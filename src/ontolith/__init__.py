@@ -3,7 +3,17 @@
 Where humans and AI agents are co-equal authors of a shared, governed ontology.
 """
 
+from ontolith.core import Assertion, Entity, FixedClock, SequentialIdProvider
+from ontolith.identity import Principal
+from ontolith.ontology import Ontology
+
 __version__ = "0.0.1"
 
-# Public API will be exposed here once implemented
-__all__: list[str] = []
+__all__ = [
+    "Ontology",
+    "Entity",
+    "Assertion",
+    "Principal",
+    "FixedClock",
+    "SequentialIdProvider",
+]
