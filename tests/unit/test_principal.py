@@ -109,3 +109,46 @@ class TestPrincipal:
                 created_at=datetime(2025, 1, 1, tzinfo=UTC),
             )
             assert principal.default_capability == cap
+
+    def test_trust_level_range_valid(self) -> None:
+        """Trust level must be between 0 and 10 (ADR-0009)."""
+        # Boundary values
+        p0 = Principal(
+            id="test@example.com",
+            kind="human",
+            auth_method="oidc",
+            trust_level=0,
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        assert p0.trust_level == 0
+
+        p10 = Principal(
+            id="test@example.com",
+            kind="human",
+            auth_method="oidc",
+            trust_level=10,
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        assert p10.trust_level == 10
+
+    def test_trust_level_below_range_raises(self) -> None:
+        """Trust level below 0 raises validation error."""
+        with pytest.raises(ValueError):
+            Principal(
+                id="test@example.com",
+                kind="human",
+                auth_method="oidc",
+                trust_level=-1,  # Invalid!
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+
+    def test_trust_level_above_range_raises(self) -> None:
+        """Trust level above 10 raises validation error."""
+        with pytest.raises(ValueError):
+            Principal(
+                id="test@example.com",
+                kind="human",
+                auth_method="oidc",
+                trust_level=11,  # Invalid!
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )

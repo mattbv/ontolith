@@ -6,7 +6,7 @@ Per SPEC §8: Principals are authenticated actors who can create assertions.
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class Principal(BaseModel):
@@ -33,7 +33,7 @@ class Principal(BaseModel):
     default_capability: Literal["read", "propose", "write", "review", "admin"] = (
         "propose"
     )
-    trust_level: int = 0
+    trust_level: int = Field(default=0, ge=0, le=10)
 
     # Metadata
     created_at: datetime

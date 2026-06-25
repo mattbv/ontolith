@@ -43,7 +43,7 @@ class SQLiteBackend:
         """Create database schema if not exists."""
         cursor = self.conn.cursor()
 
-        # Principal table (SPEC §8)
+        # Principal table (SPEC §8, ADR-0009)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS principal (
                 id TEXT PRIMARY KEY,
@@ -51,7 +51,7 @@ class SQLiteBackend:
                 owner TEXT,
                 auth_method TEXT NOT NULL CHECK(auth_method IN ('oidc', 'workload', 'apikey')),
                 default_capability TEXT NOT NULL DEFAULT 'propose' CHECK(default_capability IN ('read', 'propose', 'write', 'review', 'admin')),
-                trust_level INTEGER NOT NULL DEFAULT 0,
+                trust_level INTEGER NOT NULL DEFAULT 0 CHECK(trust_level BETWEEN 0 AND 10),
                 created_at TEXT NOT NULL,
                 metadata TEXT NOT NULL DEFAULT '{}'
             )

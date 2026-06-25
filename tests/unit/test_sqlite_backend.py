@@ -470,3 +470,20 @@ class TestSQLiteBackend:
 
         assert retrieved is not None
         assert retrieved.metadata == metadata
+
+    def test_trust_level_out_of_range_raises(self, backend: SQLiteBackend) -> None:
+        """Trust level outside 0-10 range rejected by database (ADR-0009)."""
+
+        # This would fail Pydantic validation, so we'd never get here in practice
+        # But test the database constraint as defense-in-depth
+        # We need to bypass Pydantic to test the DB constraint
+        import sqlite3
+
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint"):
+            backend.conn.execute(
+                """
+                INSERT INTO principal (id, kind, auth_method, trust_level, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("test", "human", "oidc", 11, "2025-01-01T00:00:00Z", "{}"),
+            )
