@@ -5,7 +5,7 @@ time rather than using datetime.now() directly in domain logic.
 """
 
 from abc import ABC, abstractmethod
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 
 class Clock(ABC):
@@ -30,7 +30,7 @@ class SystemClock(Clock):
         Returns:
             Current datetime in UTC timezone.
         """
-        return datetime.now(timezone.utc)
+        return datetime.now(UTC)
 
 
 class FixedClock(Clock):
@@ -57,7 +57,7 @@ class FixedClock(Clock):
             fixed_time: ISO-8601 string, datetime, or None for current time.
         """
         if fixed_time is None:
-            self._time = datetime.now(timezone.utc)
+            self._time = datetime.now(UTC)
         elif isinstance(fixed_time, str):
             self._time = datetime.fromisoformat(fixed_time.replace("Z", "+00:00"))
         else:
@@ -65,7 +65,7 @@ class FixedClock(Clock):
 
         # Ensure timezone-aware
         if self._time.tzinfo is None:
-            self._time = self._time.replace(tzinfo=timezone.utc)
+            self._time = self._time.replace(tzinfo=UTC)
 
     def now(self) -> datetime:
         """Return the fixed time.
@@ -87,7 +87,7 @@ class FixedClock(Clock):
             self._time = time
 
         if self._time.tzinfo is None:
-            self._time = self._time.replace(tzinfo=timezone.utc)
+            self._time = self._time.replace(tzinfo=UTC)
 
     def advance(
         self,

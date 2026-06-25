@@ -1,14 +1,12 @@
 """Unit tests for core modules."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from ontolith.core import (
-    Clock,
     FixedClock,
     FixedIdProvider,
-    IdProvider,
     OntolithError,
     SequentialIdProvider,
     SystemClock,
@@ -24,7 +22,7 @@ class TestSystemClock:
         clock = SystemClock()
         now = clock.now()
 
-        assert now.tzinfo == timezone.utc
+        assert now.tzinfo == UTC
         assert isinstance(now, datetime)
 
 
@@ -35,14 +33,14 @@ class TestFixedClock:
         """FixedClock should return the configured time."""
         clock = FixedClock("2025-01-01T00:00:00Z")
 
-        assert clock.now() == datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc)
+        assert clock.now() == datetime(2025, 1, 1, 0, 0, tzinfo=UTC)
 
     def test_advance_moves_time_forward(self) -> None:
         """advance() should move the clock forward."""
         clock = FixedClock("2025-01-01T00:00:00Z")
         clock.advance(days=1, hours=2, minutes=30)
 
-        expected = datetime(2025, 1, 2, 2, 30, tzinfo=timezone.utc)
+        expected = datetime(2025, 1, 2, 2, 30, tzinfo=UTC)
         assert clock.now() == expected
 
     def test_set_changes_time(self) -> None:
@@ -50,7 +48,7 @@ class TestFixedClock:
         clock = FixedClock("2025-01-01T00:00:00Z")
         clock.set("2025-06-15T12:30:00Z")
 
-        assert clock.now() == datetime(2025, 6, 15, 12, 30, tzinfo=timezone.utc)
+        assert clock.now() == datetime(2025, 6, 15, 12, 30, tzinfo=UTC)
 
 
 class TestUlidProvider:

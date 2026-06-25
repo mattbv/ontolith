@@ -184,10 +184,10 @@ verbose = 2
 quiet = false
 color = true
 
-[tool.import-linter]
+[tool.importlinter]
 root_packages = ["ontolith"]
 
-[[tool.import-linter.contracts]]
+[[tool.importlinter.contracts]]
 name = "Dependency Rule: Domain must not import adapters"
 type = "forbidden"
 source_modules = [
@@ -198,7 +198,7 @@ source_modules = [
 ]
 forbidden_modules = ["ontolith.store.sqlite", "ontolith.interfaces"]
 
-[[tool.import-linter.contracts]]
+[[tool.importlinter.contracts]]
 name = "Domain layers may only import abstract ports"
 type = "layers"
 layers = [
