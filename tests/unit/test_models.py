@@ -36,7 +36,9 @@ class TestEntity:
             created_by="alice@test.com",
         )
 
-        with pytest.raises(Exception):  # Pydantic raises ValidationError
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
             entity.concept = "Organization"  # type: ignore
 
 
@@ -116,7 +118,9 @@ class TestAssertion:
             valid_from=datetime(2025, 1, 1, tzinfo=UTC),
         )
 
-        with pytest.raises(Exception):  # Pydantic raises ValidationError
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
             assertion.value = "New value"  # type: ignore
 
     def test_assertion_can_copy_with_status_change(self) -> None:

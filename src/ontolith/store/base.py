@@ -6,6 +6,8 @@ adapters (SQLite, DuckDB, graph engines, etc.) must implement.
 
 from typing import Protocol
 
+from ontolith.core import Assertion, Entity
+
 
 class StorageBackend(Protocol):
     """Abstract port for storage adapters.
@@ -16,16 +18,76 @@ class StorageBackend(Protocol):
     - Query execution
     - Vector search (for hybrid retrieval)
 
-    The default implementation (M1) will be SQLite + sqlite-vec.
+    The default implementation (M1) is SQLite + sqlite-vec.
     Alternative backends can be plugged in via this interface.
-
-    This is a stub for M0. Full interface will be defined in M1 based on
-    SPEC §12.3 requirements.
     """
 
-    # Full interface to be defined in M1
-    # Will include: begin(), commit(), rollback(), put_entity(),
-    # put_assertion(), assertions(), vector_search(), etc.
+    def begin(self) -> None:
+        """Begin a new transaction."""
+        ...
+
+    def commit(self) -> None:
+        """Commit the current transaction."""
+        ...
+
+    def rollback(self) -> None:
+        """Rollback the current transaction."""
+        ...
+
+    def put_entity(self, entity: Entity) -> None:
+        """Persist an entity.
+
+        Args:
+            entity: Entity to persist
+
+        Raises:
+            StorageError: If persistence fails
+        """
+        ...
+
+    def put_assertion(self, assertion: Assertion) -> None:
+        """Persist an assertion.
+
+        Args:
+            assertion: Assertion to persist
+
+        Raises:
+            StorageError: If persistence fails
+        """
+        ...
+
+    def get_entity(self, entity_id: str) -> Entity | None:
+        """Retrieve an entity by ID.
+
+        Args:
+            entity_id: Entity ID to retrieve
+
+        Returns:
+            Entity if found, None otherwise
+        """
+        ...
+
+    def assertions(
+        self,
+        subject: str | None = None,
+        predicate: str | None = None,
+        status: str | None = None,
+    ) -> list[Assertion]:
+        """Query assertions with optional filters.
+
+        Args:
+            subject: Filter by subject entity ID
+            predicate: Filter by predicate
+            status: Filter by status (default: active only)
+
+        Returns:
+            List of matching assertions
+        """
+        ...
+
+    def close(self) -> None:
+        """Close the storage backend and release resources."""
+        ...
 
 
 __all__ = ["StorageBackend"]

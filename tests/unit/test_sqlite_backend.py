@@ -1,0 +1,310 @@
+"""Unit tests for SQLite storage backend."""
+
+import tempfile
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+
+from ontolith.core import Assertion, Entity
+from ontolith.store.sqlite import SQLiteBackend
+
+
+@pytest.fixture
+def temp_db() -> Path:
+    """Create a temporary database file."""
+    with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+        return Path(f.name)
+
+
+@pytest.fixture
+def backend(temp_db: Path) -> SQLiteBackend:
+    """Create a SQLite backend with temporary database."""
+    backend = SQLiteBackend(temp_db)
+    yield backend
+    backend.close()
+    temp_db.unlink()
+
+
+class TestSQLiteBackend:
+    """Tests for SQLiteBackend."""
+
+    def test_create_backend_creates_schema(self, temp_db: Path) -> None:
+        """Backend initialization creates schema tables."""
+        backend = SQLiteBackend(temp_db)
+        cursor = backend.conn.cursor()
+
+        # Check tables exist
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('entity', 'assertion')"
+        )
+        tables = {row[0] for row in cursor.fetchall()}
+        assert tables == {"entity", "assertion"}
+
+        backend.close()
+
+    def test_put_and_get_entity(self, backend: SQLiteBackend) -> None:
+        """Entity can be persisted and retrieved."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            natural_key="ada",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+
+        backend.put_entity(entity)
+        retrieved = backend.get_entity("entity-001")
+
+        assert retrieved is not None
+        assert retrieved.id == entity.id
+        assert retrieved.namespace == entity.namespace
+        assert retrieved.concept == entity.concept
+        assert retrieved.natural_key == entity.natural_key
+        assert retrieved.created_by == entity.created_by
+
+    def test_get_nonexistent_entity_returns_none(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """Getting a nonexistent entity returns None."""
+        assert backend.get_entity("nonexistent") is None
+
+    def test_put_assertion(self, backend: SQLiteBackend) -> None:
+        """Assertion can be persisted."""
+        # First create an entity
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(entity)
+
+        # Create assertion
+        assertion = Assertion(
+            id="assertion-001",
+            namespace="test-ns",
+            subject="entity-001",
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada Lovelace",
+            author="alice@test.com",
+            source="test",
+            confidence=0.95,
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+
+        backend.put_assertion(assertion)
+
+        # Verify it was stored
+        assertions = backend.assertions(subject="entity-001")
+        assert len(assertions) == 1
+        assert assertions[0].id == assertion.id
+        assert assertions[0].value == "Ada Lovelace"
+
+    def test_assertions_filter_by_subject(self, backend: SQLiteBackend) -> None:
+        """Assertions can be filtered by subject."""
+        # Create entities
+        entity1 = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        entity2 = Entity(
+            id="entity-002",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(entity1)
+        backend.put_entity(entity2)
+
+        # Create assertions for different entities
+        a1 = Assertion(
+            id="assertion-001",
+            namespace="test-ns",
+            subject="entity-001",
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada",
+            author="alice@test.com",
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        a2 = Assertion(
+            id="assertion-002",
+            namespace="test-ns",
+            subject="entity-002",
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Grace",
+            author="alice@test.com",
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        backend.put_assertion(a1)
+        backend.put_assertion(a2)
+
+        # Filter by subject
+        results = backend.assertions(subject="entity-001")
+        assert len(results) == 1
+        assert results[0].value == "Ada"
+
+    def test_assertions_filter_by_predicate(self, backend: SQLiteBackend) -> None:
+        """Assertions can be filtered by predicate."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(entity)
+
+        # Different predicates
+        a1 = Assertion(
+            id="assertion-001",
+            namespace="test-ns",
+            subject="entity-001",
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada",
+            author="alice@test.com",
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        a2 = Assertion(
+            id="assertion-002",
+            namespace="test-ns",
+            subject="entity-001",
+            predicate="Person.born",
+            value_kind="literal",
+            value_type="Date",
+            value="1815-12-10",
+            author="alice@test.com",
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        backend.put_assertion(a1)
+        backend.put_assertion(a2)
+
+        results = backend.assertions(predicate="Person.name")
+        assert len(results) == 1
+        assert results[0].value == "Ada"
+
+    def test_assertions_filter_by_status(self, backend: SQLiteBackend) -> None:
+        """Assertions can be filtered by status."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(entity)
+
+        # Active assertion
+        a1 = Assertion(
+            id="assertion-001",
+            namespace="test-ns",
+            subject="entity-001",
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada",
+            author="alice@test.com",
+            status="active",
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        # Retracted assertion
+        a2 = Assertion(
+            id="assertion-002",
+            namespace="test-ns",
+            subject="entity-001",
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Wrong",
+            author="alice@test.com",
+            status="retracted",
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        backend.put_assertion(a1)
+        backend.put_assertion(a2)
+
+        # Default: active only
+        active = backend.assertions(subject="entity-001")
+        assert len(active) == 1
+        assert active[0].status == "active"
+
+        # All statuses
+        all_assertions = backend.assertions(subject="entity-001", status=None)
+        assert len(all_assertions) == 2
+
+    def test_transaction_commit(self, backend: SQLiteBackend) -> None:
+        """Transactions can be committed."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+
+        backend.begin()
+        backend.put_entity(entity)
+        backend.commit()
+
+        # Verify entity persisted
+        assert backend.get_entity("entity-001") is not None
+
+    def test_transaction_rollback(self, backend: SQLiteBackend) -> None:
+        """Transactions can be rolled back."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+
+        backend.begin()
+        backend.put_entity(entity)
+        backend.rollback()
+
+        # Verify entity NOT persisted
+        assert backend.get_entity("entity-001") is None
+
+    def test_metadata_roundtrip(self, backend: SQLiteBackend) -> None:
+        """Assertion metadata is preserved through storage."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(entity)
+
+        metadata = {"key": "value", "nested": {"foo": "bar"}}
+        assertion = Assertion(
+            id="assertion-001",
+            namespace="test-ns",
+            subject="entity-001",
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada",
+            author="alice@test.com",
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+            metadata=metadata,
+        )
+        backend.put_assertion(assertion)
+
+        retrieved = backend.assertions(subject="entity-001")[0]
+        assert retrieved.metadata == metadata
