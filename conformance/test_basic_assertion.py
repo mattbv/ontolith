@@ -3,15 +3,13 @@
 SPEC §5.3, §7 - Assertions are append-only with provenance.
 """
 
+import tempfile
+from datetime import UTC, datetime
+from pathlib import Path
 
-import pytest
-
-# These imports will fail until we implement them - that's expected (TDD)
-# from ontolith import Ontology
-# from ontolith.core import FixedClock, SequentialIdProvider
+from ontolith import FixedClock, Ontology, SequentialIdProvider
 
 
-@pytest.mark.skip(reason="M1: Not yet implemented")
 def test_basic_assertion_create_and_retrieve() -> None:
     """Basic assertion flow: create entity, assert value, retrieve.
 
@@ -19,54 +17,108 @@ def test_basic_assertion_create_and_retrieve() -> None:
     are assertions with full provenance.
     """
     # Setup deterministic environment
-    # clock = FixedClock("2025-01-01T00:00:00Z")
-    # ids = SequentialIdProvider(prefix="test")
+    clock = FixedClock("2025-01-01T00:00:00Z")
+    ids = SequentialIdProvider(prefix="test")
 
-    # # Open knowledge base with simple schema
-    # kb = Ontology.connect(
-    #     "test-basic",
-    #     schema=[],  # Will need schema definition
-    #     clock=clock,
-    #     id_provider=ids,
-    # )
+    # Create temporary database
+    db_path = Path(tempfile.mktemp(suffix=".db"))
 
-    # # Create principal
-    # alice = kb.principal("alice@test.com", kind="human")
+    try:
+        # Open knowledge base
+        kb = Ontology.connect(db_path, clock=clock, id_provider=ids)
 
-    # # Create entity
-    # # entity = alice.create_entity(concept="Person", natural_key="ada")
+        # Create principal
+        alice = kb.create_principal("alice@test.com", kind="human")
+        assert alice.id == "alice@test.com"
 
-    # # Assert property
-    # # assertion = alice.assert_property(
-    # #     subject=entity.id,
-    # #     predicate="name",
-    # #     value="Ada Lovelace",
-    # #     source="test",
-    # #     confidence=1.0,
-    # # )
+        # Create entity
+        entity = kb.create_entity(
+            concept="Person", author=alice.id, natural_key="ada"
+        )
+        assert entity.id == "test-001"  # First ID from SequentialIdProvider
+        assert entity.concept == "Person"
+        assert entity.natural_key == "ada"
 
-    # # Verify assertion structure
-    # # assert assertion.id == "test-001"
-    # # assert assertion.subject == entity.id
-    # # assert assertion.predicate == "name"
-    # # assert assertion.value == "Ada Lovelace"
-    # # assert assertion.author == "alice@test.com"
-    # # assert assertion.confidence == 1.0
-    # # assert assertion.status == "active"
-    # # assert assertion.asserted_at == datetime(2025, 1, 1, 0, 0, tzinfo=UTC)
+        # Assert property
+        assertion = kb.assert_literal(
+            subject=entity.id,
+            predicate="Person.name",
+            value="Ada Lovelace",
+            value_type="Text",
+            author=alice.id,
+            source="test",
+            confidence=1.0,
+        )
 
-    # # Retrieve assertion
-    # # assertions = kb.get_assertions(subject=entity.id)
-    # # assert len(assertions) == 1
-    # # assert assertions[0].value == "Ada Lovelace"
+        # Verify assertion structure
+        assert assertion.id == "test-002"  # Second ID
+        assert assertion.subject == entity.id
+        assert assertion.predicate == "Person.name"
+        assert assertion.value == "Ada Lovelace"
+        assert assertion.value_kind == "literal"
+        assert assertion.value_type == "Text"
+        assert assertion.author == alice.id
+        assert assertion.confidence == 1.0
+        assert assertion.status == "active"
+        assert assertion.asserted_at == datetime(2025, 1, 1, 0, 0, tzinfo=UTC)
+        assert assertion.valid_from == datetime(2025, 1, 1, 0, 0, tzinfo=UTC)
 
-    pytest.fail("M1: Assertion model not yet implemented")
+        # Retrieve assertions
+        assertions = kb.assertions(subject=entity.id)
+        assert len(assertions) == 1
+        assert assertions[0].value == "Ada Lovelace"
+        assert assertions[0].id == assertion.id
+
+        kb.close()
+    finally:
+        # Cleanup
+        if db_path.exists():
+            db_path.unlink()
 
 
-@pytest.mark.skip(reason="M1: Not yet implemented")
 def test_assertion_append_only_invariant() -> None:
     """Assertions are append-only: value field never mutates.
 
     SPEC §7: Only status, valid_to, and supersedes links can be modified.
     """
-    pytest.fail("M1: Not yet implemented")
+    # Setup
+    clock = FixedClock("2025-01-01T00:00:00Z")
+    ids = SequentialIdProvider(prefix="test")
+    db_path = Path(tempfile.mktemp(suffix=".db"))
+
+    try:
+        kb = Ontology.connect(db_path, clock=clock, id_provider=ids)
+        alice = kb.create_principal("alice@test.com", kind="human")
+        entity = kb.create_entity(concept="Person", author=alice.id)
+
+        # Create assertion
+        assertion = kb.assert_literal(
+            subject=entity.id,
+            predicate="Person.name",
+            value="Ada",
+            value_type="Text",
+            author=alice.id,
+        )
+
+        # Verify immutability - assertion value cannot be changed
+        from pydantic import ValidationError
+
+        try:
+            assertion.value = "Grace"  # type: ignore
+            raise AssertionError("Should have raised ValidationError")
+        except ValidationError:
+            pass  # Expected - assertions are frozen
+
+        # Only allowed mutation: status update via backend
+        kb.backend.set_assertion_status(assertion.id, "retracted")
+
+        # Retrieve and verify status changed but value unchanged
+        assertions = kb.assertions(subject=entity.id, status=None)
+        assert len(assertions) == 1
+        assert assertions[0].value == "Ada"  # Value unchanged
+        assert assertions[0].status == "retracted"  # Status changed
+
+        kb.close()
+    finally:
+        if db_path.exists():
+            db_path.unlink()
