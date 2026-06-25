@@ -85,6 +85,27 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def set_assertion_status(
+        self,
+        assertion_id: str,
+        status: str,
+        valid_to: str | None = None,
+    ) -> None:
+        """Update assertion status and optionally close validity window.
+
+        This is the ONLY allowed mutation on assertions (append-only invariant).
+        Used for supersession and retraction.
+
+        Args:
+            assertion_id: Assertion ID to update
+            status: New status (superseded, retracted, flagged)
+            valid_to: Optional validity end time (ISO format)
+
+        Raises:
+            StorageError: If update fails or assertion not found
+        """
+        ...
+
     def close(self) -> None:
         """Close the storage backend and release resources."""
         ...

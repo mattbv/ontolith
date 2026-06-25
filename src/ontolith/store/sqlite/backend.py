@@ -35,6 +35,7 @@ class SQLiteBackend:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(str(self.path))
         self.conn.row_factory = sqlite3.Row  # Enable column access by name
+        self.conn.execute("PRAGMA foreign_keys = ON")  # Enable FK constraints
         self._create_schema()
 
     def _create_schema(self) -> None:
@@ -63,7 +64,8 @@ class SQLiteBackend:
                 predicate TEXT NOT NULL,
                 value_kind TEXT NOT NULL CHECK(value_kind IN ('literal', 'ref')),
                 value_type TEXT,
-                value TEXT NOT NULL,
+                value_lit TEXT,
+                value_ref TEXT,
                 author TEXT NOT NULL,
                 acting_as TEXT,
                 source TEXT,
@@ -71,7 +73,7 @@ class SQLiteBackend:
                 rationale TEXT,
                 model TEXT,
                 asserted_at TEXT NOT NULL,
-                valid_from TEXT NOT NULL,
+                valid_from TEXT,
                 valid_to TEXT,
                 status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'superseded', 'retracted', 'flagged')),
                 proposal_id TEXT,
@@ -81,21 +83,25 @@ class SQLiteBackend:
             )
         """)
 
-        # Index for common queries
+        # Indexes (SPEC §12.2)
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_assertion_subject
-            ON assertion(subject, status)
+            CREATE INDEX IF NOT EXISTS idx_assertion_spo
+            ON assertion(namespace, subject, predicate, status)
         """)
 
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_assertion_predicate
-            ON assertion(predicate, status)
+            CREATE INDEX IF NOT EXISTS idx_assertion_subj
+            ON assertion(namespace, subject)
         """)
 
-        # Index for bitemporal queries
         cursor.execute("""
-            CREATE INDEX IF NOT EXISTS idx_assertion_temporal
-            ON assertion(valid_from, valid_to, asserted_at)
+            CREATE INDEX IF NOT EXISTS idx_assertion_time
+            ON assertion(asserted_at)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_assertion_valid
+            ON assertion(valid_from, valid_to)
         """)
 
         self.conn.commit()
@@ -160,17 +166,21 @@ class SQLiteBackend:
         """
         import json
 
+        # Map unified value field to value_lit/value_ref based on kind
+        value_lit = assertion.value if assertion.value_kind == "literal" else None
+        value_ref = assertion.value if assertion.value_kind == "ref" else None
+
         try:
             cursor = self.conn.cursor()
             cursor.execute(
                 """
                 INSERT INTO assertion (
                     id, namespace, subject, predicate,
-                    value_kind, value_type, value,
+                    value_kind, value_type, value_lit, value_ref,
                     author, acting_as, source, confidence, rationale, model,
                     asserted_at, valid_from, valid_to,
                     status, proposal_id, supersedes, metadata
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     assertion.id,
@@ -179,7 +189,8 @@ class SQLiteBackend:
                     assertion.predicate,
                     assertion.value_kind,
                     assertion.value_type,
-                    assertion.value,
+                    value_lit,
+                    value_ref,
                     assertion.author,
                     assertion.acting_as,
                     assertion.source,
@@ -196,9 +207,13 @@ class SQLiteBackend:
                 ),
             )
         except sqlite3.IntegrityError as e:
-            raise StorageError(f"Assertion conflict: {e}") from e
+            raise StorageError(
+                f"Assertion conflict (id={assertion.id}, subject={assertion.subject}): {e}"
+            ) from e
         except sqlite3.Error as e:
-            raise StorageError(f"Failed to persist assertion: {e}") from e
+            raise StorageError(
+                f"Failed to persist assertion (id={assertion.id}): {e}"
+            ) from e
 
     def get_entity(self, entity_id: str) -> Entity | None:
         """Retrieve an entity by ID.
@@ -265,6 +280,9 @@ class SQLiteBackend:
 
         results = []
         for row in cursor.fetchall():
+            # Reconstruct unified value from value_lit/value_ref
+            value = row["value_lit"] if row["value_kind"] == "literal" else row["value_ref"]
+
             results.append(
                 Assertion(
                     id=row["id"],
@@ -273,7 +291,7 @@ class SQLiteBackend:
                     predicate=row["predicate"],
                     value_kind=row["value_kind"],
                     value_type=row["value_type"],
-                    value=row["value"],
+                    value=value,
                     author=row["author"],
                     acting_as=row["acting_as"],
                     source=row["source"],
@@ -299,6 +317,45 @@ class SQLiteBackend:
             )
 
         return results
+
+    def set_assertion_status(
+        self,
+        assertion_id: str,
+        status: str,
+        valid_to: str | None = None,
+    ) -> None:
+        """Update assertion status and optionally close validity window.
+
+        This is the ONLY allowed mutation on assertions (append-only invariant).
+
+        Args:
+            assertion_id: Assertion ID to update
+            status: New status (superseded, retracted, flagged)
+            valid_to: Optional validity end time (ISO format)
+
+        Raises:
+            StorageError: If update fails or assertion not found
+        """
+        try:
+            cursor = self.conn.cursor()
+            if valid_to is not None:
+                cursor.execute(
+                    "UPDATE assertion SET status = ?, valid_to = ? WHERE id = ?",
+                    (status, valid_to, assertion_id),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE assertion SET status = ? WHERE id = ?",
+                    (status, assertion_id),
+                )
+
+            if cursor.rowcount == 0:
+                raise StorageError(f"Assertion not found: {assertion_id}")
+
+        except sqlite3.Error as e:
+            raise StorageError(
+                f"Failed to update assertion status (id={assertion_id}): {e}"
+            ) from e
 
     def close(self) -> None:
         """Close the database connection."""

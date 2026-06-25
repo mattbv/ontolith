@@ -308,3 +308,120 @@ class TestSQLiteBackend:
 
         retrieved = backend.assertions(subject="entity-001")[0]
         assert retrieved.metadata == metadata
+
+    def test_set_assertion_status(self, backend: SQLiteBackend) -> None:
+        """Assertion status can be updated (append-only allowed mutation)."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(entity)
+
+        assertion = Assertion(
+            id="assertion-001",
+            namespace="test-ns",
+            subject="entity-001",
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada",
+            author="alice@test.com",
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        backend.put_assertion(assertion)
+
+        # Update status
+        backend.set_assertion_status("assertion-001", "retracted")
+
+        # Verify update
+        retrieved = backend.assertions(subject="entity-001", status=None)[0]
+        assert retrieved.status == "retracted"
+
+    def test_set_assertion_status_with_valid_to(self, backend: SQLiteBackend) -> None:
+        """Assertion status update can close validity window."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(entity)
+
+        assertion = Assertion(
+            id="assertion-001",
+            namespace="test-ns",
+            subject="entity-001",
+            predicate="Person.employer",
+            value_kind="ref",
+            value="org-001",
+            author="alice@test.com",
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        backend.put_assertion(assertion)
+
+        # Supersede with validity end
+        end_time = datetime(2025, 6, 1, tzinfo=UTC).isoformat()
+        backend.set_assertion_status("assertion-001", "superseded", valid_to=end_time)
+
+        # Verify both fields updated
+        retrieved = backend.assertions(subject="entity-001", status=None)[0]
+        assert retrieved.status == "superseded"
+        assert retrieved.valid_to == datetime(2025, 6, 1, tzinfo=UTC)
+
+    def test_set_assertion_status_nonexistent_raises(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """Setting status on nonexistent assertion raises StorageError."""
+        from ontolith.core.errors import StorageError
+
+        with pytest.raises(StorageError, match="not found"):
+            backend.set_assertion_status("nonexistent", "retracted")
+
+    def test_duplicate_natural_key_raises(self, backend: SQLiteBackend) -> None:
+        """Inserting entity with duplicate natural_key raises StorageError."""
+        from ontolith.core.errors import StorageError
+
+        e1 = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            natural_key="ada",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(e1)
+
+        e2 = Entity(
+            id="entity-002",
+            namespace="test-ns",
+            concept="Person",
+            natural_key="ada",  # Duplicate!
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+
+        with pytest.raises(StorageError, match="conflict"):
+            backend.put_entity(e2)
+
+    def test_assertion_without_entity_raises(self, backend: SQLiteBackend) -> None:
+        """Assertion with invalid subject (FOREIGN KEY) raises StorageError."""
+        from ontolith.core.errors import StorageError
+
+        assertion = Assertion(
+            id="assertion-001",
+            namespace="test-ns",
+            subject="nonexistent-entity",  # Invalid!
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada",
+            author="alice@test.com",
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+
+        with pytest.raises(StorageError):
+            backend.put_assertion(assertion)
