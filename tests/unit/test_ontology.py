@@ -191,3 +191,40 @@ class TestOntology:
         assert name_assertion.author == "alice@example.com"
         assert name_assertion.source == "Wikipedia"
         assert name_assertion.confidence == 1.0
+
+    def test_create_principal(self, kb: Ontology) -> None:
+        """Principals can be created."""
+        principal = kb.create_principal(
+            "alice@example.com",
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            trust_level=10,
+        )
+
+        assert principal.id == "alice@example.com"
+        assert principal.kind == "human"
+        assert principal.default_capability == "write"
+        assert principal.trust_level == 10
+
+    def test_create_principal_persists(self, kb: Ontology) -> None:
+        """Created principals are persisted."""
+        kb.create_principal("alice@example.com", kind="human")
+
+        retrieved = kb.get_principal("alice@example.com")
+        assert retrieved is not None
+        assert retrieved.id == "alice@example.com"
+
+    def test_create_ai_principal_with_owner(self, kb: Ontology) -> None:
+        """AI principals require an owner."""
+        principal = kb.create_principal(
+            "research-bot",
+            kind="ai",
+            owner="alice@example.com",
+            auth_method="workload",
+            metadata={"model": "claude-sonnet-4"},
+        )
+
+        assert principal.kind == "ai"
+        assert principal.owner == "alice@example.com"
+        assert principal.metadata["model"] == "claude-sonnet-4"

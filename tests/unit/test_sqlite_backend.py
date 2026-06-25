@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from ontolith.core import Assertion, Entity
+from ontolith.identity import Principal
 from ontolith.store.sqlite import SQLiteBackend
 
 
@@ -425,3 +426,47 @@ class TestSQLiteBackend:
 
         with pytest.raises(StorageError):
             backend.put_assertion(assertion)
+
+    def test_put_and_get_principal(self, backend: SQLiteBackend) -> None:
+        """Principal can be persisted and retrieved."""
+        principal = Principal(
+            id="alice@example.com",
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            trust_level=10,
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+
+        backend.put_principal(principal)
+        retrieved = backend.get_principal("alice@example.com")
+
+        assert retrieved is not None
+        assert retrieved.id == principal.id
+        assert retrieved.kind == principal.kind
+        assert retrieved.default_capability == principal.default_capability
+        assert retrieved.trust_level == principal.trust_level
+
+    def test_get_nonexistent_principal_returns_none(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """Getting a nonexistent principal returns None."""
+        assert backend.get_principal("nonexistent") is None
+
+    def test_principal_metadata_roundtrip(self, backend: SQLiteBackend) -> None:
+        """Principal metadata is preserved through storage."""
+        metadata = {"team": "engineering", "region": "us-west"}
+        principal = Principal(
+            id="bot-001",
+            kind="ai",
+            owner="alice@example.com",
+            auth_method="workload",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            metadata=metadata,
+        )
+
+        backend.put_principal(principal)
+        retrieved = backend.get_principal("bot-001")
+
+        assert retrieved is not None
+        assert retrieved.metadata == metadata

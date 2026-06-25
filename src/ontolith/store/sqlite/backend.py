@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ontolith.core import Assertion, Entity
 from ontolith.core.errors import StorageError
+from ontolith.identity import Principal
 
 
 class SQLiteBackend:
@@ -41,6 +42,20 @@ class SQLiteBackend:
     def _create_schema(self) -> None:
         """Create database schema if not exists."""
         cursor = self.conn.cursor()
+
+        # Principal table (SPEC §8)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS principal (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL CHECK(kind IN ('human', 'ai', 'service')),
+                owner TEXT,
+                auth_method TEXT NOT NULL CHECK(auth_method IN ('oidc', 'workload', 'apikey')),
+                default_capability TEXT NOT NULL DEFAULT 'propose' CHECK(default_capability IN ('read', 'propose', 'write', 'review', 'admin')),
+                trust_level INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            )
+        """)
 
         # Entity table (SPEC §12.2)
         cursor.execute("""
@@ -124,6 +139,71 @@ class SQLiteBackend:
             self.conn.rollback()
         except sqlite3.Error as e:
             raise StorageError(f"Failed to rollback transaction: {e}") from e
+
+    def put_principal(self, principal: Principal) -> None:
+        """Persist a principal.
+
+        Args:
+            principal: Principal to persist
+
+        Raises:
+            StorageError: If persistence fails
+        """
+        import json
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO principal (id, kind, owner, auth_method, default_capability, trust_level, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    principal.id,
+                    principal.kind,
+                    principal.owner,
+                    principal.auth_method,
+                    principal.default_capability,
+                    principal.trust_level,
+                    principal.created_at.isoformat(),
+                    json.dumps(principal.metadata),
+                ),
+            )
+        except sqlite3.IntegrityError as e:
+            raise StorageError(f"Principal conflict (id={principal.id}): {e}") from e
+        except sqlite3.Error as e:
+            raise StorageError(f"Failed to persist principal (id={principal.id}): {e}") from e
+
+    def get_principal(self, principal_id: str) -> Principal | None:
+        """Retrieve a principal by ID.
+
+        Args:
+            principal_id: Principal ID to retrieve
+
+        Returns:
+            Principal if found, None otherwise
+        """
+        import json
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM principal WHERE id = ?",
+            (principal_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        return Principal(
+            id=row["id"],
+            kind=row["kind"],
+            owner=row["owner"],
+            auth_method=row["auth_method"],
+            default_capability=row["default_capability"],
+            trust_level=row["trust_level"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            metadata=json.loads(row["metadata"]),
+        )
 
     def put_entity(self, entity: Entity) -> None:
         """Persist an entity.

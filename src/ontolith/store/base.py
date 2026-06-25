@@ -12,6 +12,7 @@ The dependency rule prevents domain logic from importing concrete adapters.
 from typing import Protocol
 
 from ontolith.core import Assertion, Entity
+from ontolith.identity import Principal
 
 
 class StorageBackend(Protocol):
@@ -37,6 +38,28 @@ class StorageBackend(Protocol):
 
     def rollback(self) -> None:
         """Rollback the current transaction."""
+        ...
+
+    def put_principal(self, principal: Principal) -> None:
+        """Persist a principal.
+
+        Args:
+            principal: Principal to persist
+
+        Raises:
+            StorageError: If persistence fails
+        """
+        ...
+
+    def get_principal(self, principal_id: str) -> Principal | None:
+        """Retrieve a principal by ID.
+
+        Args:
+            principal_id: Principal ID to retrieve
+
+        Returns:
+            Principal if found, None otherwise
+        """
         ...
 
     def put_entity(self, entity: Entity) -> None:

@@ -5,6 +5,7 @@ backend and provides high-level methods for entities, assertions, and queries.
 """
 
 from pathlib import Path
+from typing import Any
 
 from ontolith.core import (
     Assertion,
@@ -14,6 +15,7 @@ from ontolith.core import (
     SystemClock,
     UlidProvider,
 )
+from ontolith.identity import Principal
 from ontolith.store.base import StorageBackend
 
 
@@ -70,6 +72,56 @@ class Ontology:
 
         backend = SQLiteBackend(path)
         return cls(backend, clock=clock, id_provider=id_provider)
+
+    def create_principal(
+        self,
+        principal_id: str,
+        kind: str,
+        auth_method: str = "oidc",
+        *,
+        owner: str | None = None,
+        default_capability: str = "propose",
+        trust_level: int = 0,
+        metadata: dict[str, Any] | None = None,
+    ) -> Principal:
+        """Create a new principal.
+
+        Args:
+            principal_id: Email (human) or slug (ai/service)
+            kind: Type of principal (human, ai, service)
+            auth_method: Authentication method (oidc, workload, apikey)
+            owner: Required for AI principals - accountable human/team
+            default_capability: Default permission level
+            trust_level: Base trust score
+            metadata: Optional metadata
+
+        Returns:
+            Created principal
+        """
+        principal = Principal(
+            id=principal_id,
+            kind=kind,  # type: ignore
+            owner=owner,
+            auth_method=auth_method,  # type: ignore
+            default_capability=default_capability,  # type: ignore
+            trust_level=trust_level,
+            created_at=self.clock.now(),
+            metadata=metadata or {},
+        )
+
+        self.backend.put_principal(principal)
+        return principal
+
+    def get_principal(self, principal_id: str) -> Principal | None:
+        """Retrieve a principal by ID.
+
+        Args:
+            principal_id: Principal ID
+
+        Returns:
+            Principal if found, None otherwise
+        """
+        return self.backend.get_principal(principal_id)
 
     def create_entity(
         self,
