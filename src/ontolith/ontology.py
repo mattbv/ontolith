@@ -14,7 +14,7 @@ from ontolith.core import (
     SystemClock,
     UlidProvider,
 )
-from ontolith.store.sqlite import SQLiteBackend
+from ontolith.store.base import StorageBackend
 
 
 class Ontology:
@@ -32,7 +32,7 @@ class Ontology:
 
     def __init__(
         self,
-        backend: SQLiteBackend,
+        backend: StorageBackend,
         clock: Clock | None = None,
         id_provider: IdProvider | None = None,
     ) -> None:
@@ -66,6 +66,8 @@ class Ontology:
         Returns:
             Ontology instance connected to the database
         """
+        from ontolith.store.sqlite import SQLiteBackend
+
         backend = SQLiteBackend(path)
         return cls(backend, clock=clock, id_provider=id_provider)
 

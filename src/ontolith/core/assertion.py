@@ -7,7 +7,7 @@ supersedes links may be modified after creation.
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Assertion(BaseModel):

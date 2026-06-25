@@ -3,7 +3,6 @@
 SPEC §5.3, §7 - Assertions are append-only with provenance.
 """
 
-from datetime import datetime
 
 import pytest
 

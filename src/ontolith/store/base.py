@@ -2,6 +2,11 @@
 
 The StorageBackend port defines the interface that all concrete storage
 adapters (SQLite, DuckDB, graph engines, etc.) must implement.
+
+Note: This port imports domain models (Entity, Assertion) which creates
+a bidirectional dependency between store.base and core. This is acceptable
+because StorageBackend is an abstract protocol, not a concrete implementation.
+The dependency rule prevents domain logic from importing concrete adapters.
 """
 
 from typing import Protocol
