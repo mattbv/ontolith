@@ -13,6 +13,7 @@ from typing import Protocol
 
 from ontolith.core import Assertion, Entity
 from ontolith.identity import Principal
+from ontolith.schema import SchemaIR
 
 
 class StorageBackend(Protocol):
@@ -131,6 +132,34 @@ class StorageBackend(Protocol):
 
         Raises:
             StorageError: If update fails or assertion not found
+        """
+        ...
+
+    def put_schema(self, schema: SchemaIR) -> None:
+        """Persist a schema version.
+
+        Args:
+            schema: Schema to persist
+
+        Raises:
+            StorageError: If persistence fails
+
+        Note:
+            Schema versions are never deleted (required for time-travel).
+        """
+        ...
+
+    def get_schema(
+        self, namespace: str, version: int | None = None
+    ) -> SchemaIR | None:
+        """Retrieve a schema version.
+
+        Args:
+            namespace: Namespace to query
+            version: Specific version, or None for latest
+
+        Returns:
+            Schema if found, None otherwise
         """
         ...
 

@@ -8,6 +8,7 @@ import pytest
 
 from ontolith.core import Assertion, Entity
 from ontolith.identity import Principal
+from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 from ontolith.store.sqlite import SQLiteBackend
 
 
@@ -487,3 +488,44 @@ class TestSQLiteBackend:
                 """,
                 ("test", "human", "oidc", 11, "2025-01-01T00:00:00Z", "{}"),
             )
+
+    def test_put_and_get_schema(self, backend: SQLiteBackend) -> None:
+        """Schema can be persisted and retrieved."""
+        schema = SchemaIR(
+            namespace="test-ns",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "name": PropertyDef(name="name", value_type="Text"),
+                    },
+                ),
+            },
+        )
+
+        backend.put_schema(schema)
+        retrieved = backend.get_schema("test-ns", version=1)
+
+        assert retrieved is not None
+        assert retrieved.namespace == schema.namespace
+        assert retrieved.version == schema.version
+        assert "Person" in retrieved.concepts
+
+    def test_get_latest_schema_version(self, backend: SQLiteBackend) -> None:
+        """Getting schema without version returns latest."""
+        schema_v1 = SchemaIR(namespace="test-ns", version=1)
+        schema_v2 = SchemaIR(namespace="test-ns", version=2)
+
+        backend.put_schema(schema_v1)
+        backend.put_schema(schema_v2)
+
+        latest = backend.get_schema("test-ns")
+        assert latest is not None
+        assert latest.version == 2
+
+    def test_get_nonexistent_schema_returns_none(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """Getting a nonexistent schema returns None."""
+        assert backend.get_schema("nonexistent") is None

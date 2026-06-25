@@ -8,12 +8,13 @@ Default storage adapter for Ontolith. Provides:
 """
 
 import sqlite3
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ontolith.core import Assertion, Entity
 from ontolith.core.errors import StorageError
 from ontolith.identity import Principal
+from ontolith.schema import SchemaIR
 
 
 class SQLiteBackend:
@@ -54,6 +55,17 @@ class SQLiteBackend:
                 trust_level INTEGER NOT NULL DEFAULT 0 CHECK(trust_level BETWEEN 0 AND 10),
                 created_at TEXT NOT NULL,
                 metadata TEXT NOT NULL DEFAULT '{}'
+            )
+        """)
+
+        # Schema version table (SPEC §12.2, §6.4)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS schema_version (
+                namespace TEXT NOT NULL,
+                version INTEGER NOT NULL,
+                definition TEXT NOT NULL,
+                applied_at TEXT NOT NULL,
+                PRIMARY KEY (namespace, version)
             )
         """)
 
@@ -436,6 +448,84 @@ class SQLiteBackend:
             raise StorageError(
                 f"Failed to update assertion status (id={assertion_id}): {e}"
             ) from e
+
+    def put_schema(self, schema: SchemaIR) -> None:
+        """Persist a schema version.
+
+        Args:
+            schema: Schema to persist
+
+        Raises:
+            StorageError: If persistence fails
+        """
+        import json
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO schema_version (namespace, version, definition, applied_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    schema.namespace,
+                    schema.version,
+                    json.dumps(schema.to_json()),
+                    datetime.now(UTC).isoformat(),
+                ),
+            )
+        except sqlite3.IntegrityError as e:
+            raise StorageError(
+                f"Schema conflict (namespace={schema.namespace}, version={schema.version}): {e}"
+            ) from e
+        except sqlite3.Error as e:
+            raise StorageError(
+                f"Failed to persist schema (namespace={schema.namespace}): {e}"
+            ) from e
+
+    def get_schema(
+        self, namespace: str, version: int | None = None
+    ) -> SchemaIR | None:
+        """Retrieve a schema version.
+
+        Args:
+            namespace: Namespace to query
+            version: Specific version, or None for latest
+
+        Returns:
+            Schema if found, None otherwise
+        """
+        import json
+
+        cursor = self.conn.cursor()
+
+        if version is None:
+            # Get latest version
+            cursor.execute(
+                """
+                SELECT definition FROM schema_version
+                WHERE namespace = ?
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                (namespace,),
+            )
+        else:
+            # Get specific version
+            cursor.execute(
+                """
+                SELECT definition FROM schema_version
+                WHERE namespace = ? AND version = ?
+                """,
+                (namespace, version),
+            )
+
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        definition = json.loads(row["definition"])
+        return SchemaIR.from_json(definition)
 
     def close(self) -> None:
         """Close the database connection."""
