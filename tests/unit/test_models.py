@@ -163,3 +163,36 @@ class TestAssertion:
                 asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
                 valid_from=datetime(2025, 1, 1, tzinfo=UTC),
             )
+
+    def test_valid_from_defaults_to_asserted_at(self) -> None:
+        """valid_from defaults to asserted_at when not provided (SPEC §5.3)."""
+        asserted = datetime(2025, 1, 1, 12, 30, tzinfo=UTC)
+        assertion = Assertion(
+            id="test-001",
+            namespace="test-ns",
+            subject="entity-001",
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada",
+            author="alice@test.com",
+            asserted_at=asserted,
+            # valid_from intentionally omitted
+        )
+
+        assert assertion.valid_from == asserted
+
+    def test_ref_must_not_have_value_type(self) -> None:
+        """Reference assertions must not have value_type."""
+        with pytest.raises(ValueError, match="value_type must be None"):
+            Assertion(
+                id="test-001",
+                namespace="test-ns",
+                subject="person-001",
+                predicate="Person.employer",
+                value_kind="ref",
+                value_type="Organization",  # Invalid for ref!
+                value="org-001",
+                author="alice@test.com",
+                asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )

@@ -7,7 +7,7 @@ supersedes links may be modified after creation.
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class Assertion(BaseModel):
@@ -57,7 +57,7 @@ class Assertion(BaseModel):
 
     # Temporal
     asserted_at: datetime
-    valid_from: datetime
+    valid_from: datetime | None = None  # Defaults to asserted_at if not provided
     valid_to: datetime | None = None
 
     # Lifecycle
@@ -68,15 +68,24 @@ class Assertion(BaseModel):
     # Future evolution
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("value_type")
+    @model_validator(mode="before")
     @classmethod
-    def value_type_required_for_literals(
-        cls, v: str | None, info: Any
-    ) -> str | None:
-        """Validate that value_type is provided when value_kind is literal."""
-        if info.data.get("value_kind") == "literal" and v is None:
+    def set_defaults_and_validate(cls, values: dict[str, Any]) -> dict[str, Any]:
+        """Set valid_from default and validate value_type based on value_kind."""
+        # Default valid_from to asserted_at (SPEC §5.3)
+        if "valid_from" not in values or values["valid_from"] is None:
+            values["valid_from"] = values.get("asserted_at")
+
+        # Validate value_type based on value_kind
+        value_kind = values.get("value_kind")
+        value_type = values.get("value_type")
+
+        if value_kind == "literal" and value_type is None:
             raise ValueError("value_type is required when value_kind is 'literal'")
-        return v
+        if value_kind == "ref" and value_type is not None:
+            raise ValueError("value_type must be None when value_kind is 'ref'")
+
+        return values
 
     model_config = ConfigDict(
         frozen=True,  # Immutable by default
