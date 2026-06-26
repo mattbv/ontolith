@@ -1,7 +1,6 @@
 """Unit tests for query builder."""
 
 import tempfile
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -32,7 +31,7 @@ class TestQueryBuilder:
         # Create entities
         person1 = kb.create_entity("Person", author=alice.id)
         person2 = kb.create_entity("Person", author=alice.id)
-        org = kb.create_entity("Organization", author=alice.id)
+        kb.create_entity("Organization", author=alice.id)
 
         # Query all Person entities
         people = kb.query("Person").all()

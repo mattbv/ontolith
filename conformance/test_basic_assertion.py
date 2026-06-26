@@ -32,9 +32,7 @@ def test_basic_assertion_create_and_retrieve() -> None:
         assert alice.id == "alice@test.com"
 
         # Create entity
-        entity = kb.create_entity(
-            concept="Person", author=alice.id, natural_key="ada"
-        )
+        entity = kb.create_entity(concept="Person", author=alice.id, natural_key="ada")
         assert entity.id == "test-001"  # First ID from SequentialIdProvider
         assert entity.concept == "Person"
         assert entity.natural_key == "ada"

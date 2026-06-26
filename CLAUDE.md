@@ -69,6 +69,9 @@ refactor(query): extract temporal filter logic
 chore(ci): add import-linter to quality gates
 ```
 
+**Commit message rules:**
+- Do NOT include `Co-Authored-By:` trailers in commit messages
+
 **Workflow Pattern:**
 
 1. **Create branch for task/milestone:**

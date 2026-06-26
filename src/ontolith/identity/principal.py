@@ -30,9 +30,7 @@ class Principal(BaseModel):
 
     # Authorization
     auth_method: Literal["oidc", "workload", "apikey"]
-    default_capability: Literal["read", "propose", "write", "review", "admin"] = (
-        "propose"
-    )
+    default_capability: Literal["read", "propose", "write", "review", "admin"] = "propose"
     trust_level: int = Field(default=0, ge=0, le=10)
 
     # Metadata

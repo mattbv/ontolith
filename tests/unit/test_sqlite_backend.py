@@ -1,5 +1,6 @@
 """Unit tests for SQLite storage backend."""
 
+import sqlite3
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,8 +22,16 @@ def temp_db() -> Path:
 
 @pytest.fixture
 def backend(temp_db: Path) -> SQLiteBackend:
-    """Create a SQLite backend with temporary database."""
+    """Create a SQLite backend with a pre-seeded principal for FK compliance."""
     backend = SQLiteBackend(temp_db)
+    backend.put_principal(
+        Principal(
+            id="alice@test.com",
+            kind="human",
+            auth_method="oidc",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+    )
     yield backend
     backend.close()
     temp_db.unlink()
@@ -66,9 +75,7 @@ class TestSQLiteBackend:
         assert retrieved.natural_key == entity.natural_key
         assert retrieved.created_by == entity.created_by
 
-    def test_get_nonexistent_entity_returns_none(
-        self, backend: SQLiteBackend
-    ) -> None:
+    def test_get_nonexistent_entity_returns_none(self, backend: SQLiteBackend) -> None:
         """Getting a nonexistent entity returns None."""
         assert backend.get_entity("nonexistent") is None
 
@@ -374,9 +381,7 @@ class TestSQLiteBackend:
         assert retrieved.status == "superseded"
         assert retrieved.valid_to == datetime(2025, 6, 1, tzinfo=UTC)
 
-    def test_set_assertion_status_nonexistent_raises(
-        self, backend: SQLiteBackend
-    ) -> None:
+    def test_set_assertion_status_nonexistent_raises(self, backend: SQLiteBackend) -> None:
         """Setting status on nonexistent assertion raises StorageError."""
         from ontolith.core.errors import StorageError
 
@@ -448,9 +453,7 @@ class TestSQLiteBackend:
         assert retrieved.default_capability == principal.default_capability
         assert retrieved.trust_level == principal.trust_level
 
-    def test_get_nonexistent_principal_returns_none(
-        self, backend: SQLiteBackend
-    ) -> None:
+    def test_get_nonexistent_principal_returns_none(self, backend: SQLiteBackend) -> None:
         """Getting a nonexistent principal returns None."""
         assert backend.get_principal("nonexistent") is None
 
@@ -475,11 +478,7 @@ class TestSQLiteBackend:
     def test_trust_level_out_of_range_raises(self, backend: SQLiteBackend) -> None:
         """Trust level outside 0-10 range rejected by database (ADR-0009)."""
 
-        # This would fail Pydantic validation, so we'd never get here in practice
-        # But test the database constraint as defense-in-depth
-        # We need to bypass Pydantic to test the DB constraint
-        import sqlite3
-
+        # Bypasses Pydantic to test the DB CHECK constraint as defense-in-depth.
         with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint"):
             backend.conn.execute(
                 """
@@ -524,8 +523,72 @@ class TestSQLiteBackend:
         assert latest is not None
         assert latest.version == 2
 
-    def test_get_nonexistent_schema_returns_none(
-        self, backend: SQLiteBackend
-    ) -> None:
+    def test_get_nonexistent_schema_returns_none(self, backend: SQLiteBackend) -> None:
         """Getting a nonexistent schema returns None."""
         assert backend.get_schema("nonexistent") is None
+
+    def test_ai_principal_without_owner_rejected_by_db(self, backend: SQLiteBackend) -> None:
+        """AI principal without owner is rejected by DB CHECK constraint (defense-in-depth)."""
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK constraint"):
+            backend.conn.execute(
+                """
+                INSERT INTO principal (id, kind, auth_method, trust_level, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                ("bot-no-owner", "ai", "workload", 0, "2025-01-01T00:00:00Z", "{}"),
+            )
+
+    def test_transaction_context_manager_commits(self, backend: SQLiteBackend) -> None:
+        """transaction() context manager commits on success."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        with backend.transaction():
+            backend.put_entity(entity)
+
+        assert backend.get_entity("entity-001") is not None
+
+    def test_transaction_context_manager_rolls_back_on_error(self, backend: SQLiteBackend) -> None:
+        """transaction() context manager rolls back on exception."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        with pytest.raises(ValueError):
+            with backend.transaction():
+                backend.put_entity(entity)
+                raise ValueError("simulated failure")
+
+        assert backend.get_entity("entity-001") is None
+
+    def test_writes_survive_connection_close(self, temp_db: Path) -> None:
+        """Data written via one connection is visible after close and reopen (ADR-0010)."""
+        b1 = SQLiteBackend(temp_db)
+        b1.put_principal(
+            Principal(
+                id="alice@test.com",
+                kind="human",
+                auth_method="oidc",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        b1.put_entity(entity)
+        b1.close()
+
+        b2 = SQLiteBackend(temp_db)
+        assert b2.get_entity("entity-001") is not None
+        b2.close()

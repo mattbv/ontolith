@@ -19,10 +19,13 @@ def temp_db() -> Path:
 
 @pytest.fixture
 def kb(temp_db: Path) -> Ontology:
-    """Create an Ontology instance with deterministic behavior."""
+    """Create an Ontology instance with deterministic behavior and a seeded principal."""
     clock = FixedClock("2025-01-01T00:00:00Z")
     ids = SequentialIdProvider(prefix="test")
     ontology = Ontology.connect(temp_db, clock=clock, id_provider=ids)
+    # Pre-create the principal used across tests. Uses its own string ID,
+    # not the SequentialIdProvider, so entity/assertion IDs are unaffected.
+    ontology.create_principal("alice@example.com", kind="human")
     yield ontology
     ontology.close()
     temp_db.unlink()
@@ -106,9 +109,7 @@ class TestOntology:
     def test_query_assertions_by_subject(self, kb: Ontology) -> None:
         """Assertions can be queried by subject."""
         entity = kb.create_entity("Person", author="alice@example.com")
-        kb.assert_literal(
-            entity.id, "Person.name", "Ada", "Text", author="alice@example.com"
-        )
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", author="alice@example.com")
         kb.assert_literal(
             entity.id, "Person.born", "1815-12-10", "Date", author="alice@example.com"
         )
@@ -195,25 +196,25 @@ class TestOntology:
     def test_create_principal(self, kb: Ontology) -> None:
         """Principals can be created."""
         principal = kb.create_principal(
-            "alice@example.com",
+            "bob@example.com",
             kind="human",
             auth_method="oidc",
             default_capability="write",
             trust_level=10,
         )
 
-        assert principal.id == "alice@example.com"
+        assert principal.id == "bob@example.com"
         assert principal.kind == "human"
         assert principal.default_capability == "write"
         assert principal.trust_level == 10
 
     def test_create_principal_persists(self, kb: Ontology) -> None:
         """Created principals are persisted."""
-        kb.create_principal("alice@example.com", kind="human")
+        kb.create_principal("bob@example.com", kind="human")
 
-        retrieved = kb.get_principal("alice@example.com")
+        retrieved = kb.get_principal("bob@example.com")
         assert retrieved is not None
-        assert retrieved.id == "alice@example.com"
+        assert retrieved.id == "bob@example.com"
 
     def test_create_ai_principal_with_owner(self, kb: Ontology) -> None:
         """AI principals require an owner."""
