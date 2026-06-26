@@ -71,8 +71,9 @@ class Ontology:
         """
         from ontolith.store.sqlite import SQLiteBackend
 
-        backend = SQLiteBackend(path)
-        return cls(backend, clock=clock, id_provider=id_provider)
+        effective_clock = clock or SystemClock()
+        backend = SQLiteBackend(path, clock=effective_clock)
+        return cls(backend, clock=effective_clock, id_provider=id_provider)
 
     def create_principal(
         self,
@@ -263,9 +264,7 @@ class Ontology:
         Returns:
             List of matching assertions
         """
-        return self.backend.assertions(
-            subject=subject, predicate=predicate, status=status
-        )
+        return self.backend.assertions(subject=subject, predicate=predicate, status=status)
 
     def query(self, concept: str) -> QueryBuilder:
         """Create a query builder for a concept.

@@ -9,6 +9,7 @@ because StorageBackend is an abstract protocol, not a concrete implementation.
 The dependency rule prevents domain logic from importing concrete adapters.
 """
 
+from contextlib import AbstractContextManager
 from typing import Protocol
 
 from ontolith.core import Assertion, Entity
@@ -39,6 +40,14 @@ class StorageBackend(Protocol):
 
     def rollback(self) -> None:
         """Rollback the current transaction."""
+        ...
+
+    def transaction(self) -> AbstractContextManager[None]:
+        """Context manager for atomic multi-write transactions.
+
+        Guarantees rollback on any exception. Prefer this over
+        manual begin/commit/rollback to avoid wedged connections.
+        """
         ...
 
     def put_principal(self, principal: Principal) -> None:
@@ -149,9 +158,7 @@ class StorageBackend(Protocol):
         """
         ...
 
-    def get_schema(
-        self, namespace: str, version: int | None = None
-    ) -> SchemaIR | None:
+    def get_schema(self, namespace: str, version: int | None = None) -> SchemaIR | None:
         """Retrieve a schema version.
 
         Args:

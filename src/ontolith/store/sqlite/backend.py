@@ -8,10 +8,12 @@ Default storage adapter for Ontolith. Provides:
 """
 
 import sqlite3
-from datetime import UTC, datetime
+from collections.abc import Iterator
+from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 
-from ontolith.core import Assertion, Entity
+from ontolith.core import Assertion, Clock, Entity, SystemClock
 from ontolith.core.errors import StorageError
 from ontolith.identity import Principal
 from ontolith.schema import SchemaIR
@@ -27,24 +29,29 @@ class SQLiteBackend:
     - Status tracking for append-only invariant
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, clock: Clock | None = None) -> None:
         """Initialize SQLite backend.
 
         Args:
             path: Path to SQLite database file (created if doesn't exist)
+            clock: Clock for timestamps (defaults to SystemClock)
         """
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(self.path))
-        self.conn.row_factory = sqlite3.Row  # Enable column access by name
-        self.conn.execute("PRAGMA foreign_keys = ON")  # Enable FK constraints
+        # isolation_level=None: autocommit mode (ADR-0010).
+        # Each write auto-commits unless _in_transaction is True.
+        self.conn = sqlite3.connect(str(self.path), isolation_level=None)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA foreign_keys = ON")
+        self._in_transaction: bool = False
+        self._clock: Clock = clock or SystemClock()
         self._create_schema()
 
     def _create_schema(self) -> None:
         """Create database schema if not exists."""
         cursor = self.conn.cursor()
 
-        # Principal table (SPEC §8, ADR-0009)
+        # Principal table (SPEC §8, ADR-0003, ADR-0009)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS principal (
                 id TEXT PRIMARY KEY,
@@ -54,7 +61,8 @@ class SQLiteBackend:
                 default_capability TEXT NOT NULL DEFAULT 'propose' CHECK(default_capability IN ('read', 'propose', 'write', 'review', 'admin')),
                 trust_level INTEGER NOT NULL DEFAULT 0 CHECK(trust_level BETWEEN 0 AND 10),
                 created_at TEXT NOT NULL,
-                metadata TEXT NOT NULL DEFAULT '{}'
+                metadata TEXT NOT NULL DEFAULT '{}',
+                CHECK (kind <> 'ai' OR owner IS NOT NULL)
             )
         """)
 
@@ -78,7 +86,8 @@ class SQLiteBackend:
                 natural_key TEXT,
                 created_at TEXT NOT NULL,
                 created_by TEXT NOT NULL,
-                UNIQUE(namespace, concept, natural_key)
+                UNIQUE(namespace, concept, natural_key),
+                FOREIGN KEY(created_by) REFERENCES principal(id)
             )
         """)
 
@@ -106,7 +115,8 @@ class SQLiteBackend:
                 proposal_id TEXT,
                 supersedes TEXT,
                 metadata TEXT NOT NULL DEFAULT '{}',
-                FOREIGN KEY(subject) REFERENCES entity(id)
+                FOREIGN KEY(subject) REFERENCES entity(id),
+                FOREIGN KEY(author) REFERENCES principal(id)
             )
         """)
 
@@ -134,23 +144,42 @@ class SQLiteBackend:
         self.conn.commit()
 
     def begin(self) -> None:
-        """Begin a new transaction."""
-        # SQLite is in autocommit mode by default, explicit BEGIN
+        """Begin an explicit transaction (ADR-0010)."""
         self.conn.execute("BEGIN")
+        self._in_transaction = True
 
     def commit(self) -> None:
-        """Commit the current transaction."""
+        """Commit the current explicit transaction."""
         try:
             self.conn.commit()
         except sqlite3.Error as e:
             raise StorageError(f"Failed to commit transaction: {e}") from e
+        self._in_transaction = False
 
     def rollback(self) -> None:
-        """Rollback the current transaction."""
+        """Rollback the current explicit transaction."""
         try:
             self.conn.rollback()
         except sqlite3.Error as e:
             raise StorageError(f"Failed to rollback transaction: {e}") from e
+        self._in_transaction = False
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        """Context manager for atomic multi-write transactions (ADR-0010).
+
+        Usage:
+            with backend.transaction():
+                backend.put_entity(entity)
+                backend.put_assertion(assertion)
+        """
+        self.begin()
+        try:
+            yield
+            self.commit()
+        except Exception:
+            self.rollback()
+            raise
 
     def put_principal(self, principal: Principal) -> None:
         """Persist a principal.
@@ -181,6 +210,8 @@ class SQLiteBackend:
                     json.dumps(principal.metadata),
                 ),
             )
+            if not self._in_transaction:
+                self.conn.commit()
         except sqlite3.IntegrityError as e:
             raise StorageError(f"Principal conflict (id={principal.id}): {e}") from e
         except sqlite3.Error as e:
@@ -242,6 +273,8 @@ class SQLiteBackend:
                     entity.created_by,
                 ),
             )
+            if not self._in_transaction:
+                self.conn.commit()
         except sqlite3.IntegrityError as e:
             raise StorageError(f"Entity conflict: {e}") from e
         except sqlite3.Error as e:
@@ -298,14 +331,14 @@ class SQLiteBackend:
                     json.dumps(assertion.metadata),
                 ),
             )
+            if not self._in_transaction:
+                self.conn.commit()
         except sqlite3.IntegrityError as e:
             raise StorageError(
                 f"Assertion conflict (id={assertion.id}, subject={assertion.subject}): {e}"
             ) from e
         except sqlite3.Error as e:
-            raise StorageError(
-                f"Failed to persist assertion (id={assertion.id}): {e}"
-            ) from e
+            raise StorageError(f"Failed to persist assertion (id={assertion.id}): {e}") from e
 
     def get_entity(self, entity_id: str) -> Entity | None:
         """Retrieve an entity by ID.
@@ -392,15 +425,9 @@ class SQLiteBackend:
                     model=row["model"],
                     asserted_at=datetime.fromisoformat(row["asserted_at"]),
                     valid_from=(
-                        datetime.fromisoformat(row["valid_from"])
-                        if row["valid_from"]
-                        else None
+                        datetime.fromisoformat(row["valid_from"]) if row["valid_from"] else None
                     ),
-                    valid_to=(
-                        datetime.fromisoformat(row["valid_to"])
-                        if row["valid_to"]
-                        else None
-                    ),
+                    valid_to=(datetime.fromisoformat(row["valid_to"]) if row["valid_to"] else None),
                     status=row["status"],
                     proposal_id=row["proposal_id"],
                     supersedes=row["supersedes"],
@@ -443,11 +470,10 @@ class SQLiteBackend:
 
             if cursor.rowcount == 0:
                 raise StorageError(f"Assertion not found: {assertion_id}")
-
+            if not self._in_transaction:
+                self.conn.commit()
         except sqlite3.Error as e:
-            raise StorageError(
-                f"Failed to update assertion status (id={assertion_id}): {e}"
-            ) from e
+            raise StorageError(f"Failed to update assertion status (id={assertion_id}): {e}") from e
 
     def put_schema(self, schema: SchemaIR) -> None:
         """Persist a schema version.
@@ -471,9 +497,11 @@ class SQLiteBackend:
                     schema.namespace,
                     schema.version,
                     json.dumps(schema.to_json()),
-                    datetime.now(UTC).isoformat(),
+                    self._clock.now().isoformat(),
                 ),
             )
+            if not self._in_transaction:
+                self.conn.commit()
         except sqlite3.IntegrityError as e:
             raise StorageError(
                 f"Schema conflict (namespace={schema.namespace}, version={schema.version}): {e}"
@@ -483,9 +511,7 @@ class SQLiteBackend:
                 f"Failed to persist schema (namespace={schema.namespace}): {e}"
             ) from e
 
-    def get_schema(
-        self, namespace: str, version: int | None = None
-    ) -> SchemaIR | None:
+    def get_schema(self, namespace: str, version: int | None = None) -> SchemaIR | None:
         """Retrieve a schema version.
 
         Args:
