@@ -6,7 +6,7 @@ Per SPEC §8: Principals are authenticated actors who can create assertions.
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Principal(BaseModel):
@@ -37,13 +37,12 @@ class Principal(BaseModel):
     created_at: datetime
     metadata: dict[str, Any] = {}
 
-    @field_validator("owner")
-    @classmethod
-    def ai_must_have_owner(cls, v: str | None, info: Any) -> str | None:
-        """AI principals must declare an accountable owner (SPEC §8.1)."""
-        if info.data.get("kind") == "ai" and v is None:
-            raise ValueError("AI principals must have an owner")
-        return v
+    @model_validator(mode="after")
+    def ai_must_have_owner(self) -> "Principal":
+        """AI principals must declare an accountable owner (SPEC §8.1, ADR-0003)."""
+        if self.kind == "ai" and self.owner is None:
+            raise ValueError("AI principals must have an owner (SPEC §8.1)")
+        return self
 
     model_config = ConfigDict(frozen=True)  # Immutable
 

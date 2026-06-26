@@ -592,3 +592,124 @@ class TestSQLiteBackend:
         b2 = SQLiteBackend(temp_db)
         assert b2.get_entity("entity-001") is not None
         b2.close()
+
+    def test_put_principal_inside_transaction_skips_autocommit(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """put_principal inside a transaction does not auto-commit (ADR-0010)."""
+        principal = Principal(
+            id="bob@test.com",
+            kind="human",
+            auth_method="oidc",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        with backend.transaction():
+            backend.put_principal(principal)
+        assert backend.get_principal("bob@test.com") is not None
+
+    def test_put_assertion_inside_transaction_skips_autocommit(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """put_assertion inside a transaction does not auto-commit (ADR-0010)."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(entity)
+        assertion = Assertion(
+            id="assertion-001",
+            namespace="test-ns",
+            subject="entity-001",
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada",
+            author="alice@test.com",
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        with backend.transaction():
+            backend.put_assertion(assertion)
+        assert len(backend.assertions(subject="entity-001")) == 1
+
+    def test_set_assertion_status_inside_transaction_skips_autocommit(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """set_assertion_status inside a transaction does not auto-commit (ADR-0010)."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(entity)
+        assertion = Assertion(
+            id="assertion-001",
+            namespace="test-ns",
+            subject="entity-001",
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada",
+            author="alice@test.com",
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        backend.put_assertion(assertion)
+        with backend.transaction():
+            backend.set_assertion_status("assertion-001", "retracted")
+        assert backend.assertions(subject="entity-001") == []
+
+    def test_put_schema_inside_transaction_skips_autocommit(self, backend: SQLiteBackend) -> None:
+        """put_schema inside a transaction does not auto-commit (ADR-0010)."""
+        schema = SchemaIR(namespace="test-ns", version=1)
+        with backend.transaction():
+            backend.put_schema(schema)
+        assert backend.get_schema("test-ns") is not None
+
+    def test_entities_filter_by_namespace_only(self, backend: SQLiteBackend) -> None:
+        """entities() filtered by namespace only returns all concepts in that namespace."""
+        e1 = Entity(
+            id="entity-001",
+            namespace="ns-a",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        e2 = Entity(
+            id="entity-002",
+            namespace="ns-a",
+            concept="Organization",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        e3 = Entity(
+            id="entity-003",
+            namespace="ns-b",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(e1)
+        backend.put_entity(e2)
+        backend.put_entity(e3)
+
+        results = backend.entities(namespace="ns-a")
+        assert len(results) == 2
+        assert {r.id for r in results} == {"entity-001", "entity-002"}
+
+    def test_entities_no_filters_returns_all(self, backend: SQLiteBackend) -> None:
+        """entities() with no filters returns all entities."""
+        for i in range(3):
+            backend.put_entity(
+                Entity(
+                    id=f"entity-{i:03d}",
+                    namespace="test-ns",
+                    concept="Person",
+                    created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                    created_by="alice@test.com",
+                )
+            )
+        assert len(backend.entities()) == 3

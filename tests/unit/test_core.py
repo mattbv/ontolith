@@ -50,6 +50,47 @@ class TestFixedClock:
 
         assert clock.now() == datetime(2025, 6, 15, 12, 30, tzinfo=UTC)
 
+    def test_init_with_none_uses_current_time(self) -> None:
+        """FixedClock(None) uses current UTC time."""
+        before = datetime.now(UTC)
+        clock = FixedClock(None)
+        after = datetime.now(UTC)
+
+        assert before <= clock.now() <= after
+        assert clock.now().tzinfo == UTC
+
+    def test_init_with_datetime_object(self) -> None:
+        """FixedClock accepts a datetime object directly."""
+        t = datetime(2025, 3, 15, 9, 0, tzinfo=UTC)
+        clock = FixedClock(t)
+
+        assert clock.now() == t
+
+    def test_init_with_naive_datetime_adds_utc(self) -> None:
+        """FixedClock adds UTC tzinfo to naive datetimes."""
+        naive = datetime(2025, 3, 15, 9, 0)
+        clock = FixedClock(naive)
+
+        assert clock.now().tzinfo == UTC
+        assert clock.now().replace(tzinfo=None) == naive
+
+    def test_set_with_datetime_object(self) -> None:
+        """set() accepts a datetime object."""
+        clock = FixedClock("2025-01-01T00:00:00Z")
+        t = datetime(2025, 6, 1, 12, 0, tzinfo=UTC)
+        clock.set(t)
+
+        assert clock.now() == t
+
+    def test_set_with_naive_datetime_adds_utc(self) -> None:
+        """set() adds UTC tzinfo when given a naive datetime."""
+        clock = FixedClock("2025-01-01T00:00:00Z")
+        naive = datetime(2025, 6, 1, 12, 0)
+        clock.set(naive)
+
+        assert clock.now().tzinfo == UTC
+        assert clock.now().replace(tzinfo=None) == naive
+
 
 class TestUlidProvider:
     """Tests for UlidProvider."""
