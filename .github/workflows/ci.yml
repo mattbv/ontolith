@@ -38,7 +38,7 @@ jobs:
         run: uv run mypy --strict src
 
       - name: Dependency rule check
-        run: uv run import-linter
+        run: uv run lint-imports
 
   test:
     name: Tests
@@ -74,3 +74,31 @@ jobs:
         with:
           files: ./coverage.xml
           fail_ci_if_error: false
+
+  benchmarks:
+    name: Benchmarks (baseline, informational)
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Run benchmarks
+        run: uv run pytest tests/benchmarks/ --benchmark-only --benchmark-json=benchmark-results.json -q
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: benchmark-results.json

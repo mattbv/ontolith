@@ -129,6 +129,7 @@ def seeded_kb(seeded_db_path: Path) -> Ontology:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.benchmark
 def test_bench_single_entity_get(benchmark, seeded_backend: SQLiteBackend) -> None:
     """p95 target: < 10 ms — Single entity retrieval by ID."""
     result = benchmark(seeded_backend.get_entity, "entity-000500")
@@ -136,6 +137,7 @@ def test_bench_single_entity_get(benchmark, seeded_backend: SQLiteBackend) -> No
     assert result.id == "entity-000500"
 
 
+@pytest.mark.benchmark
 def test_bench_single_entity_provenance(benchmark, seeded_backend: SQLiteBackend) -> None:
     """p95 target: < 10 ms — Entity retrieval + all assertions (provenance)."""
 
@@ -149,6 +151,7 @@ def test_bench_single_entity_provenance(benchmark, seeded_backend: SQLiteBackend
     assert len(assertions) == 100
 
 
+@pytest.mark.benchmark
 def test_bench_write_assert_literal(benchmark, seeded_kb: Ontology) -> None:
     """p95 target: < 50 ms — Write path: assert_literal (standalone commit)."""
     counter = {"n": 0}
@@ -167,8 +170,13 @@ def test_bench_write_assert_literal(benchmark, seeded_kb: Ontology) -> None:
     benchmark(write_one)
 
 
+@pytest.mark.benchmark
 def test_bench_symbolic_query_concept_filter(benchmark, seeded_kb: Ontology) -> None:
-    """p95 target: < 150 ms — Symbolic query: concept + attribute filter."""
+    """p95 target: < 150 ms — Symbolic query: concept + attribute filter.
+
+    M1 baseline: ~15s mean (N+1 query pattern in QueryBuilder.where()).
+    See docs/known-issues.md — tracked for M2 fix.
+    """
 
     def query() -> list:
         return seeded_kb.query("Person").where(attr000="value-0-0").all()
@@ -177,6 +185,7 @@ def test_bench_symbolic_query_concept_filter(benchmark, seeded_kb: Ontology) -> 
     assert len(results) >= 1
 
 
+@pytest.mark.benchmark
 def test_bench_query_all_entities_of_concept(benchmark, seeded_backend: SQLiteBackend) -> None:
     """Scan all entities of a concept in a 100k-assertion KB."""
 
@@ -187,6 +196,7 @@ def test_bench_query_all_entities_of_concept(benchmark, seeded_backend: SQLiteBa
     assert len(results) == 1_000
 
 
+@pytest.mark.benchmark
 def test_bench_2hop_traversal(benchmark, seeded_backend: SQLiteBackend) -> None:
     """p95 target: < 200 ms (3-hop budget) — 2-hop ref traversal via assertions.
 
@@ -209,6 +219,7 @@ def test_bench_2hop_traversal(benchmark, seeded_backend: SQLiteBackend) -> None:
     assert result == ["entity-000002"]
 
 
+@pytest.mark.benchmark
 def test_bench_assertions_by_subject(benchmark, seeded_backend: SQLiteBackend) -> None:
     """Retrieve all 100 assertions for a single entity."""
     results = benchmark(seeded_backend.assertions, subject="entity-000500")
