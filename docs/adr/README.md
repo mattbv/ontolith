@@ -19,6 +19,12 @@ We use the [MADR](https://adr.github.io/madr/) (Markdown Any Decision Records) f
 - [ADR-0007](ADR-0007-interop-priority.md) — **Interop Priority** (LinkML → RDF/OWL → agent-memory bridges)
 - [ADR-0008](ADR-0008-mcp-surface.md) — **MCP Surface** (Read + propose, no direct write)
 
+### Implementation Decisions (M1+)
+
+- [ADR-0009](ADR-0009-trust-level-range.md) — **Trust Level Range** (0–10 integer with DB CHECK constraint)
+- [ADR-0010](ADR-0010-sqlite-transaction-model.md) — **SQLite Transaction Model** (Autocommit + explicit transaction flag)
+- [ADR-0011](ADR-0011-provenance-fk-enforcement.md) — **Provenance FK Enforcement** (DB-level FKs on `entity.created_by` and `assertion.author`)
+
 ## Decision Process
 
 1. **Propose** — Create ADR in draft status with context and options
