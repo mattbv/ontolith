@@ -163,6 +163,22 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def entities(
+        self,
+        namespace: str | None = None,
+        concept: str | None = None,
+    ) -> list[Entity]:
+        """Query entities with optional filters.
+
+        Args:
+            namespace: Filter by namespace
+            concept: Filter by concept
+
+        Returns:
+            List of matching entities
+        """
+        ...
+
     def close(self) -> None:
         """Close the storage backend and release resources."""
         ...

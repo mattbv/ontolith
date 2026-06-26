@@ -16,6 +16,7 @@ from ontolith.core import (
     UlidProvider,
 )
 from ontolith.identity import Principal
+from ontolith.query import QueryBuilder
 from ontolith.store.base import StorageBackend
 
 
@@ -264,6 +265,24 @@ class Ontology:
         """
         return self.backend.assertions(
             subject=subject, predicate=predicate, status=status
+        )
+
+    def query(self, concept: str) -> QueryBuilder:
+        """Create a query builder for a concept.
+
+        Args:
+            concept: Concept name to query
+
+        Returns:
+            QueryBuilder for fluent filtering
+
+        Example:
+            >>> kb.query("Person").where(name="Ada Lovelace").all()
+        """
+        return QueryBuilder(
+            backend=self.backend,
+            namespace=self.namespace,
+            concept=concept,
         )
 
     def close(self) -> None:

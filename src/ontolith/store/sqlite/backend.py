@@ -527,6 +527,49 @@ class SQLiteBackend:
         definition = json.loads(row["definition"])
         return SchemaIR.from_json(definition)
 
+    def entities(
+        self,
+        namespace: str | None = None,
+        concept: str | None = None,
+    ) -> list[Entity]:
+        """Query entities with optional filters.
+
+        Args:
+            namespace: Filter by namespace
+            concept: Filter by concept
+
+        Returns:
+            List of matching entities
+        """
+        query = "SELECT * FROM entity WHERE 1=1"
+        params: list[str] = []
+
+        if namespace is not None:
+            query += " AND namespace = ?"
+            params.append(namespace)
+
+        if concept is not None:
+            query += " AND concept = ?"
+            params.append(concept)
+
+        cursor = self.conn.cursor()
+        cursor.execute(query, params)
+
+        results = []
+        for row in cursor.fetchall():
+            results.append(
+                Entity(
+                    id=row["id"],
+                    namespace=row["namespace"],
+                    concept=row["concept"],
+                    natural_key=row["natural_key"],
+                    created_at=datetime.fromisoformat(row["created_at"]),
+                    created_by=row["created_by"],
+                )
+            )
+
+        return results
+
     def close(self) -> None:
         """Close the database connection."""
         self.conn.close()
