@@ -49,4 +49,3 @@ Thumbs.db
 *.db
 *.sqlite
 *.sqlite3
-uv.lock
