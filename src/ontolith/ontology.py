@@ -5,7 +5,7 @@ backend and provides high-level methods for entities, assertions, and queries.
 """
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ontolith.core import (
     Assertion,
@@ -15,6 +15,10 @@ from ontolith.core import (
     SystemClock,
     UlidProvider,
 )
+from ontolith.govern import AutoAccept, ThresholdPolicy
+from ontolith.govern.conflict import Contradict, Supersede, route
+from ontolith.govern.contradiction import Contradiction
+from ontolith.govern.proposal import Proposal
 from ontolith.identity import Principal
 from ontolith.query import QueryBuilder
 from ontolith.store.base import StorageBackend
@@ -283,6 +287,199 @@ class Ontology:
             namespace=self.namespace,
             concept=concept,
         )
+
+    def propose(
+        self,
+        subject: str,
+        predicate: str,
+        value: str,
+        value_type: str,
+        author: str,
+        *,
+        temporality: Literal["static", "time_varying"] = "static",
+        confidence: float | None = None,
+        source: str | None = None,
+        rationale: str | None = None,
+    ) -> tuple[Proposal, Any]:
+        """Submit a literal assertion through the proposal/policy path (SPEC §9).
+
+        Evaluates ThresholdPolicy. Auto-accepted proposals are committed
+        immediately with SPEC §10 conflict routing; others are stored for review.
+
+        Returns:
+            (Proposal, Decision) tuple
+        """
+        from ontolith.core.errors import StorageError
+
+        principal = self.backend.get_principal(author)
+        if principal is None:
+            raise StorageError(f"Principal not found: {author}")
+
+        now = self.clock.now()
+        proposal_id = self.id_provider.next()
+        proposal = Proposal(
+            id=proposal_id,
+            namespace=self.namespace,
+            author=author,
+            state="submitted",
+            created_at=now,
+            payload={
+                "operations": [
+                    {
+                        "kind": "assert_literal",
+                        "subject": subject,
+                        "predicate": predicate,
+                        "value": value,
+                        "value_type": value_type,
+                        "temporality": temporality,
+                        "confidence": confidence,
+                        "source": source,
+                        "rationale": rationale,
+                    }
+                ]
+            },
+        )
+
+        decision = ThresholdPolicy().evaluate(proposal, principal)
+
+        if isinstance(decision, AutoAccept):
+            assertion = Assertion(
+                id=self.id_provider.next(),
+                namespace=self.namespace,
+                subject=subject,
+                predicate=predicate,
+                value_kind="literal",
+                value_type=value_type,
+                value=value,
+                author=author,
+                confidence=confidence,
+                source=source,
+                rationale=rationale,
+                asserted_at=now,
+                proposal_id=proposal_id,
+            )
+            accepted = proposal.model_copy(
+                update={
+                    "state": "auto_accepted",
+                    "decided_at": now,
+                    "policy_reason": decision.reason,
+                }
+            )
+            with self.backend.transaction():
+                self.backend.put_proposal(accepted)
+                self._apply_with_conflict_routing(assertion, temporality)
+            return accepted, decision
+
+        pending = proposal.model_copy(
+            update={
+                "state": "require_review",
+                "policy_reason": getattr(decision, "reason", None),
+            }
+        )
+        self.backend.put_proposal(pending)
+        return pending, decision
+
+    def retract(self, assertion_id: str, author: str) -> tuple[Proposal, Any]:
+        """Propose retraction of an assertion through the policy path (SPEC §9).
+
+        Returns:
+            (Proposal, Decision) tuple
+        """
+        from ontolith.core.errors import StorageError
+
+        principal = self.backend.get_principal(author)
+        if principal is None:
+            raise StorageError(f"Principal not found: {author}")
+
+        now = self.clock.now()
+        proposal_id = self.id_provider.next()
+        proposal = Proposal(
+            id=proposal_id,
+            namespace=self.namespace,
+            author=author,
+            state="submitted",
+            created_at=now,
+            payload={"operations": [{"kind": "retract", "assertion_id": assertion_id}]},
+        )
+
+        decision = ThresholdPolicy().evaluate(proposal, principal)
+
+        if isinstance(decision, AutoAccept):
+            accepted = proposal.model_copy(
+                update={
+                    "state": "auto_accepted",
+                    "decided_at": now,
+                    "policy_reason": decision.reason,
+                }
+            )
+            with self.backend.transaction():
+                self.backend.put_proposal(accepted)
+                self.backend.set_assertion_status(assertion_id, "retracted")
+            return accepted, decision
+
+        pending = proposal.model_copy(
+            update={
+                "state": "require_review",
+                "policy_reason": getattr(decision, "reason", None),
+            }
+        )
+        self.backend.put_proposal(pending)
+        return pending, decision
+
+    def _apply_with_conflict_routing(
+        self,
+        assertion: Assertion,
+        temporality: Literal["static", "time_varying"],
+    ) -> None:
+        """Apply an assertion with SPEC §10 conflict routing. Must run inside a transaction."""
+        existing = self.backend.assertions(
+            subject=assertion.subject,
+            predicate=assertion.predicate,
+            status="active",
+        )
+
+        open_contradiction = self.backend.get_open_contradiction(
+            self.namespace, assertion.subject, assertion.predicate
+        )
+
+        result = route(
+            incoming=assertion,
+            existing=existing,
+            temporality=temporality,
+            existing_contradiction_id=open_contradiction.id if open_contradiction else None,
+        )
+
+        if isinstance(result, Supersede):
+            now_iso = assertion.asserted_at.isoformat()
+            for target_id in result.targets:
+                self.backend.set_assertion_status(target_id, "superseded", valid_to=now_iso)
+            supersedes_id = result.targets[0] if result.targets else None
+            final = assertion.model_copy(update={"supersedes": supersedes_id})
+            self.backend.put_assertion(final)
+
+        elif isinstance(result, Contradict):
+            for mid in result.member_ids:
+                if mid != assertion.id:
+                    self.backend.set_assertion_status(mid, "flagged")
+            flagged = assertion.model_copy(update={"status": "flagged"})
+            self.backend.put_assertion(flagged)
+            if result.existing_contradiction_id and open_contradiction:
+                merged = list(dict.fromkeys(open_contradiction.member_ids + result.member_ids))
+                self.backend.update_contradiction_members(result.existing_contradiction_id, merged)
+            else:
+                contradiction = Contradiction(
+                    id=self.id_provider.next(),
+                    namespace=self.namespace,
+                    subject=assertion.subject,
+                    predicate=assertion.predicate,
+                    state="open",
+                    member_ids=result.member_ids,
+                    created_at=assertion.asserted_at,
+                )
+                self.backend.put_contradiction(contradiction)
+
+        else:
+            self.backend.put_assertion(assertion)
 
     def close(self) -> None:
         """Close the knowledge base connection."""

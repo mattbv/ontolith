@@ -7,6 +7,8 @@ This module handles the write path and governance:
 - Conflict: temporal supersession and contradictions (M2)
 """
 
+from ontolith.govern.conflict import Activate, ConflictResult, Contradict, Supersede, route
+from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.policy import (
     AutoAccept,
     Decision,
@@ -19,10 +21,16 @@ from ontolith.govern.proposal import Proposal
 
 __all__ = [
     "Proposal",
+    "Contradiction",
     "Decision",
     "AutoAccept",
     "RequireReview",
     "Reject",
     "PolicyStrategy",
     "ThresholdPolicy",
+    "Activate",
+    "Supersede",
+    "Contradict",
+    "ConflictResult",
+    "route",
 ]

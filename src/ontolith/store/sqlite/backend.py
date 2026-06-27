@@ -15,6 +15,8 @@ from pathlib import Path
 
 from ontolith.core import Assertion, Clock, Entity, SystemClock
 from ontolith.core.errors import StorageError
+from ontolith.govern.contradiction import Contradiction
+from ontolith.govern.proposal import Proposal
 from ontolith.identity import Principal
 from ontolith.schema import SchemaIR
 
@@ -118,6 +120,48 @@ class SQLiteBackend:
                 FOREIGN KEY(subject) REFERENCES entity(id),
                 FOREIGN KEY(author) REFERENCES principal(id)
             )
+        """)
+
+        # Proposal table (SPEC §9.1)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS proposal (
+                id TEXT PRIMARY KEY,
+                namespace TEXT NOT NULL,
+                author TEXT NOT NULL,
+                acting_as TEXT,
+                state TEXT NOT NULL DEFAULT 'draft' CHECK(state IN (
+                    'draft', 'submitted', 'auto_accepted',
+                    'require_review', 'under_review',
+                    'accepted', 'rejected', 'changes_requested'
+                )),
+                created_at TEXT NOT NULL,
+                decided_at TEXT,
+                policy_reason TEXT,
+                payload TEXT NOT NULL DEFAULT '{}',
+                metadata TEXT NOT NULL DEFAULT '{}',
+                FOREIGN KEY(author) REFERENCES principal(id)
+            )
+        """)
+
+        # Contradiction table (SPEC §10.3)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS contradiction (
+                id TEXT PRIMARY KEY,
+                namespace TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                predicate TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open', 'resolved')),
+                member_ids TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                resolved_by TEXT,
+                resolved_at TEXT,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_contradiction_open
+            ON contradiction(namespace, subject, predicate, state)
         """)
 
         # Indexes (SPEC §12.2)
@@ -595,6 +639,171 @@ class SQLiteBackend:
             )
 
         return results
+
+    def put_proposal(self, proposal: Proposal) -> None:
+        """Persist a proposal."""
+        import json
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO proposal (id, namespace, author, acting_as, state,
+                    created_at, decided_at, policy_reason, payload, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    proposal.id,
+                    proposal.namespace,
+                    proposal.author,
+                    proposal.acting_as,
+                    proposal.state,
+                    proposal.created_at.isoformat(),
+                    proposal.decided_at.isoformat() if proposal.decided_at else None,
+                    proposal.policy_reason,
+                    json.dumps(proposal.payload),
+                    json.dumps(proposal.metadata),
+                ),
+            )
+            if not self._in_transaction:
+                self.conn.commit()
+        except sqlite3.IntegrityError as e:
+            raise StorageError(f"Proposal conflict (id={proposal.id}): {e}") from e
+        except sqlite3.Error as e:
+            raise StorageError(f"Failed to persist proposal (id={proposal.id}): {e}") from e
+
+    def get_proposal(self, proposal_id: str) -> Proposal | None:
+        """Retrieve a proposal by ID."""
+        import json
+
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM proposal WHERE id = ?", (proposal_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        return Proposal(
+            id=row["id"],
+            namespace=row["namespace"],
+            author=row["author"],
+            acting_as=row["acting_as"],
+            state=row["state"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            decided_at=datetime.fromisoformat(row["decided_at"]) if row["decided_at"] else None,
+            policy_reason=row["policy_reason"],
+            payload=json.loads(row["payload"]),
+            metadata=json.loads(row["metadata"]),
+        )
+
+    def update_proposal_state(
+        self,
+        proposal_id: str,
+        state: str,
+        decided_at: str | None = None,
+        policy_reason: str | None = None,
+    ) -> None:
+        """Update proposal state after policy decision."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "UPDATE proposal SET state = ?, decided_at = ?, policy_reason = ? WHERE id = ?",
+                (state, decided_at, policy_reason, proposal_id),
+            )
+            if cursor.rowcount == 0:
+                raise StorageError(f"Proposal not found: {proposal_id}")
+            if not self._in_transaction:
+                self.conn.commit()
+        except sqlite3.Error as e:
+            raise StorageError(f"Failed to update proposal (id={proposal_id}): {e}") from e
+
+    def put_contradiction(self, contradiction: Contradiction) -> None:
+        """Persist a new contradiction."""
+        import json
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO contradiction (id, namespace, subject, predicate, state,
+                    member_ids, created_at, resolved_by, resolved_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    contradiction.id,
+                    contradiction.namespace,
+                    contradiction.subject,
+                    contradiction.predicate,
+                    contradiction.state,
+                    json.dumps(contradiction.member_ids),
+                    contradiction.created_at.isoformat(),
+                    contradiction.resolved_by,
+                    contradiction.resolved_at.isoformat() if contradiction.resolved_at else None,
+                    json.dumps(contradiction.metadata),
+                ),
+            )
+            if not self._in_transaction:
+                self.conn.commit()
+        except sqlite3.IntegrityError as e:
+            raise StorageError(f"Contradiction conflict (id={contradiction.id}): {e}") from e
+        except sqlite3.Error as e:
+            raise StorageError(
+                f"Failed to persist contradiction (id={contradiction.id}): {e}"
+            ) from e
+
+    def get_open_contradiction(
+        self, namespace: str, subject: str, predicate: str
+    ) -> Contradiction | None:
+        """Return the open contradiction for (namespace, subject, predicate), if any."""
+        import json
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM contradiction
+            WHERE namespace = ? AND subject = ? AND predicate = ? AND state = 'open'
+            LIMIT 1
+            """,
+            (namespace, subject, predicate),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        return Contradiction(
+            id=row["id"],
+            namespace=row["namespace"],
+            subject=row["subject"],
+            predicate=row["predicate"],
+            state=row["state"],
+            member_ids=json.loads(row["member_ids"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            resolved_by=row["resolved_by"],
+            resolved_at=datetime.fromisoformat(row["resolved_at"]) if row["resolved_at"] else None,
+            metadata=json.loads(row["metadata"]),
+        )
+
+    def update_contradiction_members(
+        self,
+        contradiction_id: str,
+        member_ids: list[str],
+    ) -> None:
+        """Add member IDs to an existing open contradiction."""
+        import json
+
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "UPDATE contradiction SET member_ids = ? WHERE id = ?",
+                (json.dumps(member_ids), contradiction_id),
+            )
+            if cursor.rowcount == 0:
+                raise StorageError(f"Contradiction not found: {contradiction_id}")
+            if not self._in_transaction:
+                self.conn.commit()
+        except sqlite3.Error as e:
+            raise StorageError(
+                f"Failed to update contradiction (id={contradiction_id}): {e}"
+            ) from e
 
     def entities_where(
         self,

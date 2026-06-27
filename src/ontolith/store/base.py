@@ -13,6 +13,8 @@ from contextlib import AbstractContextManager
 from typing import Protocol
 
 from ontolith.core import Assertion, Entity
+from ontolith.govern.contradiction import Contradiction
+from ontolith.govern.proposal import Proposal
 from ontolith.identity import Principal
 from ontolith.schema import SchemaIR
 
@@ -204,6 +206,87 @@ class StorageBackend(Protocol):
 
         Returns:
             List of entities where all filters match active literal assertions
+        """
+        ...
+
+    def put_proposal(self, proposal: Proposal) -> None:
+        """Persist a proposal.
+
+        Args:
+            proposal: Proposal to persist
+
+        Raises:
+            StorageError: If persistence fails
+        """
+        ...
+
+    def get_proposal(self, proposal_id: str) -> Proposal | None:
+        """Retrieve a proposal by ID.
+
+        Args:
+            proposal_id: Proposal ID
+
+        Returns:
+            Proposal if found, None otherwise
+        """
+        ...
+
+    def update_proposal_state(
+        self,
+        proposal_id: str,
+        state: str,
+        decided_at: str | None = None,
+        policy_reason: str | None = None,
+    ) -> None:
+        """Update proposal state after policy decision.
+
+        Args:
+            proposal_id: Proposal to update
+            state: New state (auto_accepted, require_review, rejected, etc.)
+            decided_at: ISO timestamp of the decision
+            policy_reason: Human-readable reason from policy engine
+        """
+        ...
+
+    def put_contradiction(self, contradiction: Contradiction) -> None:
+        """Persist a new contradiction.
+
+        Args:
+            contradiction: Contradiction to persist
+
+        Raises:
+            StorageError: If persistence fails
+        """
+        ...
+
+    def get_open_contradiction(
+        self,
+        namespace: str,
+        subject: str,
+        predicate: str,
+    ) -> Contradiction | None:
+        """Return the open contradiction for (namespace, subject, predicate), if any.
+
+        Args:
+            namespace: Namespace to search
+            subject: Subject entity ID
+            predicate: Predicate name
+
+        Returns:
+            Open Contradiction if one exists, None otherwise
+        """
+        ...
+
+    def update_contradiction_members(
+        self,
+        contradiction_id: str,
+        member_ids: list[str],
+    ) -> None:
+        """Replace the member_ids list on an existing contradiction.
+
+        Args:
+            contradiction_id: Contradiction to update
+            member_ids: New full list of member assertion IDs
         """
         ...
 
