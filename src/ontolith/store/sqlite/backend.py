@@ -596,6 +596,52 @@ class SQLiteBackend:
 
         return results
 
+    def entities_where(
+        self,
+        namespace: str,
+        concept: str,
+        predicate_filters: dict[str, str],
+    ) -> list[Entity]:
+        """Query entities matching all predicate=value filters in one SQL query.
+
+        Uses correlated subqueries so each (predicate, value_lit) pair hits the
+        idx_assertion_spo index instead of doing one round-trip per entity.
+
+        Args:
+            namespace: Namespace to query
+            concept: Concept to filter by
+            predicate_filters: Dict of full_predicate → literal_value (AND semantics)
+
+        Returns:
+            List of entities where all filters match active literal assertions
+        """
+        query = "SELECT * FROM entity WHERE namespace = ? AND concept = ?"
+        params: list[str] = [namespace, concept]
+
+        for predicate, value in predicate_filters.items():
+            query += (
+                " AND id IN ("
+                "SELECT subject FROM assertion"
+                " WHERE predicate = ? AND value_lit = ? AND status = 'active'"
+                ")"
+            )
+            params.extend([predicate, value])
+
+        cursor = self.conn.cursor()
+        cursor.execute(query, params)
+
+        return [
+            Entity(
+                id=row["id"],
+                namespace=row["namespace"],
+                concept=row["concept"],
+                natural_key=row["natural_key"],
+                created_at=datetime.fromisoformat(row["created_at"]),
+                created_by=row["created_by"],
+            )
+            for row in cursor.fetchall()
+        ]
+
     def close(self) -> None:
         """Close the database connection."""
         self.conn.close()

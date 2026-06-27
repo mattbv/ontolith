@@ -186,6 +186,27 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def entities_where(
+        self,
+        namespace: str,
+        concept: str,
+        predicate_filters: dict[str, str],
+    ) -> list[Entity]:
+        """Query entities matching all predicate=value filters in one SQL query.
+
+        Avoids the N+1 pattern of entities() + per-entity assertions() calls.
+        Each filter is (full_predicate, literal_value); ALL must match (AND semantics).
+
+        Args:
+            namespace: Namespace to query
+            concept: Concept to filter by
+            predicate_filters: Dict of full_predicate → literal_value
+
+        Returns:
+            List of entities where all filters match active literal assertions
+        """
+        ...
+
     def close(self) -> None:
         """Close the storage backend and release resources."""
         ...
