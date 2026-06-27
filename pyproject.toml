@@ -1,0 +1,213 @@
+[project]
+name = "ontolith"
+version = "0.0.1"
+description = "A Python framework for collaborative knowledge bases where humans and AI agents are co-equal authors"
+authors = [{ name = "Matheus B. Vicari", email = "matheus.boni.vicari@gmail.com" }]
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+keywords = ["knowledge-graph", "ontology", "ai", "collaboration", "governance"]
+classifiers = [
+	"Development Status :: 2 - Pre-Alpha",
+	"Intended Audience :: Developers",
+	"License :: OSI Approved :: Apache Software License",
+	"Programming Language :: Python :: 3",
+	"Programming Language :: Python :: 3.11",
+	"Programming Language :: Python :: 3.12",
+	"Programming Language :: Python :: 3.13",
+	"Topic :: Software Development :: Libraries :: Python Modules",
+	"Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+	"pydantic>=2.0",
+	"typer>=0.9",
+	"python-ulid>=2.0",
+	"structlog>=24.0",
+]
+
+[project.optional-dependencies]
+vec = [
+	"sqlite-vec==0.1.1", # pinned: pre-v1, breaking changes possible
+]
+rest = ["fastapi>=0.110", "uvicorn>=0.27"]
+graphql = ["strawberry-graphql>=0.219"]
+mcp = ["mcp>=0.9"]
+all = ["ontolith[vec,rest,graphql,mcp]"]
+dev = [
+	"ontolith[all]",
+	# Testing
+	"pytest>=8.0",
+	"pytest-cov>=4.1",
+	"pytest-asyncio>=0.23",
+	"pytest-benchmark>=4.0",
+	"hypothesis>=6.98",
+	# Quality
+	"ruff>=0.2",
+	"mypy>=1.8",
+	"import-linter>=2.0",
+	"interrogate>=1.5",
+	# Security
+	"bandit>=1.7",
+	"pip-audit>=2.7",
+	# Documentation
+	"mkdocs-material>=9.5",
+	"mkdocstrings[python]>=0.24",
+	# Tools
+	"pre-commit>=3.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/ontolith/ontolith"
+Documentation = "https://ontolith.readthedocs.io"
+Repository = "https://github.com/ontolith/ontolith"
+Issues = "https://github.com/ontolith/ontolith/issues"
+
+[project.scripts]
+ontolith = "ontolith.interfaces.cli:app"
+
+[project.entry-points."ontolith.plugins"]
+# Plugin discovery via entry points
+# Third-party plugins register here
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ontolith"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests", "conformance"]
+
+[tool.ruff.lint]
+select = [
+	"E",  # pycodestyle errors
+	"W",  # pycodestyle warnings
+	"F",  # pyflakes
+	"I",  # isort
+	"B",  # flake8-bugbear
+	"C4", # flake8-comprehensions
+	"UP", # pyupgrade
+]
+ignore = [
+	"E501", # line too long (handled by formatter)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"] # unused imports ok in __init__
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_any_generics = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+follow_imports = "normal"
+ignore_missing_imports = false
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests", "conformance"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = ["--strict-markers", "--strict-config", "--benchmark-skip"]
+markers = [
+	"slow: marks tests as slow (deselect with '-m \"not slow\"')",
+	"integration: marks tests as integration tests",
+	"benchmark: marks tests as benchmarks",
+]
+
+[tool.hypothesis]
+[tool.hypothesis.profiles.dev]
+max_examples = 20
+deadline = 500    # ms
+
+[tool.hypothesis.profiles.ci]
+max_examples = 100
+deadline = 1000
+
+[tool.hypothesis.profiles.nightly]
+max_examples = 1000
+deadline = 5000
+
+[tool.coverage.run]
+source = ["src/ontolith"]
+branch = true
+omit = ["*/tests/*", "*/conformance/*"]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines = [
+	"pragma: no cover",
+	"def __repr__",
+	"raise AssertionError",
+	"raise NotImplementedError",
+	"if __name__ == .__main__.:",
+	"if TYPE_CHECKING:",
+	"class .*\\bProtocol\\):",
+	"@(abc\\.)?abstractmethod",
+]
+
+[tool.coverage.paths]
+source = ["src/ontolith"]
+
+[tool.interrogate]
+ignore-init-method = true
+ignore-init-module = true
+ignore-magic = false
+ignore-semiprivate = false
+ignore-private = false
+ignore-property-decorators = false
+ignore-module = false
+ignore-nested-functions = false
+ignore-nested-classes = true
+ignore-setters = false
+fail-under = 95
+exclude = ["tests", "conformance", "docs"]
+verbose = 2
+quiet = false
+color = true
+
+[tool.importlinter]
+root_packages = ["ontolith"]
+
+[[tool.importlinter.contracts]]
+name = "Dependency Rule: Domain must not import adapters"
+type = "forbidden"
+source_modules = [
+	"ontolith.core",
+	"ontolith.schema",
+	"ontolith.govern",
+	"ontolith.query",
+]
+forbidden_modules = ["ontolith.store.sqlite", "ontolith.interfaces"]
+
+# NOTE: The "layers" contract is disabled because store.base (the StorageBackend
+# protocol) needs to import Entity/Assertion from core to type its methods.
+# This creates an acceptable bidirectional dependency between core and store.base:
+#   - core uses StorageBackend protocol to define persistence interface
+#   - store.base imports Entity/Assertion to type the protocol methods
+# This is acceptable because store.base is an abstract protocol, NOT a concrete
+# adapter. The "forbidden" contract above still prevents domain logic from
+# importing concrete adapters like ontolith.store.sqlite.
+#
+# [[tool.importlinter.contracts]]
+# name = "Domain layers may only import abstract ports"
+# type = "layers"
+# layers = [...]  # Disabled - see note above
