@@ -5,10 +5,10 @@ Each entry states the issue, its severity, the milestone it's targeted for, and 
 
 ---
 
-## KI-001 — QueryBuilder.where() N+1 query pattern
+## KI-001 — QueryBuilder.where() N+1 query pattern ✓ RESOLVED (M2)
 
 **Severity:** Performance — critical gap against budget  
-**Milestone target:** M2  
+**Milestone target:** M2 — resolved in `perf(query): fix N+1 in QueryBuilder.where() with SQL subquery push-down`  
 **SPEC reference:** SPEC §11, Implementation Plan §9 (p95 < 150 ms symbolic query)
 
 ### Description
@@ -27,10 +27,10 @@ Rewrite `QueryBuilder.all()` to issue a single SQL query joining `entity` and `a
 
 ---
 
-## KI-002 — No governed retraction API on Ontology
+## KI-002 — No governed retraction API on Ontology ✓ RESOLVED (M2)
 
 **Severity:** Architecture gap — missing write surface  
-**Milestone target:** M2  
+**Milestone target:** M2 — resolved in `feat(govern): implement proposal workflow, conflict routing, and contradiction handling`  
 **SPEC reference:** SPEC §9 (all writes through proposal path)
 
 ### Description
@@ -88,10 +88,10 @@ In M2, add conformance vectors to `conformance/test_conflict.py` that verify:
 
 ---
 
-## KI-005 — `assert_literal` / `assert_ref` bypass the proposal/policy path
+## KI-005 — `assert_literal` / `assert_ref` bypass the proposal/policy path ✓ RESOLVED (M2)
 
 **Severity:** Architecture gap — not SPEC-compliant for untrusted principals  
-**Milestone target:** M2  
+**Milestone target:** M2 — resolved in `feat(govern): implement proposal workflow, conflict routing, and contradiction handling`  
 **SPEC reference:** SPEC §9 ("all writes through proposal path")
 
 ### Description
