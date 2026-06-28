@@ -16,8 +16,9 @@ from ontolith.core import (
     UlidProvider,
 )
 from ontolith.govern import AutoAccept, ThresholdPolicy
-from ontolith.govern.conflict import Contradict, Supersede, route
+from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, route
 from ontolith.govern.contradiction import Contradiction
+from ontolith.govern.policy import Decision
 from ontolith.govern.proposal import Proposal
 from ontolith.identity import Principal
 from ontolith.query import QueryBuilder
@@ -300,7 +301,7 @@ class Ontology:
         confidence: float | None = None,
         source: str | None = None,
         rationale: str | None = None,
-    ) -> tuple[Proposal, Any]:
+    ) -> tuple[Proposal, Decision]:
         """Submit a literal assertion through the proposal/policy path (SPEC §9).
 
         Evaluates ThresholdPolicy. Auto-accepted proposals are committed
@@ -379,7 +380,7 @@ class Ontology:
         self.backend.put_proposal(pending)
         return pending, decision
 
-    def retract(self, assertion_id: str, author: str) -> tuple[Proposal, Any]:
+    def retract(self, assertion_id: str, author: str) -> tuple[Proposal, Decision]:
         """Propose retraction of an assertion through the policy path (SPEC §9).
 
         Returns:
@@ -441,7 +442,7 @@ class Ontology:
         # incoming assertion must be added to the same contradiction.
         if open_contradiction is not None and temporality == "static":
             all_member_ids = list(dict.fromkeys(open_contradiction.member_ids + [assertion.id]))
-            result: Any = Contradict(
+            result: ConflictResult = Contradict(
                 member_ids=all_member_ids,
                 existing_contradiction_id=open_contradiction.id,
             )
@@ -459,9 +460,11 @@ class Ontology:
             )
 
         if isinstance(result, Supersede):
-            now_iso = assertion.asserted_at.isoformat()
+            # Close prior window at the incoming assertion's valid_from (SPEC §10.2).
+            # valid_from is guaranteed non-None after Assertion validation.
+            close_at = (assertion.valid_from or assertion.asserted_at).isoformat()
             for target_id in result.targets:
-                self.backend.set_assertion_status(target_id, "superseded", valid_to=now_iso)
+                self.backend.set_assertion_status(target_id, "superseded", valid_to=close_at)
             supersedes_id = result.targets[0] if result.targets else None
             final = assertion.model_copy(update={"supersedes": supersedes_id})
             self.backend.put_assertion(final)

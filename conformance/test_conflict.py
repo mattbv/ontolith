@@ -129,6 +129,13 @@ class TestPureRouting:
         assert isinstance(result, Supersede)
         assert set(result.targets) == {"a-1", "a-2"}
 
+    def test_time_varying_incoming_closed_window_before_existing_starts(self) -> None:
+        """Incoming [T0, T1) ends before existing [T2, ∞) starts → no overlap → Activate."""
+        existing = [_assertion("a-1", "Acme Corp", valid_from=T2)]
+        incoming = _assertion("a-2", "Beta Inc", valid_from=T0, valid_to=T1)
+        result = route(incoming, existing=existing, temporality="time_varying")
+        assert isinstance(result, Activate)
+
 
 # ===========================================================================
 # End-to-end: static contradiction (through storage)
