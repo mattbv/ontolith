@@ -432,22 +432,31 @@ class Ontology:
         temporality: Literal["static", "time_varying"],
     ) -> None:
         """Apply an assertion with SPEC §10 conflict routing. Must run inside a transaction."""
-        existing = self.backend.assertions(
-            subject=assertion.subject,
-            predicate=assertion.predicate,
-            status="active",
-        )
-
         open_contradiction = self.backend.get_open_contradiction(
             self.namespace, assertion.subject, assertion.predicate
         )
 
-        result = route(
-            incoming=assertion,
-            existing=existing,
-            temporality=temporality,
-            existing_contradiction_id=open_contradiction.id if open_contradiction else None,
-        )
+        # If a contradiction is already open, all existing assertions for this
+        # (subject, predicate) are flagged — no active ones exist. Any new
+        # incoming assertion must be added to the same contradiction.
+        if open_contradiction is not None and temporality == "static":
+            all_member_ids = list(dict.fromkeys(open_contradiction.member_ids + [assertion.id]))
+            result: Any = Contradict(
+                member_ids=all_member_ids,
+                existing_contradiction_id=open_contradiction.id,
+            )
+        else:
+            existing = self.backend.assertions(
+                subject=assertion.subject,
+                predicate=assertion.predicate,
+                status="active",
+            )
+            result = route(
+                incoming=assertion,
+                existing=existing,
+                temporality=temporality,
+                existing_contradiction_id=open_contradiction.id if open_contradiction else None,
+            )
 
         if isinstance(result, Supersede):
             now_iso = assertion.asserted_at.isoformat()
