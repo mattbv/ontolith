@@ -126,10 +126,10 @@ When the proposal workflow is wired in M2 (`KI-005`), add a rejection rule — f
 
 ---
 
-## KI-007 — No API to accept or reject a `require_review` proposal
+## KI-007 — No API to accept or reject a `require_review` proposal ✓ RESOLVED (M2)
 
 **Severity:** Architecture gap — pending proposals are unresolvable  
-**Milestone target:** M2 (review workflow)  
+**Milestone target:** M2 — resolved in `feat(govern): implement accept_proposal() and reject_proposal() review-acceptance API`  
 **SPEC reference:** SPEC §9 (proposal state machine)
 
 ### Description
