@@ -14,7 +14,7 @@ import pytest
 
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
-from ontolith.core.errors import StorageError
+from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 
@@ -198,7 +198,7 @@ class TestReviewGuards:
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
 
-        with pytest.raises(StorageError, match="lacks review capability"):
+        with pytest.raises(CapabilityError, match="lacks review capability"):
             kb.accept_proposal(proposal.id, HUMAN_AUTHOR)
 
     def test_write_only_principal_cannot_reject(self, tmp_path: Path) -> None:
@@ -206,7 +206,7 @@ class TestReviewGuards:
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
 
-        with pytest.raises(StorageError, match="lacks review capability"):
+        with pytest.raises(CapabilityError, match="lacks review capability"):
             kb.reject_proposal(proposal.id, HUMAN_AUTHOR)
 
     def test_unknown_reviewer_raises_on_accept(self, tmp_path: Path) -> None:
@@ -214,13 +214,26 @@ class TestReviewGuards:
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
 
-        with pytest.raises(StorageError, match="Principal not found"):
+        with pytest.raises(AuthError, match="Principal not found"):
             kb.accept_proposal(proposal.id, "nobody@example.com")
+
+    def test_unknown_reviewer_raises_on_reject(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+
+        with pytest.raises(AuthError, match="Principal not found"):
+            kb.reject_proposal(proposal.id, "nobody@example.com")
 
     def test_unknown_proposal_raises_on_accept(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
-        with pytest.raises(StorageError, match="Proposal not found"):
+        with pytest.raises(NotFoundError, match="Proposal not found"):
             kb.accept_proposal("nonexistent-id", REVIEWER)
+
+    def test_unknown_proposal_raises_on_reject(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        with pytest.raises(NotFoundError, match="Proposal not found"):
+            kb.reject_proposal("nonexistent-id", REVIEWER)
 
     def test_already_accepted_proposal_raises(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -228,7 +241,7 @@ class TestReviewGuards:
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
         kb.accept_proposal(proposal.id, REVIEWER)
 
-        with pytest.raises(StorageError, match="not pending review"):
+        with pytest.raises(ValidationError, match="not pending review"):
             kb.accept_proposal(proposal.id, REVIEWER)
 
     def test_already_rejected_proposal_raises(self, tmp_path: Path) -> None:
@@ -237,7 +250,7 @@ class TestReviewGuards:
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
         kb.reject_proposal(proposal.id, REVIEWER)
 
-        with pytest.raises(StorageError, match="not pending review"):
+        with pytest.raises(ValidationError, match="not pending review"):
             kb.reject_proposal(proposal.id, REVIEWER)
 
     def test_auto_accepted_proposal_cannot_be_reviewed(self, tmp_path: Path) -> None:
@@ -247,5 +260,5 @@ class TestReviewGuards:
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         assert proposal.state == "auto_accepted"
 
-        with pytest.raises(StorageError, match="not pending review"):
+        with pytest.raises(ValidationError, match="not pending review"):
             kb.accept_proposal(proposal.id, REVIEWER)

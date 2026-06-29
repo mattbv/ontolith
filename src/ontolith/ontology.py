@@ -16,6 +16,7 @@ from ontolith.core import (
     SystemClock,
     UlidProvider,
 )
+from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
 from ontolith.govern import AutoAccept, ThresholdPolicy
 from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, route
 from ontolith.govern.contradiction import Contradiction
@@ -369,11 +370,9 @@ class Ontology:
         Returns:
             (Proposal, Decision) tuple
         """
-        from ontolith.core.errors import StorageError
-
         principal = self.backend.get_principal(author)
         if principal is None:
-            raise StorageError(f"Principal not found: {author}")
+            raise AuthError(f"Principal not found: {author}")
 
         now = self.clock.now()
         proposal_id = self.id_provider.next()
@@ -445,11 +444,9 @@ class Ontology:
         Returns:
             (Proposal, Decision) tuple
         """
-        from ontolith.core.errors import StorageError
-
         principal = self.backend.get_principal(author)
         if principal is None:
-            raise StorageError(f"Principal not found: {author}")
+            raise AuthError(f"Principal not found: {author}")
 
         now = self.clock.now()
         proposal_id = self.id_provider.next()
@@ -566,19 +563,17 @@ class Ontology:
         Returns:
             Updated Proposal with state `accepted`
         """
-        from ontolith.core.errors import StorageError
-
         reviewer_principal = self.backend.get_principal(reviewer)
         if reviewer_principal is None:
-            raise StorageError(f"Principal not found: {reviewer}")
+            raise AuthError(f"Principal not found: {reviewer}")
         if reviewer_principal.default_capability not in ("review", "admin"):
-            raise StorageError(f"Principal {reviewer} lacks review capability")
+            raise CapabilityError(f"Principal {reviewer} lacks review capability")
 
         proposal = self.backend.get_proposal(proposal_id)
         if proposal is None:
-            raise StorageError(f"Proposal not found: {proposal_id}")
+            raise NotFoundError(f"Proposal not found: {proposal_id}")
         if proposal.state not in ("require_review", "under_review"):
-            raise StorageError(
+            raise ValidationError(
                 f"Proposal {proposal_id} is not pending review (state: {proposal.state})"
             )
 
@@ -607,6 +602,8 @@ class Ontology:
                     )
                 elif op["kind"] == "retract":
                     self.backend.set_assertion_status(op["assertion_id"], "retracted")
+                else:
+                    raise ValidationError(f"Unknown operation kind in proposal payload: {op['kind']}")
 
             self.backend.update_proposal_state(
                 proposal_id, "accepted", now.isoformat(), f"Accepted by reviewer {reviewer}"
@@ -630,19 +627,17 @@ class Ontology:
         Returns:
             Updated Proposal with state `rejected`
         """
-        from ontolith.core.errors import StorageError
-
         reviewer_principal = self.backend.get_principal(reviewer)
         if reviewer_principal is None:
-            raise StorageError(f"Principal not found: {reviewer}")
+            raise AuthError(f"Principal not found: {reviewer}")
         if reviewer_principal.default_capability not in ("review", "admin"):
-            raise StorageError(f"Principal {reviewer} lacks review capability")
+            raise CapabilityError(f"Principal {reviewer} lacks review capability")
 
         proposal = self.backend.get_proposal(proposal_id)
         if proposal is None:
-            raise StorageError(f"Proposal not found: {proposal_id}")
+            raise NotFoundError(f"Proposal not found: {proposal_id}")
         if proposal.state not in ("require_review", "under_review"):
-            raise StorageError(
+            raise ValidationError(
                 f"Proposal {proposal_id} is not pending review (state: {proposal.state})"
             )
 
