@@ -597,13 +597,13 @@ class Ontology:
                         asserted_at=now,
                         proposal_id=proposal_id,
                     )
-                    self._apply_with_conflict_routing(
-                        assertion, op.get("temporality", "static")
-                    )
+                    self._apply_with_conflict_routing(assertion, op.get("temporality", "static"))
                 elif op["kind"] == "retract":
                     self.backend.set_assertion_status(op["assertion_id"], "retracted")
                 else:
-                    raise ValidationError(f"Unknown operation kind in proposal payload: {op['kind']}")
+                    raise ValidationError(
+                        f"Unknown operation kind in proposal payload: {op['kind']}"
+                    )
 
             self.backend.update_proposal_state(
                 proposal_id, "accepted", now.isoformat(), f"Accepted by reviewer {reviewer}"

@@ -32,9 +32,7 @@ AUTHOR = "alice@example.com"
 
 def _kb(tmp_path: Path) -> Ontology:
     clock = FixedClock(T0)
-    ids = FixedIdProvider(
-        [f"id-{i}" for i in range(30)]
-    )
+    ids = FixedIdProvider([f"id-{i}" for i in range(30)])
     kb = Ontology.connect(tmp_path / "test.db", clock=clock, id_provider=ids)
     kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
     return kb
@@ -142,7 +140,9 @@ class TestAsOfBasics:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=AUTHOR)
         # Insert a 'superseded' assertion that was valid at T0
-        _put_assertion(kb, entity.id, "Ada", asserted_at=T0, valid_from=T0, valid_to=T1, status="superseded")
+        _put_assertion(
+            kb, entity.id, "Ada", asserted_at=T0, valid_from=T0, valid_to=T1, status="superseded"
+        )
 
         visible = kb.as_of(T0).assertions(subject=entity.id)
         assert len(visible) == 1
@@ -163,13 +163,21 @@ class TestAsOfSupersession:
         entity = kb.create_entity("Person", author=AUTHOR)
         # Acme: [T0, T1) superseded
         _put_assertion(
-            kb, entity.id, "Acme Corp",
-            asserted_at=T0, valid_from=T0, valid_to=T1, status="superseded",
+            kb,
+            entity.id,
+            "Acme Corp",
+            asserted_at=T0,
+            valid_from=T0,
+            valid_to=T1,
+            status="superseded",
         )
         # Beta: [T1, ∞) active, asserted at T1
         _put_assertion(
-            kb, entity.id, "Beta Inc",
-            asserted_at=T1, valid_from=T1,
+            kb,
+            entity.id,
+            "Beta Inc",
+            asserted_at=T1,
+            valid_from=T1,
         )
         return kb, entity.id
 
@@ -271,20 +279,28 @@ def assertion_scenarios(draw: st.DrawFn) -> tuple[list[dict[str, object]], int]:
         asserted_offset = draw(days_range)
         valid_from_offset = draw(st.one_of(st.none(), days_range))
         valid_to_offset = draw(st.one_of(st.none(), days_range))
-        value = draw(st.text(min_size=1, max_size=10, alphabet=st.characters(whitelist_categories=("Lu", "Ll"))))
-        records.append({
-            "asserted_offset": asserted_offset,
-            "valid_from_offset": valid_from_offset,
-            "valid_to_offset": valid_to_offset,
-            "value": value,
-        })
+        value = draw(
+            st.text(
+                min_size=1, max_size=10, alphabet=st.characters(whitelist_categories=("Lu", "Ll"))
+            )
+        )
+        records.append(
+            {
+                "asserted_offset": asserted_offset,
+                "valid_from_offset": valid_from_offset,
+                "valid_to_offset": valid_to_offset,
+                "value": value,
+            }
+        )
 
     query_offset = draw(days_range)
     return records, query_offset
 
 
 @given(scenario=assertion_scenarios())
-@settings(max_examples=100, deadline=5000, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=100, deadline=5000, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
 def test_as_of_reconstruction_matches_theoretical_filter(
     scenario: tuple[list[dict[str, object]], int],
 ) -> None:
@@ -315,7 +331,9 @@ def test_as_of_reconstruction_matches_theoretical_filter(
                 else None
             )
             a = _put_assertion(
-                kb, entity.id, str(rec["value"]),
+                kb,
+                entity.id,
+                str(rec["value"]),
                 asserted_at=asserted_at,
                 valid_from=valid_from,
                 valid_to=valid_to,
@@ -334,3 +352,4 @@ def test_as_of_reconstruction_matches_theoretical_filter(
         actual_ids = {a.id for a in kb.as_of(query_t).assertions(subject=entity.id)}
 
         assert actual_ids == expected_ids
+        kb.close()  # release SQLite file lock before TemporaryDirectory cleanup (Windows)

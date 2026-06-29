@@ -43,7 +43,9 @@ def _kb(tmp_path: Path) -> Ontology:
     kb = Ontology.connect(tmp_path / "test.db", clock=clock, id_provider=ids)
     kb.create_principal(HUMAN_AUTHOR, kind="human", auth_method="oidc", default_capability="write")
     kb.create_principal(REVIEWER, kind="human", auth_method="oidc", default_capability="review")
-    kb.create_principal(AI_AUTHOR, kind="ai", auth_method="apikey", owner=AI_OWNER, default_capability="propose")
+    kb.create_principal(
+        AI_AUTHOR, kind="ai", auth_method="apikey", owner=AI_OWNER, default_capability="propose"
+    )
     return kb
 
 
