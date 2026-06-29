@@ -416,13 +416,16 @@ class SQLiteBackend:
         subject: str | None = None,
         predicate: str | None = None,
         status: str | None = "active",
+        as_of_time: datetime | None = None,
     ) -> list[Assertion]:
         """Query assertions with optional filters.
 
         Args:
             subject: Filter by subject entity ID
             predicate: Filter by predicate
-            status: Filter by status (default: active only, None = all)
+            status: Filter by current status (ignored when as_of_time is set)
+            as_of_time: If set, applies bitemporal filter:
+                asserted_at <= t AND valid_from <= t AND (valid_to IS NULL OR valid_to > t)
 
         Returns:
             List of matching assertions
@@ -440,7 +443,15 @@ class SQLiteBackend:
             query += " AND predicate = ?"
             params.append(predicate)
 
-        if status is not None:
+        if as_of_time is not None:
+            t_iso = as_of_time.isoformat()
+            query += " AND asserted_at <= ?"
+            params.append(t_iso)
+            query += " AND (valid_from IS NULL OR valid_from <= ?)"
+            params.append(t_iso)
+            query += " AND (valid_to IS NULL OR valid_to > ?)"
+            params.append(t_iso)
+        elif status is not None:
             query += " AND status = ?"
             params.append(status)
 
@@ -601,12 +612,14 @@ class SQLiteBackend:
         self,
         namespace: str | None = None,
         concept: str | None = None,
+        as_of_time: datetime | None = None,
     ) -> list[Entity]:
         """Query entities with optional filters.
 
         Args:
             namespace: Filter by namespace
             concept: Filter by concept
+            as_of_time: If set, exclude entities created after this time
 
         Returns:
             List of matching entities
@@ -621,6 +634,10 @@ class SQLiteBackend:
         if concept is not None:
             query += " AND concept = ?"
             params.append(concept)
+
+        if as_of_time is not None:
+            query += " AND created_at <= ?"
+            params.append(as_of_time.isoformat())
 
         cursor = self.conn.cursor()
         cursor.execute(query, params)
@@ -810,6 +827,7 @@ class SQLiteBackend:
         namespace: str,
         concept: str,
         predicate_filters: dict[str, str],
+        as_of_time: datetime | None = None,
     ) -> list[Entity]:
         """Query entities matching all predicate=value filters in one SQL query.
 
@@ -820,21 +838,38 @@ class SQLiteBackend:
             namespace: Namespace to query
             concept: Concept to filter by
             predicate_filters: Dict of full_predicate → literal_value (AND semantics)
+            as_of_time: If set, applies bitemporal filter on assertions and entity creation
 
         Returns:
-            List of entities where all filters match active literal assertions
+            List of entities where all filters match at the given time
         """
         query = "SELECT * FROM entity WHERE namespace = ? AND concept = ?"
         params: list[str] = [namespace, concept]
 
-        for predicate, value in predicate_filters.items():
-            query += (
-                " AND id IN ("
-                "SELECT subject FROM assertion"
-                " WHERE predicate = ? AND value_lit = ? AND status = 'active'"
-                ")"
-            )
-            params.extend([predicate, value])
+        if as_of_time is not None:
+            t_iso = as_of_time.isoformat()
+            query += " AND created_at <= ?"
+            params.append(t_iso)
+            for predicate, value in predicate_filters.items():
+                query += (
+                    " AND id IN ("
+                    "SELECT subject FROM assertion"
+                    " WHERE predicate = ? AND value_lit = ?"
+                    " AND asserted_at <= ?"
+                    " AND (valid_from IS NULL OR valid_from <= ?)"
+                    " AND (valid_to IS NULL OR valid_to > ?)"
+                    ")"
+                )
+                params.extend([predicate, value, t_iso, t_iso, t_iso])
+        else:
+            for predicate, value in predicate_filters.items():
+                query += (
+                    " AND id IN ("
+                    "SELECT subject FROM assertion"
+                    " WHERE predicate = ? AND value_lit = ? AND status = 'active'"
+                    ")"
+                )
+                params.extend([predicate, value])
 
         cursor = self.conn.cursor()
         cursor.execute(query, params)

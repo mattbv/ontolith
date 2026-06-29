@@ -14,7 +14,7 @@ import pytest
 
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
-from ontolith.core.errors import StorageError
+from ontolith.core.errors import AuthError
 from ontolith.govern import AutoAccept, RequireReview
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
@@ -140,7 +140,7 @@ class TestAutoAccept:
     def test_unknown_author_raises_storage_error(self, tmp_path: Path) -> None:
         kb = _kb_human(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        with pytest.raises(StorageError):
+        with pytest.raises(AuthError):
             kb.propose(entity.id, "Person.name", "Ada", "Text", "nobody@example.com")
 
 
@@ -245,7 +245,7 @@ class TestRetract:
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
 
-        with pytest.raises(StorageError):
+        with pytest.raises(AuthError):
             kb.retract(active[0].id, "nobody@example.com")
 
     def test_retract_payload_contains_operation(self, tmp_path: Path) -> None:

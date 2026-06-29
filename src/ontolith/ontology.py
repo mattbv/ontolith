@@ -4,6 +4,7 @@ The Ontology class is the primary API surface for users. It wraps the storage
 backend and provides high-level methods for entities, assertions, and queries.
 """
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -15,6 +16,7 @@ from ontolith.core import (
     SystemClock,
     UlidProvider,
 )
+from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
 from ontolith.govern import AutoAccept, ThresholdPolicy
 from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, route
 from ontolith.govern.contradiction import Contradiction
@@ -23,6 +25,48 @@ from ontolith.govern.proposal import Proposal
 from ontolith.identity import Principal
 from ontolith.query import QueryBuilder
 from ontolith.store.base import StorageBackend
+
+
+class AsOfView:
+    """Read-only bitemporal view at a specific point in time (SPEC §10).
+
+    Reconstructs what was known and true at time `t`:
+        valid_from <= t < (valid_to or ∞)  AND  asserted_at <= t
+
+    Status is NOT used as a filter — the temporal dimensions determine visibility.
+    """
+
+    def __init__(
+        self,
+        backend: "StorageBackend",
+        as_of: datetime,
+        namespace: str,
+    ) -> None:
+        self._backend = backend
+        self._as_of = as_of
+        self._namespace = namespace
+
+    def assertions(
+        self,
+        subject: str | None = None,
+        predicate: str | None = None,
+    ) -> list[Assertion]:
+        """Assertions visible at the as_of timestamp."""
+        return self._backend.assertions(
+            subject=subject,
+            predicate=predicate,
+            status=None,
+            as_of_time=self._as_of,
+        )
+
+    def query(self, concept: str) -> QueryBuilder:
+        """Query entities as they existed at the as_of timestamp."""
+        return QueryBuilder(
+            backend=self._backend,
+            namespace=self._namespace,
+            concept=concept,
+            as_of_time=self._as_of,
+        )
 
 
 class Ontology:
@@ -289,6 +333,22 @@ class Ontology:
             concept=concept,
         )
 
+    def as_of(self, t: datetime | str) -> AsOfView:
+        """Return a read-only bitemporal view at time t (SPEC §10).
+
+        Reconstructs what was known and true at t:
+            valid_from <= t < (valid_to or ∞)  AND  asserted_at <= t
+
+        Args:
+            t: Point in time — datetime or ISO-format string
+
+        Returns:
+            AsOfView for querying the knowledge base as it stood at t
+        """
+        if isinstance(t, str):
+            t = datetime.fromisoformat(t)
+        return AsOfView(self.backend, t, self.namespace)
+
     def propose(
         self,
         subject: str,
@@ -310,11 +370,9 @@ class Ontology:
         Returns:
             (Proposal, Decision) tuple
         """
-        from ontolith.core.errors import StorageError
-
         principal = self.backend.get_principal(author)
         if principal is None:
-            raise StorageError(f"Principal not found: {author}")
+            raise AuthError(f"Principal not found: {author}")
 
         now = self.clock.now()
         proposal_id = self.id_provider.next()
@@ -386,11 +444,9 @@ class Ontology:
         Returns:
             (Proposal, Decision) tuple
         """
-        from ontolith.core.errors import StorageError
-
         principal = self.backend.get_principal(author)
         if principal is None:
-            raise StorageError(f"Principal not found: {author}")
+            raise AuthError(f"Principal not found: {author}")
 
         now = self.clock.now()
         proposal_id = self.id_provider.next()
@@ -493,9 +549,113 @@ class Ontology:
         else:
             self.backend.put_assertion(assertion)
 
+    def accept_proposal(self, proposal_id: str, reviewer: str) -> Proposal:
+        """Accept a pending proposal, replaying its operations (SPEC §9).
+
+        The reviewer must have `review` or `admin` capability.
+        Only proposals in `require_review` or `under_review` state can be accepted.
+        Operations are replayed through SPEC §10 conflict routing inside a single transaction.
+
+        Args:
+            proposal_id: ID of the proposal to accept
+            reviewer: Principal ID of the reviewer
+
+        Returns:
+            Updated Proposal with state `accepted`
+        """
+        reviewer_principal = self.backend.get_principal(reviewer)
+        if reviewer_principal is None:
+            raise AuthError(f"Principal not found: {reviewer}")
+        if reviewer_principal.default_capability not in ("review", "admin"):
+            raise CapabilityError(f"Principal {reviewer} lacks review capability")
+
+        proposal = self.backend.get_proposal(proposal_id)
+        if proposal is None:
+            raise NotFoundError(f"Proposal not found: {proposal_id}")
+        if proposal.state not in ("require_review", "under_review"):
+            raise ValidationError(
+                f"Proposal {proposal_id} is not pending review (state: {proposal.state})"
+            )
+
+        now = self.clock.now()
+
+        with self.backend.transaction():
+            for op in proposal.payload.get("operations", []):
+                if op["kind"] == "assert_literal":
+                    assertion = Assertion(
+                        id=self.id_provider.next(),
+                        namespace=self.namespace,
+                        subject=op["subject"],
+                        predicate=op["predicate"],
+                        value_kind="literal",
+                        value_type=op["value_type"],
+                        value=op["value"],
+                        author=proposal.author,
+                        confidence=op.get("confidence"),
+                        source=op.get("source"),
+                        rationale=op.get("rationale"),
+                        asserted_at=now,
+                        proposal_id=proposal_id,
+                    )
+                    self._apply_with_conflict_routing(assertion, op.get("temporality", "static"))
+                elif op["kind"] == "retract":
+                    self.backend.set_assertion_status(op["assertion_id"], "retracted")
+                else:
+                    raise ValidationError(
+                        f"Unknown operation kind in proposal payload: {op['kind']}"
+                    )
+
+            self.backend.update_proposal_state(
+                proposal_id, "accepted", now.isoformat(), f"Accepted by reviewer {reviewer}"
+            )
+
+        accepted = self.backend.get_proposal(proposal_id)
+        assert accepted is not None
+        return accepted
+
+    def reject_proposal(self, proposal_id: str, reviewer: str, reason: str = "") -> Proposal:
+        """Reject a pending proposal (SPEC §9).
+
+        The reviewer must have `review` or `admin` capability.
+        No operations are applied; the proposal is marked rejected.
+
+        Args:
+            proposal_id: ID of the proposal to reject
+            reviewer: Principal ID of the reviewer
+            reason: Optional rejection reason
+
+        Returns:
+            Updated Proposal with state `rejected`
+        """
+        reviewer_principal = self.backend.get_principal(reviewer)
+        if reviewer_principal is None:
+            raise AuthError(f"Principal not found: {reviewer}")
+        if reviewer_principal.default_capability not in ("review", "admin"):
+            raise CapabilityError(f"Principal {reviewer} lacks review capability")
+
+        proposal = self.backend.get_proposal(proposal_id)
+        if proposal is None:
+            raise NotFoundError(f"Proposal not found: {proposal_id}")
+        if proposal.state not in ("require_review", "under_review"):
+            raise ValidationError(
+                f"Proposal {proposal_id} is not pending review (state: {proposal.state})"
+            )
+
+        now = self.clock.now()
+        self.backend.update_proposal_state(
+            proposal_id,
+            "rejected",
+            now.isoformat(),
+            reason or f"Rejected by reviewer {reviewer}",
+        )
+
+        rejected = self.backend.get_proposal(proposal_id)
+        assert rejected is not None
+        return rejected
+
     def close(self) -> None:
         """Close the knowledge base connection."""
         self.backend.close()
 
 
-__all__ = ["Ontology"]
+__all__ = ["AsOfView", "Ontology"]
