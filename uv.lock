@@ -1381,7 +1381,7 @@ requires-dist = [
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.98" },
     { name = "import-linter", marker = "extra == 'dev'", specifier = ">=2.0" },
     { name = "interrogate", marker = "extra == 'dev'", specifier = ">=1.5" },
-    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=0.9" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.0" },
     { name = "mkdocs-material", marker = "extra == 'dev'", specifier = ">=9.5" },
     { name = "mkdocstrings", extras = ["python"], marker = "extra == 'dev'", specifier = ">=0.24" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8" },
