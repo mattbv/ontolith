@@ -126,6 +126,44 @@ When the proposal workflow is wired in M2 (`KI-005`), add a rejection rule — f
 
 ---
 
+## KI-007 — No API to accept or reject a `require_review` proposal
+
+**Severity:** Architecture gap — pending proposals are unresolvable  
+**Milestone target:** M2 (review workflow)  
+**SPEC reference:** SPEC §9 (proposal state machine)
+
+### Description
+
+`Ontology.propose()` and `Ontology.retract()` can produce proposals with state `require_review` (e.g. for AI principals), and those proposals are persisted. However there is no `accept_proposal()`, `reject_proposal()`, or review-approval method anywhere in `src/ontolith/`. A reviewer cannot advance the proposal through the state machine (`require_review → under_review → accepted/rejected`), so pending proposals accumulate with no resolution path.
+
+`update_proposal_state()` exists on the `StorageBackend` port and `SQLiteBackend` but is currently dead code — it was added in anticipation of this workflow.
+
+### Fix
+
+Add `Ontology.accept_proposal(proposal_id, reviewer)` and `Ontology.reject_proposal(proposal_id, reviewer, reason)` that advance the proposal state and — on acceptance — replay the stored payload operations through `_apply_with_conflict_routing`. Wire `update_proposal_state` into that path.
+
+---
+
+## KI-008 — Multi-target supersession links only the first superseded assertion
+
+**Severity:** Informational — intentional v1 limitation  
+**Milestone target:** Backlog  
+**SPEC reference:** SPEC §10.2 (supersession chain)
+
+### Description
+
+When multiple overlapping `time_varying` assertions are superseded at once (e.g. two concurrent employers both active when a new one arrives), `_apply_with_conflict_routing` sets `supersedes = result.targets[0]` on the incoming assertion — linking it to only one predecessor. The other superseded assertions have no successor pointer.
+
+`Assertion.supersedes` is a single `str | None` field by model design (one-to-one chain, not a list). This means time-travel via the `supersedes` chain cannot recover all concurrent predecessors — only the first.
+
+In practice this is rare because `time_varying` with truly concurrent open windows indicates a data-entry race, but it is a known fidelity gap in the provenance trail.
+
+### Fix
+
+In a future milestone, change `Assertion.supersedes` to `list[str]` (or add a separate `supersession_link` table) to support many-to-one successor relationships. Any schema migration must preserve existing single-link records.
+
+---
+
 ## Format
 
 Each entry follows this structure:
