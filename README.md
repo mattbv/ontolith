@@ -1,6 +1,6 @@
 # Ontolith
 
-[![CI](https://github.com/ontolith/ontolith/workflows/CI/badge.svg)](https://github.com/ontolith/ontolith/actions)
+[![CI](https://github.com/mattbv/ontolith/workflows/CI/badge.svg)](https://github.com/mattbv/ontolith/actions)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
@@ -19,7 +19,7 @@ A Python framework/SDK for building collaborative knowledge bases where humans a
 
 ```bash
 # Clone repository
-git clone https://github.com/ontolith/ontolith.git
+git clone https://github.com/mattbv/ontolith.git
 cd ontolith
 
 # Install dependencies (requires Python 3.11+)
@@ -35,7 +35,7 @@ uv run mypy --strict src
 
 ## Development Status
 
-🚧 **Pre-Alpha** - M0 (Foundations) milestone in progress
+🚧 **Pre-Alpha** - M2 (Collaboration) in progress — M1 substrate complete
 
 See [docs/Ontolith_Implementation_Plan.md](docs/Ontolith_Implementation_Plan.md) for roadmap.
 
