@@ -493,6 +493,112 @@ class Ontology:
         else:
             self.backend.put_assertion(assertion)
 
+    def accept_proposal(self, proposal_id: str, reviewer: str) -> Proposal:
+        """Accept a pending proposal, replaying its operations (SPEC §9).
+
+        The reviewer must have `review` or `admin` capability.
+        Only proposals in `require_review` or `under_review` state can be accepted.
+        Operations are replayed through SPEC §10 conflict routing inside a single transaction.
+
+        Args:
+            proposal_id: ID of the proposal to accept
+            reviewer: Principal ID of the reviewer
+
+        Returns:
+            Updated Proposal with state `accepted`
+        """
+        from ontolith.core.errors import StorageError
+
+        reviewer_principal = self.backend.get_principal(reviewer)
+        if reviewer_principal is None:
+            raise StorageError(f"Principal not found: {reviewer}")
+        if reviewer_principal.default_capability not in ("review", "admin"):
+            raise StorageError(f"Principal {reviewer} lacks review capability")
+
+        proposal = self.backend.get_proposal(proposal_id)
+        if proposal is None:
+            raise StorageError(f"Proposal not found: {proposal_id}")
+        if proposal.state not in ("require_review", "under_review"):
+            raise StorageError(
+                f"Proposal {proposal_id} is not pending review (state: {proposal.state})"
+            )
+
+        now = self.clock.now()
+
+        with self.backend.transaction():
+            for op in proposal.payload.get("operations", []):
+                if op["kind"] == "assert_literal":
+                    assertion = Assertion(
+                        id=self.id_provider.next(),
+                        namespace=self.namespace,
+                        subject=op["subject"],
+                        predicate=op["predicate"],
+                        value_kind="literal",
+                        value_type=op["value_type"],
+                        value=op["value"],
+                        author=proposal.author,
+                        confidence=op.get("confidence"),
+                        source=op.get("source"),
+                        rationale=op.get("rationale"),
+                        asserted_at=now,
+                        proposal_id=proposal_id,
+                    )
+                    self._apply_with_conflict_routing(
+                        assertion, op.get("temporality", "static")
+                    )
+                elif op["kind"] == "retract":
+                    self.backend.set_assertion_status(op["assertion_id"], "retracted")
+
+            self.backend.update_proposal_state(
+                proposal_id, "accepted", now.isoformat(), f"Accepted by reviewer {reviewer}"
+            )
+
+        accepted = self.backend.get_proposal(proposal_id)
+        assert accepted is not None
+        return accepted
+
+    def reject_proposal(self, proposal_id: str, reviewer: str, reason: str = "") -> Proposal:
+        """Reject a pending proposal (SPEC §9).
+
+        The reviewer must have `review` or `admin` capability.
+        No operations are applied; the proposal is marked rejected.
+
+        Args:
+            proposal_id: ID of the proposal to reject
+            reviewer: Principal ID of the reviewer
+            reason: Optional rejection reason
+
+        Returns:
+            Updated Proposal with state `rejected`
+        """
+        from ontolith.core.errors import StorageError
+
+        reviewer_principal = self.backend.get_principal(reviewer)
+        if reviewer_principal is None:
+            raise StorageError(f"Principal not found: {reviewer}")
+        if reviewer_principal.default_capability not in ("review", "admin"):
+            raise StorageError(f"Principal {reviewer} lacks review capability")
+
+        proposal = self.backend.get_proposal(proposal_id)
+        if proposal is None:
+            raise StorageError(f"Proposal not found: {proposal_id}")
+        if proposal.state not in ("require_review", "under_review"):
+            raise StorageError(
+                f"Proposal {proposal_id} is not pending review (state: {proposal.state})"
+            )
+
+        now = self.clock.now()
+        self.backend.update_proposal_state(
+            proposal_id,
+            "rejected",
+            now.isoformat(),
+            reason or f"Rejected by reviewer {reviewer}",
+        )
+
+        rejected = self.backend.get_proposal(proposal_id)
+        assert rejected is not None
+        return rejected
+
     def close(self) -> None:
         """Close the knowledge base connection."""
         self.backend.close()
