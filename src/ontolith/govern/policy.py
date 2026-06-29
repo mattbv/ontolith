@@ -91,9 +91,12 @@ class ThresholdPolicy:
         ):
             return AutoAccept(f"Trusted service principal ({principal.id})")
 
-        # AI always requires review in M1
+        # Read-only principals cannot propose — reject immediately
+        if principal.default_capability == "read":
+            return Reject(f"Principal {principal.id} has read-only access and cannot propose")
+
+        # AI always requires review
         if principal.kind == "ai":
-            # In M1, route to owner for review
             reviewers = [principal.owner] if principal.owner else []
             return RequireReview(
                 reviewers=reviewers,

@@ -16,6 +16,7 @@ from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
 from ontolith.core.errors import AuthError
 from ontolith.govern import AutoAccept, RequireReview
+from ontolith.govern.policy import Reject
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 HUMAN_AUTHOR = "alice@example.com"
@@ -260,3 +261,94 @@ class TestRetract:
         assert len(ops) == 1
         assert ops[0]["kind"] == "retract"
         assert ops[0]["assertion_id"] == assertion_id
+
+
+# ===========================================================================
+# Reject path — read-only principal (KI-006)
+# ===========================================================================
+
+READ_ONLY_AUTHOR = "readonly@example.com"
+
+
+def _kb_read_only(tmp_path: Path) -> Ontology:
+    """KB with a human principal that has read-only capability."""
+    clock = FixedClock(T0)
+    ids = FixedIdProvider(
+        [
+            "p-write",
+            "p-read",
+            "e-1",
+            "a-1",
+            "prop-1",
+            "prop-2",
+        ]
+    )
+    kb = Ontology.connect(tmp_path / "test.db", clock=clock, id_provider=ids)
+    kb.create_principal(HUMAN_AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+    kb.create_principal(
+        READ_ONLY_AUTHOR, kind="human", auth_method="oidc", default_capability="read"
+    )
+    return kb
+
+
+class TestRejectDecision:
+    """SPEC §9.2 — Reject path: read-only principals cannot propose or retract."""
+
+    def test_propose_by_read_only_returns_reject_decision(self, tmp_path: Path) -> None:
+        kb = _kb_read_only(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, decision = kb.propose(entity.id, "Person.name", "Ada", "Text", READ_ONLY_AUTHOR)
+        assert isinstance(decision, Reject)
+
+    def test_propose_by_read_only_proposal_state_is_rejected(self, tmp_path: Path) -> None:
+        kb = _kb_read_only(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", READ_ONLY_AUTHOR)
+        assert proposal.state == "rejected"
+
+    def test_propose_by_read_only_decided_at_is_set(self, tmp_path: Path) -> None:
+        kb = _kb_read_only(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", READ_ONLY_AUTHOR)
+        assert proposal.decided_at is not None
+
+    def test_propose_by_read_only_no_assertion_written(self, tmp_path: Path) -> None:
+        kb = _kb_read_only(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", READ_ONLY_AUTHOR)
+        assert kb.assertions(subject=entity.id, predicate="Person.name") == []
+
+    def test_propose_by_read_only_proposal_persisted(self, tmp_path: Path) -> None:
+        kb = _kb_read_only(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", READ_ONLY_AUTHOR)
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "rejected"
+
+    def test_propose_by_read_only_policy_reason_mentions_access(self, tmp_path: Path) -> None:
+        kb = _kb_read_only(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", READ_ONLY_AUTHOR)
+        assert proposal.policy_reason is not None
+        assert "read" in proposal.policy_reason.lower()
+
+    def test_retract_by_read_only_returns_reject_decision(self, tmp_path: Path) -> None:
+        kb = _kb_read_only(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        proposal, decision = kb.retract(active[0].id, READ_ONLY_AUTHOR)
+        assert isinstance(decision, Reject)
+
+    def test_retract_by_read_only_assertion_remains_active(self, tmp_path: Path) -> None:
+        """A rejected retraction must not change the assertion's state."""
+        kb = _kb_read_only(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        kb.retract(active[0].id, READ_ONLY_AUTHOR)
+        still_active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        assert len(still_active) == 1

@@ -110,10 +110,10 @@ In M2, add `Ontology.propose(...)` that creates a `Proposal`, evaluates it throu
 
 ---
 
-## KI-006 — `govern/policy.py` `Reject` decision is never produced
+## KI-006 — `govern/policy.py` `Reject` decision is never produced ✓ RESOLVED (M2)
 
 **Severity:** Informational — dead code  
-**Milestone target:** M2  
+**Milestone target:** M2 — resolved in `feat(govern): wire Reject decision for read-only principals`  
 **SPEC reference:** SPEC §9.2
 
 ### Description
@@ -122,7 +122,7 @@ In M2, add `Ontology.propose(...)` that creates a `Proposal`, evaluates it throu
 
 ### Fix
 
-When the proposal workflow is wired in M2 (`KI-005`), add a rejection rule — for example, rejecting proposals from principals with trust_level 0 or `read` capability — that exercises the `Reject` path.
+`ThresholdPolicy` now rejects proposals from principals with `read` capability immediately (no review queue). `Ontology.propose()` and `Ontology.retract()` handle the `Reject` branch: persist the proposal as `state="rejected"` with `decided_at` set, return without writing any assertions. 8 conformance vectors added in `conformance/test_proposal_workflow.py::TestRejectDecision`.
 
 ---
 
