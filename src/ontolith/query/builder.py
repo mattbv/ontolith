@@ -57,35 +57,21 @@ class QueryBuilder:
         Returns:
             List of matching entities (may be empty)
         """
-        # M1: Get all entities of this concept, then filter client-side
-        # M2: Push filters to backend for efficiency
-        entities = self._backend.entities(
+        if not self._filters:
+            return self._backend.entities(
+                namespace=self._namespace,
+                concept=self._concept,
+            )
+
+        # Push filters to backend as full predicates: "name" → "Concept.name"
+        predicate_filters = {
+            f"{self._concept}.{key}": value for key, value in self._filters.items()
+        }
+        return self._backend.entities_where(
             namespace=self._namespace,
             concept=self._concept,
+            predicate_filters=predicate_filters,
         )
-
-        if not self._filters:
-            return entities
-
-        # Client-side filtering (M1 simplification)
-        filtered = []
-        for entity in entities:
-            # Get assertions for this entity
-            assertions = self._backend.assertions(subject=entity.id, status="active")
-
-            # Build property map
-            props = {}
-            for assertion in assertions:
-                # Extract property name from predicate (e.g., "Person.name" -> "name")
-                if "." in assertion.predicate:
-                    prop_name = assertion.predicate.split(".", 1)[1]
-                    props[prop_name] = assertion.value
-
-            # Check if all filters match
-            if all(props.get(k) == v for k, v in self._filters.items()):
-                filtered.append(entity)
-
-        return filtered
 
     def first(self) -> Entity | None:
         """Execute query and return first matching entity.
