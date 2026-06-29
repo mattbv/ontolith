@@ -7,7 +7,7 @@ RequireReview for AI principals or low-capability principals.
 
 from datetime import UTC, datetime
 
-from ontolith.govern.policy import AutoAccept, RequireReview, ThresholdPolicy
+from ontolith.govern.policy import AutoAccept, Reject, RequireReview, ThresholdPolicy
 from ontolith.govern.proposal import Proposal
 from ontolith.identity import Principal
 
@@ -66,11 +66,11 @@ def test_human_propose_capability_requires_review() -> None:
     assert isinstance(decision, RequireReview)
 
 
-def test_human_read_capability_requires_review() -> None:
-    """Human principal with read capability requires review."""
+def test_human_read_capability_is_rejected() -> None:
+    """Read-only principals cannot propose — policy rejects immediately (KI-006)."""
     principal = _principal(default_capability="read")
     decision = POLICY.evaluate(PROPOSAL, principal)
-    assert isinstance(decision, RequireReview)
+    assert isinstance(decision, Reject)
 
 
 def test_ai_principal_always_requires_review() -> None:

@@ -20,7 +20,7 @@ from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, Vali
 from ontolith.govern import AutoAccept, ThresholdPolicy
 from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, route
 from ontolith.govern.contradiction import Contradiction
-from ontolith.govern.policy import Decision
+from ontolith.govern.policy import Decision, Reject
 from ontolith.govern.proposal import Proposal
 from ontolith.identity import Principal
 from ontolith.query import QueryBuilder
@@ -429,6 +429,17 @@ class Ontology:
                 self._apply_with_conflict_routing(assertion, temporality)
             return accepted, decision
 
+        if isinstance(decision, Reject):
+            rejected = proposal.model_copy(
+                update={
+                    "state": "rejected",
+                    "decided_at": now,
+                    "policy_reason": decision.reason,
+                }
+            )
+            self.backend.put_proposal(rejected)
+            return rejected, decision
+
         pending = proposal.model_copy(
             update={
                 "state": "require_review",
@@ -473,6 +484,17 @@ class Ontology:
                 self.backend.put_proposal(accepted)
                 self.backend.set_assertion_status(assertion_id, "retracted")
             return accepted, decision
+
+        if isinstance(decision, Reject):
+            rejected = proposal.model_copy(
+                update={
+                    "state": "rejected",
+                    "decided_at": now,
+                    "policy_reason": decision.reason,
+                }
+            )
+            self.backend.put_proposal(rejected)
+            return rejected, decision
 
         pending = proposal.model_copy(
             update={
