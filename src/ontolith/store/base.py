@@ -10,6 +10,7 @@ The dependency rule prevents domain logic from importing concrete adapters.
 """
 
 from contextlib import AbstractContextManager
+from datetime import datetime
 from typing import Protocol
 
 from ontolith.core import Assertion, Entity
@@ -112,13 +113,16 @@ class StorageBackend(Protocol):
         subject: str | None = None,
         predicate: str | None = None,
         status: str | None = None,
+        as_of_time: datetime | None = None,
     ) -> list[Assertion]:
         """Query assertions with optional filters.
 
         Args:
             subject: Filter by subject entity ID
             predicate: Filter by predicate
-            status: Filter by status (default: active only)
+            status: Filter by current status (ignored when as_of_time is set)
+            as_of_time: If set, applies bitemporal filter:
+                valid_from <= t < (valid_to or ∞) AND asserted_at <= t
 
         Returns:
             List of matching assertions
@@ -176,12 +180,14 @@ class StorageBackend(Protocol):
         self,
         namespace: str | None = None,
         concept: str | None = None,
+        as_of_time: datetime | None = None,
     ) -> list[Entity]:
         """Query entities with optional filters.
 
         Args:
             namespace: Filter by namespace
             concept: Filter by concept
+            as_of_time: If set, exclude entities created after this time
 
         Returns:
             List of matching entities
@@ -193,6 +199,7 @@ class StorageBackend(Protocol):
         namespace: str,
         concept: str,
         predicate_filters: dict[str, str],
+        as_of_time: datetime | None = None,
     ) -> list[Entity]:
         """Query entities matching all predicate=value filters in one SQL query.
 
@@ -203,9 +210,10 @@ class StorageBackend(Protocol):
             namespace: Namespace to query
             concept: Concept to filter by
             predicate_filters: Dict of full_predicate → literal_value
+            as_of_time: If set, applies bitemporal filter on assertions and entity creation
 
         Returns:
-            List of entities where all filters match active literal assertions
+            List of entities where all filters match at the given time
         """
         ...
 

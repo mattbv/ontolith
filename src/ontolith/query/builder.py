@@ -4,6 +4,7 @@ Per SPEC §12.2: Query builder provides .where() filtering and traversal.
 For M1 we implement basic filtering; full traversal is M2.
 """
 
+from datetime import datetime
 from typing import Any
 
 from ontolith.core import Entity
@@ -15,7 +16,7 @@ class QueryBuilder:
 
     Example:
         >>> kb.query(Person).where(name="Ada Lovelace")
-        >>> kb.query(Person).where(employer__name="Acme Corp")  # future: traversal
+        >>> kb.as_of("2025-01-01").query(Person).where(employer__name="Acme Corp")
     """
 
     def __init__(
@@ -23,6 +24,7 @@ class QueryBuilder:
         backend: StorageBackend,
         namespace: str,
         concept: str,
+        as_of_time: datetime | None = None,
     ) -> None:
         """Initialize query builder.
 
@@ -30,11 +32,13 @@ class QueryBuilder:
             backend: Storage backend for retrieval
             namespace: Namespace to query in
             concept: Concept to filter by
+            as_of_time: If set, applies bitemporal filter to all queries
         """
         self._backend = backend
         self._namespace = namespace
         self._concept = concept
         self._filters: dict[str, Any] = {}
+        self._as_of_time = as_of_time
 
     def where(self, **kwargs: Any) -> "QueryBuilder":
         """Add filters to the query.
@@ -61,6 +65,7 @@ class QueryBuilder:
             return self._backend.entities(
                 namespace=self._namespace,
                 concept=self._concept,
+                as_of_time=self._as_of_time,
             )
 
         # Push filters to backend as full predicates: "name" → "Concept.name"
@@ -71,6 +76,7 @@ class QueryBuilder:
             namespace=self._namespace,
             concept=self._concept,
             predicate_filters=predicate_filters,
+            as_of_time=self._as_of_time,
         )
 
     def first(self) -> Entity | None:

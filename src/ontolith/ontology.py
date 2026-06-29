@@ -4,6 +4,7 @@ The Ontology class is the primary API surface for users. It wraps the storage
 backend and provides high-level methods for entities, assertions, and queries.
 """
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,6 +24,48 @@ from ontolith.govern.proposal import Proposal
 from ontolith.identity import Principal
 from ontolith.query import QueryBuilder
 from ontolith.store.base import StorageBackend
+
+
+class AsOfView:
+    """Read-only bitemporal view at a specific point in time (SPEC §10).
+
+    Reconstructs what was known and true at time `t`:
+        valid_from <= t < (valid_to or ∞)  AND  asserted_at <= t
+
+    Status is NOT used as a filter — the temporal dimensions determine visibility.
+    """
+
+    def __init__(
+        self,
+        backend: "StorageBackend",
+        as_of: datetime,
+        namespace: str,
+    ) -> None:
+        self._backend = backend
+        self._as_of = as_of
+        self._namespace = namespace
+
+    def assertions(
+        self,
+        subject: str | None = None,
+        predicate: str | None = None,
+    ) -> list[Assertion]:
+        """Assertions visible at the as_of timestamp."""
+        return self._backend.assertions(
+            subject=subject,
+            predicate=predicate,
+            status=None,
+            as_of_time=self._as_of,
+        )
+
+    def query(self, concept: str) -> QueryBuilder:
+        """Query entities as they existed at the as_of timestamp."""
+        return QueryBuilder(
+            backend=self._backend,
+            namespace=self._namespace,
+            concept=concept,
+            as_of_time=self._as_of,
+        )
 
 
 class Ontology:
@@ -288,6 +331,22 @@ class Ontology:
             namespace=self.namespace,
             concept=concept,
         )
+
+    def as_of(self, t: datetime | str) -> AsOfView:
+        """Return a read-only bitemporal view at time t (SPEC §10).
+
+        Reconstructs what was known and true at t:
+            valid_from <= t < (valid_to or ∞)  AND  asserted_at <= t
+
+        Args:
+            t: Point in time — datetime or ISO-format string
+
+        Returns:
+            AsOfView for querying the knowledge base as it stood at t
+        """
+        if isinstance(t, str):
+            t = datetime.fromisoformat(t)
+        return AsOfView(self.backend, t, self.namespace)
 
     def propose(
         self,
@@ -604,4 +663,4 @@ class Ontology:
         self.backend.close()
 
 
-__all__ = ["Ontology"]
+__all__ = ["AsOfView", "Ontology"]
