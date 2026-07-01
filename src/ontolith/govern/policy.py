@@ -65,17 +65,18 @@ class PolicyStrategy(Protocol):
 
 
 class ThresholdPolicy:
-    """Simple threshold policy for M1.
+    """Threshold policy evaluating capability and trust level.
 
-    Rules:
-    - Human principals with write capability: auto-accept
-    - AI principals: require review (future: check confidence threshold)
-    - Service principals with write capability: auto-accept
+    Rules (evaluated in order):
+    - Human/service with write/review/admin capability: auto-accept
+    - Read-only principals: reject immediately (no propose rights)
+    - Any principal with propose capability + trust_level >= 5: auto-accept
+    - AI principals: require review (routed to owner)
     - Everyone else: require review
     """
 
     def evaluate(self, proposal: Proposal, principal: Principal) -> Decision:
-        """Evaluate proposal based on principal capabilities."""
+        """Evaluate proposal based on principal capabilities and trust level."""
         # Humans with write capability can auto-accept
         if principal.kind == "human" and principal.default_capability in (
             "write",
@@ -94,6 +95,12 @@ class ThresholdPolicy:
         # Read-only principals cannot propose — reject immediately
         if principal.default_capability == "read":
             return Reject(f"Principal {principal.id} has read-only access and cannot propose")
+
+        # Trust-elevated propose: sufficient trust lifts a propose-capability principal
+        if principal.default_capability == "propose" and principal.trust_level >= 5:
+            return AutoAccept(
+                f"Trust-elevated principal ({principal.id}, trust={principal.trust_level})"
+            )
 
         # AI always requires review
         if principal.kind == "ai":

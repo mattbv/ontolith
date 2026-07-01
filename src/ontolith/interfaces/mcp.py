@@ -211,6 +211,7 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
         source: str | None = None,
         rationale: str | None = None,
         temporality: str = "static",
+        acting_as: str | None = None,
     ) -> dict[str, Any]:
         """Create a proposal to assert a fact. Does NOT write directly.
 
@@ -218,6 +219,9 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
         - Trusted principals → auto_accepted (assertion written immediately)
         - AI/low-trust principals → require_review (queued for human review)
         - Read-only principals → rejected
+
+        When ``acting_as`` is set (delegation), policy is evaluated using the
+        delegating principal's capability and trust level (ADR-0003).
 
         Args:
             subject: Entity ID to assert about
@@ -229,9 +233,10 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
             source: Optional source URL or reference
             rationale: Optional explanation for the assertion
             temporality: Property temporality ("static" or "time_varying")
+            acting_as: Optional principal ID being acted on behalf of (delegation)
 
         Returns:
-            Dict with "proposal" (id, state, policy_reason) and "decision" type.
+            Dict with "proposal" (id, state, policy_reason, acting_as) and "decision" type.
         """
         from ontolith.core.errors import AuthError, CapabilityError
 
@@ -246,6 +251,7 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
                 source=source,
                 rationale=rationale,
                 temporality=temporality,  # type: ignore[arg-type]
+                acting_as=acting_as,
             )
         except AuthError as exc:
             return {"error": str(exc), "code": "auth_error"}
@@ -258,6 +264,7 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
                 "state": proposal.state,
                 "policy_reason": proposal.policy_reason,
                 "decided_at": proposal.decided_at.isoformat() if proposal.decided_at else None,
+                "acting_as": proposal.acting_as,
             },
             "decision": type(decision).__name__,
         }
