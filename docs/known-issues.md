@@ -198,6 +198,24 @@ Scope as a dedicated chunk: (1) decide LinkML dialect coverage (Appendix B notes
 
 ---
 
+## KI-011 — Confidence-based auto-accept for AI proposals: deliberately not implemented
+
+**Severity:** Informational — design decision, not a defect  
+**Milestone target:** N/A — will not be implemented in v1  
+**SPEC reference:** SPEC §19 (informative "SHOULD include vectors" list), Appendix A (informative example)
+
+### Description
+
+SPEC §19's SHOULD-vector list mentions "policy auto-accept vs. review by confidence threshold," and the informative Appendix A worked example shows an AI agent's proposal with confidence 0.82 going to `under_review` against an implied 0.9 auto-accept threshold — suggesting confidence ≥ 0.9 would auto-accept for an AI principal.
+
+This was considered and explicitly rejected for Ontolith's `ThresholdPolicy`. Both SPEC §19's vector list and Appendix A are non-normative (informative/SHOULD, not MUST). Letting an AI principal's self-reported confidence score grant `AutoAccept` would mean an AI proposal can be committed with zero human in the loop — which conflicts with the project's AI-safety posture (CLAUDE.md: AI principals default to `propose` not `write`, mandatory accountable owner, no direct MCP write tool). A model's own confidence number is not a trust signal strong enough to bypass human review.
+
+### Resolution
+
+`ThresholdPolicy` always returns `RequireReview` for `kind == "ai"` principals, regardless of confidence or trust level. Confidence is still captured and visible to reviewers — it's stored on both `Proposal.payload["operations"][0]["confidence"]` and the resulting `Assertion.confidence` field — but it is a provenance/triage signal only, never a policy input. No code changes were needed for this decision since that storage already existed; this entry documents the choice so it isn't re-litigated as a "missing feature" in a future gap audit.
+
+---
+
 ## Format
 
 Each entry follows this structure:
