@@ -298,6 +298,35 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def get_contradiction(self, contradiction_id: str) -> Contradiction | None:
+        """Retrieve a contradiction by ID, regardless of state.
+
+        Args:
+            contradiction_id: Contradiction ID to retrieve
+
+        Returns:
+            Contradiction if found, None otherwise
+        """
+        ...
+
+    def resolve_contradiction(
+        self,
+        contradiction_id: str,
+        resolved_by: str,
+        resolved_at: datetime,
+    ) -> None:
+        """Mark a contradiction as resolved (SPEC §10.3).
+
+        Args:
+            contradiction_id: Contradiction to resolve
+            resolved_by: Principal ID who resolved it
+            resolved_at: Timestamp of resolution
+
+        Raises:
+            StorageError: If the contradiction is not found or update fails
+        """
+        ...
+
     def close(self) -> None:
         """Close the storage backend and release resources."""
         ...

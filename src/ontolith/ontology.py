@@ -716,6 +716,57 @@ class Ontology:
         assert rejected is not None
         return rejected
 
+    def resolve_contradiction(
+        self,
+        contradiction_id: str,
+        winner_assertion_id: str,
+        resolver: str,
+    ) -> Contradiction:
+        """Resolve an open contradiction by selecting a winning assertion (SPEC §10.3).
+
+        All other member assertions are retracted; the winning assertion is
+        reactivated. The resolver must have `review` or `admin` capability.
+        Resolution is recorded on the contradiction and appears in provenance.
+
+        Args:
+            contradiction_id: ID of the contradiction to resolve
+            winner_assertion_id: ID of the member assertion to keep active
+            resolver: Principal ID resolving the contradiction
+
+        Returns:
+            Updated Contradiction with state `resolved`
+        """
+        resolver_principal = self.backend.get_principal(resolver)
+        if resolver_principal is None:
+            raise AuthError(f"Principal not found: {resolver}")
+        if resolver_principal.default_capability not in ("review", "admin"):
+            raise CapabilityError(f"Principal {resolver} lacks review capability")
+
+        contradiction = self.backend.get_contradiction(contradiction_id)
+        if contradiction is None:
+            raise NotFoundError(f"Contradiction not found: {contradiction_id}")
+        if contradiction.state != "open":
+            raise ValidationError(
+                f"Contradiction {contradiction_id} is not open (state: {contradiction.state})"
+            )
+        if winner_assertion_id not in contradiction.member_ids:
+            raise ValidationError(
+                f"Assertion {winner_assertion_id} is not a member of "
+                f"contradiction {contradiction_id}"
+            )
+
+        now = self.clock.now()
+        with self.backend.transaction():
+            for member_id in contradiction.member_ids:
+                if member_id != winner_assertion_id:
+                    self.backend.set_assertion_status(member_id, "retracted")
+            self.backend.set_assertion_status(winner_assertion_id, "active")
+            self.backend.resolve_contradiction(contradiction_id, resolver, now)
+
+        resolved = self.backend.get_contradiction(contradiction_id)
+        assert resolved is not None
+        return resolved
+
     def close(self) -> None:
         """Close the knowledge base connection."""
         self.backend.close()

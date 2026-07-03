@@ -164,6 +164,40 @@ In a future milestone, change `Assertion.supersedes` to `list[str]` (or add a se
 
 ---
 
+## KI-009 — Contradiction resolution API was missing ✓ RESOLVED (M2)
+
+**Severity:** Major — SPEC §19 SHOULD-vector gap  
+**Milestone target:** M2 — resolved in `feat(govern): implement resolve_contradiction() for contradiction resolution`  
+**SPEC reference:** SPEC §10.3, §19 ("contradiction creation + resolution")
+
+### Description
+
+`Contradiction` carries `resolved_by`/`resolved_at` fields and `.claude/rules/conflict.md` documents a `resolve(c, winner_id, by)` function, but no code path ever called it. Contradictions could be created (flagged, routed to review) but never resolved — `state` stayed `"open"` forever and losing assertions stayed `"flagged"` indefinitely.
+
+### Fix
+
+Added `Ontology.resolve_contradiction(contradiction_id, winner_assertion_id, resolver)`: validates resolver has `review`/`admin` capability, contradiction is open, and the winner is an actual member; then retracts all other members, reactivates the winner, and marks the contradiction `resolved` — all inside one transaction. Added `StorageBackend.get_contradiction()` and `resolve_contradiction()` to the port and SQLite adapter. 12 conformance vectors in `conformance/test_contradiction_resolution.py`. Not exposed via MCP — resolution is a reviewer-only action, out of scope for the ADR-0008 propose-only surface.
+
+---
+
+## KI-010 — LinkML-aligned YAML schema dialect and reference plugins deferred
+
+**Severity:** Informational — scoped M2 deliverable not yet started  
+**Milestone target:** Deferred to its own dedicated design pass (M2 follow-up or M3)  
+**SPEC reference:** Implementation Plan §2 (M2 exit list), ADR-0007 (interop priority)
+
+### Description
+
+CLAUDE.md's M2 deliverable list includes "LinkML-aligned YAML, first 3 reference plugins" alongside review workflow, bitemporal time-travel, conflict handling, MCP server, and trust/delegation — all of which are now complete. The YAML dialect and plugin work were explicitly deferred: they require their own design pass (schema dialect coverage, bidirectional codegen, and the shape of the `Importer`/`Exporter`/`Reasoner`/`Validator` protocol implementations) rather than being folded into a conformance-gap sweep.
+
+`src/ontolith/plugins/` currently contains only protocol stubs (`ports.py`) — no concrete plugin implementations, no entry-point discovery exercised end-to-end, no LinkML loader.
+
+### Fix
+
+Scope as a dedicated chunk: (1) decide LinkML dialect coverage (Appendix B notes this is an open question), (2) implement YAML → IR loader with round-trip codegen tests, (3) implement 3 reference plugins per SPEC's plugin protocols. Needs its own ADR or design discussion before implementation, per Appendix B's "open implementation questions."
+
+---
+
 ## Format
 
 Each entry follows this structure:
