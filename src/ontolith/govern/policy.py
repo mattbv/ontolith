@@ -69,9 +69,9 @@ class ThresholdPolicy:
 
     Rules (evaluated in order):
     - Human/service with write/review/admin capability: auto-accept
+    - AI principals: always require review, regardless of trust level (ADR-0003)
     - Read-only principals: reject immediately (no propose rights)
-    - Any principal with propose capability + trust_level >= 5: auto-accept
-    - AI principals: require review (routed to owner)
+    - Non-AI principals with propose capability + trust_level >= 5: auto-accept
     - Everyone else: require review
     """
 
@@ -92,22 +92,22 @@ class ThresholdPolicy:
         ):
             return AutoAccept(f"Trusted service principal ({principal.id})")
 
-        # Read-only principals cannot propose — reject immediately
-        if principal.default_capability == "read":
-            return Reject(f"Principal {principal.id} has read-only access and cannot propose")
-
-        # Trust-elevated propose: sufficient trust lifts a propose-capability principal
-        if principal.default_capability == "propose" and principal.trust_level >= 5:
-            return AutoAccept(
-                f"Trust-elevated principal ({principal.id}, trust={principal.trust_level})"
-            )
-
-        # AI always requires review
+        # AI always requires review — trust level never overrides this (ADR-0003)
         if principal.kind == "ai":
             reviewers = [principal.owner] if principal.owner else []
             return RequireReview(
                 reviewers=reviewers,
                 reason=f"AI proposals require review (owner: {principal.owner})",
+            )
+
+        # Read-only principals cannot propose — reject immediately
+        if principal.default_capability == "read":
+            return Reject(f"Principal {principal.id} has read-only access and cannot propose")
+
+        # Trust-elevated propose: sufficient trust lifts a non-AI propose-capability principal
+        if principal.default_capability == "propose" and principal.trust_level >= 5:
+            return AutoAccept(
+                f"Trust-elevated principal ({principal.id}, trust={principal.trust_level})"
             )
 
         # Default: require review

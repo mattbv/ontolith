@@ -380,10 +380,15 @@ class Ontology:
             raise AuthError(f"Principal not found: {author}")
 
         delegating: Principal | None = None
-        if acting_as is not None:
+        if acting_as is not None and acting_as != author:
             delegating = self.backend.get_principal(acting_as)
             if delegating is None:
                 raise AuthError(f"Delegating principal not found: {acting_as}")
+            # Authorization: author must be owned by acting_as (ADR-0003)
+            if principal.owner != acting_as:
+                raise CapabilityError(
+                    f"Principal {author!r} is not authorized to act as {acting_as!r}"
+                )
 
         now = self.clock.now()
         proposal_id = self.id_provider.next()
@@ -484,10 +489,14 @@ class Ontology:
             raise AuthError(f"Principal not found: {author}")
 
         delegating: Principal | None = None
-        if acting_as is not None:
+        if acting_as is not None and acting_as != author:
             delegating = self.backend.get_principal(acting_as)
             if delegating is None:
                 raise AuthError(f"Delegating principal not found: {acting_as}")
+            if principal.owner != acting_as:
+                raise CapabilityError(
+                    f"Principal {author!r} is not authorized to act as {acting_as!r}"
+                )
 
         now = self.clock.now()
         proposal_id = self.id_provider.next()
