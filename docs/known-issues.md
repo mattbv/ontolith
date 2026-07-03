@@ -45,46 +45,35 @@ In M2, add `Ontology.retract(assertion_id, author)` that creates a `Proposal` wi
 
 ---
 
-## KI-003 — Append-only conformance vector does not directly test frozen model
+## KI-003 — Append-only conformance vector does not directly test frozen model ✓ RESOLVED (M2)
 
 **Severity:** Test gap — conformance coverage  
-**Milestone target:** M2 (low priority)  
+**Milestone target:** M2 — resolved in `test(conformance): add Hypothesis property tests for conflict routing and append-only invariants`  
 **SPEC reference:** SPEC §5 (append-only assertions)
 
 ### Description
 
 `conformance/test_append_only.py::test_value_field_is_immutable` demonstrates that new values create new assertion records rather than overwriting existing ones — but it never directly asserts that attempting to mutate `assertion.value` in-place raises an error.
 
-`Assertion` is correctly `frozen=True` (via `model_config = ConfigDict(frozen=True)` in `src/ontolith/core/assertion.py`), so in-place mutation does raise `ValidationError`. The conformance vector just doesn't prove it.
-
 ### Fix
 
-Add a test case that does:
-```python
-with pytest.raises(ValidationError):
-    assertion.value = "tampered"
-```
-This can be added to `conformance/test_append_only.py` or to the property tests.
+Added `test_assertion_value_mutation_raises` and `test_assertion_status_cannot_be_mutated_directly` to `conformance/test_append_only_properties.py`, directly asserting `pytest.raises(ValidationError)` on in-place field assignment.
 
 ---
 
-## KI-004 — Symbolic query filter covers only `retracted` status in append-only vector
+## KI-004 — Symbolic query filter covers only `retracted` status in append-only vector ✓ RESOLVED (M2)
 
 **Severity:** Test gap — partial conformance coverage  
-**Milestone target:** M2 (with conflict/supersession vectors)  
+**Milestone target:** M2 — resolved in `feat(govern): implement proposal workflow, conflict routing, and contradiction handling`  
 **SPEC reference:** SPEC §5, §10
 
 ### Description
 
-`conformance/test_append_only.py` tests that retracted assertions are excluded from default queries and retained in history. It does not cover the `superseded` and `flagged` statuses, which also must be excluded from default retrieval (SPEC §5) and queryable for audit.
-
-These statuses only arise from the conflict-routing logic (SPEC §10 — supersession and contradiction), which is a M2 deliverable. The vectors covering those paths belong with the M2 conflict conformance suite.
+`conformance/test_append_only.py` tests that retracted assertions are excluded from default queries and retained in history. It did not cover the `superseded` and `flagged` statuses, which also must be excluded from default retrieval (SPEC §5) and queryable for audit.
 
 ### Fix
 
-In M2, add conformance vectors to `conformance/test_conflict.py` that verify:
-- Superseded assertions excluded from default queries, retained in history
-- Flagged assertions excluded from default queries, queryable with `status="flagged"`
+`conformance/test_conflict.py` now covers both: `status="flagged"` queryability (contradiction vectors) and `status="superseded"` queryability (supersession vectors).
 
 ---
 
@@ -213,6 +202,24 @@ This was considered and explicitly rejected for Ontolith's `ThresholdPolicy`. Bo
 ### Resolution
 
 `ThresholdPolicy` always returns `RequireReview` for `kind == "ai"` principals, regardless of confidence or trust level. Confidence is still captured and visible to reviewers — it's stored on both `Proposal.payload["operations"][0]["confidence"]` and the resulting `Assertion.confidence` field — but it is a provenance/triage signal only, never a policy input. No code changes were needed for this decision since that storage already existed; this entry documents the choice so it isn't re-litigated as a "missing feature" in a future gap audit.
+
+---
+
+## KI-012 — Property tests (Hypothesis) only covered bitemporal reconstruction ✓ RESOLVED (M2)
+
+**Severity:** Test-strategy gap — conflict routing and append-only invariants are correctness-critical and warrant property coverage, not just example-based vectors  
+**Milestone target:** M2 — resolved in `test(conformance): add Hypothesis property tests for conflict routing and append-only invariants`  
+**SPEC reference:** SPEC §19
+
+### Description
+
+Only bitemporal reconstruction (`conformance/test_bitemporal.py`) had a Hypothesis property test. Conflict routing (SPEC §10) and the append-only invariant (SPEC §5) — both correctness-critical, branch-heavy logic — had only example-based conformance vectors, which don't exhaustively probe edge cases the way generated inputs do.
+
+### Fix
+
+Added `conformance/test_conflict_routing_properties.py` — 8 property tests directly exercising the pure `govern/conflict.route()` function: empty-existing always activates, determinism, static routing contradicts iff any value differs (with exact member-set verification), time-varying supersedes iff window overlaps AND value differs, `_windows_overlap` symmetry, half-open boundary behavior, identical-window overlap, and fully-open-window overlap.
+
+Added `conformance/test_append_only_properties.py` — 4 tests: direct frozen-field mutation checks (closing KI-003) plus two property tests driving a real `Ontology` through randomized `propose()`/`retract()` sequences, verifying no assertion's `value` ever changes after creation and the total record count never decreases.
 
 ---
 
