@@ -361,11 +361,16 @@ class Ontology:
         confidence: float | None = None,
         source: str | None = None,
         rationale: str | None = None,
+        acting_as: str | None = None,
     ) -> tuple[Proposal, Decision]:
         """Submit a literal assertion through the proposal/policy path (SPEC §9).
 
         Evaluates ThresholdPolicy. Auto-accepted proposals are committed
         immediately with SPEC §10 conflict routing; others are stored for review.
+
+        When ``acting_as`` is set the proposal is made on behalf of another
+        principal (delegation, ADR-0003). Policy is evaluated using the
+        delegating principal's capability and trust level.
 
         Returns:
             (Proposal, Decision) tuple
@@ -374,12 +379,24 @@ class Ontology:
         if principal is None:
             raise AuthError(f"Principal not found: {author}")
 
+        delegating: Principal | None = None
+        if acting_as is not None and acting_as != author:
+            delegating = self.backend.get_principal(acting_as)
+            if delegating is None:
+                raise AuthError(f"Delegating principal not found: {acting_as}")
+            # Authorization: author must be owned by acting_as (ADR-0003)
+            if principal.owner != acting_as:
+                raise CapabilityError(
+                    f"Principal {author!r} is not authorized to act as {acting_as!r}"
+                )
+
         now = self.clock.now()
         proposal_id = self.id_provider.next()
         proposal = Proposal(
             id=proposal_id,
             namespace=self.namespace,
             author=author,
+            acting_as=acting_as,
             state="submitted",
             created_at=now,
             payload={
@@ -399,7 +416,9 @@ class Ontology:
             },
         )
 
-        decision = ThresholdPolicy().evaluate(proposal, principal)
+        # Policy uses delegating principal when acting_as is set (ADR-0003)
+        effective_principal = delegating if delegating is not None else principal
+        decision = ThresholdPolicy().evaluate(proposal, effective_principal)
 
         if isinstance(decision, AutoAccept):
             assertion = Assertion(
@@ -411,6 +430,7 @@ class Ontology:
                 value_type=value_type,
                 value=value,
                 author=author,
+                acting_as=acting_as,
                 confidence=confidence,
                 source=source,
                 rationale=rationale,
@@ -449,8 +469,17 @@ class Ontology:
         self.backend.put_proposal(pending)
         return pending, decision
 
-    def retract(self, assertion_id: str, author: str) -> tuple[Proposal, Decision]:
+    def retract(
+        self,
+        assertion_id: str,
+        author: str,
+        *,
+        acting_as: str | None = None,
+    ) -> tuple[Proposal, Decision]:
         """Propose retraction of an assertion through the policy path (SPEC §9).
+
+        When ``acting_as`` is set the retraction is made on behalf of another
+        principal (delegation, ADR-0003).
 
         Returns:
             (Proposal, Decision) tuple
@@ -459,18 +488,30 @@ class Ontology:
         if principal is None:
             raise AuthError(f"Principal not found: {author}")
 
+        delegating: Principal | None = None
+        if acting_as is not None and acting_as != author:
+            delegating = self.backend.get_principal(acting_as)
+            if delegating is None:
+                raise AuthError(f"Delegating principal not found: {acting_as}")
+            if principal.owner != acting_as:
+                raise CapabilityError(
+                    f"Principal {author!r} is not authorized to act as {acting_as!r}"
+                )
+
         now = self.clock.now()
         proposal_id = self.id_provider.next()
         proposal = Proposal(
             id=proposal_id,
             namespace=self.namespace,
             author=author,
+            acting_as=acting_as,
             state="submitted",
             created_at=now,
             payload={"operations": [{"kind": "retract", "assertion_id": assertion_id}]},
         )
 
-        decision = ThresholdPolicy().evaluate(proposal, principal)
+        effective_principal = delegating if delegating is not None else principal
+        decision = ThresholdPolicy().evaluate(proposal, effective_principal)
 
         if isinstance(decision, AutoAccept):
             accepted = proposal.model_copy(

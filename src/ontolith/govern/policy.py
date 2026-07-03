@@ -65,17 +65,18 @@ class PolicyStrategy(Protocol):
 
 
 class ThresholdPolicy:
-    """Simple threshold policy for M1.
+    """Threshold policy evaluating capability and trust level.
 
-    Rules:
-    - Human principals with write capability: auto-accept
-    - AI principals: require review (future: check confidence threshold)
-    - Service principals with write capability: auto-accept
+    Rules (evaluated in order):
+    - Human/service with write/review/admin capability: auto-accept
+    - AI principals: always require review, regardless of trust level (ADR-0003)
+    - Read-only principals: reject immediately (no propose rights)
+    - Non-AI principals with propose capability + trust_level >= 5: auto-accept
     - Everyone else: require review
     """
 
     def evaluate(self, proposal: Proposal, principal: Principal) -> Decision:
-        """Evaluate proposal based on principal capabilities."""
+        """Evaluate proposal based on principal capabilities and trust level."""
         # Humans with write capability can auto-accept
         if principal.kind == "human" and principal.default_capability in (
             "write",
@@ -91,16 +92,22 @@ class ThresholdPolicy:
         ):
             return AutoAccept(f"Trusted service principal ({principal.id})")
 
-        # Read-only principals cannot propose — reject immediately
-        if principal.default_capability == "read":
-            return Reject(f"Principal {principal.id} has read-only access and cannot propose")
-
-        # AI always requires review
+        # AI always requires review — trust level never overrides this (ADR-0003)
         if principal.kind == "ai":
             reviewers = [principal.owner] if principal.owner else []
             return RequireReview(
                 reviewers=reviewers,
                 reason=f"AI proposals require review (owner: {principal.owner})",
+            )
+
+        # Read-only principals cannot propose — reject immediately
+        if principal.default_capability == "read":
+            return Reject(f"Principal {principal.id} has read-only access and cannot propose")
+
+        # Trust-elevated propose: sufficient trust lifts a non-AI propose-capability principal
+        if principal.default_capability == "propose" and principal.trust_level >= 5:
+            return AutoAccept(
+                f"Trust-elevated principal ({principal.id}, trust={principal.trust_level})"
             )
 
         # Default: require review
