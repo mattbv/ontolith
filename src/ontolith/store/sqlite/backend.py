@@ -822,6 +822,55 @@ class SQLiteBackend:
                 f"Failed to update contradiction (id={contradiction_id}): {e}"
             ) from e
 
+    def get_contradiction(self, contradiction_id: str) -> Contradiction | None:
+        """Retrieve a contradiction by ID, regardless of state."""
+        import json
+
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM contradiction WHERE id = ?", (contradiction_id,))
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        return Contradiction(
+            id=row["id"],
+            namespace=row["namespace"],
+            subject=row["subject"],
+            predicate=row["predicate"],
+            state=row["state"],
+            member_ids=json.loads(row["member_ids"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            resolved_by=row["resolved_by"],
+            resolved_at=datetime.fromisoformat(row["resolved_at"]) if row["resolved_at"] else None,
+            metadata=json.loads(row["metadata"]),
+        )
+
+    def resolve_contradiction(
+        self,
+        contradiction_id: str,
+        resolved_by: str,
+        resolved_at: datetime,
+    ) -> None:
+        """Mark a contradiction as resolved (SPEC §10.3)."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                UPDATE contradiction
+                SET state = 'resolved', resolved_by = ?, resolved_at = ?
+                WHERE id = ?
+                """,
+                (resolved_by, resolved_at.isoformat(), contradiction_id),
+            )
+            if cursor.rowcount == 0:
+                raise StorageError(f"Contradiction not found: {contradiction_id}")
+            if not self._in_transaction:
+                self.conn.commit()
+        except sqlite3.Error as e:
+            raise StorageError(
+                f"Failed to resolve contradiction (id={contradiction_id}): {e}"
+            ) from e
+
     def entities_where(
         self,
         namespace: str,
