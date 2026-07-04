@@ -12,6 +12,7 @@ from pathlib import Path
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
 from ontolith.interfaces.mcp import create_mcp_server
+from ontolith.schema.ir import ConceptDef, PropertyDef, SchemaIR
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 HUMAN = "alice@example.com"
@@ -30,6 +31,57 @@ def _kb(tmp_path: Path) -> Ontology:
         AI, kind="ai", auth_method="apikey", owner=AI_OWNER, default_capability="propose"
     )
     return kb
+
+
+# ---------------------------------------------------------------------------
+# ontolith.schema
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaTool:
+    def test_schema_returns_empty_when_no_schema_stored(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp = create_mcp_server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.schema").fn()
+        assert result == {"concepts": []}
+
+    def test_schema_returns_concepts_and_properties(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "name": PropertyDef(name="name", value_type="Text", required=True),
+                        "employer": PropertyDef(
+                            name="employer", value_type="Text", temporality="time_varying"
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.backend.put_schema(schema)
+
+        mcp = create_mcp_server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.schema").fn()
+
+        assert result["namespace"] == "default"
+        assert result["version"] == 1
+        assert len(result["concepts"]) == 1
+        person = result["concepts"][0]
+        assert person["name"] == "Person"
+        props_by_name = {p["name"]: p for p in person["properties"]}
+        assert props_by_name["name"]["type"] == "Text"
+        assert props_by_name["name"]["required"] is True
+        assert props_by_name["employer"]["temporality"] == "time_varying"
+
+    def test_schema_respects_namespace_argument(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp = create_mcp_server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.schema").fn(namespace="other")
+        assert result == {"concepts": []}
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +187,22 @@ class TestProvenanceTool:
         result = mcp._tool_manager.get_tool("ontolith.provenance").fn(assertion_id="nonexistent")
         assert "error" in result
 
+    def test_provenance_reachable_for_retracted_assertion(self, tmp_path: Path) -> None:
+        """Provenance must be resolvable for non-active assertions too — that's
+        the audit-trail use case (regression: backend.assertions() defaults to
+        status='active' and previously hid retracted/flagged/superseded records).
+        """
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        kb.retract(active[0].id, HUMAN)
+
+        mcp = create_mcp_server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(assertion_id=active[0].id)
+        assert result["id"] == active[0].id
+        assert result["status"] == "retracted"
+
 
 # ---------------------------------------------------------------------------
 # ontolith.propose
@@ -188,6 +256,26 @@ class TestProposeTool:
         )
         assert "error" in result
         assert result["code"] == "auth_error"
+
+    def test_propose_unauthorized_delegation_returns_capability_error(self, tmp_path: Path) -> None:
+        """acting_as a principal that isn't the author's owner is rejected (ADR-0003)."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.create_principal(
+            "carol@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+
+        mcp = create_mcp_server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.propose").fn(
+            subject=entity.id,
+            predicate="Person.name",
+            value="Ada",
+            value_type="Text",
+            author=AI,  # owner=alice
+            acting_as="carol@example.com",  # not AI's owner
+        )
+        assert "error" in result
+        assert result["code"] == "capability_error"
 
     def test_propose_does_not_expose_direct_write(self, tmp_path: Path) -> None:
         """MCP propose tool must not bypass policy — AI assertions need review."""
@@ -299,3 +387,72 @@ class TestFlagContradictionTool:
         )
         assert "error" in result
         assert result["code"] == "auth_error"
+
+    def test_flag_assertion_a_not_found_returns_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        mcp = create_mcp_server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
+            assertion_id_a="nonexistent",
+            assertion_id_b=assertions[0].id,
+            author=HUMAN,
+        )
+        assert "error" in result
+        assert result["code"] == "not_found"
+
+    def test_flag_assertion_b_not_found_returns_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        mcp = create_mcp_server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
+            assertion_id_a=assertions[0].id,
+            assertion_id_b="nonexistent",
+            author=HUMAN,
+        )
+        assert "error" in result
+        assert result["code"] == "not_found"
+
+    def test_flag_extends_existing_contradiction(self, tmp_path: Path) -> None:
+        """A third conflicting assertion extends the open contradiction rather than
+        creating a new one, and already-flagged members are not re-flagged.
+        """
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        # First two proposals conflict via normal conflict routing -> open contradiction
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        kb.propose(entity.id, "Person.name", "Ava", "Text", HUMAN)
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        assert len(flagged) == 2
+
+        from ontolith.core import Assertion
+
+        a3 = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity.id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Eve",
+            author=HUMAN,
+            asserted_at=T0,
+            status="active",
+        )
+        kb.backend.put_assertion(a3)
+
+        mcp = create_mcp_server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
+            assertion_id_a=flagged[0].id,
+            assertion_id_b=a3.id,
+            author=HUMAN,
+        )
+
+        assert result["action"] == "extended"
+        still_flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        assert {a.id for a in still_flagged} == {flagged[0].id, flagged[1].id, a3.id}

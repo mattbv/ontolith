@@ -173,7 +173,7 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
             Dict with assertion details including author, confidence, source,
             rationale, proposal link, and temporal fields.
         """
-        results = kb.backend.assertions()
+        results = kb.backend.assertions(status=None)
         match = next((a for a in results if a.id == assertion_id), None)
         if match is None:
             return {"error": f"Assertion {assertion_id!r} not found"}
@@ -302,8 +302,9 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
         if principal is None:
             return {"error": f"Principal {author!r} not found", "code": "auth_error"}
 
-        # Resolve both assertions
-        all_assertions = kb.backend.assertions()
+        # Resolve both assertions (status=None: a flagged/superseded assertion
+        # must still be resolvable here, e.g. when extending an open contradiction)
+        all_assertions = kb.backend.assertions(status=None)
         a_map = {a.id: a for a in all_assertions}
 
         a = a_map.get(assertion_id_a)
