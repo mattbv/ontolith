@@ -98,5 +98,4 @@ def rollback(self) -> None:
 
 - ADR-0001: Storage Default (SQLite + sqlite-vec)
 - SPEC §9: Proposal workflow and acceptance
-- CLAUDE.md: "One transaction per proposal acceptance: All writes within proposal acceptance in single transaction"
 - Python `sqlite3` docs: `isolation_level` parameter

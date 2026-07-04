@@ -102,4 +102,3 @@ The system must distinguish these and route them differently.
 - PRD §7 (Core concepts: Temporality, Contradiction)
 - PRD §16 Decision 5
 - SPEC §10 (Conflict semantics)
-- `.claude/rules/conflict.md` (Conflict handling rules)
