@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from hypothesis import HealthCheck, given, settings
+from hypothesis import given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
@@ -43,10 +43,11 @@ def test_assertion_value_mutation_raises() -> None:
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         assertion = kb.assertions(subject=entity.id, predicate="Person.name")[0]
 
-        with pytest.raises(ValidationError):
-            assertion.value = "tampered"  # type: ignore[misc]
-
-        kb.close()
+        try:
+            with pytest.raises(ValidationError):
+                assertion.value = "tampered"  # type: ignore[misc]
+        finally:
+            kb.close()
 
 
 def test_assertion_status_cannot_be_mutated_directly() -> None:
@@ -62,10 +63,11 @@ def test_assertion_status_cannot_be_mutated_directly() -> None:
         kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         assertion = kb.assertions(subject=entity.id, predicate="Person.name")[0]
 
-        with pytest.raises(ValidationError):
-            assertion.status = "retracted"  # type: ignore[misc]
-
-        kb.close()
+        try:
+            with pytest.raises(ValidationError):
+                assertion.status = "retracted"  # type: ignore[misc]
+        finally:
+            kb.close()
 
 
 # ===========================================================================
@@ -74,7 +76,7 @@ def test_assertion_status_cannot_be_mutated_directly() -> None:
 
 
 @given(values=st.lists(_short_values, min_size=1, max_size=8))
-@settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(max_examples=50)
 def test_propose_sequence_never_mutates_prior_assertion_values(values: list[str]) -> None:
     """For any sequence of static-property proposals (triggering corroboration or
     contradiction), every assertion ever created keeps its original value forever.
@@ -83,24 +85,31 @@ def test_propose_sequence_never_mutates_prior_assertion_values(values: list[str]
         clock = FixedClock(T0)
         ids = FixedIdProvider([f"id-{i}" for i in range(len(values) * 3 + 10)])
         kb = Ontology.connect(Path(tmpdir) / "prop.db", clock=clock, id_provider=ids)
-        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
-        entity = kb.create_entity("Person", author=AUTHOR)
+        try:
+            kb.create_principal(
+                AUTHOR, kind="human", auth_method="oidc", default_capability="write"
+            )
+            entity = kb.create_entity("Person", author=AUTHOR)
 
-        recorded: dict[str, str] = {}
-        for value in values:
-            kb.propose(entity.id, "Person.name", value, "Text", AUTHOR)
-            all_assertions = kb.assertions(subject=entity.id, predicate="Person.name", status=None)
-            for a in all_assertions:
-                if a.id not in recorded:
-                    recorded[a.id] = a.value
+            recorded: dict[str, str] = {}
+            for value in values:
+                kb.propose(entity.id, "Person.name", value, "Text", AUTHOR)
+                all_assertions = kb.assertions(
+                    subject=entity.id, predicate="Person.name", status=None
+                )
+                for a in all_assertions:
+                    if a.id not in recorded:
+                        recorded[a.id] = a.value
 
-        final_assertions = kb.assertions(subject=entity.id, predicate="Person.name", status=None)
-        final_by_id = {a.id: a.value for a in final_assertions}
+            final_assertions = kb.assertions(
+                subject=entity.id, predicate="Person.name", status=None
+            )
+            final_by_id = {a.id: a.value for a in final_assertions}
 
-        for assertion_id, original_value in recorded.items():
-            assert final_by_id[assertion_id] == original_value
-
-        kb.close()
+            for assertion_id, original_value in recorded.items():
+                assert final_by_id[assertion_id] == original_value
+        finally:
+            kb.close()
 
 
 # ===========================================================================
@@ -109,7 +118,7 @@ def test_propose_sequence_never_mutates_prior_assertion_values(values: list[str]
 
 
 @given(values=st.lists(_short_values, min_size=1, max_size=6))
-@settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(max_examples=50)
 def test_assertion_count_never_decreases_across_propose_and_retract(values: list[str]) -> None:
     """Interleave propose() and retract() calls; the total count of assertion
     records (status=None) must be monotonically non-decreasing — retraction
@@ -119,28 +128,33 @@ def test_assertion_count_never_decreases_across_propose_and_retract(values: list
         clock = FixedClock(T0)
         ids = FixedIdProvider([f"id-{i}" for i in range(len(values) * 3 + 10)])
         kb = Ontology.connect(Path(tmpdir) / "prop.db", clock=clock, id_provider=ids)
-        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
-        entity = kb.create_entity("Person", author=AUTHOR)
-
-        previous_count = 0
-        for i, value in enumerate(values):
-            kb.propose(entity.id, "Person.name", value, "Text", AUTHOR)
-
-            current_count = len(
-                kb.assertions(subject=entity.id, predicate="Person.name", status=None)
+        try:
+            kb.create_principal(
+                AUTHOR, kind="human", auth_method="oidc", default_capability="write"
             )
-            assert current_count >= previous_count
-            previous_count = current_count
+            entity = kb.create_entity("Person", author=AUTHOR)
 
-            # Every other iteration, retract one active assertion (if any)
-            if i % 2 == 1:
-                active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
-                if active:
-                    kb.retract(active[0].id, AUTHOR)
-                    count_after_retract = len(
-                        kb.assertions(subject=entity.id, predicate="Person.name", status=None)
+            previous_count = 0
+            for i, value in enumerate(values):
+                kb.propose(entity.id, "Person.name", value, "Text", AUTHOR)
+
+                current_count = len(
+                    kb.assertions(subject=entity.id, predicate="Person.name", status=None)
+                )
+                assert current_count >= previous_count
+                previous_count = current_count
+
+                # Every other iteration, retract one active assertion (if any)
+                if i % 2 == 1:
+                    active = kb.assertions(
+                        subject=entity.id, predicate="Person.name", status="active"
                     )
-                    assert count_after_retract >= previous_count
-                    previous_count = count_after_retract
-
-        kb.close()
+                    if active:
+                        kb.retract(active[0].id, AUTHOR)
+                        count_after_retract = len(
+                            kb.assertions(subject=entity.id, predicate="Person.name", status=None)
+                        )
+                        assert count_after_retract >= previous_count
+                        previous_count = count_after_retract
+        finally:
+            kb.close()
