@@ -851,19 +851,24 @@ class SQLiteBackend:
         resolved_by: str,
         resolved_at: datetime,
     ) -> None:
-        """Mark a contradiction as resolved (SPEC §10.3)."""
+        """Mark a contradiction as resolved (SPEC §10.3).
+
+        The UPDATE is scoped to state='open' so a concurrent resolution of the
+        same contradiction cannot silently re-resolve it (rowcount==0 signals
+        the race instead of last-writer-wins).
+        """
         try:
             cursor = self.conn.cursor()
             cursor.execute(
                 """
                 UPDATE contradiction
                 SET state = 'resolved', resolved_by = ?, resolved_at = ?
-                WHERE id = ?
+                WHERE id = ? AND state = 'open'
                 """,
                 (resolved_by, resolved_at.isoformat(), contradiction_id),
             )
             if cursor.rowcount == 0:
-                raise StorageError(f"Contradiction not found: {contradiction_id}")
+                raise StorageError(f"Contradiction not found or not open: {contradiction_id}")
             if not self._in_transaction:
                 self.conn.commit()
         except sqlite3.Error as e:

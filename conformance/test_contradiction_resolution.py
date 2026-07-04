@@ -15,7 +15,13 @@ import pytest
 
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
-from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
+from ontolith.core.errors import (
+    AuthError,
+    CapabilityError,
+    NotFoundError,
+    StorageError,
+    ValidationError,
+)
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 
@@ -174,3 +180,24 @@ class TestResolveContradictionGuards:
 
         with pytest.raises(ValidationError, match="is not open"):
             kb.resolve_contradiction(contradiction_id, ada_id, REVIEWER)
+
+    def test_backend_resolve_is_scoped_to_open_state(self, tmp_path: Path) -> None:
+        """Port-level guard: resolve_contradiction's UPDATE only affects rows still
+        in state='open', so a second resolve on an already-resolved contradiction
+        cannot silently re-resolve it (race-safety at the storage layer).
+        """
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        contradiction_id, ada_id, ava_id = _open_contradiction(kb, entity.id)
+        kb.resolve_contradiction(contradiction_id, ada_id, REVIEWER)
+
+        with pytest.raises(StorageError, match="not found or not open"):
+            kb.backend.resolve_contradiction(contradiction_id, REVIEWER, kb.clock.now())
+
+        # Original resolution outcome is untouched by the failed second attempt
+        resolved = kb.backend.get_contradiction(contradiction_id)
+        assert resolved is not None
+        assert resolved.resolved_by == REVIEWER
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        assert len(active) == 1
+        assert active[0].id == ada_id
