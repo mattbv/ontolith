@@ -16,7 +16,13 @@ from ontolith.core import (
     SystemClock,
     UlidProvider,
 )
-from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
+from ontolith.core.errors import (
+    AuthError,
+    CapabilityError,
+    NotFoundError,
+    SchemaError,
+    ValidationError,
+)
 from ontolith.govern import AutoAccept, ThresholdPolicy
 from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, route
 from ontolith.govern.contradiction import Contradiction
@@ -24,6 +30,7 @@ from ontolith.govern.policy import Decision, Reject
 from ontolith.govern.proposal import Proposal
 from ontolith.identity import Principal
 from ontolith.query import QueryBuilder
+from ontolith.schema import SchemaIR
 from ontolith.store.base import StorageBackend
 
 
@@ -766,6 +773,46 @@ class Ontology:
         resolved = self.backend.get_contradiction(contradiction_id)
         assert resolved is not None
         return resolved
+
+    def apply_schema(self, schema: SchemaIR, author: str) -> SchemaIR:
+        """Persist a new schema version, capability-checked (SPEC §6).
+
+        The author must have `admin` capability. Versions must be applied in
+        strict monotonic order: 1 if no schema exists yet for the namespace,
+        otherwise exactly `current_latest + 1`.
+
+        This is the only governed path that reaches `StorageBackend.put_schema()` —
+        without it, schema versions could be persisted with no capability check
+        by anything holding a `backend` reference directly.
+
+        Args:
+            schema: SchemaIR to persist
+            author: Principal ID applying the schema
+
+        Returns:
+            The persisted SchemaIR
+
+        Raises:
+            AuthError: If the author principal is not found
+            CapabilityError: If the author lacks `admin` capability
+            SchemaError: If `schema.version` is not the next monotonic version
+        """
+        author_principal = self.backend.get_principal(author)
+        if author_principal is None:
+            raise AuthError(f"Principal not found: {author}")
+        if author_principal.default_capability != "admin":
+            raise CapabilityError(f"Principal {author} lacks admin capability")
+
+        current = self.backend.get_schema(schema.namespace)
+        expected_version = (current.version + 1) if current is not None else 1
+        if schema.version != expected_version:
+            raise SchemaError(
+                f"Schema version {schema.version} is not the next monotonic version "
+                f"for namespace {schema.namespace!r} (expected {expected_version})"
+            )
+
+        self.backend.put_schema(schema)
+        return schema
 
     def close(self) -> None:
         """Close the knowledge base connection."""
