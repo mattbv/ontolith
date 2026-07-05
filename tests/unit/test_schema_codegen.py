@@ -4,7 +4,17 @@ Covers the `classes -> IR -> class stubs -> IR` half of the required
 bidirectional-codegen golden idempotence test.
 """
 
-from ontolith.schema import Concept, Date, Ref, Relation, Text, compile_schema, generate_class_stubs
+from ontolith.schema import (
+    Concept,
+    Date,
+    Integer,
+    Property,
+    Ref,
+    Relation,
+    Text,
+    compile_schema,
+    generate_class_stubs,
+)
 
 
 def _roundtrip_through_stubs(schema):
@@ -69,6 +79,67 @@ class TestGenerateClassStubs:
         reconstructed = _roundtrip_through_stubs(schema)
 
         assert reconstructed.concepts == schema.concepts
+
+    def test_property_with_cardinality_temporality_description_roundtrips(self) -> None:
+        class Person(Concept):
+            name: Text
+            salary: Integer = Property(
+                cardinality="many",
+                temporality="time_varying",
+                description="Historical salary figures",
+                required=True,
+            )
+
+        schema = compile_schema("default", 1, Person)
+        reconstructed = _roundtrip_through_stubs(schema)
+
+        assert reconstructed.concepts["Person"].properties == schema.concepts["Person"].properties
+
+    def test_optional_property_with_overrides_roundtrips(self) -> None:
+        class Person(Concept):
+            name: Text
+            nickname: Text | None = Property(cardinality="many", description="Known aliases")
+
+        schema = compile_schema("default", 1, Person)
+        reconstructed = _roundtrip_through_stubs(schema)
+
+        nickname = reconstructed.concepts["Person"].properties["nickname"]
+        assert nickname == schema.concepts["Person"].properties["nickname"]
+        assert nickname.required is False
+
+    def test_relation_with_cardinality_and_description_roundtrips(self) -> None:
+        class Organization(Concept):
+            name: Text
+            employees: Ref["Person"] = Relation(
+                cardinality="many", description="People employed here"
+            )
+
+        class Person(Concept):
+            name: Text
+
+        schema = compile_schema("default", 1, Organization, Person)
+        reconstructed = _roundtrip_through_stubs(schema)
+
+        assert (
+            reconstructed.concepts["Organization"].relations["employees"]
+            == schema.concepts["Organization"].relations["employees"]
+        )
+
+    def test_concept_description_with_quotes_roundtrips(self) -> None:
+        """A description containing quote characters must not break the
+        generated source (regression: repr(), not a raw triple-quoted string)."""
+
+        class Person(Concept):
+            '''He said """hello""" and it\'s "fine".'''
+
+            name: Text
+
+        schema = compile_schema("default", 1, Person)
+        source = generate_class_stubs(schema)
+        compile(source, "<generated>", "exec")  # raises SyntaxError if malformed
+
+        reconstructed = _roundtrip_through_stubs(schema)
+        assert reconstructed.concepts["Person"].description == schema.concepts["Person"].description
 
     def test_generated_source_is_valid_python_importing_public_names(self) -> None:
         class Person(Concept):

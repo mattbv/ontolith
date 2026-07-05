@@ -6,6 +6,7 @@ from ontolith.core.errors import SchemaError
 from ontolith.schema import (
     Concept,
     Date,
+    Integer,
     Property,
     Ref,
     Relation,
@@ -38,13 +39,33 @@ class TestBasicCompilation:
     def test_property_spec_sets_temporality_and_cardinality(self) -> None:
         class Person(Concept):
             name: Text
-            nickname: Text = Property(cardinality="many", temporality="time_varying")
+            nickname: Text | None = Property(cardinality="many", temporality="time_varying")
 
         schema = compile_schema("default", 1, Person)
         nickname = schema.concepts["Person"].properties["nickname"]
         assert nickname.cardinality == "many"
         assert nickname.temporality == "time_varying"
         assert nickname.required is False
+
+    def test_property_spec_infers_required_from_bare_annotation(self) -> None:
+        """A bare (non-Optional) annotation stays required even when a
+        Property(...) spec is attached for unrelated reasons (temporality here) —
+        attaching a spec must not silently flip required to False."""
+
+        class Person(Concept):
+            name: Text
+            salary: Integer = Property(temporality="time_varying")
+
+        schema = compile_schema("default", 1, Person)
+        assert schema.concepts["Person"].properties["salary"].required is True
+
+    def test_property_spec_explicit_required_overrides_annotation(self) -> None:
+        class Person(Concept):
+            name: Text
+            nickname: Text = Property(required=False, cardinality="many")
+
+        schema = compile_schema("default", 1, Person)
+        assert schema.concepts["Person"].properties["nickname"].required is False
 
 
 class TestRelations:
@@ -102,6 +123,20 @@ class TestRelations:
         schema = compile_schema("default", 1, Person, Organization)
         assert schema.concepts["Person"].relations["employer"].required is False
 
+    def test_relation_spec_infers_required_from_bare_annotation(self) -> None:
+        """A bare (non-Optional) Ref[...] stays required even when a
+        Relation(...) spec is attached for unrelated reasons (temporality here)."""
+
+        class Organization(Concept):
+            name: Text
+
+        class Person(Concept):
+            name: Text
+            employer: Ref["Organization"] = Relation(temporality="time_varying")
+
+        schema = compile_schema("default", 1, Person, Organization)
+        assert schema.concepts["Person"].relations["employer"].required is True
+
     def test_missing_relation_target_raises_schema_error(self) -> None:
         class Person(Concept):
             name: Text
@@ -133,3 +168,7 @@ class TestCompileSchemaEntrypoint:
 
             class Broken(Concept):
                 name: str  # not one of the ontolith scalar markers
+
+    def test_ref_with_non_string_target_raises_schema_error(self) -> None:
+        with pytest.raises(SchemaError, match="target must be a string"):
+            Ref[Text]  # type: ignore[index]

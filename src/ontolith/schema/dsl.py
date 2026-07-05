@@ -47,21 +47,29 @@ class _RefMarker:
 
 @dataclass(frozen=True)
 class _RelationSpec:
-    """Sentinel returned by Relation(...), captured as a class-body default value."""
+    """Sentinel returned by Relation(...), captured as a class-body default value.
+
+    `required=None` means "not stated explicitly — infer from whether the
+    annotation itself is `X | None`", matching plain-annotation behavior.
+    """
 
     inverse: str | None
     cardinality: Cardinality
-    required: bool
+    required: bool | None
     temporality: Temporality
     description: str | None
 
 
 @dataclass(frozen=True)
 class _PropertySpec:
-    """Sentinel returned by Property(...), captured as a class-body default value."""
+    """Sentinel returned by Property(...), captured as a class-body default value.
+
+    `required=None` means "not stated explicitly — infer from whether the
+    annotation itself is `X | None`", matching plain-annotation behavior.
+    """
 
     cardinality: Cardinality
-    required: bool
+    required: bool | None
     temporality: Temporality
     description: str | None
 
@@ -70,11 +78,16 @@ def Relation(
     *,
     inverse: str | None = None,
     cardinality: Cardinality = "single",
-    required: bool = False,
+    required: bool | None = None,
     temporality: Temporality = "static",
     description: str | None = None,
 ) -> Any:
     """Field spec for a relation, used as a class-body default (SPEC §6.2).
+
+    `required` defaults to `None`, meaning "infer from the annotation" — a
+    bare `Ref["X"]` is required, `Ref["X"] | None` is optional — exactly like
+    a relation with no `Relation(...)` spec at all. Pass `required=True`/`False`
+    explicitly only to override what the annotation itself already states.
 
     Example:
         employer: Ref["Organization"] = Relation(inverse="employees")
@@ -91,7 +104,7 @@ def Relation(
 def Property(
     *,
     cardinality: Cardinality = "single",
-    required: bool = False,
+    required: bool | None = None,
     temporality: Temporality = "static",
     description: str | None = None,
 ) -> Any:
@@ -99,7 +112,12 @@ def Property(
 
     Plain annotations (`name: Text`) are sufficient for static, single-valued,
     optional properties. Use `Property(...)` to declare `temporality="time_varying"`,
-    non-default cardinality, or `required=True` on a property.
+    non-default cardinality, or a description on a property.
+
+    `required` defaults to `None`, meaning "infer from the annotation" — a bare
+    `Integer` is required, `Integer | None` is optional — exactly as if no
+    `Property(...)` spec were attached at all. Pass `required=True`/`False`
+    explicitly only to override what the annotation itself already states.
 
     Example:
         salary: Integer = Property(temporality="time_varying")
@@ -168,9 +186,7 @@ class ConceptMeta(type):
     matching the current flat (non-inheriting) ConceptDef shape in the IR.
     """
 
-    def __new__(
-        mcs, name: str, bases: tuple[type, ...], namespace: dict[str, Any]
-    ) -> ConceptMeta:
+    def __new__(mcs, name: str, bases: tuple[type, ...], namespace: dict[str, Any]) -> ConceptMeta:
         cls = super().__new__(mcs, name, bases, namespace)
         if bases == ():
             # This is the `Concept` base class itself — nothing to compile.
@@ -189,11 +205,12 @@ class ConceptMeta(type):
 
             if isinstance(marker, _RefMarker):
                 if isinstance(default, _RelationSpec):
+                    required = default.required if default.required is not None else not is_optional
                     relations[field_name] = RelationDef(
                         name=field_name,
                         target_concept=marker.target_concept,
                         cardinality=default.cardinality,
-                        required=default.required,
+                        required=required,
                         temporality=default.temporality,
                         inverse=default.inverse,
                         description=default.description,
@@ -206,11 +223,12 @@ class ConceptMeta(type):
                     )
             elif isinstance(marker, _ScalarMarker):
                 if isinstance(default, _PropertySpec):
+                    required = default.required if default.required is not None else not is_optional
                     properties[field_name] = PropertyDef(
                         name=field_name,
                         value_type=marker.value_type,
                         cardinality=default.cardinality,
-                        required=default.required,
+                        required=required,
                         temporality=default.temporality,
                         description=default.description,
                     )
@@ -296,35 +314,44 @@ _VALUE_TYPE_TO_MARKER_NAME = {
 
 
 def _property_annotation(prop: PropertyDef) -> str:
+    """Render a property field. `required` is encoded via the annotation's
+    optionality (bare vs. `X | None`), never via an explicit `required=` arg,
+    so `not prop.required` round-trips correctly through `_unwrap_optional`'s
+    infer-from-annotation fallback regardless of whether other overrides
+    (cardinality/temporality/description) are also present.
+    """
     type_name = _VALUE_TYPE_TO_MARKER_NAME[prop.value_type]
+    annotation = type_name if prop.required else f"{type_name} | None"
 
     non_default_args = []
     if prop.cardinality != "single":
         non_default_args.append(f"cardinality={prop.cardinality!r}")
-    if prop.required:
-        non_default_args.append("required=True")
     if prop.temporality != "static":
         non_default_args.append(f"temporality={prop.temporality!r}")
     if prop.description:
         non_default_args.append(f"description={prop.description!r}")
 
     if non_default_args:
-        return f"{type_name} = Property({', '.join(non_default_args)})"
-    return f"{type_name} | None = None"
+        return f"{annotation} = Property({', '.join(non_default_args)})"
+    return annotation if prop.required else f"{annotation} = None"
 
 
 def _relation_field(rel: RelationDef) -> str:
+    """Render a relation field. See `_property_annotation` for why `required`
+    is encoded via the annotation's optionality rather than a `required=` arg.
+    """
+    ref_expr = f'Ref["{rel.target_concept}"]'
+    annotation = ref_expr if rel.required else f"{ref_expr} | None"
+
     args = [f"inverse={rel.inverse!r}"] if rel.inverse else []
     if rel.cardinality != "single":
         args.append(f"cardinality={rel.cardinality!r}")
-    if rel.required:
-        args.append("required=True")
     if rel.temporality != "static":
         args.append(f"temporality={rel.temporality!r}")
     if rel.description:
         args.append(f"description={rel.description!r}")
     spec = f"Relation({', '.join(args)})" if args else "Relation()"
-    return f'Ref["{rel.target_concept}"] = {spec}'
+    return f"{annotation} = {spec}"
 
 
 def generate_class_stubs(schema: SchemaIR) -> str:
@@ -352,7 +379,9 @@ def generate_class_stubs(schema: SchemaIR) -> str:
         lines.append(f"class {concept_name}(Concept):")
         body_lines: list[str] = []
         if concept.description:
-            body_lines.append(f'    """{concept.description}"""')
+            # repr(), not a raw triple-quoted string: a description containing
+            # quotes or backslashes would otherwise produce invalid Python.
+            body_lines.append(f"    {concept.description!r}")
         for prop_name in concept.properties:
             prop = concept.properties[prop_name]
             body_lines.append(f"    {prop_name}: {_property_annotation(prop)}")
