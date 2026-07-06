@@ -71,6 +71,30 @@ class TestToYaml:
         assert "default_prefix: ex" in text
         assert "description: An example schema" in text
 
+    def test_schema_level_metadata_roundtrips(self) -> None:
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={},
+            metadata={
+                "prefixes": {"ex": "https://example.org/"},
+                "default_prefix": "ex",
+                "description": "An example schema",
+            },
+        )
+        reconstructed = from_yaml(to_yaml(schema))
+        assert reconstructed.metadata == schema.metadata
+
+    def test_unsupported_metadata_key_raises(self) -> None:
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={},
+            metadata={"custom_key": "would be silently dropped without this guard"},
+        )
+        with pytest.raises(SchemaError, match="Unsupported schema metadata key"):
+            to_yaml(schema)
+
     def test_required_relation_serialized(self) -> None:
         schema = SchemaIR(
             namespace="default",
@@ -207,6 +231,13 @@ class TestFromYaml:
         with pytest.raises(SchemaError, match="must be an integer"):
             from_yaml(text)
 
+    def test_boolean_version_raises(self) -> None:
+        """bool is an int subclass — isinstance(True, int) is True — so this
+        must be excluded explicitly or `version: true` would silently parse as 1."""
+        text = "id: default\nversion: true\nclasses: {}"
+        with pytest.raises(SchemaError, match="must be an integer"):
+            from_yaml(text)
+
     def test_non_mapping_document_raises(self) -> None:
         with pytest.raises(SchemaError, match="must be a mapping at the top level"):
             from_yaml("- just\n- a\n- list\n")
@@ -215,6 +246,19 @@ class TestFromYaml:
         text = "id: default\nversion: 1\nclasses: [not, a, mapping]"
         with pytest.raises(SchemaError, match="'classes' must be a mapping"):
             from_yaml(text)
+
+    @pytest.mark.parametrize("bad_value", ["0", "false", '""'])
+    def test_classes_falsy_wrong_type_raises(self, bad_value: str) -> None:
+        """A falsy-but-wrong-type `classes:` must still raise, not be silently
+        coerced to {} the way `classes: null` (absent) legitimately is."""
+        text = f"id: default\nversion: 1\nclasses: {bad_value}"
+        with pytest.raises(SchemaError, match="'classes' must be a mapping"):
+            from_yaml(text)
+
+    def test_classes_null_is_treated_as_empty(self) -> None:
+        text = "id: default\nversion: 1\nclasses:"
+        schema = from_yaml(text)
+        assert schema.concepts == {}
 
     def test_class_body_not_a_mapping_raises(self) -> None:
         text = "id: default\nversion: 1\nclasses:\n  Person: not-a-mapping"
@@ -225,6 +269,19 @@ class TestFromYaml:
         text = "id: default\nversion: 1\nclasses:\n  Person:\n    attributes: [nope]"
         with pytest.raises(SchemaError, match="attributes must be a mapping"):
             from_yaml(text)
+
+    @pytest.mark.parametrize("bad_value", ["0", "false", '""'])
+    def test_attributes_falsy_wrong_type_raises(self, bad_value: str) -> None:
+        """A falsy-but-wrong-type `attributes:` must still raise, not be silently
+        coerced to {} the way `attributes: null` (absent) legitimately is."""
+        text = f"id: default\nversion: 1\nclasses:\n  Person:\n    attributes: {bad_value}"
+        with pytest.raises(SchemaError, match="attributes must be a mapping"):
+            from_yaml(text)
+
+    def test_attributes_null_is_treated_as_empty(self) -> None:
+        text = "id: default\nversion: 1\nclasses:\n  Person:\n    attributes:"
+        schema = from_yaml(text)
+        assert schema.concepts["Person"].properties == {}
 
     def test_slot_body_not_a_mapping_raises(self) -> None:
         text = "id: default\nversion: 1\nclasses:\n  Person:\n    attributes:\n      name: not-a-mapping"

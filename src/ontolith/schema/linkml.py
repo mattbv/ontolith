@@ -64,6 +64,8 @@ _UNSUPPORTED_SLOT_KEYS = (
     "permissible_values",
 )
 
+_SUPPORTED_METADATA_KEYS = ("prefixes", "default_prefix", "description")
+
 _TEMPORALITY_ANNOTATION_KEY = "ontolith_temporality"
 _VALUE_TYPE_ANNOTATION_KEY = "ontolith_value_type"
 
@@ -90,7 +92,14 @@ def to_yaml(schema: SchemaIR) -> str:
         "version": schema.version,
     }
     if schema.metadata:
-        for key in ("prefixes", "default_prefix", "description"):
+        unsupported_metadata_keys = set(schema.metadata) - set(_SUPPORTED_METADATA_KEYS)
+        if unsupported_metadata_keys:
+            raise SchemaError(
+                f"Unsupported schema metadata key(s) for the v1 LinkML dialect: "
+                f"{sorted(unsupported_metadata_keys)!r} (only {_SUPPORTED_METADATA_KEYS} "
+                "round-trip through YAML)"
+            )
+        for key in _SUPPORTED_METADATA_KEYS:
             if key in schema.metadata:
                 document[key] = schema.metadata[key]
 
@@ -181,10 +190,14 @@ def from_yaml(text: str) -> SchemaIR:
         raise SchemaError("LinkML YAML document must set 'id' or 'name'")
 
     version = document.get("version")
-    if not isinstance(version, int):
+    if not isinstance(version, int) or isinstance(version, bool):
+        # bool is an int subclass in Python — isinstance(True, int) is True —
+        # so it must be excluded explicitly or `version: true` would parse as 1.
         raise SchemaError(f"'version' must be an integer for the v1 dialect, got {version!r}")
 
-    classes = document.get("classes") or {}
+    classes = document.get("classes", {})
+    if classes is None:
+        classes = {}
     if not isinstance(classes, dict):
         raise SchemaError("'classes' must be a mapping of class name -> class definition")
 
@@ -193,7 +206,7 @@ def from_yaml(text: str) -> SchemaIR:
         concepts[class_name] = _parse_class(class_name, class_doc, list(classes.keys()))
 
     metadata: dict[str, Any] = {}
-    for key in ("prefixes", "default_prefix", "description"):
+    for key in _SUPPORTED_METADATA_KEYS:
         if key in document:
             metadata[key] = document[key]
 
@@ -212,7 +225,9 @@ def _parse_class(class_name: str, class_doc: Any, known_class_names: list[str]) 
             )
 
     description = class_doc.get("description")
-    attributes = class_doc.get("attributes") or {}
+    attributes = class_doc.get("attributes", {})
+    if attributes is None:
+        attributes = {}
     if not isinstance(attributes, dict):
         raise SchemaError(f"Class {class_name!r}.attributes must be a mapping")
 
