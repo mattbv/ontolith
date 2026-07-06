@@ -8,6 +8,8 @@ import pytest
 
 from ontolith import Ontology
 from ontolith.core import FixedClock, SequentialIdProvider
+from ontolith.core.errors import AuthError, CapabilityError, SchemaError
+from ontolith.schema import SchemaIR
 
 
 @pytest.fixture
@@ -229,3 +231,59 @@ class TestOntology:
         assert principal.kind == "ai"
         assert principal.owner == "alice@example.com"
         assert principal.metadata["model"] == "claude-sonnet-4"
+
+
+class TestApplySchema:
+    """Tests for Ontology.apply_schema (SPEC §6, capability-checked schema persistence)."""
+
+    def test_admin_can_apply_first_schema_version(self, kb: Ontology) -> None:
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        schema = SchemaIR(namespace="default", version=1, concepts={})
+
+        applied = kb.apply_schema(schema, author="admin@example.com")
+
+        assert applied.version == 1
+        assert kb.backend.get_schema("default") is not None
+
+    def test_non_admin_raises_capability_error(self, kb: Ontology) -> None:
+        """alice@example.com defaults to 'propose' capability, not 'admin'."""
+        schema = SchemaIR(namespace="default", version=1, concepts={})
+
+        with pytest.raises(CapabilityError, match="lacks admin capability"):
+            kb.apply_schema(schema, author="alice@example.com")
+
+    def test_unknown_author_raises_auth_error(self, kb: Ontology) -> None:
+        schema = SchemaIR(namespace="default", version=1, concepts={})
+
+        with pytest.raises(AuthError, match="Principal not found"):
+            kb.apply_schema(schema, author="nobody@example.com")
+
+    def test_second_version_must_be_monotonic(self, kb: Ontology) -> None:
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        kb.apply_schema(
+            SchemaIR(namespace="default", version=1, concepts={}), author="admin@example.com"
+        )
+
+        applied = kb.apply_schema(
+            SchemaIR(namespace="default", version=2, concepts={}), author="admin@example.com"
+        )
+        assert applied.version == 2
+
+    def test_skipping_a_version_raises_schema_error(self, kb: Ontology) -> None:
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        kb.apply_schema(
+            SchemaIR(namespace="default", version=1, concepts={}), author="admin@example.com"
+        )
+
+        with pytest.raises(SchemaError, match="expected 2"):
+            kb.apply_schema(
+                SchemaIR(namespace="default", version=3, concepts={}), author="admin@example.com"
+            )
+
+    def test_first_version_must_be_one(self, kb: Ontology) -> None:
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+
+        with pytest.raises(SchemaError, match="expected 1"):
+            kb.apply_schema(
+                SchemaIR(namespace="default", version=2, concepts={}), author="admin@example.com"
+            )
