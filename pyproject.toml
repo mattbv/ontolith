@@ -35,7 +35,8 @@ graphql = ["strawberry-graphql>=0.219"]
 mcp = [
     "mcp>=1.0",
 ]
-all = ["ontolith[vec,rest,graphql,mcp]"]
+interop = ["pyyaml>=6.0"]
+all = ["ontolith[vec,rest,graphql,mcp,interop]"]
 dev = [
 	"ontolith[all]",
 	# Testing
@@ -47,6 +48,7 @@ dev = [
 	# Quality
 	"ruff>=0.2",
 	"mypy>=1.8",
+	"types-PyYAML>=6.0",
 	"import-linter>=2.0",
 	"interrogate>=1.5",
 	# Security
