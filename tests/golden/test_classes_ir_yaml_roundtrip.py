@@ -16,7 +16,6 @@ pytest.importorskip(
 
 def test_classes_ir_yaml_ir_classes_roundtrip() -> None:
     from ontolith.schema.dsl import Concept, Date, Ref, Relation, Text, compile_schema
-
     from ontolith.schema.linkml import from_yaml, to_yaml
 
     class Organization(Concept):
