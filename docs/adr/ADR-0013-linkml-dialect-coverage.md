@@ -22,6 +22,7 @@ This ADR also decides the mechanics for two IR concepts LinkML has no native equ
 
 **In scope:**
 - Schema-level `id`/`name` (→ `namespace`), `version` (parsed as a plain integer — a deliberate, documented deviation from LinkML's typical free-text `version` field), `prefixes`/`default_prefix`/`description` (preserved verbatim in `SchemaIR.metadata`, not interpreted).
+- Schema-level `default_range:` — the fallback `range` applied to any slot that omits `range:` explicitly (must itself be a builtin scalar or a class defined in the schema; a class name here means unranged slots become relations, mirroring per-slot `range:` resolution). Falls back to LinkML's own default (`string`) when not declared.
 - `classes.<Name>` → `ConceptDef`, with **only inline `attributes:` per class**.
 - `attributes.<name>.range`: a builtin scalar type name (via the fixed mapping table below) → `PropertyDef`; a name matching another class in the same schema → `RelationDef`.
 - `multivalued: true/false` → `cardinality: many/single`.
@@ -31,11 +32,14 @@ This ADR also decides the mechanics for two IR concepts LinkML has no native equ
 
 **Explicitly out of scope for v1 (fail-loud on import, not silently dropped):**
 - Shared top-level `slots:` dict / slot reuse across classes, `slot_usage` overrides.
-- Class inheritance (`is_a`, `mixins`, `tree_root`).
+- Class inheritance (`is_a`, `mixins`, `tree_root`) and `abstract` classes.
 - `enums`, `permissible_values`.
 - Pattern/boolean constraints (`pattern`, `any_of`, `all_of`, `exactly_one_of`, `none_of`).
+- Slot-level `identifier`, `key`, `alias`, `ifabsent`, `readonly`, `recommended` — Ontolith has no primary-key, default-value, or read-only-field concept to map these onto yet.
 - `imports` / multi-file schemas.
 - `types` (custom scalar type definitions) and `subsets`.
+
+This blacklist is an enumerated set of constructs identified as plausible to encounter, not an exhaustive audit of the full LinkML metamodel — a real LinkML key outside both the in-scope and out-of-scope lists above is still silently ignored today. Widening the blacklist as new gaps are found is cheap (one string per key); closing all of them up front was not attempted.
 
 The single biggest scope-reducer is **inline attributes only** — Ontolith-authored schemas (round-tripped from the class DSL) never need shared slots anyway; this mainly affects importing hand-written external LinkML files that use the shared-slot idiom, which now fail loudly with a clear `SchemaError` naming the unsupported construct, rather than silently dropping data.
 
