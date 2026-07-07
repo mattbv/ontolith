@@ -58,4 +58,31 @@ class Proposal(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
-__all__ = ["Proposal"]
+class ProposalEvent(BaseModel):
+    """A structured review action recorded against a proposal (SPEC §9.4).
+
+    Currently covers the two review actions that exist as Ontology methods:
+    accept and reject. assign/comment/request_changes are not implemented as
+    methods yet, so no event type exists for them — this is a scoped subset
+    of SPEC §9.4's full action vocabulary, not the complete review workflow.
+
+    Attributes:
+        id: Unique event ID (ULID)
+        proposal_id: Proposal this event was recorded against
+        actor: Principal ID who performed the review action
+        type: Which review action this event records
+        detail: Optional free-text detail (e.g. a rejection reason)
+        at: When the action occurred
+    """
+
+    id: str
+    proposal_id: str
+    actor: str
+    type: Literal["accept", "reject"]
+    detail: str | None = None
+    at: datetime
+
+    model_config = ConfigDict(frozen=True)
+
+
+__all__ = ["Proposal", "ProposalEvent"]

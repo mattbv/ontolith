@@ -206,6 +206,38 @@ class TestProvenanceTool:
 
         assert result["model"] == "claude-sonnet-4"
 
+    def test_provenance_surfaces_review_events_after_accept(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "carol@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI, model="claude-sonnet-4"
+        )
+        kb.accept_proposal(proposal.id, "carol@example.com")
+        assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(assertion_id=assertions[0].id)
+
+        assert len(result["review_events"]) == 1
+        assert result["review_events"][0]["type"] == "accept"
+        assert result["review_events"][0]["actor"] == "carol@example.com"
+
+    def test_provenance_review_events_empty_for_direct_write(self, tmp_path: Path) -> None:
+        """A direct write (no proposal_id) has no review events - not an
+        error, just an empty list."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(assertion_id=assertion.id)
+
+        assert result["proposal_id"] is None
+        assert result["review_events"] == []
+
     def test_provenance_unknown_assertion_returns_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)

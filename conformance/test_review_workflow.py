@@ -157,6 +157,50 @@ class TestAcceptProposal:
         assert len(flagged) == 2
         assert {a.value for a in flagged} == {"Ada", "Ava"}
 
+    def test_accept_records_exactly_one_proposal_event(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        kb.accept_proposal(proposal.id, REVIEWER)
+
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert len(events) == 1
+        assert events[0].type == "accept"
+        assert events[0].actor == REVIEWER
+        assert events[0].proposal_id == proposal.id
+
+    def test_accept_does_not_overwrite_policy_reason(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        original_policy_reason = proposal.policy_reason
+        assert original_policy_reason is not None
+
+        accepted = kb.accept_proposal(proposal.id, REVIEWER)
+        assert accepted.policy_reason == original_policy_reason
+
+    def test_multiple_review_cycles_produce_independent_events(self, tmp_path: Path) -> None:
+        """Accept/reject cycles across different proposals don't overwrite
+        each other's events - each proposal_id gets its own event history."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        p1, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="m1")
+        p2, _ = kb.propose(entity.id, "Person.born", "1815", "Text", AI_AUTHOR, model="m1")
+
+        kb.accept_proposal(p1.id, REVIEWER)
+        kb.reject_proposal(p2.id, REVIEWER, reason="not enough evidence")
+
+        p1_events = kb.backend.get_proposal_events(p1.id)
+        p2_events = kb.backend.get_proposal_events(p2.id)
+        assert len(p1_events) == 1 and p1_events[0].type == "accept"
+        assert len(p2_events) == 1 and p2_events[0].type == "reject"
+        assert p2_events[0].detail == "not enough evidence"
+
 
 # ===========================================================================
 # Reject path
@@ -196,15 +240,25 @@ class TestRejectProposal:
         kb.reject_proposal(proposal.id, REVIEWER, reason="Insufficient evidence")
         assert kb.assertions(subject=entity.id, predicate="Person.name") == []
 
-    def test_reject_reason_stored(self, tmp_path: Path) -> None:
+    def test_reject_reason_recorded_as_proposal_event(self, tmp_path: Path) -> None:
+        """The reviewer's reason is recorded as a structured proposal_event
+        (SPEC §9.4), not overwritten into policy_reason - that field remains
+        whatever the policy engine set at proposal-creation time."""
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(
             entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
         )
+        original_policy_reason = proposal.policy_reason
 
         rejected = kb.reject_proposal(proposal.id, REVIEWER, reason="Insufficient evidence")
-        assert rejected.policy_reason == "Insufficient evidence"
+        assert rejected.policy_reason == original_policy_reason
+
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert len(events) == 1
+        assert events[0].type == "reject"
+        assert events[0].actor == REVIEWER
+        assert events[0].detail == "Insufficient evidence"
 
 
 # ===========================================================================

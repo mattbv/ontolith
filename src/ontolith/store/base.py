@@ -15,7 +15,7 @@ from typing import Protocol
 
 from ontolith.core import Assertion, Entity
 from ontolith.govern.contradiction import Contradiction
-from ontolith.govern.proposal import Proposal
+from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
 
@@ -319,7 +319,33 @@ class StorageBackend(Protocol):
             proposal_id: Proposal to update
             state: New state (auto_accepted, require_review, rejected, etc.)
             decided_at: ISO timestamp of the decision
-            policy_reason: Human-readable reason from policy engine
+            policy_reason: Human-readable reason from policy engine. If None,
+                the stored value is left unchanged (not cleared) — the
+                policy-engine reason set at proposal-creation time is
+                distinct from, and not overwritten by, review actions
+                recorded via put_proposal_event.
+        """
+        ...
+
+    def put_proposal_event(self, event: ProposalEvent) -> None:
+        """Persist a structured review-action event (SPEC §9.4).
+
+        Args:
+            event: ProposalEvent to persist
+
+        Raises:
+            StorageError: If persistence fails
+        """
+        ...
+
+    def get_proposal_events(self, proposal_id: str) -> list[ProposalEvent]:
+        """Retrieve all review events for a proposal, oldest first.
+
+        Args:
+            proposal_id: Proposal to retrieve events for
+
+        Returns:
+            Events for this proposal, ordered by occurrence
         """
         ...
 

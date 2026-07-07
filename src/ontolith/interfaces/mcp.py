@@ -190,6 +190,20 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         if match is None:
             return {"error": f"Assertion {assertion_id!r} not found"}
 
+        review_events = (
+            [
+                {
+                    "actor": e.actor,
+                    "type": e.type,
+                    "detail": e.detail,
+                    "at": e.at.isoformat(),
+                }
+                for e in kb.backend.get_proposal_events(match.proposal_id)
+            ]
+            if match.proposal_id
+            else []
+        )
+
         return {
             "id": match.id,
             "subject": match.subject,
@@ -207,6 +221,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             "valid_to": match.valid_to.isoformat() if match.valid_to else None,
             "proposal_id": match.proposal_id,
             "supersedes": match.supersedes,
+            "review_events": review_events,
         }
 
     # ------------------------------------------------------------------

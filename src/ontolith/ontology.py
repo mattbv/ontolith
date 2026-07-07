@@ -27,7 +27,7 @@ from ontolith.govern import AutoAccept, ThresholdPolicy
 from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, route
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.policy import Decision, Reject
-from ontolith.govern.proposal import Proposal
+from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential, min_capability
 from ontolith.query import QueryBuilder
 from ontolith.schema import SchemaIR
@@ -959,8 +959,15 @@ class Ontology:
                         f"Unknown operation kind in proposal payload: {op['kind']}"
                     )
 
-            self.backend.update_proposal_state(
-                proposal_id, "accepted", now.isoformat(), f"Accepted by reviewer {reviewer}"
+            self.backend.update_proposal_state(proposal_id, "accepted", now.isoformat())
+            self.backend.put_proposal_event(
+                ProposalEvent(
+                    id=self.id_provider.next(),
+                    proposal_id=proposal_id,
+                    actor=reviewer,
+                    type="accept",
+                    at=now,
+                )
             )
 
         accepted = self.backend.get_proposal(proposal_id)
@@ -996,12 +1003,18 @@ class Ontology:
             )
 
         now = self.clock.now()
-        self.backend.update_proposal_state(
-            proposal_id,
-            "rejected",
-            now.isoformat(),
-            reason or f"Rejected by reviewer {reviewer}",
-        )
+        with self.backend.transaction():
+            self.backend.update_proposal_state(proposal_id, "rejected", now.isoformat())
+            self.backend.put_proposal_event(
+                ProposalEvent(
+                    id=self.id_provider.next(),
+                    proposal_id=proposal_id,
+                    actor=reviewer,
+                    type="reject",
+                    detail=reason or None,
+                    at=now,
+                )
+            )
 
         rejected = self.backend.get_proposal(proposal_id)
         assert rejected is not None

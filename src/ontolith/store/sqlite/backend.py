@@ -16,7 +16,7 @@ from pathlib import Path
 from ontolith.core import Assertion, Clock, Entity, SystemClock
 from ontolith.core.errors import StorageError
 from ontolith.govern.contradiction import Contradiction
-from ontolith.govern.proposal import Proposal
+from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
 
@@ -161,6 +161,28 @@ class SQLiteBackend:
                 metadata TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY(author) REFERENCES principal(id)
             )
+        """)
+
+        # Proposal event table (SPEC §9.4) — structured review actions.
+        # Scoped to accept/reject, the two review actions that exist as
+        # Ontology methods; assign/comment/request_changes are not
+        # implemented yet (see ProposalEvent docstring).
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS proposal_event (
+                id TEXT PRIMARY KEY,
+                proposal_id TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                type TEXT NOT NULL CHECK(type IN ('accept', 'reject')),
+                detail TEXT,
+                at TEXT NOT NULL,
+                FOREIGN KEY(proposal_id) REFERENCES proposal(id),
+                FOREIGN KEY(actor) REFERENCES principal(id)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_proposal_event_proposal
+            ON proposal_event(proposal_id)
         """)
 
         # Contradiction table (SPEC §10.3)
@@ -875,11 +897,16 @@ class SQLiteBackend:
         decided_at: str | None = None,
         policy_reason: str | None = None,
     ) -> None:
-        """Update proposal state after policy decision."""
+        """Update proposal state after policy decision.
+
+        policy_reason=None leaves the stored value unchanged (COALESCE), it
+        does not clear it — see the port docstring for why.
+        """
         try:
             cursor = self.conn.cursor()
             cursor.execute(
-                "UPDATE proposal SET state = ?, decided_at = ?, policy_reason = ? WHERE id = ?",
+                "UPDATE proposal SET state = ?, decided_at = ?, "
+                "policy_reason = COALESCE(?, policy_reason) WHERE id = ?",
                 (state, decided_at, policy_reason, proposal_id),
             )
             if cursor.rowcount == 0:
@@ -888,6 +915,50 @@ class SQLiteBackend:
                 self.conn.commit()
         except sqlite3.Error as e:
             raise StorageError(f"Failed to update proposal (id={proposal_id}): {e}") from e
+
+    def put_proposal_event(self, event: ProposalEvent) -> None:
+        """Persist a structured review-action event (SPEC §9.4)."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO proposal_event (id, proposal_id, actor, type, detail, at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.id,
+                    event.proposal_id,
+                    event.actor,
+                    event.type,
+                    event.detail,
+                    event.at.isoformat(),
+                ),
+            )
+            if not self._in_transaction:
+                self.conn.commit()
+        except sqlite3.IntegrityError as e:
+            raise StorageError(f"Proposal event conflict (id={event.id}): {e}") from e
+        except sqlite3.Error as e:
+            raise StorageError(f"Failed to persist proposal event (id={event.id}): {e}") from e
+
+    def get_proposal_events(self, proposal_id: str) -> list[ProposalEvent]:
+        """Retrieve all review events for a proposal, oldest first."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM proposal_event WHERE proposal_id = ? ORDER BY at ASC",
+            (proposal_id,),
+        )
+        return [
+            ProposalEvent(
+                id=row["id"],
+                proposal_id=row["proposal_id"],
+                actor=row["actor"],
+                type=row["type"],
+                detail=row["detail"],
+                at=datetime.fromisoformat(row["at"]),
+            )
+            for row in cursor.fetchall()
+        ]
 
     def put_contradiction(self, contradiction: Contradiction) -> None:
         """Persist a new contradiction."""
