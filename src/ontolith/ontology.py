@@ -364,7 +364,6 @@ class Ontology:
         value_type: str,
         author: str,
         *,
-        temporality: Literal["static", "time_varying"] = "static",
         confidence: float | None = None,
         source: str | None = None,
         rationale: str | None = None,
@@ -374,6 +373,11 @@ class Ontology:
 
         Evaluates ThresholdPolicy. Auto-accepted proposals are committed
         immediately with SPEC §10 conflict routing; others are stored for review.
+
+        Conflict-routing temporality is resolved from the active schema's
+        declared temporality for ``predicate`` (SPEC §10.1: ``t :=
+        schema.temporality(P)``) — it is never caller-supplied. Falls back to
+        "static" if no schema is registered for this namespace.
 
         When ``acting_as`` is set the proposal is made on behalf of another
         principal (delegation, ADR-0003). Policy is evaluated using the
@@ -396,6 +400,11 @@ class Ontology:
                 raise CapabilityError(
                     f"Principal {author!r} is not authorized to act as {acting_as!r}"
                 )
+
+        schema = self.backend.get_schema(self.namespace)
+        temporality: Literal["static", "time_varying"] = (
+            schema.temporality_of(predicate) if schema is not None else "static"
+        )
 
         now = self.clock.now()
         proposal_id = self.id_provider.next()

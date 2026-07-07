@@ -210,7 +210,6 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
         confidence: float | None = None,
         source: str | None = None,
         rationale: str | None = None,
-        temporality: str = "static",
         acting_as: str | None = None,
     ) -> dict[str, Any]:
         """Create a proposal to assert a fact. Does NOT write directly.
@@ -219,6 +218,10 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
         - Trusted principals → auto_accepted (assertion written immediately)
         - AI/low-trust principals → require_review (queued for human review)
         - Read-only principals → rejected
+
+        Conflict-routing temporality is resolved server-side from the active
+        schema's declaration for ``predicate`` (SPEC §10.1) — it is not a
+        caller-supplied argument.
 
         When ``acting_as`` is set (delegation), policy is evaluated using the
         delegating principal's capability and trust level (ADR-0003).
@@ -232,7 +235,6 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
             confidence: Optional confidence score (0.0–1.0)
             source: Optional source URL or reference
             rationale: Optional explanation for the assertion
-            temporality: Property temporality ("static" or "time_varying")
             acting_as: Optional principal ID being acted on behalf of (delegation)
 
         Returns:
@@ -250,7 +252,6 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
                 confidence=confidence,
                 source=source,
                 rationale=rationale,
-                temporality=temporality,  # type: ignore[arg-type]
                 acting_as=acting_as,
             )
         except AuthError as exc:
