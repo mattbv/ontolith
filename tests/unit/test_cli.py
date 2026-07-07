@@ -23,7 +23,7 @@ def temp_db() -> Path:
 def seeded_db(temp_db: Path) -> tuple[Path, str, str]:
     """DB with a principal and entity pre-created. Returns (path, principal_id, entity_id)."""
     kb = Ontology.connect(temp_db)
-    alice = kb.create_principal("alice@example.com", kind="human")
+    alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
     entity = kb.create_entity("Person", author=alice.id)
     kb.close()
     return temp_db, alice.id, entity.id

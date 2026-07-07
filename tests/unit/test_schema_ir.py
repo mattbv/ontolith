@@ -122,3 +122,51 @@ class TestSchemaIR:
 
         rel = RelationDef(name="employer", target_concept="Organization")
         assert rel.cardinality == "single"
+
+
+class TestTemporalityOf:
+    """SchemaIR.temporality_of() — schema-derived conflict routing (SPEC §10.1)."""
+
+    def _schema(self) -> SchemaIR:
+        return SchemaIR(
+            namespace="test",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "name": PropertyDef(name="name", value_type="Text"),
+                        "employer_name": PropertyDef(
+                            name="employer_name", value_type="Text", temporality="time_varying"
+                        ),
+                    },
+                    relations={
+                        "employer": RelationDef(
+                            name="employer",
+                            target_concept="Organization",
+                            temporality="time_varying",
+                        ),
+                    },
+                ),
+                "Organization": ConceptDef(name="Organization"),
+            },
+        )
+
+    def test_resolves_static_property(self) -> None:
+        assert self._schema().temporality_of("Person.name") == "static"
+
+    def test_resolves_time_varying_property(self) -> None:
+        assert self._schema().temporality_of("Person.employer_name") == "time_varying"
+
+    def test_resolves_time_varying_relation(self) -> None:
+        assert self._schema().temporality_of("Person.employer") == "time_varying"
+
+    def test_malformed_predicate_falls_back_to_static(self) -> None:
+        """No '.' separator — falls back to static rather than raising."""
+        assert self._schema().temporality_of("NoDotHere") == "static"
+
+    def test_unknown_concept_falls_back_to_static(self) -> None:
+        assert self._schema().temporality_of("Vehicle.make") == "static"
+
+    def test_unknown_field_on_known_concept_falls_back_to_static(self) -> None:
+        assert self._schema().temporality_of("Person.unknown_field") == "static"

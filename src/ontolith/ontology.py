@@ -28,7 +28,7 @@ from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, rout
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.policy import Decision, Reject
 from ontolith.govern.proposal import Proposal
-from ontolith.identity import Principal
+from ontolith.identity import Principal, min_capability
 from ontolith.query import QueryBuilder
 from ontolith.schema import SchemaIR
 from ontolith.store.base import StorageBackend
@@ -209,6 +209,56 @@ class Ontology:
         self.backend.put_entity(entity)
         return entity
 
+    def _check_direct_write_capability(
+        self, author: str, acting_as: str | None
+    ) -> tuple[Principal, Principal | None]:
+        """Shared auth/capability gate for assert_literal/assert_ref (SPEC §9.3).
+
+        A principal with `write` (or `admin`) capability MAY bypass proposals,
+        but direct writes still pass through conflict routing (§10) and
+        provenance is still recorded. AI-kind principals are never permitted
+        this path, even if misconfigured with elevated capability — AI
+        proposals always require review (ADR-0003); direct writes skip review
+        entirely.
+
+        Returns:
+            (author principal, delegating principal or None)
+
+        Raises:
+            AuthError: author or acting_as is not a known principal
+            CapabilityError: author is AI-kind, delegation is unauthorized, or
+                effective capability is below `write`
+        """
+        principal = self.backend.get_principal(author)
+        if principal is None:
+            raise AuthError(f"Principal not found: {author}")
+        if principal.kind == "ai":
+            raise CapabilityError(f"AI principal {author!r} cannot make direct writes")
+
+        delegating: Principal | None = None
+        if acting_as is not None and acting_as != author:
+            delegating = self.backend.get_principal(acting_as)
+            if delegating is None:
+                raise AuthError(f"Delegating principal not found: {acting_as}")
+            if principal.owner != acting_as:
+                raise CapabilityError(
+                    f"Principal {author!r} is not authorized to act as {acting_as!r}"
+                )
+
+        # SPEC §8.4: effective capability is min(author, acting_as) when
+        # delegating, not a wholesale substitution.
+        capability: str = principal.default_capability
+        if delegating is not None:
+            capability = min_capability(capability, delegating.default_capability)
+        if capability not in ("write", "admin"):
+            raise CapabilityError(f"Principal {author!r} lacks write capability")
+
+        return principal, delegating
+
+    def _resolve_temporality(self, predicate: str) -> Literal["static", "time_varying"]:
+        schema = self.backend.get_schema(self.namespace)
+        return schema.temporality_of(predicate) if schema is not None else "static"
+
     def assert_literal(
         self,
         subject: str,
@@ -220,8 +270,12 @@ class Ontology:
         confidence: float | None = None,
         source: str | None = None,
         rationale: str | None = None,
+        acting_as: str | None = None,
     ) -> Assertion:
-        """Make a literal assertion about an entity.
+        """Make a literal assertion about an entity, bypassing the proposal queue.
+
+        SPEC §9.3: requires `write` capability (or `admin`); still passes
+        through SPEC §10 conflict routing and records full provenance.
 
         Args:
             subject: Entity ID
@@ -232,10 +286,14 @@ class Ontology:
             confidence: Optional confidence (0.0-1.0)
             source: Optional source of information
             rationale: Optional why this assertion was made
+            acting_as: Optional principal ID being acted on behalf of (delegation)
 
         Returns:
-            Created assertion
+            Assertion as persisted (status/supersedes reflect conflict routing)
         """
+        self._check_direct_write_capability(author, acting_as)
+        temporality = self._resolve_temporality(predicate)
+
         assertion = Assertion(
             id=self.id_provider.next(),
             namespace=self.namespace,
@@ -245,14 +303,15 @@ class Ontology:
             value_type=value_type,
             value=value,
             author=author,
+            acting_as=acting_as,
             confidence=confidence,
             source=source,
             rationale=rationale,
             asserted_at=self.clock.now(),
         )
 
-        self.backend.put_assertion(assertion)
-        return assertion
+        with self.backend.transaction():
+            return self._apply_with_conflict_routing(assertion, temporality)
 
     def assert_ref(
         self,
@@ -263,8 +322,13 @@ class Ontology:
         *,
         confidence: float | None = None,
         source: str | None = None,
+        acting_as: str | None = None,
     ) -> Assertion:
-        """Make a reference assertion (relation) between entities.
+        """Make a reference assertion (relation) between entities, bypassing the
+        proposal queue.
+
+        SPEC §9.3: requires `write` capability (or `admin`); still passes
+        through SPEC §10 conflict routing and records full provenance.
 
         Args:
             subject: Source entity ID
@@ -273,10 +337,14 @@ class Ontology:
             author: Principal ID making this assertion
             confidence: Optional confidence (0.0-1.0)
             source: Optional source of information
+            acting_as: Optional principal ID being acted on behalf of (delegation)
 
         Returns:
-            Created assertion
+            Assertion as persisted (status/supersedes reflect conflict routing)
         """
+        self._check_direct_write_capability(author, acting_as)
+        temporality = self._resolve_temporality(predicate)
+
         assertion = Assertion(
             id=self.id_provider.next(),
             namespace=self.namespace,
@@ -285,13 +353,14 @@ class Ontology:
             value_kind="ref",
             value=target,
             author=author,
+            acting_as=acting_as,
             confidence=confidence,
             source=source,
             asserted_at=self.clock.now(),
         )
 
-        self.backend.put_assertion(assertion)
-        return assertion
+        with self.backend.transaction():
+            return self._apply_with_conflict_routing(assertion, temporality)
 
     def get_entity(self, entity_id: str) -> Entity | None:
         """Retrieve an entity by ID.
@@ -364,7 +433,6 @@ class Ontology:
         value_type: str,
         author: str,
         *,
-        temporality: Literal["static", "time_varying"] = "static",
         confidence: float | None = None,
         source: str | None = None,
         rationale: str | None = None,
@@ -374,6 +442,11 @@ class Ontology:
 
         Evaluates ThresholdPolicy. Auto-accepted proposals are committed
         immediately with SPEC §10 conflict routing; others are stored for review.
+
+        Conflict-routing temporality is resolved from the active schema's
+        declared temporality for ``predicate`` (SPEC §10.1: ``t :=
+        schema.temporality(P)``) — it is never caller-supplied. Falls back to
+        "static" if no schema is registered for this namespace.
 
         When ``acting_as`` is set the proposal is made on behalf of another
         principal (delegation, ADR-0003). Policy is evaluated using the
@@ -396,6 +469,11 @@ class Ontology:
                 raise CapabilityError(
                     f"Principal {author!r} is not authorized to act as {acting_as!r}"
                 )
+
+        schema = self.backend.get_schema(self.namespace)
+        temporality: Literal["static", "time_varying"] = (
+            schema.temporality_of(predicate) if schema is not None else "static"
+        )
 
         now = self.clock.now()
         proposal_id = self.id_provider.next()
@@ -423,9 +501,9 @@ class Ontology:
             },
         )
 
-        # Policy uses delegating principal when acting_as is set (ADR-0003)
-        effective_principal = delegating if delegating is not None else principal
-        decision = ThresholdPolicy().evaluate(proposal, effective_principal)
+        # SPEC §8.4: effective capability is min(author, acting_as) when
+        # delegating, not a wholesale substitution (ADR-0003).
+        decision = ThresholdPolicy().evaluate(proposal, principal, acting_as=delegating)
 
         if isinstance(decision, AutoAccept):
             assertion = Assertion(
@@ -436,6 +514,132 @@ class Ontology:
                 value_kind="literal",
                 value_type=value_type,
                 value=value,
+                author=author,
+                acting_as=acting_as,
+                confidence=confidence,
+                source=source,
+                rationale=rationale,
+                asserted_at=now,
+                proposal_id=proposal_id,
+            )
+            accepted = proposal.model_copy(
+                update={
+                    "state": "auto_accepted",
+                    "decided_at": now,
+                    "policy_reason": decision.reason,
+                }
+            )
+            with self.backend.transaction():
+                self.backend.put_proposal(accepted)
+                self._apply_with_conflict_routing(assertion, temporality)
+            return accepted, decision
+
+        if isinstance(decision, Reject):
+            rejected = proposal.model_copy(
+                update={
+                    "state": "rejected",
+                    "decided_at": now,
+                    "policy_reason": decision.reason,
+                }
+            )
+            self.backend.put_proposal(rejected)
+            return rejected, decision
+
+        pending = proposal.model_copy(
+            update={
+                "state": "require_review",
+                "policy_reason": getattr(decision, "reason", None),
+            }
+        )
+        self.backend.put_proposal(pending)
+        return pending, decision
+
+    def propose_ref(
+        self,
+        subject: str,
+        predicate: str,
+        target: str,
+        author: str,
+        *,
+        confidence: float | None = None,
+        source: str | None = None,
+        rationale: str | None = None,
+        acting_as: str | None = None,
+    ) -> tuple[Proposal, Decision]:
+        """Submit a reference (relation) assertion through the proposal/policy path (SPEC §9).
+
+        Mirrors ``propose()`` for relations — the only difference is the
+        operation kind and that ``target`` (an entity ID) replaces
+        ``value``/``value_type``. Evaluates ThresholdPolicy; auto-accepted
+        proposals are committed immediately with SPEC §10 conflict routing.
+        Conflict-routing temporality is resolved from the active schema's
+        declared temporality for ``predicate`` (SPEC §10.1), never
+        caller-supplied.
+
+        When ``acting_as`` is set the proposal is made on behalf of another
+        principal (delegation, ADR-0003). Policy is evaluated using the
+        delegating principal's capability and trust level.
+
+        Returns:
+            (Proposal, Decision) tuple
+        """
+        principal = self.backend.get_principal(author)
+        if principal is None:
+            raise AuthError(f"Principal not found: {author}")
+
+        delegating: Principal | None = None
+        if acting_as is not None and acting_as != author:
+            delegating = self.backend.get_principal(acting_as)
+            if delegating is None:
+                raise AuthError(f"Delegating principal not found: {acting_as}")
+            # Authorization: author must be owned by acting_as (ADR-0003)
+            if principal.owner != acting_as:
+                raise CapabilityError(
+                    f"Principal {author!r} is not authorized to act as {acting_as!r}"
+                )
+
+        schema = self.backend.get_schema(self.namespace)
+        temporality: Literal["static", "time_varying"] = (
+            schema.temporality_of(predicate) if schema is not None else "static"
+        )
+
+        now = self.clock.now()
+        proposal_id = self.id_provider.next()
+        proposal = Proposal(
+            id=proposal_id,
+            namespace=self.namespace,
+            author=author,
+            acting_as=acting_as,
+            state="submitted",
+            created_at=now,
+            payload={
+                "operations": [
+                    {
+                        "kind": "assert_ref",
+                        "subject": subject,
+                        "predicate": predicate,
+                        "target": target,
+                        "temporality": temporality,
+                        "confidence": confidence,
+                        "source": source,
+                        "rationale": rationale,
+                    }
+                ]
+            },
+        )
+
+        # SPEC §8.4: effective capability is min(author, acting_as) when
+        # delegating, not a wholesale substitution (ADR-0003).
+        decision = ThresholdPolicy().evaluate(proposal, principal, acting_as=delegating)
+
+        if isinstance(decision, AutoAccept):
+            assertion = Assertion(
+                id=self.id_provider.next(),
+                namespace=self.namespace,
+                subject=subject,
+                predicate=predicate,
+                value_kind="ref",
+                value=target,
                 author=author,
                 acting_as=acting_as,
                 confidence=confidence,
@@ -517,8 +721,9 @@ class Ontology:
             payload={"operations": [{"kind": "retract", "assertion_id": assertion_id}]},
         )
 
-        effective_principal = delegating if delegating is not None else principal
-        decision = ThresholdPolicy().evaluate(proposal, effective_principal)
+        # SPEC §8.4: effective capability is min(author, acting_as) when
+        # delegating, not a wholesale substitution (ADR-0003).
+        decision = ThresholdPolicy().evaluate(proposal, principal, acting_as=delegating)
 
         if isinstance(decision, AutoAccept):
             accepted = proposal.model_copy(
@@ -557,8 +762,12 @@ class Ontology:
         self,
         assertion: Assertion,
         temporality: Literal["static", "time_varying"],
-    ) -> None:
-        """Apply an assertion with SPEC §10 conflict routing. Must run inside a transaction."""
+    ) -> Assertion:
+        """Apply an assertion with SPEC §10 conflict routing. Must run inside a transaction.
+
+        Returns the assertion as actually persisted (its ``status``/``supersedes``
+        may differ from the input, e.g. when routing flags or supersedes it).
+        """
         open_contradiction = self.backend.get_open_contradiction(
             self.namespace, assertion.subject, assertion.predicate
         )
@@ -594,6 +803,7 @@ class Ontology:
             supersedes_id = result.targets[0] if result.targets else None
             final = assertion.model_copy(update={"supersedes": supersedes_id})
             self.backend.put_assertion(final)
+            return final
 
         elif isinstance(result, Contradict):
             for mid in result.member_ids:
@@ -615,9 +825,11 @@ class Ontology:
                     created_at=assertion.asserted_at,
                 )
                 self.backend.put_contradiction(contradiction)
+            return flagged
 
         else:
             self.backend.put_assertion(assertion)
+            return assertion
 
     def accept_proposal(self, proposal_id: str, reviewer: str) -> Proposal:
         """Accept a pending proposal, replaying its operations (SPEC §9).
@@ -668,6 +880,24 @@ class Ontology:
                         proposal_id=proposal_id,
                     )
                     self._apply_with_conflict_routing(assertion, op.get("temporality", "static"))
+                elif op["kind"] == "assert_ref":
+                    ref_assertion = Assertion(
+                        id=self.id_provider.next(),
+                        namespace=self.namespace,
+                        subject=op["subject"],
+                        predicate=op["predicate"],
+                        value_kind="ref",
+                        value=op["target"],
+                        author=proposal.author,
+                        confidence=op.get("confidence"),
+                        source=op.get("source"),
+                        rationale=op.get("rationale"),
+                        asserted_at=now,
+                        proposal_id=proposal_id,
+                    )
+                    self._apply_with_conflict_routing(
+                        ref_assertion, op.get("temporality", "static")
+                    )
                 elif op["kind"] == "retract":
                     self.backend.set_assertion_status(op["assertion_id"], "retracted")
                 else:

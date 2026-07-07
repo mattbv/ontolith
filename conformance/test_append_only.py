@@ -26,7 +26,7 @@ def test_active_assertion_is_returned_by_default() -> None:
     """Active assertions appear in default queries (SPEC §5)."""
     kb, path = _kb()
     try:
-        alice = kb.create_principal("alice@example.com", kind="human")
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
         entity = kb.create_entity("Person", author=alice.id)
         a = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", alice.id)
 
@@ -43,7 +43,7 @@ def test_retracted_assertion_excluded_from_default_query() -> None:
     """Retracted assertions are excluded from default (active-only) queries (SPEC §5)."""
     kb, path = _kb()
     try:
-        alice = kb.create_principal("alice@example.com", kind="human")
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
         entity = kb.create_entity("Person", author=alice.id)
         a = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", alice.id)
 
@@ -60,7 +60,7 @@ def test_retracted_assertion_survives_in_history() -> None:
     """Retracted assertions are retained and queryable when history is requested (SPEC §5)."""
     kb, path = _kb()
     try:
-        alice = kb.create_principal("alice@example.com", kind="human")
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
         entity = kb.create_entity("Person", author=alice.id)
         a = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", alice.id)
 
@@ -82,7 +82,7 @@ def test_value_field_is_immutable() -> None:
     """
     kb, path = _kb()
     try:
-        alice = kb.create_principal("alice@example.com", kind="human")
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
         entity = kb.create_entity("Person", author=alice.id)
 
         a1 = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", alice.id)
@@ -105,8 +105,8 @@ def test_multiple_assertions_coexist_for_same_predicate() -> None:
     """Multiple assertions for the same (subject, predicate) coexist (SPEC §5, corroboration)."""
     kb, path = _kb()
     try:
-        alice = kb.create_principal("alice@example.com", kind="human")
-        bob = kb.create_principal("bob@example.com", kind="human")
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        bob = kb.create_principal("bob@example.com", kind="human", default_capability="write")
         entity = kb.create_entity("Person", author=alice.id)
 
         kb.assert_literal(entity.id, "Person.name", "Ada", "Text", alice.id, confidence=0.9)
@@ -126,7 +126,7 @@ def test_provenance_fields_are_captured() -> None:
     """Every assertion carries full provenance: author, asserted_at, confidence (SPEC §5.4)."""
     kb, path = _kb()
     try:
-        alice = kb.create_principal("alice@example.com", kind="human")
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
         entity = kb.create_entity("Person", author=alice.id)
         kb.assert_literal(
             entity.id,
@@ -157,7 +157,7 @@ def test_assertion_records_survive_connection_close() -> None:
     f.close()
 
     kb1 = Ontology.connect(path, clock=FixedClock(T0), id_provider=SequentialIdProvider("cv"))
-    alice = kb1.create_principal("alice@example.com", kind="human")
+    alice = kb1.create_principal("alice@example.com", kind="human", default_capability="write")
     entity = kb1.create_entity("Person", author=alice.id)
     a = kb1.assert_literal(entity.id, "Person.name", "Ada", "Text", alice.id)
     kb1.close()

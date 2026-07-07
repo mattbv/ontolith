@@ -7,6 +7,6 @@ This module contains:
 - Delegation support
 """
 
-from ontolith.identity.principal import Principal
+from ontolith.identity.principal import Principal, min_capability
 
-__all__ = ["Principal"]
+__all__ = ["Principal", "min_capability"]

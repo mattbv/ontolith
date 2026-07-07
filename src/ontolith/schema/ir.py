@@ -106,6 +106,35 @@ class SchemaIR(BaseModel):
 
     model_config = {"frozen": True}
 
+    def temporality_of(self, predicate: str) -> Literal["static", "time_varying"]:
+        """Resolve the declared temporality of a predicate (SPEC §10.1).
+
+        ``predicate`` is a flat ``"Concept.field"`` string. Falls back to
+        ``"static"`` (SPEC's stated default) when the concept or field isn't
+        declared in this schema — e.g. a schema-less namespace, or a field
+        not yet added to the active schema version.
+
+        Args:
+            predicate: Dotted predicate, e.g. "Person.name" or "Person.employer"
+
+        Returns:
+            The property's or relation's declared temporality, or "static"
+            if unresolvable.
+        """
+        concept_name, _, field_name = predicate.partition(".")
+        if not field_name:
+            return "static"
+        concept = self.concepts.get(concept_name)
+        if concept is None:
+            return "static"
+        prop = concept.properties.get(field_name)
+        if prop is not None:
+            return prop.temporality
+        relation = concept.relations.get(field_name)
+        if relation is not None:
+            return relation.temporality
+        return "static"
+
     def to_json(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
         return self.model_dump()

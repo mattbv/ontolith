@@ -77,25 +77,32 @@ Added `test_assertion_value_mutation_raises` and `test_assertion_status_cannot_b
 
 ---
 
-## KI-005 — `assert_literal` / `assert_ref` bypass the proposal/policy path ✓ RESOLVED (M2)
+## KI-005 — `assert_literal` / `assert_ref` bypass the proposal/policy path ✓ RESOLVED
 
 **Severity:** Architecture gap — not SPEC-compliant for untrusted principals  
-**Milestone target:** M2 — resolved in `feat(govern): implement proposal workflow, conflict routing, and contradiction handling`  
-**SPEC reference:** SPEC §9 ("all writes through proposal path")
+**Milestone target:** M2 added `propose()` as a governed path; `assert_literal`/`assert_ref`
+themselves remained an ungoverned direct-write bypass until fixed on `fix/govern-write-pipeline`.  
+**SPEC reference:** SPEC §9.3 ("A principal with `write` capability MAY bypass proposals; such
+writes still pass through the conflict pipeline (§10) and still record full provenance.")
 
 ### Description
 
-`Ontology.assert_literal()` and `Ontology.assert_ref()` write assertions directly to the backend without creating a `Proposal` or running `ThresholdPolicy`. This means:
-
-- AI principals can write assertions without owner review
-- Low-capability principals (e.g., `propose`) bypass policy
-- The audit trail has no proposal record
-
-The M1 CLI and quickstart use these methods for simplicity. The policy engine (`ThresholdPolicy`) exists and is tested in isolation, but is not wired into the write path.
+M2's `feat(govern): implement proposal workflow, conflict routing, and contradiction handling`
+added `Ontology.propose(...)` as a governed path, but `Ontology.assert_literal()` and
+`Ontology.assert_ref()` continued to call `backend.put_assertion()` directly with no
+capability check and no conflict routing — any principal, including `ai`-kind ones, could
+write an assertion that silently coexisted with a conflicting `static` fact with no
+contradiction raised. This entry was previously marked resolved based on the *intended* fix
+description below, but the code was never changed to match — the bypass was live until now.
 
 ### Fix
 
-In M2, add `Ontology.propose(...)` that creates a `Proposal`, evaluates it through the configured `PolicyStrategy`, and — if `AutoAccept` — commits the assertions in a single transaction (SPEC §9, ADR-0010). Rename or deprecate `assert_literal` / `assert_ref` as convenience wrappers that call `propose()` internally.
+`assert_literal`/`assert_ref` now require `write` (or `admin`) capability, explicitly reject
+`ai`-kind principals regardless of a misconfigured capability, and route through
+`_apply_with_conflict_routing` (the same SPEC §10 routing `propose()`'s auto-accept path uses)
+instead of writing directly. Per SPEC §9.3 they intentionally do **not** create a `Proposal`
+record or evaluate `ThresholdPolicy` — that's the defined difference between the write-capable
+bypass and the governed `propose()` path, not a gap to close.
 
 ---
 
