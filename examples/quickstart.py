@@ -46,7 +46,6 @@ def main() -> None:
         auth_method="workload",
         default_capability="propose",
         trust_level=5,
-        metadata={"model": "claude-sonnet-4", "version": "20250101"},
     )
     print(f"✓ Created AI principal: {research_bot.id} (owner: {research_bot.owner})")
     print()
@@ -123,16 +122,22 @@ def main() -> None:
     )
     print(f"✓ Asserted: {ada.id} collaboratedWith {charles.id}")
 
-    kb.assert_ref(
+    # AI principals cannot write directly (SPEC §9.3) — they go through the
+    # governed propose path instead, and always require human review
+    # regardless of trust level (ADR-0003). `model` is required provenance
+    # for AI-authored assertions (SPEC §7.4).
+    proposal, decision = kb.propose_ref(
         subject=ada.id,
         predicate="Person.contributedTo",
         target=analytical_engine.id,
         author=research_bot.id,
         source="ACM Digital Library",
         confidence=0.95,
+        model="claude-sonnet-4-20250101",
     )
-    print(f"✓ Asserted: {ada.id} contributedTo {analytical_engine.id}")
+    print(f"✓ Proposed: {ada.id} contributedTo {analytical_engine.id}")
     print(f"  (by AI: {research_bot.id}, confidence: 0.95)")
+    print(f"  Decision: {type(decision).__name__} — proposal state: {proposal.state}")
     print()
 
     # Query assertions

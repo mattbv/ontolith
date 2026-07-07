@@ -156,26 +156,32 @@ class TestRequireReview:
     def test_proposal_state_is_require_review(self, tmp_path: Path) -> None:
         kb = _kb_ai(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, decision = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, decision = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
         assert proposal.state == "require_review"
 
     def test_decision_is_require_review_instance(self, tmp_path: Path) -> None:
         kb = _kb_ai(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        _, decision = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        _, decision = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
         assert isinstance(decision, RequireReview)
 
     def test_no_assertion_written_for_require_review(self, tmp_path: Path) -> None:
         kb = _kb_ai(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1")
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
         assert active == []
 
     def test_proposal_stored_with_require_review_state(self, tmp_path: Path) -> None:
         kb = _kb_ai(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
         stored = kb.backend.get_proposal(proposal.id)
         assert stored is not None
         assert stored.state == "require_review"
@@ -183,14 +189,18 @@ class TestRequireReview:
     def test_ai_reviewers_include_owner(self, tmp_path: Path) -> None:
         kb = _kb_ai(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        _, decision = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        _, decision = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
         assert isinstance(decision, RequireReview)
         assert AI_OWNER in decision.reviewers
 
     def test_decided_at_not_set_for_require_review(self, tmp_path: Path) -> None:
         kb = _kb_ai(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
         assert proposal.decided_at is None
 
 

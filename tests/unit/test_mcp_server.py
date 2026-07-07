@@ -189,6 +189,23 @@ class TestProvenanceTool:
         assert result["source"] == "wiki"
         assert result["subject"] == entity.id
 
+    def test_provenance_surfaces_model_for_ai_authored_assertion(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "carol@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI, model="claude-sonnet-4"
+        )
+        kb.accept_proposal(proposal.id, "carol@example.com")
+        assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(assertion_id=assertions[0].id)
+
+        assert result["model"] == "claude-sonnet-4"
+
     def test_provenance_unknown_assertion_returns_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
@@ -234,6 +251,23 @@ class TestProposeTool:
         assert result["proposal"]["state"] == "auto_accepted"
         assert result["decision"] == "AutoAccept"
 
+    def test_propose_ai_without_model_returns_validation_error(self, tmp_path: Path) -> None:
+        """model is required for ai-kind authors (SPEC §7.4) — enforced even
+        via the MCP tool wrapper, not just the SDK method directly."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.propose").fn(
+            subject=entity.id,
+            predicate="Person.name",
+            value="Ada",
+            value_type="Text",
+            token=kb.issue_token(AI),
+        )
+        assert "error" in result
+        assert result["code"] == "validation_error"
+
     def test_propose_ai_requires_review(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
@@ -245,6 +279,7 @@ class TestProposeTool:
             value="Ada",
             value_type="Text",
             token=kb.issue_token(AI),
+            model="test-model-v1",
         )
 
         assert result["proposal"]["state"] == "require_review"
@@ -301,6 +336,7 @@ class TestProposeTool:
             value_type="Text",
             token=kb.issue_token(AI),  # owner=alice
             acting_as="carol@example.com",  # not AI's owner
+            model="test-model-v1",
         )
         assert "error" in result
         assert result["code"] == "capability_error"
@@ -317,6 +353,7 @@ class TestProposeTool:
             value="Ada",
             value_type="Text",
             token=kb.issue_token(AI),
+            model="test-model-v1",
         )
 
         # No assertion written yet — still pending review

@@ -201,6 +201,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             "confidence": match.confidence,
             "source": match.source,
             "rationale": match.rationale,
+            "model": match.model,
             "asserted_at": match.asserted_at.isoformat(),
             "valid_from": match.valid_from.isoformat() if match.valid_from else None,
             "valid_to": match.valid_to.isoformat() if match.valid_to else None,
@@ -224,6 +225,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         source: str | None = None,
         rationale: str | None = None,
         acting_as: str | None = None,
+        model: str | None = None,
     ) -> dict[str, Any]:
         """Create a proposal to assert a fact or relation. Does NOT write directly.
 
@@ -239,7 +241,8 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         The acting principal is resolved from ``token`` (ADR-0014), never
         taken as a caller-supplied ID. When ``acting_as`` is set (delegation),
         policy is evaluated using min(capability(author), capability(acting_as))
-        (SPEC §8.4, ADR-0003).
+        (SPEC §8.4, ADR-0003). ``model`` (the AI model family+version) is
+        REQUIRED when the resolved principal is ``ai``-kind (SPEC §7.4/§14.4).
 
         Args:
             subject: Entity ID to assert about
@@ -252,11 +255,12 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             source: Optional source URL or reference
             rationale: Optional explanation for the assertion
             acting_as: Optional principal ID being acted on behalf of (delegation)
+            model: Model family+version; required when the calling principal is AI-kind
 
         Returns:
             Dict with "proposal" (id, state, policy_reason, acting_as) and "decision" type.
         """
-        from ontolith.core.errors import AuthError, CapabilityError
+        from ontolith.core.errors import AuthError, CapabilityError, ValidationError
 
         has_literal = value is not None and value_type is not None
         has_ref = target is not None
@@ -283,6 +287,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
                     source=source,
                     rationale=rationale,
                     acting_as=acting_as,
+                    model=model,
                 )
             else:
                 assert value is not None and value_type is not None
@@ -296,11 +301,14 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
                     source=source,
                     rationale=rationale,
                     acting_as=acting_as,
+                    model=model,
                 )
         except AuthError as exc:
             return {"error": str(exc), "code": "auth_error"}
         except CapabilityError as exc:
             return {"error": str(exc), "code": "capability_error"}
+        except ValidationError as exc:
+            return {"error": str(exc), "code": "validation_error"}
 
         return {
             "proposal": {

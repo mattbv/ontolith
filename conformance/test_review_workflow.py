@@ -60,7 +60,9 @@ class TestAcceptProposal:
     def test_accepted_proposal_state(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
         assert proposal.state == "require_review"
 
         accepted = kb.accept_proposal(proposal.id, REVIEWER)
@@ -69,7 +71,9 @@ class TestAcceptProposal:
     def test_accepted_proposal_has_decided_at(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
 
         accepted = kb.accept_proposal(proposal.id, REVIEWER)
         assert accepted.decided_at is not None
@@ -77,7 +81,9 @@ class TestAcceptProposal:
     def test_assertion_written_after_accept(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
 
         # No assertion yet
         assert kb.assertions(subject=entity.id, predicate="Person.name") == []
@@ -91,7 +97,9 @@ class TestAcceptProposal:
     def test_accepted_assertion_carries_proposal_id(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
         kb.accept_proposal(proposal.id, REVIEWER)
 
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
@@ -100,7 +108,9 @@ class TestAcceptProposal:
     def test_accepted_assertion_author_is_original_proposer(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
         kb.accept_proposal(proposal.id, REVIEWER)
 
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
@@ -134,7 +144,9 @@ class TestAcceptProposal:
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
 
         # AI proposes "Ava" → require_review
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ava", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ava", "Text", AI_AUTHOR, model="test-model-v1"
+        )
 
         # Reviewer accepts → conflict routing triggers, both flagged
         kb.accept_proposal(proposal.id, REVIEWER)
@@ -157,7 +169,9 @@ class TestRejectProposal:
     def test_rejected_proposal_state(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
 
         rejected = kb.reject_proposal(proposal.id, REVIEWER)
         assert rejected.state == "rejected"
@@ -165,7 +179,9 @@ class TestRejectProposal:
     def test_rejected_proposal_has_decided_at(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
 
         rejected = kb.reject_proposal(proposal.id, REVIEWER)
         assert rejected.decided_at is not None
@@ -173,7 +189,9 @@ class TestRejectProposal:
     def test_no_assertion_written_after_reject(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
 
         kb.reject_proposal(proposal.id, REVIEWER, reason="Insufficient evidence")
         assert kb.assertions(subject=entity.id, predicate="Person.name") == []
@@ -181,7 +199,9 @@ class TestRejectProposal:
     def test_reject_reason_stored(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
 
         rejected = kb.reject_proposal(proposal.id, REVIEWER, reason="Insufficient evidence")
         assert rejected.policy_reason == "Insufficient evidence"
@@ -198,7 +218,9 @@ class TestReviewGuards:
     def test_write_only_principal_cannot_accept(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
 
         with pytest.raises(CapabilityError, match="lacks review capability"):
             kb.accept_proposal(proposal.id, HUMAN_AUTHOR)
@@ -206,7 +228,9 @@ class TestReviewGuards:
     def test_write_only_principal_cannot_reject(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
 
         with pytest.raises(CapabilityError, match="lacks review capability"):
             kb.reject_proposal(proposal.id, HUMAN_AUTHOR)
@@ -214,7 +238,9 @@ class TestReviewGuards:
     def test_unknown_reviewer_raises_on_accept(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
 
         with pytest.raises(AuthError, match="Principal not found"):
             kb.accept_proposal(proposal.id, "nobody@example.com")
@@ -222,7 +248,9 @@ class TestReviewGuards:
     def test_unknown_reviewer_raises_on_reject(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
 
         with pytest.raises(AuthError, match="Principal not found"):
             kb.reject_proposal(proposal.id, "nobody@example.com")
@@ -240,7 +268,9 @@ class TestReviewGuards:
     def test_already_accepted_proposal_raises(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
         kb.accept_proposal(proposal.id, REVIEWER)
 
         with pytest.raises(ValidationError, match="not pending review"):
@@ -249,7 +279,9 @@ class TestReviewGuards:
     def test_already_rejected_proposal_raises(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
         kb.reject_proposal(proposal.id, REVIEWER)
 
         with pytest.raises(ValidationError, match="not pending review"):

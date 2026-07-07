@@ -233,7 +233,9 @@ class TestOntology:
         person = kb.create_entity("Person", author="alice@example.com")
         org = kb.create_entity("Organization", author="alice@example.com")
 
-        proposal, decision = kb.propose_ref(person.id, "Person.employer", org.id, "bot@example.com")
+        proposal, decision = kb.propose_ref(
+            person.id, "Person.employer", org.id, "bot@example.com", model="test-model-v1"
+        )
 
         assert proposal.state == "require_review"
         active = kb.assertions(subject=person.id, predicate="Person.employer", status="active")
@@ -248,7 +250,9 @@ class TestOntology:
         person = kb.create_entity("Person", author="alice@example.com")
         org = kb.create_entity("Organization", author="alice@example.com")
 
-        proposal, decision = kb.propose_ref(person.id, "Person.employer", org.id, "bot@example.com")
+        proposal, decision = kb.propose_ref(
+            person.id, "Person.employer", org.id, "bot@example.com", model="test-model-v1"
+        )
         assert proposal.state == "require_review"
 
         accepted = kb.accept_proposal(proposal.id, "carol@example.com")
@@ -383,6 +387,70 @@ class TestOntology:
         assert principal.kind == "ai"
         assert principal.owner == "alice@example.com"
         assert principal.metadata["model"] == "claude-sonnet-4"
+
+
+class TestModelCapture:
+    """model is required for ai-kind authors on the governed proposal path
+    (SPEC §7.4/§14.4); optional and never required for human/service authors.
+    """
+
+    def test_propose_ai_without_model_raises_validation_error(self, kb: Ontology) -> None:
+        kb.create_principal(
+            "bot@example.com", kind="ai", owner="alice@example.com", default_capability="propose"
+        )
+        entity = kb.create_entity("Person", author="alice@example.com")
+
+        with pytest.raises(ValidationError, match="model is required for ai-kind authors"):
+            kb.propose(entity.id, "Person.name", "Ada", "Text", "bot@example.com")
+
+    def test_propose_ref_ai_without_model_raises_validation_error(self, kb: Ontology) -> None:
+        kb.create_principal(
+            "bot@example.com", kind="ai", owner="alice@example.com", default_capability="propose"
+        )
+        person = kb.create_entity("Person", author="alice@example.com")
+        org = kb.create_entity("Organization", author="alice@example.com")
+
+        with pytest.raises(ValidationError, match="model is required for ai-kind authors"):
+            kb.propose_ref(person.id, "Person.employer", org.id, "bot@example.com")
+
+    def test_propose_ai_with_model_succeeds_and_round_trips(self, kb: Ontology) -> None:
+        kb.create_principal(
+            "bot@example.com", kind="ai", owner="alice@example.com", default_capability="propose"
+        )
+        entity = kb.create_entity("Person", author="alice@example.com")
+
+        proposal, decision = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", "bot@example.com", model="claude-sonnet-4"
+        )
+        assert proposal.state == "require_review"
+
+        # Round-trips through accept_proposal's replay and SQLite persistence
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        kb.accept_proposal(proposal.id, "carol@example.com")
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        assert len(active) == 1
+        assert active[0].model == "claude-sonnet-4"
+
+    def test_propose_human_author_model_optional(self, kb: Ontology) -> None:
+        """Human/service authors are never required to pass model."""
+        entity = kb.create_entity("Person", author="alice@example.com")
+
+        proposal, decision = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", "alice@example.com"
+        )
+        assert proposal.state == "auto_accepted"
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        assert active[0].model is None
+
+    def test_assert_literal_model_optional_for_write_capable_human(self, kb: Ontology) -> None:
+        """Direct writes are human/service-only (AI hard-blocked), so model is
+        accepted but never required here — still round-trips when provided."""
+        entity = kb.create_entity("Person", author="alice@example.com")
+
+        assertion = kb.assert_literal(
+            entity.id, "Person.name", "Ada", "Text", "alice@example.com", model="unused-model"
+        )
+        assert assertion.model == "unused-model"
 
 
 class TestApplySchema:

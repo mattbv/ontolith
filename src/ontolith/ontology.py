@@ -265,6 +265,14 @@ class Ontology:
         schema = self.backend.get_schema(self.namespace)
         return schema.temporality_of(predicate) if schema is not None else "static"
 
+    @staticmethod
+    def _require_model_for_ai(principal: Principal, model: str | None) -> None:
+        """SPEC §7.4/§14.4 MUST: AI-authored assertions carry model provenance."""
+        if principal.kind == "ai" and model is None:
+            raise ValidationError(
+                f"model is required for ai-kind authors (principal: {principal.id})"
+            )
+
     def assert_literal(
         self,
         subject: str,
@@ -277,6 +285,7 @@ class Ontology:
         source: str | None = None,
         rationale: str | None = None,
         acting_as: str | None = None,
+        model: str | None = None,
     ) -> Assertion:
         """Make a literal assertion about an entity, bypassing the proposal queue.
 
@@ -293,6 +302,9 @@ class Ontology:
             source: Optional source of information
             rationale: Optional why this assertion was made
             acting_as: Optional principal ID being acted on behalf of (delegation)
+            model: Model family+version (AI principals cannot reach this
+                direct-write path — see _check_direct_write_capability — so
+                this is accepted but never required here)
 
         Returns:
             Assertion as persisted (status/supersedes reflect conflict routing)
@@ -313,6 +325,7 @@ class Ontology:
             confidence=confidence,
             source=source,
             rationale=rationale,
+            model=model,
             asserted_at=self.clock.now(),
         )
 
@@ -329,6 +342,7 @@ class Ontology:
         confidence: float | None = None,
         source: str | None = None,
         acting_as: str | None = None,
+        model: str | None = None,
     ) -> Assertion:
         """Make a reference assertion (relation) between entities, bypassing the
         proposal queue.
@@ -344,6 +358,9 @@ class Ontology:
             confidence: Optional confidence (0.0-1.0)
             source: Optional source of information
             acting_as: Optional principal ID being acted on behalf of (delegation)
+            model: Model family+version (AI principals cannot reach this
+                direct-write path — see _check_direct_write_capability — so
+                this is accepted but never required here)
 
         Returns:
             Assertion as persisted (status/supersedes reflect conflict routing)
@@ -362,6 +379,7 @@ class Ontology:
             acting_as=acting_as,
             confidence=confidence,
             source=source,
+            model=model,
             asserted_at=self.clock.now(),
         )
 
@@ -443,6 +461,7 @@ class Ontology:
         source: str | None = None,
         rationale: str | None = None,
         acting_as: str | None = None,
+        model: str | None = None,
     ) -> tuple[Proposal, Decision]:
         """Submit a literal assertion through the proposal/policy path (SPEC §9).
 
@@ -454,16 +473,25 @@ class Ontology:
         schema.temporality(P)``) — it is never caller-supplied. Falls back to
         "static" if no schema is registered for this namespace.
 
+        ``model`` (the AI model family+version) is REQUIRED when ``author``
+        is an ``ai``-kind principal (SPEC §7.4/§14.4).
+
         When ``acting_as`` is set the proposal is made on behalf of another
         principal (delegation, ADR-0003). Policy is evaluated using the
         delegating principal's capability and trust level.
 
         Returns:
             (Proposal, Decision) tuple
+
+        Raises:
+            AuthError: author or acting_as is not a known principal
+            CapabilityError: delegation is unauthorized
+            ValidationError: author is ai-kind and model is not provided
         """
         principal = self.backend.get_principal(author)
         if principal is None:
             raise AuthError(f"Principal not found: {author}")
+        self._require_model_for_ai(principal, model)
 
         delegating: Principal | None = None
         if acting_as is not None and acting_as != author:
@@ -502,6 +530,7 @@ class Ontology:
                         "confidence": confidence,
                         "source": source,
                         "rationale": rationale,
+                        "model": model,
                     }
                 ]
             },
@@ -525,6 +554,7 @@ class Ontology:
                 confidence=confidence,
                 source=source,
                 rationale=rationale,
+                model=model,
                 asserted_at=now,
                 proposal_id=proposal_id,
             )
@@ -571,6 +601,7 @@ class Ontology:
         source: str | None = None,
         rationale: str | None = None,
         acting_as: str | None = None,
+        model: str | None = None,
     ) -> tuple[Proposal, Decision]:
         """Submit a reference (relation) assertion through the proposal/policy path (SPEC §9).
 
@@ -582,16 +613,25 @@ class Ontology:
         declared temporality for ``predicate`` (SPEC §10.1), never
         caller-supplied.
 
+        ``model`` (the AI model family+version) is REQUIRED when ``author``
+        is an ``ai``-kind principal (SPEC §7.4/§14.4).
+
         When ``acting_as`` is set the proposal is made on behalf of another
         principal (delegation, ADR-0003). Policy is evaluated using the
         delegating principal's capability and trust level.
 
         Returns:
             (Proposal, Decision) tuple
+
+        Raises:
+            AuthError: author or acting_as is not a known principal
+            CapabilityError: delegation is unauthorized
+            ValidationError: author is ai-kind and model is not provided
         """
         principal = self.backend.get_principal(author)
         if principal is None:
             raise AuthError(f"Principal not found: {author}")
+        self._require_model_for_ai(principal, model)
 
         delegating: Principal | None = None
         if acting_as is not None and acting_as != author:
@@ -629,6 +669,7 @@ class Ontology:
                         "confidence": confidence,
                         "source": source,
                         "rationale": rationale,
+                        "model": model,
                     }
                 ]
             },
@@ -651,6 +692,7 @@ class Ontology:
                 confidence=confidence,
                 source=source,
                 rationale=rationale,
+                model=model,
                 asserted_at=now,
                 proposal_id=proposal_id,
             )
@@ -884,6 +926,7 @@ class Ontology:
                         confidence=op.get("confidence"),
                         source=op.get("source"),
                         rationale=op.get("rationale"),
+                        model=op.get("model"),
                         asserted_at=now,
                         proposal_id=proposal_id,
                     )
@@ -900,6 +943,7 @@ class Ontology:
                         confidence=op.get("confidence"),
                         source=op.get("source"),
                         rationale=op.get("rationale"),
+                        model=op.get("model"),
                         asserted_at=now,
                         proposal_id=proposal_id,
                     )
