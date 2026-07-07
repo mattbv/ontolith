@@ -16,7 +16,7 @@ from typing import Protocol
 from ontolith.core import Assertion, Entity
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal
-from ontolith.identity import Principal
+from ontolith.identity import Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
 
 
@@ -72,6 +72,67 @@ class StorageBackend(Protocol):
 
         Returns:
             Principal if found, None otherwise
+        """
+        ...
+
+    def put_credential(self, credential: PrincipalCredential) -> None:
+        """Persist a principal credential (hashed API-key token, ADR-0014).
+
+        Args:
+            credential: PrincipalCredential to persist
+
+        Raises:
+            StorageError: If persistence fails
+        """
+        ...
+
+    def get_principal_by_token_hash(self, token_hash: str) -> Principal | None:
+        """Resolve a principal via a credential's token hash.
+
+        Only unrevoked credentials resolve.
+
+        Args:
+            token_hash: SHA-256 hash of the raw bearer token
+
+        Returns:
+            Principal if the hash matches an active credential, None otherwise
+        """
+        ...
+
+    def get_credential(self, credential_id: str) -> PrincipalCredential | None:
+        """Retrieve a credential by ID.
+
+        Args:
+            credential_id: Credential ID to retrieve
+
+        Returns:
+            PrincipalCredential if found, None otherwise
+        """
+        ...
+
+    def get_credentials_for_principal(self, principal_id: str) -> list[PrincipalCredential]:
+        """List all credentials (active and revoked) issued to a principal.
+
+        Never exposes the raw token — only credential metadata (id,
+        created_at, revoked_at). Used to discover a credential ID to revoke.
+
+        Args:
+            principal_id: Principal to list credentials for
+
+        Returns:
+            Credentials for this principal, most recently issued first
+        """
+        ...
+
+    def revoke_credential(self, credential_id: str, revoked_at: datetime) -> None:
+        """Mark a credential as revoked.
+
+        Args:
+            credential_id: Credential to revoke
+            revoked_at: Timestamp of revocation
+
+        Raises:
+            StorageError: If the credential is not found
         """
         ...
 

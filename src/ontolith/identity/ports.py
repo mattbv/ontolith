@@ -2,20 +2,32 @@
 
 from typing import Protocol
 
+from ontolith.identity.principal import Principal
+
 
 class AuthProvider(Protocol):
-    """Abstract port for authentication providers.
+    """Abstract port for resolving a caller's credential to a Principal.
 
-    AuthProviders resolve requests to principal identities.
-    Implementations include OIDC, workload identity, API keys, etc.
-
-    This is a stub for M0. Full interface will be defined in M1 based on
-    SPEC §8.2 requirements.
+    AuthProviders resolve a bearer credential (e.g. an API-key token) to the
+    principal it authenticates as — the principal is never taken as a
+    caller-asserted ID. See ADR-0014 for the interim per-principal API-key
+    model implemented by the concrete `TokenAuthProvider`; full OIDC/
+    workload-identity support remains future work.
     """
 
-    # Full interface in M1:
-    # def authenticate(self, request: Request) -> Identity: ...
-    # Identity includes: principal_id, acting_as (optional)
+    def resolve(self, token: str) -> Principal:
+        """Resolve a raw bearer token to its Principal.
+
+        Args:
+            token: Raw bearer token supplied by the caller
+
+        Returns:
+            The Principal the token authenticates as
+
+        Raises:
+            AuthError: token is invalid, unknown, or revoked
+        """
+        ...
 
 
 __all__ = ["AuthProvider"]

@@ -8,7 +8,13 @@ import pytest
 
 from ontolith import Ontology
 from ontolith.core import FixedClock, SequentialIdProvider
-from ontolith.core.errors import AuthError, CapabilityError, SchemaError
+from ontolith.core.errors import (
+    AuthError,
+    CapabilityError,
+    NotFoundError,
+    SchemaError,
+    ValidationError,
+)
 from ontolith.schema import ConceptDef, RelationDef, SchemaIR
 
 
@@ -433,3 +439,96 @@ class TestApplySchema:
             kb.apply_schema(
                 SchemaIR(namespace="default", version=2, concepts={}), author="admin@example.com"
             )
+
+
+class TestFlagContradiction:
+    """Ontology.flag_contradiction() — propose-level capability gate (ADR-0008)."""
+
+    def _conflicting_assertions(self, kb: Ontology) -> tuple[str, str, str]:
+        """Two active assertions on the same (subject, predicate) with different
+        values, inserted directly (bypassing conflict routing) so they don't
+        already form a contradiction before flag_contradiction() is called."""
+        from ontolith.core import Assertion
+
+        entity = kb.create_entity("Person", author="alice@example.com")
+        a = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity.id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada",
+            author="alice@example.com",
+            asserted_at=kb.clock.now(),
+            status="active",
+        )
+        b = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity.id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ava",
+            author="alice@example.com",
+            asserted_at=kb.clock.now(),
+            status="active",
+        )
+        kb.backend.put_assertion(a)
+        kb.backend.put_assertion(b)
+        return entity.id, a.id, b.id
+
+    def test_read_capability_raises_capability_error(self, kb: Ontology) -> None:
+        """Previously there was no capability check at all — the HIGH finding."""
+        kb.create_principal("readonly@example.com", kind="human", default_capability="read")
+        _, a_id, b_id = self._conflicting_assertions(kb)
+
+        with pytest.raises(CapabilityError, match="lacks propose capability"):
+            kb.flag_contradiction(a_id, b_id, "readonly@example.com")
+
+    def test_propose_capability_succeeds(self, kb: Ontology) -> None:
+        kb.create_principal("proposer@example.com", kind="human", default_capability="propose")
+        _, a_id, b_id = self._conflicting_assertions(kb)
+
+        contradiction, action = kb.flag_contradiction(a_id, b_id, "proposer@example.com")
+        assert action == "created"
+        assert set(contradiction.member_ids) >= {a_id, b_id}
+
+    def test_unknown_author_raises_auth_error(self, kb: Ontology) -> None:
+        _, a_id, b_id = self._conflicting_assertions(kb)
+        with pytest.raises(AuthError, match="Principal not found"):
+            kb.flag_contradiction(a_id, b_id, "nobody@example.com")
+
+    def test_unknown_assertion_raises_not_found(self, kb: Ontology) -> None:
+        _, a_id, _ = self._conflicting_assertions(kb)
+        with pytest.raises(NotFoundError, match="Assertion not found"):
+            kb.flag_contradiction(a_id, "nonexistent", "alice@example.com")
+
+    def test_mismatched_subject_predicate_raises_validation_error(self, kb: Ontology) -> None:
+        entity = kb.create_entity("Person", author="alice@example.com")
+        a = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", "alice@example.com")
+        b = kb.assert_literal(entity.id, "Person.born", "1815", "Text", "alice@example.com")
+
+        with pytest.raises(ValidationError, match="same subject and predicate"):
+            kb.flag_contradiction(a.id, b.id, "alice@example.com")
+
+    def test_rationale_persisted_in_contradiction_metadata(self, kb: Ontology) -> None:
+        _, a_id, b_id = self._conflicting_assertions(kb)
+        contradiction, _ = kb.flag_contradiction(
+            a_id, b_id, "alice@example.com", rationale="Sources disagree"
+        )
+        assert contradiction.metadata.get("rationale") == "Sources disagree"
+
+    def test_third_conflicting_assertion_extends_existing_contradiction(self, kb: Ontology) -> None:
+        entity_id, a_id, b_id = self._conflicting_assertions(kb)
+        first, _ = kb.flag_contradiction(a_id, b_id, "alice@example.com")
+
+        c_assertion = kb.assert_literal(
+            entity_id, "Person.name", "Eve", "Text", "alice@example.com"
+        )
+        second, action = kb.flag_contradiction(a_id, c_assertion.id, "alice@example.com")
+
+        assert action == "extended"
+        assert second.id == first.id
+        assert set(second.member_ids) == {a_id, b_id, c_assertion.id}

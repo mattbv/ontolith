@@ -1,4 +1,4 @@
-"""MCP server for Ontolith (ADR-0008).
+"""MCP server for Ontolith (ADR-0008, ADR-0014).
 
 Exposes read/propose/flag tools to AI agents. No direct write tool is exposed;
 all mutations flow through the proposal/policy pipeline.
@@ -11,9 +11,18 @@ Tools (ADR-0008):
   ontolith.propose          — create a proposal (NOT write)
   ontolith.flag_contradiction — open/extend a contradiction for review
 
+Authentication (ADR-0014): ``propose`` and ``flag_contradiction`` take a
+bearer ``token`` instead of a caller-supplied ``author`` ID. The server
+resolves the token to a Principal via the injected AuthProvider — the acting
+principal is always server-derived from a verified credential, never
+client-asserted. One server (one AuthProvider/backend) can serve many
+principals, each with their own issued token (``kb.issue_token(principal_id)``
+via SDK/CLI).
+
 Usage:
+    from ontolith.identity.token_auth import TokenAuthProvider
     from ontolith.interfaces.mcp import create_mcp_server
-    mcp = create_mcp_server(kb)
+    mcp = create_mcp_server(kb, TokenAuthProvider(kb.backend))
     mcp.run()          # stdio (default for MCP)
     mcp.run("sse")     # SSE transport
 """
@@ -25,16 +34,19 @@ from typing import TYPE_CHECKING, Any
 from mcp.server.fastmcp import FastMCP
 
 if TYPE_CHECKING:
+    from ontolith.identity.ports import AuthProvider
     from ontolith.ontology import Ontology
 
 
-def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
+def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "ontolith") -> FastMCP:
     """Build and return a FastMCP server bound to the given knowledge base.
 
     The returned server is not yet running — call ``mcp.run()`` to start it.
 
     Args:
         kb: Ontology instance (knowledge base) to expose
+        auth_provider: Resolves caller-supplied bearer tokens to Principals
+            (ADR-0014) — e.g. ``TokenAuthProvider(kb.backend)``
         name: Server name advertised to MCP clients
 
     Returns:
@@ -204,7 +216,7 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
     def propose_tool(
         subject: str,
         predicate: str,
-        author: str,
+        token: str,
         value: str | None = None,
         value_type: str | None = None,
         target: str | None = None,
@@ -224,13 +236,15 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
         schema's declaration for ``predicate`` (SPEC §10.1) — it is not a
         caller-supplied argument.
 
-        When ``acting_as`` is set (delegation), policy is evaluated using the
-        delegating principal's capability and trust level (ADR-0003).
+        The acting principal is resolved from ``token`` (ADR-0014), never
+        taken as a caller-supplied ID. When ``acting_as`` is set (delegation),
+        policy is evaluated using min(capability(author), capability(acting_as))
+        (SPEC §8.4, ADR-0003).
 
         Args:
             subject: Entity ID to assert about
             predicate: Predicate name (e.g. "Person.name" or "Person.employer")
-            author: Principal ID making the assertion
+            token: Bearer token identifying the calling principal (ADR-0014)
             value: Literal value to assert (mutually exclusive with target)
             value_type: Type of value (e.g. "Text", "Integer", "Date"); required with value
             target: Target entity ID for a relation (mutually exclusive with value)
@@ -251,6 +265,11 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
                 "error": "Provide exactly one of (value and value_type) or target",
                 "code": "validation_error",
             }
+
+        try:
+            author = auth_provider.resolve(token).id
+        except AuthError as exc:
+            return {"error": str(exc), "code": "auth_error"}
 
         try:
             if has_ref:
@@ -302,7 +321,7 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
     def flag_contradiction_tool(
         assertion_id_a: str,
         assertion_id_b: str,
-        author: str,
+        token: str,
         rationale: str | None = None,
     ) -> dict[str, Any]:
         """Flag two assertions as contradictory and route them to review.
@@ -311,79 +330,45 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
         subject+predicate pair. Both assertions are marked "flagged" and
         excluded from default queries until the contradiction is resolved.
 
-        This is a propose-level action — it does NOT resolve the contradiction.
+        This is a propose-level action (requires >= propose capability) — it
+        does NOT resolve the contradiction. The acting principal is resolved
+        from ``token`` (ADR-0014), never taken as a caller-supplied ID.
 
         Args:
             assertion_id_a: First conflicting assertion ID
             assertion_id_b: Second conflicting assertion ID
-            author: Principal ID raising the flag
+            token: Bearer token identifying the calling principal (ADR-0014)
             rationale: Optional explanation of the contradiction
 
         Returns:
             Dict describing the contradiction created/extended, or "error".
         """
+        from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
 
-        principal = kb.backend.get_principal(author)
-        if principal is None:
-            return {"error": f"Principal {author!r} not found", "code": "auth_error"}
+        try:
+            author = auth_provider.resolve(token).id
+        except AuthError as exc:
+            return {"error": str(exc), "code": "auth_error"}
 
-        # Resolve both assertions (status=None: a flagged/superseded assertion
-        # must still be resolvable here, e.g. when extending an open contradiction)
-        all_assertions = kb.backend.assertions(status=None)
-        a_map = {a.id: a for a in all_assertions}
-
-        a = a_map.get(assertion_id_a)
-        b = a_map.get(assertion_id_b)
-
-        if a is None:
-            return {"error": f"Assertion {assertion_id_a!r} not found", "code": "not_found"}
-        if b is None:
-            return {"error": f"Assertion {assertion_id_b!r} not found", "code": "not_found"}
-        if a.subject != b.subject or a.predicate != b.predicate:
-            return {
-                "error": "Assertions must share the same subject and predicate to contradict",
-                "code": "validation_error",
-            }
-
-        # Find or create contradiction
-        from ontolith.govern.contradiction import Contradiction
-
-        existing = kb.backend.get_open_contradiction(
-            namespace=kb.namespace,
-            subject=a.subject,
-            predicate=a.predicate,
-        )
-
-        with kb.backend.transaction():
-            if existing is not None:
-                new_member_ids = list(
-                    dict.fromkeys(existing.member_ids + [assertion_id_a, assertion_id_b])
-                )
-                kb.backend.update_contradiction_members(existing.id, new_member_ids)
-                contradiction_id = existing.id
-            else:
-                contradiction_id = kb.id_provider.next()
-                contradiction = Contradiction(
-                    id=contradiction_id,
-                    namespace=kb.namespace,
-                    subject=a.subject,
-                    predicate=a.predicate,
-                    member_ids=[assertion_id_a, assertion_id_b],
-                    state="open",
-                    created_at=kb.clock.now(),
-                )
-                kb.backend.put_contradiction(contradiction)
-
-            for aid in [assertion_id_a, assertion_id_b]:
-                if a_map[aid].status != "flagged":
-                    kb.backend.set_assertion_status(aid, "flagged")
+        try:
+            contradiction, action = kb.flag_contradiction(
+                assertion_id_a, assertion_id_b, author, rationale=rationale
+            )
+        except AuthError as exc:
+            return {"error": str(exc), "code": "auth_error"}
+        except CapabilityError as exc:
+            return {"error": str(exc), "code": "capability_error"}
+        except NotFoundError as exc:
+            return {"error": str(exc), "code": "not_found"}
+        except ValidationError as exc:
+            return {"error": str(exc), "code": "validation_error"}
 
         return {
-            "contradiction_id": contradiction_id,
-            "subject": a.subject,
-            "predicate": a.predicate,
+            "contradiction_id": contradiction.id,
+            "subject": contradiction.subject,
+            "predicate": contradiction.predicate,
             "member_ids": [assertion_id_a, assertion_id_b],
-            "action": "extended" if existing else "created",
+            "action": action,
         }
 
     return mcp

@@ -17,7 +17,7 @@ from ontolith.core import Assertion, Clock, Entity, SystemClock
 from ontolith.core.errors import StorageError
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal
-from ontolith.identity import Principal
+from ontolith.identity import Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
 
 
@@ -66,6 +66,26 @@ class SQLiteBackend:
                 metadata TEXT NOT NULL DEFAULT '{}',
                 CHECK (kind <> 'ai' OR owner IS NOT NULL)
             )
+        """)
+
+        # Principal credential table (ADR-0014) — hashed API-key tokens.
+        # The raw token is never persisted, only its SHA-256 hash. A principal
+        # may hold multiple concurrent active credentials (rotation = issue
+        # new + revoke old, both explicit); revoked rows are kept, not deleted.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS principal_credential (
+                id TEXT PRIMARY KEY,
+                principal_id TEXT NOT NULL,
+                token_hash TEXT NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                revoked_at TEXT,
+                FOREIGN KEY(principal_id) REFERENCES principal(id)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_principal_credential_principal
+            ON principal_credential(principal_id)
         """)
 
         # Schema version table (SPEC §12.2, §6.4)
@@ -270,8 +290,6 @@ class SQLiteBackend:
         Returns:
             Principal if found, None otherwise
         """
-        import json
-
         cursor = self.conn.cursor()
         cursor.execute(
             "SELECT * FROM principal WHERE id = ?",
@@ -280,6 +298,11 @@ class SQLiteBackend:
         row = cursor.fetchone()
         if row is None:
             return None
+        return self._row_to_principal(row)
+
+    @staticmethod
+    def _row_to_principal(row: sqlite3.Row) -> Principal:
+        import json
 
         return Principal(
             id=row["id"],
@@ -291,6 +314,132 @@ class SQLiteBackend:
             created_at=datetime.fromisoformat(row["created_at"]),
             metadata=json.loads(row["metadata"]),
         )
+
+    def put_credential(self, credential: PrincipalCredential) -> None:
+        """Persist a principal credential (hashed API-key token).
+
+        Args:
+            credential: PrincipalCredential to persist (token_hash, never the
+                raw token)
+
+        Raises:
+            StorageError: If persistence fails
+        """
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO principal_credential
+                    (id, principal_id, token_hash, created_at, revoked_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    credential.id,
+                    credential.principal_id,
+                    credential.token_hash,
+                    credential.created_at.isoformat(),
+                    credential.revoked_at.isoformat() if credential.revoked_at else None,
+                ),
+            )
+            if not self._in_transaction:
+                self.conn.commit()
+        except sqlite3.IntegrityError as e:
+            raise StorageError(f"Credential conflict (id={credential.id}): {e}") from e
+        except sqlite3.Error as e:
+            raise StorageError(f"Failed to persist credential (id={credential.id}): {e}") from e
+
+    def get_principal_by_token_hash(self, token_hash: str) -> Principal | None:
+        """Resolve a principal via a credential's token hash.
+
+        Only unrevoked credentials resolve. This is the sole read path used
+        for MCP authentication — it never trusts a caller-supplied principal
+        ID directly.
+
+        Args:
+            token_hash: SHA-256 hash of the raw bearer token
+
+        Returns:
+            Principal if the hash matches an active (unrevoked) credential,
+            None otherwise
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT p.* FROM principal p
+            JOIN principal_credential c ON c.principal_id = p.id
+            WHERE c.token_hash = ? AND c.revoked_at IS NULL
+            """,
+            (token_hash,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_principal(row)
+
+    def get_credential(self, credential_id: str) -> PrincipalCredential | None:
+        """Retrieve a credential by ID (never exposes the raw token or hash to callers).
+
+        Args:
+            credential_id: Credential ID to retrieve
+
+        Returns:
+            PrincipalCredential if found, None otherwise
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM principal_credential WHERE id = ?",
+            (credential_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_credential(row)
+
+    def get_credentials_for_principal(self, principal_id: str) -> list[PrincipalCredential]:
+        """List all credentials (active and revoked) issued to a principal.
+
+        Args:
+            principal_id: Principal to list credentials for
+
+        Returns:
+            Credentials for this principal, most recently issued first
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM principal_credential WHERE principal_id = ? ORDER BY created_at DESC",
+            (principal_id,),
+        )
+        return [self._row_to_credential(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _row_to_credential(row: sqlite3.Row) -> PrincipalCredential:
+        return PrincipalCredential(
+            id=row["id"],
+            principal_id=row["principal_id"],
+            token_hash=row["token_hash"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            revoked_at=datetime.fromisoformat(row["revoked_at"]) if row["revoked_at"] else None,
+        )
+
+    def revoke_credential(self, credential_id: str, revoked_at: datetime) -> None:
+        """Mark a credential as revoked. Idempotent-safe: re-revoking is a no-op update.
+
+        Args:
+            credential_id: Credential to revoke
+            revoked_at: Timestamp of revocation
+
+        Raises:
+            StorageError: If the credential is not found
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "UPDATE principal_credential SET revoked_at = ? WHERE id = ?",
+            (revoked_at.isoformat(), credential_id),
+        )
+        if cursor.rowcount == 0:
+            raise StorageError(f"Credential not found: {credential_id}")
+        if not self._in_transaction:
+            self.conn.commit()
 
     def put_entity(self, entity: Entity) -> None:
         """Persist an entity.

@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 
 from ontolith.core import Assertion, Entity
-from ontolith.identity import Principal
+from ontolith.core.errors import StorageError
+from ontolith.identity import Principal, PrincipalCredential
 from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 from ontolith.store.sqlite import SQLiteBackend
 
@@ -487,6 +488,83 @@ class TestSQLiteBackend:
                 """,
                 ("test", "human", "oidc", 11, "2025-01-01T00:00:00Z", "{}"),
             )
+
+    def test_put_credential_and_resolve_by_token_hash(self, backend: SQLiteBackend) -> None:
+        """Credential can be persisted and the principal resolved via its token hash."""
+        credential = PrincipalCredential(
+            id="cred-1",
+            principal_id="alice@test.com",
+            token_hash="deadbeef" * 8,
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        backend.put_credential(credential)
+
+        resolved = backend.get_principal_by_token_hash("deadbeef" * 8)
+        assert resolved is not None
+        assert resolved.id == "alice@test.com"
+
+    def test_get_principal_by_unknown_token_hash_returns_none(self, backend: SQLiteBackend) -> None:
+        assert backend.get_principal_by_token_hash("nonexistent") is None
+
+    def test_revoked_credential_no_longer_resolves(self, backend: SQLiteBackend) -> None:
+        credential = PrincipalCredential(
+            id="cred-1",
+            principal_id="alice@test.com",
+            token_hash="deadbeef" * 8,
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        backend.put_credential(credential)
+        backend.revoke_credential("cred-1", datetime(2025, 1, 2, tzinfo=UTC))
+
+        assert backend.get_principal_by_token_hash("deadbeef" * 8) is None
+
+    def test_revoke_nonexistent_credential_raises(self, backend: SQLiteBackend) -> None:
+        with pytest.raises(StorageError, match="Credential not found"):
+            backend.revoke_credential("nonexistent", datetime(2025, 1, 1, tzinfo=UTC))
+
+    def test_get_credential_by_id(self, backend: SQLiteBackend) -> None:
+        credential = PrincipalCredential(
+            id="cred-1",
+            principal_id="alice@test.com",
+            token_hash="deadbeef" * 8,
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        backend.put_credential(credential)
+
+        retrieved = backend.get_credential("cred-1")
+        assert retrieved is not None
+        assert retrieved.principal_id == "alice@test.com"
+        assert retrieved.revoked_at is None
+
+    def test_get_nonexistent_credential_returns_none(self, backend: SQLiteBackend) -> None:
+        assert backend.get_credential("nonexistent") is None
+
+    def test_get_credentials_for_principal_two_active_tokens(self, backend: SQLiteBackend) -> None:
+        """A principal may hold multiple concurrent active credentials —
+        revoking one doesn't invalidate the other."""
+        backend.put_credential(
+            PrincipalCredential(
+                id="cred-1",
+                principal_id="alice@test.com",
+                token_hash="a" * 64,
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+        backend.put_credential(
+            PrincipalCredential(
+                id="cred-2",
+                principal_id="alice@test.com",
+                token_hash="b" * 64,
+                created_at=datetime(2025, 1, 2, tzinfo=UTC),
+            )
+        )
+
+        credentials = backend.get_credentials_for_principal("alice@test.com")
+        assert {c.id for c in credentials} == {"cred-1", "cred-2"}
+
+        backend.revoke_credential("cred-1", datetime(2025, 1, 3, tzinfo=UTC))
+        assert backend.get_principal_by_token_hash("a" * 64) is None
+        assert backend.get_principal_by_token_hash("b" * 64) is not None
 
     def test_put_and_get_schema(self, backend: SQLiteBackend) -> None:
         """Schema can be persisted and retrieved."""
