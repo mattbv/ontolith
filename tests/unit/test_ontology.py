@@ -9,7 +9,7 @@ import pytest
 from ontolith import Ontology
 from ontolith.core import FixedClock, SequentialIdProvider
 from ontolith.core.errors import AuthError, CapabilityError, SchemaError
-from ontolith.schema import SchemaIR
+from ontolith.schema import ConceptDef, RelationDef, SchemaIR
 
 
 @pytest.fixture
@@ -153,6 +153,106 @@ class TestOntology:
         assert contradiction is not None
         flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
         assert len(flagged) == 2
+
+    def test_propose_ref_auto_accept_creates_relation(self, kb: Ontology) -> None:
+        """propose_ref() mirrors propose() for relations (SPEC §9)."""
+        person = kb.create_entity("Person", author="alice@example.com")
+        org = kb.create_entity("Organization", author="alice@example.com")
+
+        proposal, decision = kb.propose_ref(
+            person.id, "Person.employer", org.id, "alice@example.com"
+        )
+
+        assert proposal.state == "auto_accepted"
+        active = kb.assertions(subject=person.id, predicate="Person.employer", status="active")
+        assert len(active) == 1
+        assert active[0].value_kind == "ref"
+        assert active[0].value == org.id
+        assert active[0].value_type is None
+
+    def test_propose_ref_conflicting_relations_contradict(self, kb: Ontology) -> None:
+        """Static relation predicate: conflicting targets flag a contradiction."""
+        person = kb.create_entity("Person", author="alice@example.com")
+        org1 = kb.create_entity("Organization", author="alice@example.com")
+        org2 = kb.create_entity("Organization", author="alice@example.com")
+
+        kb.propose_ref(person.id, "Person.employer", org1.id, "alice@example.com")
+        kb.propose_ref(person.id, "Person.employer", org2.id, "alice@example.com")
+
+        contradiction = kb.backend.get_open_contradiction("default", person.id, "Person.employer")
+        assert contradiction is not None
+        assert len(contradiction.member_ids) == 2
+
+    def test_propose_ref_time_varying_supersedes(self, kb: Ontology) -> None:
+        """Schema-declared time_varying relation predicate supersedes, not contradicts."""
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    relations={
+                        "employer": RelationDef(
+                            name="employer",
+                            target_concept="Organization",
+                            temporality="time_varying",
+                        ),
+                    },
+                ),
+                "Organization": ConceptDef(name="Organization"),
+            },
+        )
+        kb.apply_schema(schema, author="admin@example.com")
+
+        person = kb.create_entity("Person", author="alice@example.com")
+        org1 = kb.create_entity("Organization", author="alice@example.com")
+        org2 = kb.create_entity("Organization", author="alice@example.com")
+
+        kb.propose_ref(person.id, "Person.employer", org1.id, "alice@example.com")
+        kb.propose_ref(person.id, "Person.employer", org2.id, "alice@example.com")
+
+        contradiction = kb.backend.get_open_contradiction("default", person.id, "Person.employer")
+        assert contradiction is None
+        superseded = kb.assertions(
+            subject=person.id, predicate="Person.employer", status="superseded"
+        )
+        assert len(superseded) == 1
+
+    def test_propose_ref_ai_requires_review(self, kb: Ontology) -> None:
+        """AI-authored relation proposals require review, same as literal proposals."""
+        kb.create_principal(
+            "bot@example.com", kind="ai", owner="alice@example.com", default_capability="propose"
+        )
+        person = kb.create_entity("Person", author="alice@example.com")
+        org = kb.create_entity("Organization", author="alice@example.com")
+
+        proposal, decision = kb.propose_ref(person.id, "Person.employer", org.id, "bot@example.com")
+
+        assert proposal.state == "require_review"
+        active = kb.assertions(subject=person.id, predicate="Person.employer", status="active")
+        assert active == []
+
+    def test_accept_proposal_replays_relation(self, kb: Ontology) -> None:
+        """Full propose -> require_review -> accept round trip for a relation."""
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        kb.create_principal(
+            "bot@example.com", kind="ai", owner="alice@example.com", default_capability="propose"
+        )
+        person = kb.create_entity("Person", author="alice@example.com")
+        org = kb.create_entity("Organization", author="alice@example.com")
+
+        proposal, decision = kb.propose_ref(person.id, "Person.employer", org.id, "bot@example.com")
+        assert proposal.state == "require_review"
+
+        accepted = kb.accept_proposal(proposal.id, "carol@example.com")
+        assert accepted.state == "accepted"
+
+        active = kb.assertions(subject=person.id, predicate="Person.employer", status="active")
+        assert len(active) == 1
+        assert active[0].value_kind == "ref"
+        assert active[0].value == org.id
+        assert active[0].proposal_id == proposal.id
 
     def test_query_assertions_by_subject(self, kb: Ontology) -> None:
         """Assertions can be queried by subject."""

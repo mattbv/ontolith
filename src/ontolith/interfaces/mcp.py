@@ -204,15 +204,16 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
     def propose_tool(
         subject: str,
         predicate: str,
-        value: str,
-        value_type: str,
         author: str,
+        value: str | None = None,
+        value_type: str | None = None,
+        target: str | None = None,
         confidence: float | None = None,
         source: str | None = None,
         rationale: str | None = None,
         acting_as: str | None = None,
     ) -> dict[str, Any]:
-        """Create a proposal to assert a fact. Does NOT write directly.
+        """Create a proposal to assert a fact or relation. Does NOT write directly.
 
         The proposal is evaluated by the policy engine:
         - Trusted principals → auto_accepted (assertion written immediately)
@@ -228,10 +229,11 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
 
         Args:
             subject: Entity ID to assert about
-            predicate: Predicate name (e.g. "Person.name")
-            value: Literal value to assert
-            value_type: Type of value (e.g. "Text", "Integer", "Date")
+            predicate: Predicate name (e.g. "Person.name" or "Person.employer")
             author: Principal ID making the assertion
+            value: Literal value to assert (mutually exclusive with target)
+            value_type: Type of value (e.g. "Text", "Integer", "Date"); required with value
+            target: Target entity ID for a relation (mutually exclusive with value)
             confidence: Optional confidence score (0.0–1.0)
             source: Optional source URL or reference
             rationale: Optional explanation for the assertion
@@ -242,18 +244,40 @@ def create_mcp_server(kb: Ontology, name: str = "ontolith") -> FastMCP:
         """
         from ontolith.core.errors import AuthError, CapabilityError
 
+        has_literal = value is not None and value_type is not None
+        has_ref = target is not None
+        if has_literal == has_ref:
+            return {
+                "error": "Provide exactly one of (value and value_type) or target",
+                "code": "validation_error",
+            }
+
         try:
-            proposal, decision = kb.propose(
-                subject=subject,
-                predicate=predicate,
-                value=value,
-                value_type=value_type,
-                author=author,
-                confidence=confidence,
-                source=source,
-                rationale=rationale,
-                acting_as=acting_as,
-            )
+            if has_ref:
+                assert target is not None
+                proposal, decision = kb.propose_ref(
+                    subject=subject,
+                    predicate=predicate,
+                    target=target,
+                    author=author,
+                    confidence=confidence,
+                    source=source,
+                    rationale=rationale,
+                    acting_as=acting_as,
+                )
+            else:
+                assert value is not None and value_type is not None
+                proposal, decision = kb.propose(
+                    subject=subject,
+                    predicate=predicate,
+                    value=value,
+                    value_type=value_type,
+                    author=author,
+                    confidence=confidence,
+                    source=source,
+                    rationale=rationale,
+                    acting_as=acting_as,
+                )
         except AuthError as exc:
             return {"error": str(exc), "code": "auth_error"}
         except CapabilityError as exc:

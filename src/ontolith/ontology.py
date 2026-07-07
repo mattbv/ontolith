@@ -550,6 +550,132 @@ class Ontology:
         self.backend.put_proposal(pending)
         return pending, decision
 
+    def propose_ref(
+        self,
+        subject: str,
+        predicate: str,
+        target: str,
+        author: str,
+        *,
+        confidence: float | None = None,
+        source: str | None = None,
+        rationale: str | None = None,
+        acting_as: str | None = None,
+    ) -> tuple[Proposal, Decision]:
+        """Submit a reference (relation) assertion through the proposal/policy path (SPEC §9).
+
+        Mirrors ``propose()`` for relations — the only difference is the
+        operation kind and that ``target`` (an entity ID) replaces
+        ``value``/``value_type``. Evaluates ThresholdPolicy; auto-accepted
+        proposals are committed immediately with SPEC §10 conflict routing.
+        Conflict-routing temporality is resolved from the active schema's
+        declared temporality for ``predicate`` (SPEC §10.1), never
+        caller-supplied.
+
+        When ``acting_as`` is set the proposal is made on behalf of another
+        principal (delegation, ADR-0003). Policy is evaluated using the
+        delegating principal's capability and trust level.
+
+        Returns:
+            (Proposal, Decision) tuple
+        """
+        principal = self.backend.get_principal(author)
+        if principal is None:
+            raise AuthError(f"Principal not found: {author}")
+
+        delegating: Principal | None = None
+        if acting_as is not None and acting_as != author:
+            delegating = self.backend.get_principal(acting_as)
+            if delegating is None:
+                raise AuthError(f"Delegating principal not found: {acting_as}")
+            # Authorization: author must be owned by acting_as (ADR-0003)
+            if principal.owner != acting_as:
+                raise CapabilityError(
+                    f"Principal {author!r} is not authorized to act as {acting_as!r}"
+                )
+
+        schema = self.backend.get_schema(self.namespace)
+        temporality: Literal["static", "time_varying"] = (
+            schema.temporality_of(predicate) if schema is not None else "static"
+        )
+
+        now = self.clock.now()
+        proposal_id = self.id_provider.next()
+        proposal = Proposal(
+            id=proposal_id,
+            namespace=self.namespace,
+            author=author,
+            acting_as=acting_as,
+            state="submitted",
+            created_at=now,
+            payload={
+                "operations": [
+                    {
+                        "kind": "assert_ref",
+                        "subject": subject,
+                        "predicate": predicate,
+                        "target": target,
+                        "temporality": temporality,
+                        "confidence": confidence,
+                        "source": source,
+                        "rationale": rationale,
+                    }
+                ]
+            },
+        )
+
+        # Policy uses delegating principal when acting_as is set (ADR-0003)
+        effective_principal = delegating if delegating is not None else principal
+        decision = ThresholdPolicy().evaluate(proposal, effective_principal)
+
+        if isinstance(decision, AutoAccept):
+            assertion = Assertion(
+                id=self.id_provider.next(),
+                namespace=self.namespace,
+                subject=subject,
+                predicate=predicate,
+                value_kind="ref",
+                value=target,
+                author=author,
+                acting_as=acting_as,
+                confidence=confidence,
+                source=source,
+                rationale=rationale,
+                asserted_at=now,
+                proposal_id=proposal_id,
+            )
+            accepted = proposal.model_copy(
+                update={
+                    "state": "auto_accepted",
+                    "decided_at": now,
+                    "policy_reason": decision.reason,
+                }
+            )
+            with self.backend.transaction():
+                self.backend.put_proposal(accepted)
+                self._apply_with_conflict_routing(assertion, temporality)
+            return accepted, decision
+
+        if isinstance(decision, Reject):
+            rejected = proposal.model_copy(
+                update={
+                    "state": "rejected",
+                    "decided_at": now,
+                    "policy_reason": decision.reason,
+                }
+            )
+            self.backend.put_proposal(rejected)
+            return rejected, decision
+
+        pending = proposal.model_copy(
+            update={
+                "state": "require_review",
+                "policy_reason": getattr(decision, "reason", None),
+            }
+        )
+        self.backend.put_proposal(pending)
+        return pending, decision
+
     def retract(
         self,
         assertion_id: str,
@@ -749,6 +875,24 @@ class Ontology:
                         proposal_id=proposal_id,
                     )
                     self._apply_with_conflict_routing(assertion, op.get("temporality", "static"))
+                elif op["kind"] == "assert_ref":
+                    ref_assertion = Assertion(
+                        id=self.id_provider.next(),
+                        namespace=self.namespace,
+                        subject=op["subject"],
+                        predicate=op["predicate"],
+                        value_kind="ref",
+                        value=op["target"],
+                        author=proposal.author,
+                        confidence=op.get("confidence"),
+                        source=op.get("source"),
+                        rationale=op.get("rationale"),
+                        asserted_at=now,
+                        proposal_id=proposal_id,
+                    )
+                    self._apply_with_conflict_routing(
+                        ref_assertion, op.get("temporality", "static")
+                    )
                 elif op["kind"] == "retract":
                     self.backend.set_assertion_status(op["assertion_id"], "retracted")
                 else:

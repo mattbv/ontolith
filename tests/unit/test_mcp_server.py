@@ -295,6 +295,59 @@ class TestProposeTool:
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
         assert active == []
 
+    def test_propose_with_target_creates_relation(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        person = kb.create_entity("Person", author=HUMAN)
+        org = kb.create_entity("Organization", author=HUMAN)
+
+        mcp = create_mcp_server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.propose").fn(
+            subject=person.id,
+            predicate="Person.employer",
+            target=org.id,
+            author=HUMAN,
+        )
+
+        assert result["proposal"]["state"] == "auto_accepted"
+        active = kb.assertions(subject=person.id, predicate="Person.employer", status="active")
+        assert len(active) == 1
+        assert active[0].value_kind == "ref"
+        assert active[0].value == org.id
+
+    def test_propose_neither_value_nor_target_returns_validation_error(
+        self, tmp_path: Path
+    ) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+
+        mcp = create_mcp_server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.propose").fn(
+            subject=entity.id,
+            predicate="Person.name",
+            author=HUMAN,
+        )
+
+        assert "error" in result
+        assert result["code"] == "validation_error"
+
+    def test_propose_both_value_and_target_returns_validation_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        person = kb.create_entity("Person", author=HUMAN)
+        org = kb.create_entity("Organization", author=HUMAN)
+
+        mcp = create_mcp_server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.propose").fn(
+            subject=person.id,
+            predicate="Person.employer",
+            value="Acme",
+            value_type="Text",
+            target=org.id,
+            author=HUMAN,
+        )
+
+        assert "error" in result
+        assert result["code"] == "validation_error"
+
     def test_no_write_tool_registered(self, tmp_path: Path) -> None:
         """ADR-0008: no direct write, update, or delete tool must be registered."""
         kb = _kb(tmp_path)
