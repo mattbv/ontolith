@@ -453,7 +453,12 @@ def test_as_of_reconstruction_matches_theoretical_filter(
     query_offset=st.integers(min_value=0, max_value=15),
 )
 @settings(
-    max_examples=50, deadline=5000, suppress_health_check=[HealthCheck.function_scoped_fixture]
+    max_examples=50,
+    deadline=None,  # each example runs real governed propose/retract cycles
+    # (conflict routing + policy evaluation), not raw inserts like the
+    # sibling property test above — Windows CI SQLite I/O is measurably
+    # slower, so a fixed deadline flakes; correctness is what matters here.
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
 def test_as_of_visibility_matches_ground_truth_across_assert_retract_sequence(
     n_asserts: int,
