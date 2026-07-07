@@ -4,11 +4,15 @@ Trust levels: non-AI principals with 'propose' capability + trust_level >= 5
 are auto-accepted without requiring write capability. AI principals always
 require review regardless of trust level (ADR-0003).
 
-Delegation (acting_as): a principal (typically an AI agent) can act on behalf
-of its owner. Policy is evaluated using the owner/delegating principal's
-capability and trust level. Authorization rule: acting_as must equal the
-author's owner field (or author itself). Borrowing a third party's privileges
-is rejected with CapabilityError.
+Delegation (acting_as): a principal can act on behalf of another (typically
+an AI agent acting as its owner). Per SPEC §8.4, the effective capability is
+min(capability(author), capability(acting_as)) and effective trust_level is
+the more conservative (lower) of the two — never a wholesale substitution of
+the delegating principal's capability. AI-kind authors always require review
+regardless of delegation (ADR-0003): the author's own kind is never
+laundered away by delegating to a higher-capability owner. Authorization
+rule: acting_as must equal the author's owner field (or author itself).
+Borrowing a third party's privileges is rejected with CapabilityError.
 """
 
 from __future__ import annotations
@@ -28,6 +32,8 @@ T0 = datetime(2025, 1, 1, tzinfo=UTC)
 HUMAN_WRITE = "alice@example.com"
 HUMAN_PROPOSE_LOW = "bob@example.com"  # propose + trust_level=3 → require_review
 HUMAN_PROPOSE_HIGH = "carol@example.com"  # propose + trust_level=5 → auto_accept
+HUMAN_WRITE2 = "dave@example.com"  # write, owner=alice — for non-AI delegation vectors
+HUMAN_PROPOSE_OWNED = "erin@example.com"  # propose/trust=0, owner=alice — min() capping vector
 AI_AGENT = "scout-agent"  # owner=alice (HUMAN_WRITE)
 AI_AGENT2 = "research-bot"  # owner=carol (HUMAN_PROPOSE_HIGH)
 AI_AGENT3 = "analyst-bot"  # owner=bob (HUMAN_PROPOSE_LOW)
@@ -73,6 +79,21 @@ def _kb(tmp_path: Path) -> Ontology:
         kind="ai",
         auth_method="apikey",
         owner=HUMAN_PROPOSE_LOW,
+        default_capability="propose",
+        trust_level=0,
+    )
+    kb.create_principal(
+        HUMAN_WRITE2,
+        kind="human",
+        auth_method="oidc",
+        owner=HUMAN_WRITE,
+        default_capability="write",
+    )
+    kb.create_principal(
+        HUMAN_PROPOSE_OWNED,
+        kind="human",
+        auth_method="oidc",
+        owner=HUMAN_WRITE,
         default_capability="propose",
         trust_level=0,
     )
@@ -225,10 +246,16 @@ class TestDelegationAuthorization:
 
 
 class TestDelegationPropose:
-    """AI agent acts on behalf of its owner — policy uses the owner's capability."""
+    """Delegation uses min(capability(author), capability(acting_as)) (SPEC §8.4);
+    AI-kind authors always require review regardless of delegation (ADR-0003)."""
 
-    def test_ai_acting_as_owner_write_auto_accepted(self, tmp_path: Path) -> None:
-        """AI (owner=alice/write) acting as alice → AutoAccept via alice's capability."""
+    def test_ai_acting_as_owner_write_still_requires_review(self, tmp_path: Path) -> None:
+        """AI (owner=alice/write) acting as alice → still RequireReview.
+
+        The AI's own kind dominates and is never laundered away by delegating
+        to a write-capable owner (ADR-0003) — this was the CRITICAL governance
+        bypass: an AI could previously auto-accept by naming a trusted owner.
+        """
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         proposal, decision = kb.propose(
@@ -239,8 +266,8 @@ class TestDelegationPropose:
             AI_AGENT,
             acting_as=HUMAN_WRITE,
         )
-        assert isinstance(decision, AutoAccept)
-        assert proposal.state == "auto_accepted"
+        assert isinstance(decision, RequireReview)
+        assert proposal.state == "require_review"
 
     def test_ai_acting_as_owner_low_trust_requires_review(self, tmp_path: Path) -> None:
         """AI (owner=bob/propose/trust=3) acting as bob → RequireReview."""
@@ -257,8 +284,13 @@ class TestDelegationPropose:
         assert isinstance(decision, RequireReview)
         assert proposal.state == "require_review"
 
-    def test_ai_acting_as_owner_high_trust_auto_accepted(self, tmp_path: Path) -> None:
-        """AI (owner=carol/propose/trust=5) acting as carol → AutoAccept via trust elevation."""
+    def test_ai_acting_as_owner_high_trust_still_requires_review(self, tmp_path: Path) -> None:
+        """AI (owner=carol/propose/trust=5) acting as carol → still RequireReview.
+
+        Trust elevation belongs to the delegate, not the AI author — ADR-0003's
+        "AI proposals always require review" is checked before any
+        capability/trust math, so it can't be bypassed via a trusted owner.
+        """
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         proposal, decision = kb.propose(
@@ -268,6 +300,40 @@ class TestDelegationPropose:
             "Text",
             AI_AGENT2,
             acting_as=HUMAN_PROPOSE_HIGH,
+        )
+        assert isinstance(decision, RequireReview)
+        assert proposal.state == "require_review"
+
+    def test_low_capability_delegating_to_write_capped_by_min(self, tmp_path: Path) -> None:
+        """SPEC §8.4: effective capability is min(author, acting_as), not acting_as
+        alone. A propose-capability principal delegating to a write-capable owner
+        does NOT inherit write — it's capped at propose (and still needs trust>=5
+        to auto-accept, which this principal lacks)."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        proposal, decision = kb.propose(
+            entity.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            HUMAN_PROPOSE_OWNED,
+            acting_as=HUMAN_WRITE,
+        )
+        assert isinstance(decision, RequireReview)
+        assert proposal.state == "require_review"
+
+    def test_write_delegating_to_write_auto_accepted(self, tmp_path: Path) -> None:
+        """Both author and delegate have write capability: min(write, write) = write
+        → AutoAccept. Positive-path coverage for non-AI delegation."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        proposal, decision = kb.propose(
+            entity.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            HUMAN_WRITE2,
+            acting_as=HUMAN_WRITE,
         )
         assert isinstance(decision, AutoAccept)
         assert proposal.state == "auto_accepted"
@@ -282,12 +348,13 @@ class TestDelegationPropose:
         assert proposal.author == AI_AGENT
 
     def test_delegation_stamped_on_assertion(self, tmp_path: Path) -> None:
+        """Non-AI delegation (auto-accepted) stamps author/acting_as on the assertion."""
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
-        kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AGENT, acting_as=HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE2, acting_as=HUMAN_WRITE)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
         assert len(active) == 1
-        assert active[0].author == AI_AGENT
+        assert active[0].author == HUMAN_WRITE2
         assert active[0].acting_as == HUMAN_WRITE
 
     def test_no_acting_as_behaviour_unchanged(self, tmp_path: Path) -> None:
@@ -307,24 +374,41 @@ class TestDelegationPropose:
 class TestDelegationRetract:
     """Delegation on retract() mirrors propose() delegation semantics."""
 
-    def test_ai_retract_acting_as_owner_write_auto_accepted(self, tmp_path: Path) -> None:
+    def test_ai_retract_acting_as_owner_still_requires_review(self, tmp_path: Path) -> None:
+        """AI-initiated retraction via delegation still requires review (ADR-0003)."""
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
 
         proposal, decision = kb.retract(active[0].id, AI_AGENT, acting_as=HUMAN_WRITE)
-        assert isinstance(decision, AutoAccept)
-        assert proposal.state == "auto_accepted"
+        assert isinstance(decision, RequireReview)
+        assert proposal.state == "require_review"
         assert proposal.acting_as == HUMAN_WRITE
 
-    def test_delegation_retraction_removes_assertion(self, tmp_path: Path) -> None:
+    def test_ai_delegated_retraction_pending_assertion_still_active(self, tmp_path: Path) -> None:
+        """AI-initiated retraction stays pending — the assertion is not removed
+        until a reviewer accepts it."""
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
 
         kb.retract(active[0].id, AI_AGENT, acting_as=HUMAN_WRITE)
+        still_active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        assert len(still_active) == 1
+
+    def test_write_delegation_retraction_auto_accepted_removes_assertion(
+        self, tmp_path: Path
+    ) -> None:
+        """Non-AI delegation: min(write, write) = write → AutoAccept, retraction applied."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE)
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        proposal, decision = kb.retract(active[0].id, HUMAN_WRITE2, acting_as=HUMAN_WRITE)
+        assert isinstance(decision, AutoAccept)
         assert kb.assertions(subject=entity.id, predicate="Person.name", status="active") == []
 
     def test_unknown_delegating_principal_on_retract_raises(self, tmp_path: Path) -> None:

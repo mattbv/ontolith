@@ -28,7 +28,7 @@ from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, rout
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.policy import Decision, Reject
 from ontolith.govern.proposal import Proposal
-from ontolith.identity import Principal
+from ontolith.identity import Principal, min_capability
 from ontolith.query import QueryBuilder
 from ontolith.schema import SchemaIR
 from ontolith.store.base import StorageBackend
@@ -245,9 +245,13 @@ class Ontology:
                     f"Principal {author!r} is not authorized to act as {acting_as!r}"
                 )
 
-        effective = delegating if delegating is not None else principal
-        if effective.default_capability not in ("write", "admin"):
-            raise CapabilityError(f"Principal {effective.id} lacks write capability")
+        # SPEC §8.4: effective capability is min(author, acting_as) when
+        # delegating, not a wholesale substitution.
+        capability: str = principal.default_capability
+        if delegating is not None:
+            capability = min_capability(capability, delegating.default_capability)
+        if capability not in ("write", "admin"):
+            raise CapabilityError(f"Principal {author!r} lacks write capability")
 
         return principal, delegating
 
@@ -497,9 +501,9 @@ class Ontology:
             },
         )
 
-        # Policy uses delegating principal when acting_as is set (ADR-0003)
-        effective_principal = delegating if delegating is not None else principal
-        decision = ThresholdPolicy().evaluate(proposal, effective_principal)
+        # SPEC §8.4: effective capability is min(author, acting_as) when
+        # delegating, not a wholesale substitution (ADR-0003).
+        decision = ThresholdPolicy().evaluate(proposal, principal, acting_as=delegating)
 
         if isinstance(decision, AutoAccept):
             assertion = Assertion(
@@ -624,9 +628,9 @@ class Ontology:
             },
         )
 
-        # Policy uses delegating principal when acting_as is set (ADR-0003)
-        effective_principal = delegating if delegating is not None else principal
-        decision = ThresholdPolicy().evaluate(proposal, effective_principal)
+        # SPEC §8.4: effective capability is min(author, acting_as) when
+        # delegating, not a wholesale substitution (ADR-0003).
+        decision = ThresholdPolicy().evaluate(proposal, principal, acting_as=delegating)
 
         if isinstance(decision, AutoAccept):
             assertion = Assertion(
@@ -717,8 +721,9 @@ class Ontology:
             payload={"operations": [{"kind": "retract", "assertion_id": assertion_id}]},
         )
 
-        effective_principal = delegating if delegating is not None else principal
-        decision = ThresholdPolicy().evaluate(proposal, effective_principal)
+        # SPEC §8.4: effective capability is min(author, acting_as) when
+        # delegating, not a wholesale substitution (ADR-0003).
+        decision = ThresholdPolicy().evaluate(proposal, principal, acting_as=delegating)
 
         if isinstance(decision, AutoAccept):
             accepted = proposal.model_copy(

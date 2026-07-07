@@ -47,4 +47,21 @@ class Principal(BaseModel):
     model_config = ConfigDict(frozen=True)  # Immutable
 
 
-__all__ = ["Principal"]
+_CAPABILITY_ORDER: dict[str, int] = {
+    "read": 0,
+    "propose": 1,
+    "write": 2,
+    "review": 3,
+    "admin": 4,
+}
+
+
+def min_capability(a: str, b: str) -> str:
+    """Return the lower of two capability levels (SPEC §8.3 ordering).
+
+    Ordering: read < propose < write < review < admin.
+    """
+    return a if _CAPABILITY_ORDER[a] <= _CAPABILITY_ORDER[b] else b
+
+
+__all__ = ["Principal", "min_capability"]
