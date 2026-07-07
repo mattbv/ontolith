@@ -40,7 +40,10 @@ class AsOfView:
     Reconstructs what was known and true at time `t`:
         valid_from <= t < (valid_to or ∞)  AND  asserted_at <= t
 
-    Status is NOT used as a filter — the temporal dimensions determine visibility.
+    Status is not used as a positive filter — the temporal dimensions
+    determine visibility — but 'flagged' assertions (disputed, not
+    confirmed-valid) are excluded by default, same as default (non-as_of)
+    queries. Pass ``include_flagged=True`` for explicit audit/history views.
     """
 
     def __init__(
@@ -57,6 +60,8 @@ class AsOfView:
         self,
         subject: str | None = None,
         predicate: str | None = None,
+        *,
+        include_flagged: bool = False,
     ) -> list[Assertion]:
         """Assertions visible at the as_of timestamp."""
         return self._backend.assertions(
@@ -64,6 +69,7 @@ class AsOfView:
             predicate=predicate,
             status=None,
             as_of_time=self._as_of,
+            include_flagged=include_flagged,
         )
 
     def query(self, concept: str) -> QueryBuilder:
@@ -735,7 +741,9 @@ class Ontology:
             )
             with self.backend.transaction():
                 self.backend.put_proposal(accepted)
-                self.backend.set_assertion_status(assertion_id, "retracted")
+                self.backend.set_assertion_status(
+                    assertion_id, "retracted", valid_to=now.isoformat()
+                )
             return accepted, decision
 
         if isinstance(decision, Reject):
@@ -899,7 +907,9 @@ class Ontology:
                         ref_assertion, op.get("temporality", "static")
                     )
                 elif op["kind"] == "retract":
-                    self.backend.set_assertion_status(op["assertion_id"], "retracted")
+                    self.backend.set_assertion_status(
+                        op["assertion_id"], "retracted", valid_to=now.isoformat()
+                    )
                 else:
                     raise ValidationError(
                         f"Unknown operation kind in proposal payload: {op['kind']}"
@@ -996,7 +1006,9 @@ class Ontology:
         with self.backend.transaction():
             for member_id in contradiction.member_ids:
                 if member_id != winner_assertion_id:
-                    self.backend.set_assertion_status(member_id, "retracted")
+                    self.backend.set_assertion_status(
+                        member_id, "retracted", valid_to=now.isoformat()
+                    )
             self.backend.set_assertion_status(winner_assertion_id, "active")
             self.backend.resolve_contradiction(contradiction_id, resolver, now)
 

@@ -566,6 +566,7 @@ class SQLiteBackend:
         predicate: str | None = None,
         status: str | None = "active",
         as_of_time: datetime | None = None,
+        include_flagged: bool = False,
     ) -> list[Assertion]:
         """Query assertions with optional filters.
 
@@ -575,6 +576,10 @@ class SQLiteBackend:
             status: Filter by current status (ignored when as_of_time is set)
             as_of_time: If set, applies bitemporal filter:
                 asserted_at <= t AND valid_from <= t AND (valid_to IS NULL OR valid_to > t)
+            include_flagged: When as_of_time is set, whether to include
+                'flagged' assertions (excluded by default — a flagged
+                assertion is disputed, not confirmed-valid; pass True for
+                explicit audit/history views)
 
         Returns:
             List of matching assertions
@@ -600,6 +605,8 @@ class SQLiteBackend:
             params.append(t_iso)
             query += " AND (valid_to IS NULL OR valid_to > ?)"
             params.append(t_iso)
+            if not include_flagged:
+                query += " AND status != 'flagged'"
         elif status is not None:
             query += " AND status = ?"
             params.append(status)
@@ -1026,6 +1033,7 @@ class SQLiteBackend:
         concept: str,
         predicate_filters: dict[str, str],
         as_of_time: datetime | None = None,
+        include_flagged: bool = False,
     ) -> list[Entity]:
         """Query entities matching all predicate=value filters in one SQL query.
 
@@ -1037,6 +1045,9 @@ class SQLiteBackend:
             concept: Concept to filter by
             predicate_filters: Dict of full_predicate → literal_value (AND semantics)
             as_of_time: If set, applies bitemporal filter on assertions and entity creation
+            include_flagged: When as_of_time is set, whether to include
+                'flagged' assertions in the predicate match (excluded by
+                default — see assertions())
 
         Returns:
             List of entities where all filters match at the given time
@@ -1048,6 +1059,7 @@ class SQLiteBackend:
             t_iso = as_of_time.isoformat()
             query += " AND created_at <= ?"
             params.append(t_iso)
+            flagged_clause = "" if include_flagged else " AND status != 'flagged'"
             for predicate, value in predicate_filters.items():
                 query += (
                     " AND id IN ("
@@ -1056,6 +1068,7 @@ class SQLiteBackend:
                     " AND asserted_at <= ?"
                     " AND (valid_from IS NULL OR valid_from <= ?)"
                     " AND (valid_to IS NULL OR valid_to > ?)"
+                    f"{flagged_clause}"
                     ")"
                 )
                 params.extend([predicate, value, t_iso, t_iso, t_iso])

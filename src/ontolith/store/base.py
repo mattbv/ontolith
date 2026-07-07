@@ -175,6 +175,7 @@ class StorageBackend(Protocol):
         predicate: str | None = None,
         status: str | None = None,
         as_of_time: datetime | None = None,
+        include_flagged: bool = False,
     ) -> list[Assertion]:
         """Query assertions with optional filters.
 
@@ -184,6 +185,8 @@ class StorageBackend(Protocol):
             status: Filter by current status (ignored when as_of_time is set)
             as_of_time: If set, applies bitemporal filter:
                 valid_from <= t < (valid_to or ∞) AND asserted_at <= t
+            include_flagged: When as_of_time is set, whether to include
+                'flagged' assertions (excluded by default)
 
         Returns:
             List of matching assertions
@@ -261,6 +264,7 @@ class StorageBackend(Protocol):
         concept: str,
         predicate_filters: dict[str, str],
         as_of_time: datetime | None = None,
+        include_flagged: bool = False,
     ) -> list[Entity]:
         """Query entities matching all predicate=value filters in one SQL query.
 
@@ -272,6 +276,8 @@ class StorageBackend(Protocol):
             concept: Concept to filter by
             predicate_filters: Dict of full_predicate → literal_value
             as_of_time: If set, applies bitemporal filter on assertions and entity creation
+            include_flagged: When as_of_time is set, whether to include
+                'flagged' assertions in the predicate match (excluded by default)
 
         Returns:
             List of entities where all filters match at the given time

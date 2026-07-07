@@ -136,7 +136,9 @@ class TestAsOfBasics:
         assert len(kb.as_of(T2).assertions(subject=entity.id)) == 1
 
     def test_no_status_filter_applied(self, tmp_path: Path) -> None:
-        """as_of() does not filter by current status — temporal dims decide visibility."""
+        """as_of() does not filter non-flagged statuses — temporal dims decide
+        visibility. ('flagged' is the one exception — see TestAsOfRetractionAndFlagging.)
+        """
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=AUTHOR)
         # Insert a 'superseded' assertion that was valid at T0
@@ -205,6 +207,96 @@ class TestAsOfSupersession:
         visible = kb.as_of(T1).assertions(subject=eid, predicate="Person.name")
         assert len(visible) == 1
         assert visible[0].value == "Beta Inc"
+
+
+# ===========================================================================
+# Retraction closes valid_to; flagged excluded by default
+# ===========================================================================
+
+
+class TestAsOfRetractionAndFlagging:
+    """Retraction closes valid_to (SPEC §5); flagged assertions are excluded
+    from as_of by default, same as default (non-as_of) queries (SPEC §10.3).
+    """
+
+    def test_retract_visible_as_of_before_retraction(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        before_retraction = clock.now()
+        clock.advance(days=1)
+        kb.retract(active[0].id, AUTHOR)
+
+        visible = kb.as_of(before_retraction).assertions(subject=entity.id)
+        assert len(visible) == 1
+        assert visible[0].id == active[0].id
+
+    def test_retract_not_visible_as_of_after_retraction(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)
+        kb.retract(active[0].id, AUTHOR)
+        after_retraction = clock.now()
+        clock.advance(days=1)
+
+        visible = kb.as_of(after_retraction).assertions(subject=entity.id, predicate="Person.name")
+        assert visible == []
+
+    def test_flagged_excluded_from_as_of_by_default(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)  # -> contradiction
+
+        now = kb.clock.now()
+        visible = kb.as_of(now).assertions(subject=entity.id, predicate="Person.name")
+        assert visible == []
+
+    def test_flagged_included_with_include_flagged_true(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)
+
+        now = kb.clock.now()
+        visible = kb.as_of(now).assertions(
+            subject=entity.id, predicate="Person.name", include_flagged=True
+        )
+        assert len(visible) == 2
+        assert {a.value for a in visible} == {"Ada", "Ava"}
+
+    def test_contradiction_resolution_closes_losers_valid_to(self, tmp_path: Path) -> None:
+        """A retracted (losing) contradiction member's window closes at
+        resolution time; as_of() after resolution must not show it."""
+        kb = _kb(tmp_path)
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        contradiction = kb.backend.get_open_contradiction("default", entity.id, "Person.name")
+        assert contradiction is not None
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)
+        winner = flagged[0]
+        kb.resolve_contradiction(contradiction.id, winner.id, "carol@example.com")
+        after_resolution = clock.now()
+
+        visible = kb.as_of(after_resolution).assertions(
+            subject=entity.id, predicate="Person.name", include_flagged=True
+        )
+        assert {a.id for a in visible} == {winner.id}
 
 
 # ===========================================================================
@@ -353,3 +445,64 @@ def test_as_of_reconstruction_matches_theoretical_filter(
 
         assert actual_ids == expected_ids
         kb.close()  # release SQLite file lock before TemporaryDirectory cleanup (Windows)
+
+
+@given(
+    n_asserts=st.integers(min_value=1, max_value=5),
+    retract_after=st.lists(st.booleans(), min_size=1, max_size=5),
+    query_offset=st.integers(min_value=0, max_value=15),
+)
+@settings(
+    max_examples=50, deadline=5000, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
+def test_as_of_visibility_matches_ground_truth_across_assert_retract_sequence(
+    n_asserts: int,
+    retract_after: list[bool],
+    query_offset: int,
+) -> None:
+    """Property: for any sequence of static-predicate assertions (distinct
+    values, so every 2nd+ triggers a contradiction) with optional retraction
+    after each, as_of(t) visibility exactly matches the bitemporal formula
+    applied to the assertions' *actual persisted* temporal fields/status —
+    i.e. retraction must close valid_to, and flagged must be excluded unless
+    include_flagged=True. Ground truth is the non-as_of status=None query, a
+    codepath this fix does not touch.
+    """
+    with tempfile.TemporaryDirectory() as tmpdir:
+        clock = FixedClock(T0)
+        ids = FixedIdProvider([f"id-{i}" for i in range(n_asserts * 3 + 10)])
+        kb = Ontology.connect(Path(tmpdir) / "prop2.db", clock=clock, id_provider=ids)
+        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+        entity = kb.create_entity("Person", author=AUTHOR)
+
+        for i in range(n_asserts):
+            a = kb.assert_literal(entity.id, "Person.name", f"value-{i}", "Text", AUTHOR)
+            clock.advance(days=1)
+            if i < len(retract_after) and retract_after[i] and a.status == "active":
+                kb.retract(a.id, AUTHOR)
+                clock.advance(days=1)
+
+        query_t = T0 + timedelta(days=query_offset)
+        ground_truth = kb.backend.assertions(
+            subject=entity.id, predicate="Person.name", status=None
+        )
+
+        INF = datetime(9999, 12, 31, tzinfo=UTC)
+
+        def is_visible(a: Assertion, include_flagged: bool) -> bool:
+            vf = a.valid_from if a.valid_from is not None else datetime(1970, 1, 1, tzinfo=UTC)
+            vt = a.valid_to if a.valid_to is not None else INF
+            temporally_visible = vf <= query_t < vt and a.asserted_at <= query_t
+            return temporally_visible and (include_flagged or a.status != "flagged")
+
+        for include_flagged in (False, True):
+            expected_ids = {a.id for a in ground_truth if is_visible(a, include_flagged)}
+            actual_ids = {
+                a.id
+                for a in kb.as_of(query_t).assertions(
+                    subject=entity.id, predicate="Person.name", include_flagged=include_flagged
+                )
+            }
+            assert actual_ids == expected_ids
+
+        kb.close()
