@@ -119,7 +119,12 @@ def assert_literal(
         typer.Option("--source", help="Source of the information."),
     ] = None,
 ) -> None:
-    """Make a literal assertion about an entity."""
+    """Make a literal assertion about an entity — a direct write (SPEC §9.3).
+
+    Requires `write` (or `admin`) capability; bypasses the proposal queue but
+    still passes through SPEC §10 conflict routing. For the governed
+    propose → review → accept path, use the SDK's `Ontology.propose()`.
+    """
     kb = _kb()
     try:
         a = kb.assert_literal(

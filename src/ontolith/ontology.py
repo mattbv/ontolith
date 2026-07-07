@@ -209,6 +209,52 @@ class Ontology:
         self.backend.put_entity(entity)
         return entity
 
+    def _check_direct_write_capability(
+        self, author: str, acting_as: str | None
+    ) -> tuple[Principal, Principal | None]:
+        """Shared auth/capability gate for assert_literal/assert_ref (SPEC §9.3).
+
+        A principal with `write` (or `admin`) capability MAY bypass proposals,
+        but direct writes still pass through conflict routing (§10) and
+        provenance is still recorded. AI-kind principals are never permitted
+        this path, even if misconfigured with elevated capability — AI
+        proposals always require review (ADR-0003); direct writes skip review
+        entirely.
+
+        Returns:
+            (author principal, delegating principal or None)
+
+        Raises:
+            AuthError: author or acting_as is not a known principal
+            CapabilityError: author is AI-kind, delegation is unauthorized, or
+                effective capability is below `write`
+        """
+        principal = self.backend.get_principal(author)
+        if principal is None:
+            raise AuthError(f"Principal not found: {author}")
+        if principal.kind == "ai":
+            raise CapabilityError(f"AI principal {author!r} cannot make direct writes")
+
+        delegating: Principal | None = None
+        if acting_as is not None and acting_as != author:
+            delegating = self.backend.get_principal(acting_as)
+            if delegating is None:
+                raise AuthError(f"Delegating principal not found: {acting_as}")
+            if principal.owner != acting_as:
+                raise CapabilityError(
+                    f"Principal {author!r} is not authorized to act as {acting_as!r}"
+                )
+
+        effective = delegating if delegating is not None else principal
+        if effective.default_capability not in ("write", "admin"):
+            raise CapabilityError(f"Principal {effective.id} lacks write capability")
+
+        return principal, delegating
+
+    def _resolve_temporality(self, predicate: str) -> Literal["static", "time_varying"]:
+        schema = self.backend.get_schema(self.namespace)
+        return schema.temporality_of(predicate) if schema is not None else "static"
+
     def assert_literal(
         self,
         subject: str,
@@ -220,8 +266,12 @@ class Ontology:
         confidence: float | None = None,
         source: str | None = None,
         rationale: str | None = None,
+        acting_as: str | None = None,
     ) -> Assertion:
-        """Make a literal assertion about an entity.
+        """Make a literal assertion about an entity, bypassing the proposal queue.
+
+        SPEC §9.3: requires `write` capability (or `admin`); still passes
+        through SPEC §10 conflict routing and records full provenance.
 
         Args:
             subject: Entity ID
@@ -232,10 +282,14 @@ class Ontology:
             confidence: Optional confidence (0.0-1.0)
             source: Optional source of information
             rationale: Optional why this assertion was made
+            acting_as: Optional principal ID being acted on behalf of (delegation)
 
         Returns:
-            Created assertion
+            Assertion as persisted (status/supersedes reflect conflict routing)
         """
+        self._check_direct_write_capability(author, acting_as)
+        temporality = self._resolve_temporality(predicate)
+
         assertion = Assertion(
             id=self.id_provider.next(),
             namespace=self.namespace,
@@ -245,14 +299,15 @@ class Ontology:
             value_type=value_type,
             value=value,
             author=author,
+            acting_as=acting_as,
             confidence=confidence,
             source=source,
             rationale=rationale,
             asserted_at=self.clock.now(),
         )
 
-        self.backend.put_assertion(assertion)
-        return assertion
+        with self.backend.transaction():
+            return self._apply_with_conflict_routing(assertion, temporality)
 
     def assert_ref(
         self,
@@ -263,8 +318,13 @@ class Ontology:
         *,
         confidence: float | None = None,
         source: str | None = None,
+        acting_as: str | None = None,
     ) -> Assertion:
-        """Make a reference assertion (relation) between entities.
+        """Make a reference assertion (relation) between entities, bypassing the
+        proposal queue.
+
+        SPEC §9.3: requires `write` capability (or `admin`); still passes
+        through SPEC §10 conflict routing and records full provenance.
 
         Args:
             subject: Source entity ID
@@ -273,10 +333,14 @@ class Ontology:
             author: Principal ID making this assertion
             confidence: Optional confidence (0.0-1.0)
             source: Optional source of information
+            acting_as: Optional principal ID being acted on behalf of (delegation)
 
         Returns:
-            Created assertion
+            Assertion as persisted (status/supersedes reflect conflict routing)
         """
+        self._check_direct_write_capability(author, acting_as)
+        temporality = self._resolve_temporality(predicate)
+
         assertion = Assertion(
             id=self.id_provider.next(),
             namespace=self.namespace,
@@ -285,13 +349,14 @@ class Ontology:
             value_kind="ref",
             value=target,
             author=author,
+            acting_as=acting_as,
             confidence=confidence,
             source=source,
             asserted_at=self.clock.now(),
         )
 
-        self.backend.put_assertion(assertion)
-        return assertion
+        with self.backend.transaction():
+            return self._apply_with_conflict_routing(assertion, temporality)
 
     def get_entity(self, entity_id: str) -> Entity | None:
         """Retrieve an entity by ID.
@@ -566,8 +631,12 @@ class Ontology:
         self,
         assertion: Assertion,
         temporality: Literal["static", "time_varying"],
-    ) -> None:
-        """Apply an assertion with SPEC §10 conflict routing. Must run inside a transaction."""
+    ) -> Assertion:
+        """Apply an assertion with SPEC §10 conflict routing. Must run inside a transaction.
+
+        Returns the assertion as actually persisted (its ``status``/``supersedes``
+        may differ from the input, e.g. when routing flags or supersedes it).
+        """
         open_contradiction = self.backend.get_open_contradiction(
             self.namespace, assertion.subject, assertion.predicate
         )
@@ -603,6 +672,7 @@ class Ontology:
             supersedes_id = result.targets[0] if result.targets else None
             final = assertion.model_copy(update={"supersedes": supersedes_id})
             self.backend.put_assertion(final)
+            return final
 
         elif isinstance(result, Contradict):
             for mid in result.member_ids:
@@ -624,9 +694,11 @@ class Ontology:
                     created_at=assertion.asserted_at,
                 )
                 self.backend.put_contradiction(contradiction)
+            return flagged
 
         else:
             self.backend.put_assertion(assertion)
+            return assertion
 
     def accept_proposal(self, proposal_id: str, reviewer: str) -> Proposal:
         """Accept a pending proposal, replaying its operations (SPEC §9).

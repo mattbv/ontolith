@@ -28,7 +28,7 @@ def test_basic_assertion_create_and_retrieve() -> None:
         kb = Ontology.connect(db_path, clock=clock, id_provider=ids)
 
         # Create principal
-        alice = kb.create_principal("alice@test.com", kind="human")
+        alice = kb.create_principal("alice@test.com", kind="human", default_capability="write")
         assert alice.id == "alice@test.com"
 
         # Create entity
@@ -86,7 +86,7 @@ def test_assertion_append_only_invariant() -> None:
 
     try:
         kb = Ontology.connect(db_path, clock=clock, id_provider=ids)
-        alice = kb.create_principal("alice@test.com", kind="human")
+        alice = kb.create_principal("alice@test.com", kind="human", default_capability="write")
         entity = kb.create_entity(concept="Person", author=alice.id)
 
         # Create assertion
