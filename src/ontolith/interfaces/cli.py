@@ -76,6 +76,67 @@ def principal_create(
         kb.close()
 
 
+@principal_app.command("issue-token")
+def principal_issue_token(
+    principal_id: Annotated[str, typer.Argument(help="Principal ID to issue a token for.")],
+) -> None:
+    """Issue a new API-key token for a principal (ADR-0014).
+
+    The raw token is printed ONCE — it is not stored anywhere and cannot be
+    recovered. Save it immediately; use the printed credential ID (not the
+    token) to revoke it later via `principal revoke-token`.
+    """
+    kb = _kb()
+    try:
+        token = kb.issue_token(principal_id)
+        credential_id = kb.list_tokens(principal_id)[0].id
+        typer.echo(f"Token for {principal_id}: {token}")
+        typer.echo(f"Credential ID (for revocation): {credential_id}")
+        typer.echo("Store this token now — it will not be shown again.")
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
+@principal_app.command("revoke-token")
+def principal_revoke_token(
+    credential_id: Annotated[str, typer.Argument(help="Credential ID to revoke.")],
+) -> None:
+    """Revoke a previously issued API-key token by its credential ID."""
+    kb = _kb()
+    try:
+        kb.revoke_token(credential_id)
+        typer.echo(f"Revoked credential: {credential_id}")
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
+@principal_app.command("list-tokens")
+def principal_list_tokens(
+    principal_id: Annotated[str, typer.Argument(help="Principal ID to list credentials for.")],
+) -> None:
+    """List credentials issued to a principal. Never shows the raw token or its hash."""
+    kb = _kb()
+    try:
+        credentials = kb.list_tokens(principal_id)
+        if not credentials:
+            typer.echo(f"No credentials issued for {principal_id}.")
+            return
+        for c in credentials:
+            status = f"revoked at {c.revoked_at.isoformat()}" if c.revoked_at else "active"
+            typer.echo(f"{c.id}  issued={c.created_at.isoformat()}  {status}")
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
 # ─── entity ───────────────────────────────────────────────────────────────────
 
 

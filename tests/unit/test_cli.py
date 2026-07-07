@@ -76,6 +76,80 @@ class TestPrincipalCreate:
         assert "capability=write" in result.output
 
 
+class TestPrincipalTokens:
+    def test_issue_token_prints_token_and_credential_id(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.close()
+
+        result = runner.invoke(
+            app, ["--db", str(temp_db), "principal", "issue-token", "alice@example.com"]
+        )
+        assert result.exit_code == 0
+        assert "Token for alice@example.com:" in result.output
+        assert "Credential ID" in result.output
+        assert "will not be shown again" in result.output
+
+    def test_issue_token_unknown_principal_exits_nonzero(self, temp_db: Path) -> None:
+        result = runner.invoke(
+            app, ["--db", str(temp_db), "principal", "issue-token", "nobody@example.com"]
+        )
+        assert result.exit_code == 1
+
+    def test_revoke_token_then_it_no_longer_resolves(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        raw_token = kb.issue_token("alice@example.com")
+        credential_id = kb.list_tokens("alice@example.com")[0].id
+        kb.close()
+
+        result = runner.invoke(
+            app, ["--db", str(temp_db), "principal", "revoke-token", credential_id]
+        )
+        assert result.exit_code == 0
+        assert credential_id in result.output
+
+        from ontolith.core.errors import AuthError
+        from ontolith.identity.token_auth import TokenAuthProvider
+
+        kb2 = Ontology.connect(temp_db)
+        with pytest.raises(AuthError):
+            TokenAuthProvider(kb2.backend).resolve(raw_token)
+        kb2.close()
+
+    def test_revoke_token_unknown_credential_exits_nonzero(self, temp_db: Path) -> None:
+        result = runner.invoke(
+            app, ["--db", str(temp_db), "principal", "revoke-token", "nonexistent"]
+        )
+        assert result.exit_code == 1
+
+    def test_list_tokens_shows_issued_credentials_not_raw_token(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        raw_token = kb.issue_token("alice@example.com")
+        credential_id = kb.list_tokens("alice@example.com")[0].id
+        kb.close()
+
+        result = runner.invoke(
+            app, ["--db", str(temp_db), "principal", "list-tokens", "alice@example.com"]
+        )
+        assert result.exit_code == 0
+        assert credential_id in result.output
+        assert "active" in result.output
+        assert raw_token not in result.output
+
+    def test_list_tokens_no_credentials_message(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.close()
+
+        result = runner.invoke(
+            app, ["--db", str(temp_db), "principal", "list-tokens", "alice@example.com"]
+        )
+        assert result.exit_code == 0
+        assert "No credentials issued" in result.output
+
+
 class TestEntityCreate:
     def test_creates_entity(self, temp_db: Path) -> None:
         runner.invoke(

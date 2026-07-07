@@ -28,7 +28,7 @@ from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, rout
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.policy import Decision, Reject
 from ontolith.govern.proposal import Proposal
-from ontolith.identity import Principal, min_capability
+from ontolith.identity import Principal, PrincipalCredential, min_capability
 from ontolith.query import QueryBuilder
 from ontolith.schema import SchemaIR
 from ontolith.store.base import StorageBackend
@@ -1004,6 +1004,94 @@ class Ontology:
         assert resolved is not None
         return resolved
 
+    def flag_contradiction(
+        self,
+        assertion_id_a: str,
+        assertion_id_b: str,
+        author: str,
+        *,
+        rationale: str | None = None,
+    ) -> tuple[Contradiction, str]:
+        """Flag two assertions as contradictory, opening or extending a contradiction.
+
+        Propose-level action (ADR-0008): author must hold >= propose
+        capability. Both assertions are marked "flagged" and excluded from
+        default queries until the contradiction is resolved. This does NOT
+        resolve the contradiction — see resolve_contradiction().
+
+        Args:
+            assertion_id_a: First conflicting assertion ID
+            assertion_id_b: Second conflicting assertion ID
+            author: Principal ID raising the flag
+            rationale: Optional explanation of the contradiction
+
+        Returns:
+            (Contradiction, action) where action is "created" or "extended"
+
+        Raises:
+            AuthError: author is not a known principal
+            CapabilityError: author's capability is 'read'
+            NotFoundError: either assertion id does not exist
+            ValidationError: assertions do not share subject and predicate
+        """
+        principal = self.backend.get_principal(author)
+        if principal is None:
+            raise AuthError(f"Principal not found: {author}")
+        if principal.default_capability == "read":
+            raise CapabilityError(f"Principal {author!r} lacks propose capability")
+
+        # Resolve both assertions (status=None: a flagged/superseded assertion
+        # must still be resolvable here, e.g. when extending an open contradiction)
+        all_assertions = self.backend.assertions(status=None)
+        a_map = {a.id: a for a in all_assertions}
+
+        a = a_map.get(assertion_id_a)
+        b = a_map.get(assertion_id_b)
+        if a is None:
+            raise NotFoundError(f"Assertion not found: {assertion_id_a}")
+        if b is None:
+            raise NotFoundError(f"Assertion not found: {assertion_id_b}")
+        if a.subject != b.subject or a.predicate != b.predicate:
+            raise ValidationError(
+                "Assertions must share the same subject and predicate to contradict"
+            )
+
+        existing = self.backend.get_open_contradiction(
+            namespace=self.namespace,
+            subject=a.subject,
+            predicate=a.predicate,
+        )
+
+        with self.backend.transaction():
+            if existing is not None:
+                merged = list(dict.fromkeys(existing.member_ids + [assertion_id_a, assertion_id_b]))
+                self.backend.update_contradiction_members(existing.id, merged)
+                contradiction_id = existing.id
+                action = "extended"
+            else:
+                contradiction_id = self.id_provider.next()
+                self.backend.put_contradiction(
+                    Contradiction(
+                        id=contradiction_id,
+                        namespace=self.namespace,
+                        subject=a.subject,
+                        predicate=a.predicate,
+                        member_ids=[assertion_id_a, assertion_id_b],
+                        state="open",
+                        created_at=self.clock.now(),
+                        metadata={"rationale": rationale} if rationale else {},
+                    )
+                )
+                action = "created"
+
+            for aid in (assertion_id_a, assertion_id_b):
+                if a_map[aid].status != "flagged":
+                    self.backend.set_assertion_status(aid, "flagged")
+
+        result = self.backend.get_contradiction(contradiction_id)
+        assert result is not None
+        return result, action
+
     def apply_schema(self, schema: SchemaIR, author: str) -> SchemaIR:
         """Persist a new schema version, capability-checked (SPEC §6).
 
@@ -1043,6 +1131,77 @@ class Ontology:
 
         self.backend.put_schema(schema)
         return schema
+
+    def issue_token(self, principal_id: str) -> str:
+        """Issue a new API-key token for a principal (ADR-0014).
+
+        Returns the raw secret ONCE — only its SHA-256 hash is persisted, and
+        the raw value cannot be recovered afterward. Callers must save it
+        immediately.
+
+        Token generation uses ``secrets.token_urlsafe`` directly rather than
+        the injected ``IdProvider``: this is a deliberate, documented
+        exception to the "no non-determinism in domain logic" rule —
+        cryptographic unpredictability is the entire point of a secret token,
+        unlike ULIDs/timestamps, which are banned from domain logic for
+        *reproducibility* reasons that don't apply here. The credential row's
+        own id/created_at still go through id_provider/clock for that reason.
+
+        Args:
+            principal_id: Principal to issue a token for
+
+        Returns:
+            The raw token (not persisted anywhere — save it now)
+
+        Raises:
+            AuthError: principal_id does not name an existing principal
+        """
+        import secrets
+
+        from ontolith.identity.token_auth import hash_token
+
+        principal = self.backend.get_principal(principal_id)
+        if principal is None:
+            raise AuthError(f"Principal not found: {principal_id}")
+
+        raw_token = secrets.token_urlsafe(32)
+        credential = PrincipalCredential(
+            id=self.id_provider.next(),
+            principal_id=principal_id,
+            token_hash=hash_token(raw_token),
+            created_at=self.clock.now(),
+        )
+        self.backend.put_credential(credential)
+        return raw_token
+
+    def revoke_token(self, credential_id: str) -> None:
+        """Revoke a previously issued token by its credential ID (ADR-0014).
+
+        Args:
+            credential_id: Credential to revoke (returned alongside the raw
+                token by a token-issuance CLI/tool, not the token itself)
+
+        Raises:
+            NotFoundError: No credential with that ID exists
+        """
+        credential = self.backend.get_credential(credential_id)
+        if credential is None:
+            raise NotFoundError(f"Token credential not found: {credential_id}")
+        self.backend.revoke_credential(credential_id, self.clock.now())
+
+    def list_tokens(self, principal_id: str) -> list[PrincipalCredential]:
+        """List all credentials (active and revoked) issued to a principal.
+
+        Never returns the raw token or its hash — only id/created_at/revoked_at,
+        enough to identify which credential to pass to ``revoke_token``.
+
+        Args:
+            principal_id: Principal to list credentials for
+
+        Returns:
+            Credentials for this principal, most recently issued first
+        """
+        return self.backend.get_credentials_for_principal(principal_id)
 
     def close(self) -> None:
         """Close the knowledge base connection."""

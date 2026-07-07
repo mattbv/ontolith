@@ -33,7 +33,8 @@ The MCP (Model Context Protocol) server exposes Ontolith to AI agents as a tool.
 - ❌ Any tool that bypasses proposal/policy pipeline
 
 **Provenance Capture:**
-- `ontolith.propose` stamps calling agent as `author`
+- `ontolith.propose` stamps calling agent as `author` — resolved server-side from a verified
+  bearer token, never a caller-supplied ID (ADR-0014)
 - Captures `model` from agent context
 - Records `acting_as` if delegation present
 

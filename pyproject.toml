@@ -199,6 +199,7 @@ source_modules = [
 	"ontolith.schema",
 	"ontolith.govern",
 	"ontolith.query",
+	"ontolith.identity",
 ]
 forbidden_modules = ["ontolith.store.sqlite", "ontolith.interfaces"]
 
