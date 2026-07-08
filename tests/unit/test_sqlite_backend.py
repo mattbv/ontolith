@@ -9,6 +9,7 @@ import pytest
 
 from ontolith.core import Assertion, Entity
 from ontolith.core.errors import StorageError
+from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential
 from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 from ontolith.store.sqlite import SQLiteBackend
@@ -565,6 +566,112 @@ class TestSQLiteBackend:
         backend.revoke_credential("cred-1", datetime(2025, 1, 3, tzinfo=UTC))
         assert backend.get_principal_by_token_hash("a" * 64) is None
         assert backend.get_principal_by_token_hash("b" * 64) is not None
+
+    def _put_proposal(self, backend: SQLiteBackend, proposal_id: str) -> None:
+        backend.put_proposal(
+            Proposal(
+                id=proposal_id,
+                namespace="default",
+                author="alice@test.com",
+                state="require_review",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+
+    def test_put_and_get_proposal_events(self, backend: SQLiteBackend) -> None:
+        self._put_proposal(backend, "prop-1")
+        backend.put_proposal_event(
+            ProposalEvent(
+                id="event-1",
+                proposal_id="prop-1",
+                actor="alice@test.com",
+                type="accept",
+                at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+
+        events = backend.get_proposal_events("prop-1")
+        assert len(events) == 1
+        assert events[0].id == "event-1"
+        assert events[0].type == "accept"
+        assert events[0].actor == "alice@test.com"
+        assert events[0].detail is None
+
+    def test_get_proposal_events_ordered_oldest_first(self, backend: SQLiteBackend) -> None:
+        self._put_proposal(backend, "prop-1")
+        backend.put_proposal_event(
+            ProposalEvent(
+                id="event-1",
+                proposal_id="prop-1",
+                actor="alice@test.com",
+                type="reject",
+                detail="first pass",
+                at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+        backend.put_proposal_event(
+            ProposalEvent(
+                id="event-2",
+                proposal_id="prop-1",
+                actor="alice@test.com",
+                type="accept",
+                at=datetime(2025, 1, 2, tzinfo=UTC),
+            )
+        )
+
+        events = backend.get_proposal_events("prop-1")
+        assert [e.id for e in events] == ["event-1", "event-2"]
+
+    def test_get_proposal_events_empty_for_unknown_proposal(self, backend: SQLiteBackend) -> None:
+        assert backend.get_proposal_events("nonexistent") == []
+
+    def test_proposal_events_scoped_to_their_own_proposal(self, backend: SQLiteBackend) -> None:
+        self._put_proposal(backend, "prop-1")
+        self._put_proposal(backend, "prop-2")
+        backend.put_proposal_event(
+            ProposalEvent(
+                id="event-1",
+                proposal_id="prop-1",
+                actor="alice@test.com",
+                type="accept",
+                at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+        backend.put_proposal_event(
+            ProposalEvent(
+                id="event-2",
+                proposal_id="prop-2",
+                actor="alice@test.com",
+                type="reject",
+                at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+
+        assert [e.id for e in backend.get_proposal_events("prop-1")] == ["event-1"]
+        assert [e.id for e in backend.get_proposal_events("prop-2")] == ["event-2"]
+
+    def test_update_proposal_state_none_reason_preserves_existing(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """policy_reason=None leaves the stored value unchanged (COALESCE) -
+        review actions must not clobber the policy engine's original reason."""
+        backend.put_proposal(
+            Proposal(
+                id="prop-1",
+                namespace="default",
+                author="alice@test.com",
+                state="require_review",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                policy_reason="AI proposals require review",
+            )
+        )
+
+        backend.update_proposal_state("prop-1", "accepted", datetime(2025, 1, 2).isoformat())
+
+        updated = backend.get_proposal("prop-1")
+        assert updated is not None
+        assert updated.state == "accepted"
+        assert updated.policy_reason == "AI proposals require review"
 
     def test_put_and_get_schema(self, backend: SQLiteBackend) -> None:
         """Schema can be persisted and retrieved."""

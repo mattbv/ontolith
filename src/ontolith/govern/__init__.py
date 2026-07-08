@@ -17,10 +17,11 @@ from ontolith.govern.policy import (
     RequireReview,
     ThresholdPolicy,
 )
-from ontolith.govern.proposal import Proposal
+from ontolith.govern.proposal import Proposal, ProposalEvent
 
 __all__ = [
     "Proposal",
+    "ProposalEvent",
     "Contradiction",
     "Decision",
     "AutoAccept",

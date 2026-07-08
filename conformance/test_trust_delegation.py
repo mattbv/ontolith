@@ -201,6 +201,7 @@ class TestDelegationAuthorization:
                 "Text",
                 AI_AGENT,  # owner=alice
                 acting_as=HUMAN_PROPOSE_HIGH,  # carol — not alice
+                model="test-model-v1",
             )
 
     def test_unauthorized_delegation_on_retract_raises(self, tmp_path: Path) -> None:
@@ -223,6 +224,7 @@ class TestDelegationAuthorization:
                 "Text",
                 AI_AGENT,
                 acting_as="nobody@example.com",
+                model="test-model-v1",
             )
 
     def test_self_delegation_is_permitted(self, tmp_path: Path) -> None:
@@ -265,6 +267,7 @@ class TestDelegationPropose:
             "Text",
             AI_AGENT,
             acting_as=HUMAN_WRITE,
+            model="test-model-v1",
         )
         assert isinstance(decision, RequireReview)
         assert proposal.state == "require_review"
@@ -280,6 +283,7 @@ class TestDelegationPropose:
             "Text",
             AI_AGENT3,
             acting_as=HUMAN_PROPOSE_LOW,
+            model="test-model-v1",
         )
         assert isinstance(decision, RequireReview)
         assert proposal.state == "require_review"
@@ -300,6 +304,7 @@ class TestDelegationPropose:
             "Text",
             AI_AGENT2,
             acting_as=HUMAN_PROPOSE_HIGH,
+            model="test-model-v1",
         )
         assert isinstance(decision, RequireReview)
         assert proposal.state == "require_review"
@@ -342,7 +347,13 @@ class TestDelegationPropose:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         proposal, _ = kb.propose(
-            entity.id, "Person.name", "Ada", "Text", AI_AGENT, acting_as=HUMAN_WRITE
+            entity.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            AI_AGENT,
+            acting_as=HUMAN_WRITE,
+            model="test-model-v1",
         )
         assert proposal.acting_as == HUMAN_WRITE
         assert proposal.author == AI_AGENT
@@ -361,7 +372,9 @@ class TestDelegationPropose:
         """Without acting_as, AI still requires review (no delegation privilege)."""
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
-        proposal, decision = kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AGENT)
+        proposal, decision = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AGENT, model="test-model-v1"
+        )
         assert isinstance(decision, RequireReview)
         assert proposal.acting_as is None
 

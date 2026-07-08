@@ -27,7 +27,7 @@ from ontolith.govern import AutoAccept, ThresholdPolicy
 from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, route
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.policy import Decision, Reject
-from ontolith.govern.proposal import Proposal
+from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential, min_capability
 from ontolith.query import QueryBuilder
 from ontolith.schema import SchemaIR
@@ -40,7 +40,10 @@ class AsOfView:
     Reconstructs what was known and true at time `t`:
         valid_from <= t < (valid_to or ∞)  AND  asserted_at <= t
 
-    Status is NOT used as a filter — the temporal dimensions determine visibility.
+    Status is not used as a positive filter — the temporal dimensions
+    determine visibility — but 'flagged' assertions (disputed, not
+    confirmed-valid) are excluded by default, same as default (non-as_of)
+    queries. Pass ``include_flagged=True`` for explicit audit/history views.
     """
 
     def __init__(
@@ -57,6 +60,8 @@ class AsOfView:
         self,
         subject: str | None = None,
         predicate: str | None = None,
+        *,
+        include_flagged: bool = False,
     ) -> list[Assertion]:
         """Assertions visible at the as_of timestamp."""
         return self._backend.assertions(
@@ -64,6 +69,7 @@ class AsOfView:
             predicate=predicate,
             status=None,
             as_of_time=self._as_of,
+            include_flagged=include_flagged,
         )
 
     def query(self, concept: str) -> QueryBuilder:
@@ -259,6 +265,14 @@ class Ontology:
         schema = self.backend.get_schema(self.namespace)
         return schema.temporality_of(predicate) if schema is not None else "static"
 
+    @staticmethod
+    def _require_model_for_ai(principal: Principal, model: str | None) -> None:
+        """SPEC §7.4/§14.4 MUST: AI-authored assertions carry model provenance."""
+        if principal.kind == "ai" and model is None:
+            raise ValidationError(
+                f"model is required for ai-kind authors (principal: {principal.id})"
+            )
+
     def assert_literal(
         self,
         subject: str,
@@ -271,6 +285,7 @@ class Ontology:
         source: str | None = None,
         rationale: str | None = None,
         acting_as: str | None = None,
+        model: str | None = None,
     ) -> Assertion:
         """Make a literal assertion about an entity, bypassing the proposal queue.
 
@@ -287,6 +302,9 @@ class Ontology:
             source: Optional source of information
             rationale: Optional why this assertion was made
             acting_as: Optional principal ID being acted on behalf of (delegation)
+            model: Model family+version (AI principals cannot reach this
+                direct-write path — see _check_direct_write_capability — so
+                this is accepted but never required here)
 
         Returns:
             Assertion as persisted (status/supersedes reflect conflict routing)
@@ -307,6 +325,7 @@ class Ontology:
             confidence=confidence,
             source=source,
             rationale=rationale,
+            model=model,
             asserted_at=self.clock.now(),
         )
 
@@ -323,6 +342,7 @@ class Ontology:
         confidence: float | None = None,
         source: str | None = None,
         acting_as: str | None = None,
+        model: str | None = None,
     ) -> Assertion:
         """Make a reference assertion (relation) between entities, bypassing the
         proposal queue.
@@ -338,6 +358,9 @@ class Ontology:
             confidence: Optional confidence (0.0-1.0)
             source: Optional source of information
             acting_as: Optional principal ID being acted on behalf of (delegation)
+            model: Model family+version (AI principals cannot reach this
+                direct-write path — see _check_direct_write_capability — so
+                this is accepted but never required here)
 
         Returns:
             Assertion as persisted (status/supersedes reflect conflict routing)
@@ -356,6 +379,7 @@ class Ontology:
             acting_as=acting_as,
             confidence=confidence,
             source=source,
+            model=model,
             asserted_at=self.clock.now(),
         )
 
@@ -437,6 +461,7 @@ class Ontology:
         source: str | None = None,
         rationale: str | None = None,
         acting_as: str | None = None,
+        model: str | None = None,
     ) -> tuple[Proposal, Decision]:
         """Submit a literal assertion through the proposal/policy path (SPEC §9).
 
@@ -448,16 +473,25 @@ class Ontology:
         schema.temporality(P)``) — it is never caller-supplied. Falls back to
         "static" if no schema is registered for this namespace.
 
+        ``model`` (the AI model family+version) is REQUIRED when ``author``
+        is an ``ai``-kind principal (SPEC §7.4/§14.4).
+
         When ``acting_as`` is set the proposal is made on behalf of another
         principal (delegation, ADR-0003). Policy is evaluated using the
         delegating principal's capability and trust level.
 
         Returns:
             (Proposal, Decision) tuple
+
+        Raises:
+            AuthError: author or acting_as is not a known principal
+            CapabilityError: delegation is unauthorized
+            ValidationError: author is ai-kind and model is not provided
         """
         principal = self.backend.get_principal(author)
         if principal is None:
             raise AuthError(f"Principal not found: {author}")
+        self._require_model_for_ai(principal, model)
 
         delegating: Principal | None = None
         if acting_as is not None and acting_as != author:
@@ -496,6 +530,7 @@ class Ontology:
                         "confidence": confidence,
                         "source": source,
                         "rationale": rationale,
+                        "model": model,
                     }
                 ]
             },
@@ -519,6 +554,7 @@ class Ontology:
                 confidence=confidence,
                 source=source,
                 rationale=rationale,
+                model=model,
                 asserted_at=now,
                 proposal_id=proposal_id,
             )
@@ -565,6 +601,7 @@ class Ontology:
         source: str | None = None,
         rationale: str | None = None,
         acting_as: str | None = None,
+        model: str | None = None,
     ) -> tuple[Proposal, Decision]:
         """Submit a reference (relation) assertion through the proposal/policy path (SPEC §9).
 
@@ -576,16 +613,25 @@ class Ontology:
         declared temporality for ``predicate`` (SPEC §10.1), never
         caller-supplied.
 
+        ``model`` (the AI model family+version) is REQUIRED when ``author``
+        is an ``ai``-kind principal (SPEC §7.4/§14.4).
+
         When ``acting_as`` is set the proposal is made on behalf of another
         principal (delegation, ADR-0003). Policy is evaluated using the
         delegating principal's capability and trust level.
 
         Returns:
             (Proposal, Decision) tuple
+
+        Raises:
+            AuthError: author or acting_as is not a known principal
+            CapabilityError: delegation is unauthorized
+            ValidationError: author is ai-kind and model is not provided
         """
         principal = self.backend.get_principal(author)
         if principal is None:
             raise AuthError(f"Principal not found: {author}")
+        self._require_model_for_ai(principal, model)
 
         delegating: Principal | None = None
         if acting_as is not None and acting_as != author:
@@ -623,6 +669,7 @@ class Ontology:
                         "confidence": confidence,
                         "source": source,
                         "rationale": rationale,
+                        "model": model,
                     }
                 ]
             },
@@ -645,6 +692,7 @@ class Ontology:
                 confidence=confidence,
                 source=source,
                 rationale=rationale,
+                model=model,
                 asserted_at=now,
                 proposal_id=proposal_id,
             )
@@ -735,7 +783,9 @@ class Ontology:
             )
             with self.backend.transaction():
                 self.backend.put_proposal(accepted)
-                self.backend.set_assertion_status(assertion_id, "retracted")
+                self.backend.set_assertion_status(
+                    assertion_id, "retracted", valid_to=now.isoformat()
+                )
             return accepted, decision
 
         if isinstance(decision, Reject):
@@ -876,6 +926,7 @@ class Ontology:
                         confidence=op.get("confidence"),
                         source=op.get("source"),
                         rationale=op.get("rationale"),
+                        model=op.get("model"),
                         asserted_at=now,
                         proposal_id=proposal_id,
                     )
@@ -892,6 +943,7 @@ class Ontology:
                         confidence=op.get("confidence"),
                         source=op.get("source"),
                         rationale=op.get("rationale"),
+                        model=op.get("model"),
                         asserted_at=now,
                         proposal_id=proposal_id,
                     )
@@ -899,14 +951,23 @@ class Ontology:
                         ref_assertion, op.get("temporality", "static")
                     )
                 elif op["kind"] == "retract":
-                    self.backend.set_assertion_status(op["assertion_id"], "retracted")
+                    self.backend.set_assertion_status(
+                        op["assertion_id"], "retracted", valid_to=now.isoformat()
+                    )
                 else:
                     raise ValidationError(
                         f"Unknown operation kind in proposal payload: {op['kind']}"
                     )
 
-            self.backend.update_proposal_state(
-                proposal_id, "accepted", now.isoformat(), f"Accepted by reviewer {reviewer}"
+            self.backend.update_proposal_state(proposal_id, "accepted", now.isoformat())
+            self.backend.put_proposal_event(
+                ProposalEvent(
+                    id=self.id_provider.next(),
+                    proposal_id=proposal_id,
+                    actor=reviewer,
+                    type="accept",
+                    at=now,
+                )
             )
 
         accepted = self.backend.get_proposal(proposal_id)
@@ -942,12 +1003,18 @@ class Ontology:
             )
 
         now = self.clock.now()
-        self.backend.update_proposal_state(
-            proposal_id,
-            "rejected",
-            now.isoformat(),
-            reason or f"Rejected by reviewer {reviewer}",
-        )
+        with self.backend.transaction():
+            self.backend.update_proposal_state(proposal_id, "rejected", now.isoformat())
+            self.backend.put_proposal_event(
+                ProposalEvent(
+                    id=self.id_provider.next(),
+                    proposal_id=proposal_id,
+                    actor=reviewer,
+                    type="reject",
+                    detail=reason or None,
+                    at=now,
+                )
+            )
 
         rejected = self.backend.get_proposal(proposal_id)
         assert rejected is not None
@@ -996,7 +1063,9 @@ class Ontology:
         with self.backend.transaction():
             for member_id in contradiction.member_ids:
                 if member_id != winner_assertion_id:
-                    self.backend.set_assertion_status(member_id, "retracted")
+                    self.backend.set_assertion_status(
+                        member_id, "retracted", valid_to=now.isoformat()
+                    )
             self.backend.set_assertion_status(winner_assertion_id, "active")
             self.backend.resolve_contradiction(contradiction_id, resolver, now)
 
