@@ -9,12 +9,20 @@ v1 dialect coverage (ADR-0013):
     - Scalar ranges map to Ontolith value types via a fixed table.
     - A range naming another class in the same schema becomes a relation.
     - `multivalued:` -> cardinality, native `inverse:` -> RelationDef.inverse.
+    - Schema-level `default_range:` is honored as the fallback range for any
+      slot that omits `range:` (must itself be a builtin scalar or a class
+      defined in the schema).
     - Temporality has no LinkML equivalent: encoded as
       `annotations.ontolith_temporality: time_varying` on the slot.
-    - Unsupported constructs (is_a/mixins, enums, slot_usage, patterns,
-      any_of/exactly_one_of, imports, multi-file schemas) raise SchemaError
-      on import rather than silently dropping data. `to_yaml` only ever
-      emits constructs it can faithfully round-trip.
+    - Unsupported constructs (is_a/mixins, enums, slot_usage, abstract,
+      patterns, any_of/exactly_one_of, identifier/key/alias/ifabsent/
+      readonly/recommended, imports, multi-file schemas) raise SchemaError
+      on import rather than silently dropping data. This is an enumerated
+      blacklist, not an exhaustive one — a real LinkML key outside both the
+      supported and blacklisted sets is still silently ignored; the
+      blacklist only covers the constructs identified so far as plausible
+      to encounter. `to_yaml` only ever emits constructs it can faithfully
+      round-trip.
 """
 
 from __future__ import annotations
@@ -54,7 +62,7 @@ _LINKML_RANGE_TO_VALUE_TYPE: dict[str, str] = {
 }
 
 _UNSUPPORTED_SCHEMA_KEYS = ("slots", "imports", "types", "subsets", "enums")
-_UNSUPPORTED_CLASS_KEYS = ("is_a", "mixins", "slot_usage", "tree_root")
+_UNSUPPORTED_CLASS_KEYS = ("is_a", "mixins", "slot_usage", "tree_root", "abstract")
 _UNSUPPORTED_SLOT_KEYS = (
     "pattern",
     "any_of",
@@ -62,6 +70,12 @@ _UNSUPPORTED_SLOT_KEYS = (
     "exactly_one_of",
     "none_of",
     "permissible_values",
+    "identifier",
+    "key",
+    "alias",
+    "ifabsent",
+    "readonly",
+    "recommended",
 )
 
 _SUPPORTED_METADATA_KEYS = ("prefixes", "default_prefix", "description")
@@ -201,9 +215,21 @@ def from_yaml(text: str) -> SchemaIR:
     if not isinstance(classes, dict):
         raise SchemaError("'classes' must be a mapping of class name -> class definition")
 
+    default_range = document.get("default_range")
+    if default_range is not None:
+        if default_range not in _LINKML_RANGE_TO_VALUE_TYPE and default_range not in classes:
+            raise SchemaError(
+                f"'default_range' {default_range!r} is not a builtin scalar type "
+                "or a class defined in this schema"
+            )
+    else:
+        default_range = "string"
+
     concepts: dict[str, ConceptDef] = {}
     for class_name, class_doc in classes.items():
-        concepts[class_name] = _parse_class(class_name, class_doc, list(classes.keys()))
+        concepts[class_name] = _parse_class(
+            class_name, class_doc, list(classes.keys()), default_range
+        )
 
     metadata: dict[str, Any] = {}
     for key in _SUPPORTED_METADATA_KEYS:
@@ -213,7 +239,9 @@ def from_yaml(text: str) -> SchemaIR:
     return SchemaIR(namespace=namespace, version=version, concepts=concepts, metadata=metadata)
 
 
-def _parse_class(class_name: str, class_doc: Any, known_class_names: list[str]) -> ConceptDef:
+def _parse_class(
+    class_name: str, class_doc: Any, known_class_names: list[str], default_range: str
+) -> ConceptDef:
     if not isinstance(class_doc, dict):
         raise SchemaError(f"Class {class_name!r} must be a mapping")
 
@@ -221,7 +249,7 @@ def _parse_class(class_name: str, class_doc: Any, known_class_names: list[str]) 
         if key in class_doc:
             raise SchemaError(
                 f"Unsupported LinkML construct on class {class_name!r}: {key!r} "
-                "(v1 dialect: no inheritance/mixins/slot_usage)"
+                "(v1 dialect: no inheritance/mixins/slot_usage/abstract classes)"
             )
 
     description = class_doc.get("description")
@@ -241,10 +269,11 @@ def _parse_class(class_name: str, class_doc: Any, known_class_names: list[str]) 
             if key in slot_doc:
                 raise SchemaError(
                     f"Unsupported LinkML construct on {class_name}.{slot_name}: {key!r} "
-                    "(v1 dialect: no patterns/enums/boolean-combinators)"
+                    "(v1 dialect: no patterns/enums/boolean-combinators/identifier-key-"
+                    "alias-ifabsent-readonly-recommended)"
                 )
 
-        range_value = slot_doc.get("range", "string")
+        range_value = slot_doc.get("range", default_range)
         required = bool(slot_doc.get("required", False))
         cardinality: _Cardinality = "many" if slot_doc.get("multivalued") else "single"
         slot_description = slot_doc.get("description")

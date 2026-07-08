@@ -316,6 +316,75 @@ class TestFromYaml:
         with pytest.raises(SchemaError, match="unknown range"):
             from_yaml(text)
 
+    def test_default_range_applied_when_slot_omits_range(self) -> None:
+        text = """
+        id: default
+        version: 1
+        default_range: integer
+        classes:
+          Person:
+            attributes:
+              age: {}
+        """
+        schema = from_yaml(text)
+        assert schema.concepts["Person"].properties["age"].value_type == "Integer"
+
+    def test_slot_range_overrides_default_range(self) -> None:
+        text = """
+        id: default
+        version: 1
+        default_range: integer
+        classes:
+          Person:
+            attributes:
+              name:
+                range: string
+        """
+        schema = from_yaml(text)
+        assert schema.concepts["Person"].properties["name"].value_type == "Text"
+
+    def test_no_default_range_falls_back_to_string(self) -> None:
+        """Unchanged historical behavior when default_range isn't declared."""
+        text = """
+        id: default
+        version: 1
+        classes:
+          Person:
+            attributes:
+              name: {}
+        """
+        schema = from_yaml(text)
+        assert schema.concepts["Person"].properties["name"].value_type == "Text"
+
+    def test_default_range_naming_a_class_makes_unranged_slots_relations(self) -> None:
+        text = """
+        id: default
+        version: 1
+        default_range: Organization
+        classes:
+          Person:
+            attributes:
+              employer: {}
+          Organization:
+            attributes: {}
+        """
+        schema = from_yaml(text)
+        assert "employer" in schema.concepts["Person"].relations
+        assert schema.concepts["Person"].relations["employer"].target_concept == "Organization"
+
+    def test_invalid_default_range_raises(self) -> None:
+        text = """
+        id: default
+        version: 1
+        default_range: NotARealClassOrType
+        classes:
+          Person:
+            attributes:
+              name: {}
+        """
+        with pytest.raises(SchemaError, match="'default_range'"):
+            from_yaml(text)
+
     @pytest.mark.parametrize("key", ["slots", "imports", "types", "subsets", "enums"])
     def test_unsupported_schema_level_construct_raises(self, key: str) -> None:
         text = f"""
@@ -327,7 +396,7 @@ class TestFromYaml:
         with pytest.raises(SchemaError, match="Unsupported LinkML construct at schema level"):
             from_yaml(text)
 
-    @pytest.mark.parametrize("key", ["is_a", "mixins", "slot_usage", "tree_root"])
+    @pytest.mark.parametrize("key", ["is_a", "mixins", "slot_usage", "tree_root", "abstract"])
     def test_unsupported_class_level_construct_raises(self, key: str) -> None:
         text = f"""
         id: default
@@ -349,6 +418,12 @@ class TestFromYaml:
             ("exactly_one_of", [{"range": "string"}]),
             ("none_of", [{"range": "string"}]),
             ("permissible_values", {"a": {}}),
+            ("identifier", True),
+            ("key", True),
+            ("alias", "person_name"),
+            ("ifabsent", "string(unknown)"),
+            ("readonly", "true"),
+            ("recommended", True),
         ],
     )
     def test_unsupported_slot_level_construct_raises(self, key: str, value: object) -> None:
