@@ -1,9 +1,11 @@
 """Conformance vector: Accountable owner rule for AI principals.
 
 SPEC §8 — AI principals MUST declare an accountable owner (human or team).
-This invariant is enforced at two layers:
-  1. Application layer (Pydantic validation via Ontology.create_principal)
-  2. Storage layer (DB CHECK constraint — ADR-0011)
+This invariant is enforced at three layers:
+  1. Pydantic model (owner must be non-null for ai-kind)
+  2. Application layer (Ontology.create_principal: owner must resolve to an
+     existing human/service principal, not just be a non-null string)
+  3. Storage layer (DB CHECK + FOREIGN KEY constraints — ADR-0011)
 """
 
 import tempfile
@@ -14,7 +16,7 @@ import pytest
 
 from ontolith import Ontology, SequentialIdProvider
 from ontolith.core import FixedClock
-from ontolith.core.errors import StorageError
+from ontolith.core.errors import StorageError, ValidationError
 from ontolith.identity import Principal
 
 T0 = "2025-01-01T00:00:00+00:00"
@@ -29,9 +31,10 @@ def _kb() -> tuple[Ontology, Path]:
 
 
 def test_ai_principal_with_owner_is_accepted() -> None:
-    """AI principal with a declared owner is accepted (SPEC §8)."""
+    """AI principal with a declared, resolvable owner is accepted (SPEC §8)."""
     kb, path = _kb()
     try:
+        kb.create_principal("alice@example.com", kind="human")
         principal = kb.create_principal(
             "scout-agent",
             kind="ai",
@@ -61,6 +64,7 @@ def test_ai_principal_owner_survives_roundtrip() -> None:
     """Owner field is persisted and retrieved correctly."""
     kb, path = _kb()
     try:
+        kb.create_principal("alice@example.com", kind="human")
         kb.create_principal(
             "scout-agent",
             kind="ai",
@@ -70,6 +74,45 @@ def test_ai_principal_owner_survives_roundtrip() -> None:
         retrieved = kb.get_principal("scout-agent")
         assert retrieved is not None
         assert retrieved.owner == "alice@example.com"
+    finally:
+        kb.close()
+        path.unlink()
+
+
+def test_ai_principal_with_unresolvable_owner_rejected() -> None:
+    """Owner must name an EXISTING principal, not just be a non-null string —
+    otherwise the accountable-owner guarantee is fiction (SPEC §8.1)."""
+    kb, path = _kb()
+    try:
+        with pytest.raises(ValidationError, match="owner not found"):
+            kb.create_principal(
+                "scout-agent",
+                kind="ai",
+                auth_method="workload",
+                owner="ghost@example.com",
+            )
+    finally:
+        kb.close()
+        path.unlink()
+
+
+def test_ai_principal_owner_cannot_be_another_ai() -> None:
+    """The accountable owner must be human/service — an AI cannot be
+    accountable for another AI (SPEC §8.1)."""
+    kb, path = _kb()
+    try:
+        kb.create_principal("alice@example.com", kind="human")
+        kb.create_principal(
+            "scout-agent", kind="ai", auth_method="workload", owner="alice@example.com"
+        )
+
+        with pytest.raises(ValidationError, match="must be human or service"):
+            kb.create_principal(
+                "downstream-bot",
+                kind="ai",
+                auth_method="workload",
+                owner="scout-agent",
+            )
     finally:
         kb.close()
         path.unlink()
@@ -115,6 +158,40 @@ def test_ai_owner_invariant_enforced_at_db_layer() -> None:
                 VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 ("bot-bypass", "ai", "workload", 0, "2025-01-01T00:00:00Z", "{}"),
+            )
+    finally:
+        backend.close()
+        path.unlink()
+
+
+def test_ai_owner_fk_enforced_at_db_layer() -> None:
+    """DB FOREIGN KEY constraint rejects an owner that isn't an existing
+    principal row, even if Ontology.create_principal is bypassed
+    (ADR-0011 defense-in-depth)."""
+    import sqlite3
+
+    from ontolith.store.sqlite import SQLiteBackend
+
+    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    path = Path(f.name)
+    f.close()
+    backend = SQLiteBackend(path)
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            backend.conn.execute(
+                """
+                INSERT INTO principal (id, kind, owner, auth_method, trust_level, created_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "bot-bypass",
+                    "ai",
+                    "ghost@example.com",
+                    "workload",
+                    0,
+                    "2025-01-01T00:00:00Z",
+                    "{}",
+                ),
             )
     finally:
         backend.close()

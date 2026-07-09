@@ -16,8 +16,9 @@ bearer ``token`` instead of a caller-supplied ``author`` ID. The server
 resolves the token to a Principal via the injected AuthProvider — the acting
 principal is always server-derived from a verified credential, never
 client-asserted. One server (one AuthProvider/backend) can serve many
-principals, each with their own issued token (``kb.issue_token(principal_id)``
-via SDK/CLI).
+principals, each with their own issued token (``kb.issue_token(principal_id,
+author=admin_id)`` via SDK/CLI — requires the issuing author to hold `admin`
+capability).
 
 Usage:
     from ontolith.identity.token_auth import TokenAuthProvider
@@ -392,6 +393,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             "predicate": contradiction.predicate,
             "member_ids": [assertion_id_a, assertion_id_b],
             "action": action,
+            "raised_by": contradiction.raised_by,
         }
 
     return mcp

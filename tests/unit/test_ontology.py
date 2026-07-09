@@ -15,7 +15,7 @@ from ontolith.core.errors import (
     SchemaError,
     ValidationError,
 )
-from ontolith.schema import ConceptDef, RelationDef, SchemaIR
+from ontolith.schema import ConceptDef, PropertyDef, RelationDef, SchemaIR
 
 
 @pytest.fixture
@@ -242,7 +242,13 @@ class TestOntology:
         assert active == []
 
     def test_accept_proposal_replays_relation(self, kb: Ontology) -> None:
-        """Full propose -> require_review -> accept round trip for a relation."""
+        """Full propose -> require_review -> accept round trip for a relation.
+
+        Also covers acting_as survives replay for the ref branch (regression
+        for the bug where accept_proposal dropped delegation provenance) —
+        the literal-branch equivalent is pinned in test_trust_delegation.py's
+        test_delegation_survives_the_review_accept_path.
+        """
         kb.create_principal("carol@example.com", kind="human", default_capability="review")
         kb.create_principal(
             "bot@example.com", kind="ai", owner="alice@example.com", default_capability="propose"
@@ -251,7 +257,12 @@ class TestOntology:
         org = kb.create_entity("Organization", author="alice@example.com")
 
         proposal, decision = kb.propose_ref(
-            person.id, "Person.employer", org.id, "bot@example.com", model="test-model-v1"
+            person.id,
+            "Person.employer",
+            org.id,
+            "bot@example.com",
+            acting_as="alice@example.com",
+            model="test-model-v1",
         )
         assert proposal.state == "require_review"
 
@@ -263,6 +274,7 @@ class TestOntology:
         assert active[0].value_kind == "ref"
         assert active[0].value == org.id
         assert active[0].proposal_id == proposal.id
+        assert active[0].acting_as == "alice@example.com"
 
     def test_query_assertions_by_subject(self, kb: Ontology) -> None:
         """Assertions can be queried by subject."""
@@ -507,6 +519,79 @@ class TestApplySchema:
             kb.apply_schema(
                 SchemaIR(namespace="default", version=2, concepts={}), author="admin@example.com"
             )
+
+
+class TestAcceptProposalReResolvesTemporality:
+    """accept_proposal must re-resolve temporality from the current schema at
+    apply time, not trust the snapshot stored at propose time — otherwise a
+    schema migration between propose and accept silently misroutes SPEC §10
+    conflict handling (a static predicate could be superseded instead of
+    flagged as a contradiction)."""
+
+    def test_schema_change_between_propose_and_accept_uses_apply_time_temporality(
+        self, kb: Ontology
+    ) -> None:
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        kb.create_principal(
+            "bot@example.com", kind="ai", owner="alice@example.com", default_capability="propose"
+        )
+
+        kb.apply_schema(
+            SchemaIR(
+                namespace="default",
+                version=1,
+                concepts={
+                    "Person": ConceptDef(
+                        name="Person",
+                        properties={
+                            "name": PropertyDef(
+                                name="name", value_type="Text", temporality="static"
+                            )
+                        },
+                    )
+                },
+            ),
+            author="admin@example.com",
+        )
+
+        entity = kb.create_entity("Person", author="alice@example.com")
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", "alice@example.com")
+
+        proposal, decision = kb.propose(
+            entity.id, "Person.name", "Ava", "Text", "bot@example.com", model="test-model-v1"
+        )
+        assert proposal.state == "require_review"
+
+        # Schema migrates to time_varying before the proposal is reviewed.
+        kb.apply_schema(
+            SchemaIR(
+                namespace="default",
+                version=2,
+                concepts={
+                    "Person": ConceptDef(
+                        name="Person",
+                        properties={
+                            "name": PropertyDef(
+                                name="name", value_type="Text", temporality="time_varying"
+                            )
+                        },
+                    )
+                },
+            ),
+            author="admin@example.com",
+        )
+
+        kb.accept_proposal(proposal.id, "carol@example.com")
+
+        # Routed as time_varying (current schema at accept time): Ada
+        # superseded, Ava active — NOT both flagged as a static contradiction.
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        superseded = kb.assertions(subject=entity.id, predicate="Person.name", status="superseded")
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        assert [a.value for a in active] == ["Ava"]
+        assert [a.value for a in superseded] == ["Ada"]
+        assert flagged == []
 
 
 class TestFlagContradiction:

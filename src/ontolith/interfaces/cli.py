@@ -79,17 +79,21 @@ def principal_create(
 @principal_app.command("issue-token")
 def principal_issue_token(
     principal_id: Annotated[str, typer.Argument(help="Principal ID to issue a token for.")],
+    author: Annotated[
+        str, typer.Option("--author", help="Admin-capability principal performing the issuance.")
+    ],
 ) -> None:
     """Issue a new API-key token for a principal (ADR-0014).
 
     The raw token is printed ONCE — it is not stored anywhere and cannot be
     recovered. Save it immediately; use the printed credential ID (not the
-    token) to revoke it later via `principal revoke-token`.
+    token) to revoke it later via `principal revoke-token`. Requires the
+    `--author` principal to hold `admin` capability.
     """
     kb = _kb()
     try:
-        token = kb.issue_token(principal_id)
-        credential_id = kb.list_tokens(principal_id)[0].id
+        token = kb.issue_token(principal_id, author=author)
+        credential_id = kb.list_tokens(principal_id, author=author)[0].id
         typer.echo(f"Token for {principal_id}: {token}")
         typer.echo(f"Credential ID (for revocation): {credential_id}")
         typer.echo("Store this token now — it will not be shown again.")
@@ -103,11 +107,17 @@ def principal_issue_token(
 @principal_app.command("revoke-token")
 def principal_revoke_token(
     credential_id: Annotated[str, typer.Argument(help="Credential ID to revoke.")],
+    author: Annotated[
+        str, typer.Option("--author", help="Admin-capability principal performing the revocation.")
+    ],
 ) -> None:
-    """Revoke a previously issued API-key token by its credential ID."""
+    """Revoke a previously issued API-key token by its credential ID.
+
+    Requires the `--author` principal to hold `admin` capability.
+    """
     kb = _kb()
     try:
-        kb.revoke_token(credential_id)
+        kb.revoke_token(credential_id, author=author)
         typer.echo(f"Revoked credential: {credential_id}")
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -119,11 +129,17 @@ def principal_revoke_token(
 @principal_app.command("list-tokens")
 def principal_list_tokens(
     principal_id: Annotated[str, typer.Argument(help="Principal ID to list credentials for.")],
+    author: Annotated[
+        str, typer.Option("--author", help="Admin-capability principal performing the lookup.")
+    ],
 ) -> None:
-    """List credentials issued to a principal. Never shows the raw token or its hash."""
+    """List credentials issued to a principal. Never shows the raw token or its hash.
+
+    Requires the `--author` principal to hold `admin` capability.
+    """
     kb = _kb()
     try:
-        credentials = kb.list_tokens(principal_id)
+        credentials = kb.list_tokens(principal_id, author=author)
         if not credentials:
             typer.echo(f"No credentials issued for {principal_id}.")
             return

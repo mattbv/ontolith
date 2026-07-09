@@ -49,6 +49,43 @@ def _open_contradiction(kb: Ontology, entity_id: str) -> tuple[str, str, str]:
 
 
 # ===========================================================================
+# raised_by attribution
+# ===========================================================================
+
+
+class TestContradictionRaisedBy:
+    """Contradictions record who raised them, whether auto-detected during
+    conflict routing or explicitly flagged via flag_contradiction()."""
+
+    def test_auto_detected_contradiction_records_raiser(self, tmp_path: Path) -> None:
+        """The author of the assertion whose write triggered conflict-routing
+        detection is recorded as raised_by."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        contradiction_id, _, _ = _open_contradiction(kb, entity.id)
+
+        contradiction = kb.backend.get_contradiction(contradiction_id)
+        assert contradiction is not None
+        assert contradiction.raised_by == HUMAN_WRITE
+
+    def test_explicit_flag_records_flagging_principal(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        kb.assert_literal(entity.id, "Person.born", "1815", "Text", HUMAN_WRITE)
+        kb.create_principal(
+            "dave@example.com", kind="human", auth_method="oidc", default_capability="propose"
+        )
+        a = kb.assert_ref(entity.id, "Person.employer", entity.id, HUMAN_WRITE)
+        b = kb.assert_ref(entity.id, "Person.employer", entity.id, HUMAN_WRITE)
+
+        contradiction, _ = kb.flag_contradiction(a.id, b.id, "dave@example.com")
+
+        fetched = kb.backend.get_contradiction(contradiction.id)
+        assert fetched is not None
+        assert fetched.raised_by == "dave@example.com"
+
+
+# ===========================================================================
 # Successful resolution
 # ===========================================================================
 

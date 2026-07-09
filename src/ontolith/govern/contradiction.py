@@ -21,6 +21,10 @@ class Contradiction(BaseModel):
         state: Whether the contradiction is open or resolved
         member_ids: IDs of the flagged assertions in this contradiction
         created_at: When this contradiction was first detected
+        raised_by: Principal ID who raised it — either the author of the
+            assertion whose conflict-routing auto-detected it, or the
+            author of an explicit flag_contradiction() call. None only for
+            contradictions persisted before this field existed.
         resolved_by: Principal ID who resolved it (if resolved)
         resolved_at: When it was resolved (if resolved)
         metadata: Open JSON blob for future extension
@@ -33,6 +37,7 @@ class Contradiction(BaseModel):
     state: Literal["open", "resolved"] = "open"
     member_ids: list[str] = Field(default_factory=list)
     created_at: datetime
+    raised_by: str | None = None
     resolved_by: str | None = None
     resolved_at: datetime | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)

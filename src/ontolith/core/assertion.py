@@ -93,4 +93,33 @@ class Assertion(BaseModel):
     )
 
 
-__all__ = ["Assertion"]
+class AssertionEvent(BaseModel):
+    """Append-only audit record of an assertion status mutation.
+
+    Assertions themselves are append-only (only status/valid_to/supersedes
+    mutate in place) — this event log makes each such mutation independently
+    attributable and timestamped, since the assertion row itself is
+    overwritten in place and doesn't retain who caused a given transition
+    or when it happened (only its current status).
+
+    Attributes:
+        id: Unique event ID (ULID)
+        assertion_id: Assertion this event was recorded against
+        actor: Principal ID accountable for the transition — the author of
+            the assertion that triggered supersession/contradiction during
+            conflict routing, or the principal who explicitly retracted/
+            resolved it
+        action: Which status transition this event records
+        at: When the transition occurred
+    """
+
+    id: str
+    assertion_id: str
+    actor: str
+    action: Literal["superseded", "flagged", "retracted", "reactivated"]
+    at: datetime
+
+    model_config = ConfigDict(frozen=True)
+
+
+__all__ = ["Assertion", "AssertionEvent"]

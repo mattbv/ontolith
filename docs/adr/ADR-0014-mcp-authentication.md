@@ -28,9 +28,12 @@ in `mcp.py` used it.
 **Per-principal API-key tokens**, not a single server-bound principal and not a shared-secret
 allow-list.
 
-- Each principal is issued a token via `Ontology.issue_token(principal_id)` (also exposed via
-  `ontolith principal issue-token` in the CLI). The raw token is returned exactly once; only its
-  SHA-256 hash is persisted (`principal_credential` table). A principal may hold multiple
+- Each principal is issued a token via `Ontology.issue_token(principal_id, author)` (also exposed
+  via `ontolith principal issue-token --author <admin>` in the CLI). Issuing, revoking, and
+  listing credentials all require the `author` to hold `admin` capability — minting a bearer
+  token converts local access into a remote, network-reachable credential, a higher-stakes action
+  than the target principal's own capability level. The raw token is returned exactly once; only
+  its SHA-256 hash is persisted (`principal_credential` table). A principal may hold multiple
   concurrent active tokens — rotation is issue-new-then-revoke-old, both explicit.
 - `AuthProvider.resolve(token) -> Principal` is now a real port method. The concrete
   `TokenAuthProvider` (`identity/token_auth.py`) implements it against the abstract

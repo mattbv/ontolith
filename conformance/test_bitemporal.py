@@ -22,6 +22,7 @@ from hypothesis import strategies as st
 
 from ontolith import Ontology
 from ontolith.core import Assertion, FixedClock, FixedIdProvider
+from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 T1 = datetime(2025, 6, 1, tzinfo=UTC)
@@ -298,6 +299,62 @@ class TestAsOfRetractionAndFlagging:
         )
         assert {a.id for a in visible} == {winner.id}
 
+    def test_retract_never_widens_an_already_closed_valid_to(self, tmp_path: Path) -> None:
+        """Retracting an already-superseded assertion must not push its
+        valid_to forward — that would resurrect it as visible in as_of
+        queries between the original close point and the retraction time,
+        corrupting history (bitemporal.md invariants 1-2)."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        # Acme: [T0, T1) already closed by supersession
+        acme = _put_assertion(
+            kb,
+            entity.id,
+            "Acme Corp",
+            asserted_at=T0,
+            valid_from=T0,
+            valid_to=T1,
+            status="superseded",
+        )
+        _put_assertion(kb, entity.id, "Beta Inc", asserted_at=T1, valid_from=T1)
+
+        # Retract the already-closed Acme record long after it was superseded
+        kb.retract(acme.id, AUTHOR)
+
+        retracted = [
+            a
+            for a in kb.backend.assertions(subject=entity.id, predicate="Person.name", status=None)
+            if a.id == acme.id
+        ]
+        assert retracted[0].status == "retracted"
+        assert retracted[0].valid_to == T1  # unchanged, not widened to clock.now()
+
+        # A query strictly between the supersession and the retraction must
+        # NOT show Acme as concurrently active with Beta.
+        between = kb.as_of(T1 + timedelta(days=1)).assertions(
+            subject=entity.id, predicate="Person.name"
+        )
+        assert {a.value for a in between} == {"Beta Inc"}
+
+    def test_retract_still_closes_an_open_valid_to(self, tmp_path: Path) -> None:
+        """Sanity check: the fix for the widening bug must not regress the
+        ordinary case of retracting a still-open assertion."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)
+        retraction_time = clock.now()
+        kb.retract(active[0].id, AUTHOR)
+
+        retracted = kb.backend.assertions(
+            subject=entity.id, predicate="Person.name", status="retracted"
+        )
+        assert retracted[0].valid_to == retraction_time
+
 
 # ===========================================================================
 # Entity-level time-travel via as_of().query()
@@ -509,5 +566,74 @@ def test_as_of_visibility_matches_ground_truth_across_assert_retract_sequence(
                 )
             }
             assert actual_ids == expected_ids
+
+        kb.close()
+
+
+@given(
+    n_values=st.integers(min_value=1, max_value=5),
+    retract_indices=st.lists(st.integers(min_value=0, max_value=4), max_size=5),
+)
+@settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+def test_valid_to_never_widens_once_closed(n_values: int, retract_indices: list[int]) -> None:
+    """Property: once an assertion's valid_to is closed (by supersession or
+    retraction), no later operation - including retracting that same
+    already-closed record - may change it to a different value. Regression
+    for the bug where retract() unconditionally overwrote valid_to even when
+    already set, silently reopening history."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        clock = FixedClock(T0)
+        ids = FixedIdProvider([f"id-{i}" for i in range(n_values * 3 + 10)])
+        kb = Ontology.connect(Path(tmpdir) / "prop3.db", clock=clock, id_provider=ids)
+        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "name": PropertyDef(
+                            name="name", value_type="Text", temporality="time_varying"
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.backend.put_schema(schema)
+        entity = kb.create_entity("Person", author=AUTHOR)
+
+        all_ids: list[str] = []
+        for i in range(n_values):
+            a = kb.assert_literal(entity.id, "Person.name", f"value-{i}", "Text", AUTHOR)
+            all_ids.append(a.id)
+            clock.advance(days=1)
+
+        # Snapshot valid_to right after the chain is built (before any retracts).
+        before_retract = {
+            a.id: a.valid_to
+            for a in kb.backend.assertions(subject=entity.id, predicate="Person.name", status=None)
+        }
+
+        for idx in retract_indices:
+            if idx < len(all_ids):
+                kb.retract(all_ids[idx], AUTHOR)
+                clock.advance(days=1)
+
+        after = {
+            a.id: a.valid_to
+            for a in kb.backend.assertions(subject=entity.id, predicate="Person.name", status=None)
+        }
+
+        for aid, vt_before in before_retract.items():
+            if vt_before is not None:
+                assert after[aid] == vt_before, (
+                    f"assertion {aid} had valid_to={vt_before} before retraction "
+                    f"attempts but was changed to {after[aid]}"
+                )
 
         kb.close()

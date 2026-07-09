@@ -378,6 +378,35 @@ class TestDelegationPropose:
         assert isinstance(decision, RequireReview)
         assert proposal.acting_as is None
 
+    def test_delegation_survives_the_review_accept_path(self, tmp_path: Path) -> None:
+        """AI proposals always require review (ADR-0003), so review-accept is
+        the primary path delegated AI assertions actually take. acting_as
+        must survive replay in accept_proposal, not just the auto-accept
+        path already covered by test_delegation_stamped_on_assertion —
+        regression for the bug where accept_proposal silently dropped it."""
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "reviewer@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        proposal, decision = kb.propose(
+            entity.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            AI_AGENT,
+            acting_as=HUMAN_WRITE,
+            model="test-model-v1",
+        )
+        assert isinstance(decision, RequireReview)
+
+        kb.accept_proposal(proposal.id, "reviewer@example.com")
+
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        assert len(active) == 1
+        assert active[0].author == AI_AGENT
+        assert active[0].acting_as == HUMAN_WRITE
+
 
 # ===========================================================================
 # Delegation: acting_as wiring in retract()

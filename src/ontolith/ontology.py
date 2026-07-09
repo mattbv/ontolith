@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from ontolith.core import (
     Assertion,
+    AssertionEvent,
     Clock,
     Entity,
     IdProvider,
@@ -161,6 +162,12 @@ class Ontology:
 
         Returns:
             Created principal
+
+        Raises:
+            ValidationError: kind is "ai" and owner doesn't name an existing
+                human/service principal (SPEC §8.1: AI principals must
+                declare a *resolvable* accountable owner, not just a
+                non-null string)
         """
         principal = Principal(
             id=principal_id,
@@ -172,6 +179,16 @@ class Ontology:
             created_at=self.clock.now(),
             metadata=metadata or {},
         )
+
+        if principal.kind == "ai":
+            assert principal.owner is not None  # enforced by Principal's model_validator
+            owner_principal = self.backend.get_principal(principal.owner)
+            if owner_principal is None:
+                raise ValidationError(f"AI principal owner not found: {principal.owner!r}")
+            if owner_principal.kind == "ai":
+                raise ValidationError(
+                    f"AI principal owner must be human or service, not ai: {principal.owner!r}"
+                )
 
         self.backend.put_principal(principal)
         return principal
@@ -264,6 +281,41 @@ class Ontology:
     def _resolve_temporality(self, predicate: str) -> Literal["static", "time_varying"]:
         schema = self.backend.get_schema(self.namespace)
         return schema.temporality_of(predicate) if schema is not None else "static"
+
+    def _retraction_valid_to(self, assertion_id: str, now: datetime) -> str | None:
+        """Compute valid_to for a retraction.
+
+        Closes an open window at `now`, but never widens a window already
+        closed by a prior supersession/retraction — retraction must only
+        ever narrow validity, never rewrite history (bitemporal.md #1-2).
+        """
+        current = self.backend.get_assertion(assertion_id)
+        if current is not None and current.valid_to is not None:
+            return None
+        return now.isoformat()
+
+    def _record_assertion_event(
+        self,
+        assertion_id: str,
+        actor: str,
+        action: Literal["superseded", "flagged", "retracted", "reactivated"],
+        at: datetime,
+    ) -> None:
+        """Append an audit event for an assertion status mutation.
+
+        Must run inside the same transaction as the corresponding
+        set_assertion_status call (append-only invariant: the event log and
+        the status it describes must never diverge).
+        """
+        self.backend.put_assertion_event(
+            AssertionEvent(
+                id=self.id_provider.next(),
+                assertion_id=assertion_id,
+                actor=actor,
+                action=action,
+                at=at,
+            )
+        )
 
     @staticmethod
     def _require_model_for_ai(principal: Principal, model: str | None) -> None:
@@ -784,8 +836,9 @@ class Ontology:
             with self.backend.transaction():
                 self.backend.put_proposal(accepted)
                 self.backend.set_assertion_status(
-                    assertion_id, "retracted", valid_to=now.isoformat()
+                    assertion_id, "retracted", valid_to=self._retraction_valid_to(assertion_id, now)
                 )
+                self._record_assertion_event(assertion_id, author, "retracted", now)
             return accepted, decision
 
         if isinstance(decision, Reject):
@@ -850,6 +903,9 @@ class Ontology:
             close_at = (assertion.valid_from or assertion.asserted_at).isoformat()
             for target_id in result.targets:
                 self.backend.set_assertion_status(target_id, "superseded", valid_to=close_at)
+                self._record_assertion_event(
+                    target_id, assertion.author, "superseded", assertion.asserted_at
+                )
             supersedes_id = result.targets[0] if result.targets else None
             final = assertion.model_copy(update={"supersedes": supersedes_id})
             self.backend.put_assertion(final)
@@ -858,7 +914,17 @@ class Ontology:
         elif isinstance(result, Contradict):
             for mid in result.member_ids:
                 if mid != assertion.id:
+                    # Extending an already-open contradiction re-flags members
+                    # that are already flagged (idempotent status write) — only
+                    # emit an event for an actual transition, not a no-op.
+                    already_flagged = mid in (
+                        open_contradiction.member_ids if open_contradiction else []
+                    )
                     self.backend.set_assertion_status(mid, "flagged")
+                    if not already_flagged:
+                        self._record_assertion_event(
+                            mid, assertion.author, "flagged", assertion.asserted_at
+                        )
             flagged = assertion.model_copy(update={"status": "flagged"})
             self.backend.put_assertion(flagged)
             if result.existing_contradiction_id and open_contradiction:
@@ -873,6 +939,7 @@ class Ontology:
                     state="open",
                     member_ids=result.member_ids,
                     created_at=assertion.asserted_at,
+                    raised_by=assertion.author,
                 )
                 self.backend.put_contradiction(contradiction)
             return flagged
@@ -923,6 +990,7 @@ class Ontology:
                         value_type=op["value_type"],
                         value=op["value"],
                         author=proposal.author,
+                        acting_as=proposal.acting_as,
                         confidence=op.get("confidence"),
                         source=op.get("source"),
                         rationale=op.get("rationale"),
@@ -930,7 +998,9 @@ class Ontology:
                         asserted_at=now,
                         proposal_id=proposal_id,
                     )
-                    self._apply_with_conflict_routing(assertion, op.get("temporality", "static"))
+                    self._apply_with_conflict_routing(
+                        assertion, self._resolve_temporality(op["predicate"])
+                    )
                 elif op["kind"] == "assert_ref":
                     ref_assertion = Assertion(
                         id=self.id_provider.next(),
@@ -940,6 +1010,7 @@ class Ontology:
                         value_kind="ref",
                         value=op["target"],
                         author=proposal.author,
+                        acting_as=proposal.acting_as,
                         confidence=op.get("confidence"),
                         source=op.get("source"),
                         rationale=op.get("rationale"),
@@ -948,11 +1019,16 @@ class Ontology:
                         proposal_id=proposal_id,
                     )
                     self._apply_with_conflict_routing(
-                        ref_assertion, op.get("temporality", "static")
+                        ref_assertion, self._resolve_temporality(op["predicate"])
                     )
                 elif op["kind"] == "retract":
                     self.backend.set_assertion_status(
-                        op["assertion_id"], "retracted", valid_to=now.isoformat()
+                        op["assertion_id"],
+                        "retracted",
+                        valid_to=self._retraction_valid_to(op["assertion_id"], now),
+                    )
+                    self._record_assertion_event(
+                        op["assertion_id"], proposal.author, "retracted", now
                     )
                 else:
                     raise ValidationError(
@@ -1064,9 +1140,11 @@ class Ontology:
             for member_id in contradiction.member_ids:
                 if member_id != winner_assertion_id:
                     self.backend.set_assertion_status(
-                        member_id, "retracted", valid_to=now.isoformat()
+                        member_id, "retracted", valid_to=self._retraction_valid_to(member_id, now)
                     )
+                    self._record_assertion_event(member_id, resolver, "retracted", now)
             self.backend.set_assertion_status(winner_assertion_id, "active")
+            self._record_assertion_event(winner_assertion_id, resolver, "reactivated", now)
             self.backend.resolve_contradiction(contradiction_id, resolver, now)
 
         resolved = self.backend.get_contradiction(contradiction_id)
@@ -1131,6 +1209,7 @@ class Ontology:
             predicate=a.predicate,
         )
 
+        now = self.clock.now()
         with self.backend.transaction():
             if existing is not None:
                 merged = list(dict.fromkeys(existing.member_ids + [assertion_id_a, assertion_id_b]))
@@ -1147,7 +1226,8 @@ class Ontology:
                         predicate=a.predicate,
                         member_ids=[assertion_id_a, assertion_id_b],
                         state="open",
-                        created_at=self.clock.now(),
+                        created_at=now,
+                        raised_by=author,
                         metadata={"rationale": rationale} if rationale else {},
                     )
                 )
@@ -1156,6 +1236,7 @@ class Ontology:
             for aid in (assertion_id_a, assertion_id_b):
                 if a_map[aid].status != "flagged":
                     self.backend.set_assertion_status(aid, "flagged")
+                    self._record_assertion_event(aid, author, "flagged", now)
 
         result = self.backend.get_contradiction(contradiction_id)
         assert result is not None
@@ -1201,7 +1282,19 @@ class Ontology:
         self.backend.put_schema(schema)
         return schema
 
-    def issue_token(self, principal_id: str) -> str:
+    def _require_admin(self, author: str) -> Principal:
+        """Shared gate for credential-management actions (issue/revoke/list
+        tokens): minting or managing a bearer credential converts local
+        access into a remote, network-reachable capability, so it requires
+        `admin`, not just whatever capability the target principal has."""
+        principal = self.backend.get_principal(author)
+        if principal is None:
+            raise AuthError(f"Principal not found: {author}")
+        if principal.default_capability != "admin":
+            raise CapabilityError(f"Principal {author} lacks admin capability")
+        return principal
+
+    def issue_token(self, principal_id: str, author: str) -> str:
         """Issue a new API-key token for a principal (ADR-0014).
 
         Returns the raw secret ONCE — only its SHA-256 hash is persisted, and
@@ -1218,17 +1311,23 @@ class Ontology:
 
         Args:
             principal_id: Principal to issue a token for
+            author: Principal ID performing the issuance — must hold `admin`
+                capability (issuing a token mints a remote credential, a
+                higher-stakes action than the target principal's own
+                capability level)
 
         Returns:
             The raw token (not persisted anywhere — save it now)
 
         Raises:
-            AuthError: principal_id does not name an existing principal
+            AuthError: author or principal_id does not name an existing principal
+            CapabilityError: author lacks admin capability
         """
         import secrets
 
         from ontolith.identity.token_auth import hash_token
 
+        self._require_admin(author)
         principal = self.backend.get_principal(principal_id)
         if principal is None:
             raise AuthError(f"Principal not found: {principal_id}")
@@ -1243,22 +1342,27 @@ class Ontology:
         self.backend.put_credential(credential)
         return raw_token
 
-    def revoke_token(self, credential_id: str) -> None:
+    def revoke_token(self, credential_id: str, author: str) -> None:
         """Revoke a previously issued token by its credential ID (ADR-0014).
 
         Args:
             credential_id: Credential to revoke (returned alongside the raw
                 token by a token-issuance CLI/tool, not the token itself)
+            author: Principal ID performing the revocation — must hold
+                `admin` capability
 
         Raises:
+            AuthError: author does not name an existing principal
+            CapabilityError: author lacks admin capability
             NotFoundError: No credential with that ID exists
         """
+        self._require_admin(author)
         credential = self.backend.get_credential(credential_id)
         if credential is None:
             raise NotFoundError(f"Token credential not found: {credential_id}")
         self.backend.revoke_credential(credential_id, self.clock.now())
 
-    def list_tokens(self, principal_id: str) -> list[PrincipalCredential]:
+    def list_tokens(self, principal_id: str, author: str) -> list[PrincipalCredential]:
         """List all credentials (active and revoked) issued to a principal.
 
         Never returns the raw token or its hash — only id/created_at/revoked_at,
@@ -1266,10 +1370,17 @@ class Ontology:
 
         Args:
             principal_id: Principal to list credentials for
+            author: Principal ID performing the lookup — must hold `admin`
+                capability
 
         Returns:
             Credentials for this principal, most recently issued first
+
+        Raises:
+            AuthError: author does not name an existing principal
+            CapabilityError: author lacks admin capability
         """
+        self._require_admin(author)
         return self.backend.get_credentials_for_principal(principal_id)
 
     def close(self) -> None:
