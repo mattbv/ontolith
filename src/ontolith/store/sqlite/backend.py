@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
-from ontolith.core import Assertion, Clock, Entity, SystemClock
+from ontolith.core import Assertion, AssertionEvent, Clock, Entity, SystemClock
 from ontolith.core.errors import StorageError
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
@@ -45,6 +45,11 @@ class SQLiteBackend:
         self.conn = sqlite3.connect(str(self.path), isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        # SPEC §12.1 MUST: default backend uses WAL mode — readers don't
+        # block behind writers, which matters for a long-lived MCP server
+        # process handling concurrent tool calls. No-op (falls back to a
+        # different mode) for in-memory/`:memory:` databases.
+        self.conn.execute("PRAGMA journal_mode = WAL")
         self._in_transaction: bool = False
         self._clock: Clock = clock or SystemClock()
         self._create_schema()
@@ -64,7 +69,8 @@ class SQLiteBackend:
                 trust_level INTEGER NOT NULL DEFAULT 0 CHECK(trust_level BETWEEN 0 AND 10),
                 created_at TEXT NOT NULL,
                 metadata TEXT NOT NULL DEFAULT '{}',
-                CHECK (kind <> 'ai' OR owner IS NOT NULL)
+                CHECK (kind <> 'ai' OR owner IS NOT NULL),
+                FOREIGN KEY(owner) REFERENCES principal(id)
             )
         """)
 
@@ -142,6 +148,27 @@ class SQLiteBackend:
             )
         """)
 
+        # Assertion event table — append-only audit log for status
+        # mutations (supersession, flagging, retraction, reactivation).
+        # The assertion row itself only carries current status; this table
+        # makes each transition independently attributable and timestamped.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS assertion_event (
+                id TEXT PRIMARY KEY,
+                assertion_id TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL CHECK(action IN ('superseded', 'flagged', 'retracted', 'reactivated')),
+                at TEXT NOT NULL,
+                FOREIGN KEY(assertion_id) REFERENCES assertion(id),
+                FOREIGN KEY(actor) REFERENCES principal(id)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_assertion_event_assertion
+            ON assertion_event(assertion_id)
+        """)
+
         # Proposal table (SPEC §9.1)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS proposal (
@@ -195,6 +222,7 @@ class SQLiteBackend:
                 state TEXT NOT NULL DEFAULT 'open' CHECK(state IN ('open', 'resolved')),
                 member_ids TEXT NOT NULL DEFAULT '[]',
                 created_at TEXT NOT NULL,
+                raised_by TEXT,
                 resolved_by TEXT,
                 resolved_at TEXT,
                 metadata TEXT NOT NULL DEFAULT '{}'
@@ -606,8 +634,6 @@ class SQLiteBackend:
         Returns:
             List of matching assertions
         """
-        import json
-
         query = "SELECT * FROM assertion WHERE 1=1"
         params: list[str] = []
 
@@ -636,39 +662,51 @@ class SQLiteBackend:
         cursor = self.conn.cursor()
         cursor.execute(query, params)
 
-        results = []
-        for row in cursor.fetchall():
-            # Reconstruct unified value from value_lit/value_ref
-            value = row["value_lit"] if row["value_kind"] == "literal" else row["value_ref"]
+        return [self._row_to_assertion(row) for row in cursor.fetchall()]
 
-            results.append(
-                Assertion(
-                    id=row["id"],
-                    namespace=row["namespace"],
-                    subject=row["subject"],
-                    predicate=row["predicate"],
-                    value_kind=row["value_kind"],
-                    value_type=row["value_type"],
-                    value=value,
-                    author=row["author"],
-                    acting_as=row["acting_as"],
-                    source=row["source"],
-                    confidence=row["confidence"],
-                    rationale=row["rationale"],
-                    model=row["model"],
-                    asserted_at=datetime.fromisoformat(row["asserted_at"]),
-                    valid_from=(
-                        datetime.fromisoformat(row["valid_from"]) if row["valid_from"] else None
-                    ),
-                    valid_to=(datetime.fromisoformat(row["valid_to"]) if row["valid_to"] else None),
-                    status=row["status"],
-                    proposal_id=row["proposal_id"],
-                    supersedes=row["supersedes"],
-                    metadata=json.loads(row["metadata"]),
-                )
-            )
+    @staticmethod
+    def _row_to_assertion(row: sqlite3.Row) -> Assertion:
+        import json
 
-        return results
+        # Reconstruct unified value from value_lit/value_ref
+        value = row["value_lit"] if row["value_kind"] == "literal" else row["value_ref"]
+
+        return Assertion(
+            id=row["id"],
+            namespace=row["namespace"],
+            subject=row["subject"],
+            predicate=row["predicate"],
+            value_kind=row["value_kind"],
+            value_type=row["value_type"],
+            value=value,
+            author=row["author"],
+            acting_as=row["acting_as"],
+            source=row["source"],
+            confidence=row["confidence"],
+            rationale=row["rationale"],
+            model=row["model"],
+            asserted_at=datetime.fromisoformat(row["asserted_at"]),
+            valid_from=(datetime.fromisoformat(row["valid_from"]) if row["valid_from"] else None),
+            valid_to=(datetime.fromisoformat(row["valid_to"]) if row["valid_to"] else None),
+            status=row["status"],
+            proposal_id=row["proposal_id"],
+            supersedes=row["supersedes"],
+            metadata=json.loads(row["metadata"]),
+        )
+
+    def get_assertion(self, assertion_id: str) -> Assertion | None:
+        """Retrieve a single assertion by ID, regardless of status.
+
+        Args:
+            assertion_id: Assertion ID to retrieve
+
+        Returns:
+            Assertion if found, None otherwise
+        """
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM assertion WHERE id = ?", (assertion_id,))
+        row = cursor.fetchone()
+        return self._row_to_assertion(row) if row else None
 
     def set_assertion_status(
         self,
@@ -960,6 +998,48 @@ class SQLiteBackend:
             for row in cursor.fetchall()
         ]
 
+    def put_assertion_event(self, event: AssertionEvent) -> None:
+        """Persist an append-only assertion status-mutation event."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO assertion_event (id, assertion_id, actor, action, at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    event.id,
+                    event.assertion_id,
+                    event.actor,
+                    event.action,
+                    event.at.isoformat(),
+                ),
+            )
+            if not self._in_transaction:
+                self.conn.commit()
+        except sqlite3.IntegrityError as e:
+            raise StorageError(f"Assertion event conflict (id={event.id}): {e}") from e
+        except sqlite3.Error as e:
+            raise StorageError(f"Failed to persist assertion event (id={event.id}): {e}") from e
+
+    def get_assertion_events(self, assertion_id: str) -> list[AssertionEvent]:
+        """Retrieve all status-mutation events for an assertion, oldest first."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM assertion_event WHERE assertion_id = ? ORDER BY at ASC",
+            (assertion_id,),
+        )
+        return [
+            AssertionEvent(
+                id=row["id"],
+                assertion_id=row["assertion_id"],
+                actor=row["actor"],
+                action=row["action"],
+                at=datetime.fromisoformat(row["at"]),
+            )
+            for row in cursor.fetchall()
+        ]
+
     def put_contradiction(self, contradiction: Contradiction) -> None:
         """Persist a new contradiction."""
         import json
@@ -969,8 +1049,8 @@ class SQLiteBackend:
             cursor.execute(
                 """
                 INSERT INTO contradiction (id, namespace, subject, predicate, state,
-                    member_ids, created_at, resolved_by, resolved_at, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    member_ids, created_at, raised_by, resolved_by, resolved_at, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     contradiction.id,
@@ -980,6 +1060,7 @@ class SQLiteBackend:
                     contradiction.state,
                     json.dumps(contradiction.member_ids),
                     contradiction.created_at.isoformat(),
+                    contradiction.raised_by,
                     contradiction.resolved_by,
                     contradiction.resolved_at.isoformat() if contradiction.resolved_at else None,
                     json.dumps(contradiction.metadata),
@@ -994,12 +1075,28 @@ class SQLiteBackend:
                 f"Failed to persist contradiction (id={contradiction.id}): {e}"
             ) from e
 
+    @staticmethod
+    def _row_to_contradiction(row: sqlite3.Row) -> Contradiction:
+        import json
+
+        return Contradiction(
+            id=row["id"],
+            namespace=row["namespace"],
+            subject=row["subject"],
+            predicate=row["predicate"],
+            state=row["state"],
+            member_ids=json.loads(row["member_ids"]),
+            created_at=datetime.fromisoformat(row["created_at"]),
+            raised_by=row["raised_by"],
+            resolved_by=row["resolved_by"],
+            resolved_at=datetime.fromisoformat(row["resolved_at"]) if row["resolved_at"] else None,
+            metadata=json.loads(row["metadata"]),
+        )
+
     def get_open_contradiction(
         self, namespace: str, subject: str, predicate: str
     ) -> Contradiction | None:
         """Return the open contradiction for (namespace, subject, predicate), if any."""
-        import json
-
         cursor = self.conn.cursor()
         cursor.execute(
             """
@@ -1010,21 +1107,7 @@ class SQLiteBackend:
             (namespace, subject, predicate),
         )
         row = cursor.fetchone()
-        if row is None:
-            return None
-
-        return Contradiction(
-            id=row["id"],
-            namespace=row["namespace"],
-            subject=row["subject"],
-            predicate=row["predicate"],
-            state=row["state"],
-            member_ids=json.loads(row["member_ids"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            resolved_by=row["resolved_by"],
-            resolved_at=datetime.fromisoformat(row["resolved_at"]) if row["resolved_at"] else None,
-            metadata=json.loads(row["metadata"]),
-        )
+        return self._row_to_contradiction(row) if row else None
 
     def update_contradiction_members(
         self,
@@ -1051,26 +1134,10 @@ class SQLiteBackend:
 
     def get_contradiction(self, contradiction_id: str) -> Contradiction | None:
         """Retrieve a contradiction by ID, regardless of state."""
-        import json
-
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM contradiction WHERE id = ?", (contradiction_id,))
         row = cursor.fetchone()
-        if row is None:
-            return None
-
-        return Contradiction(
-            id=row["id"],
-            namespace=row["namespace"],
-            subject=row["subject"],
-            predicate=row["predicate"],
-            state=row["state"],
-            member_ids=json.loads(row["member_ids"]),
-            created_at=datetime.fromisoformat(row["created_at"]),
-            resolved_by=row["resolved_by"],
-            resolved_at=datetime.fromisoformat(row["resolved_at"]) if row["resolved_at"] else None,
-            metadata=json.loads(row["metadata"]),
-        )
+        return self._row_to_contradiction(row) if row else None
 
     def resolve_contradiction(
         self,

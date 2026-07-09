@@ -6,8 +6,10 @@ from pathlib import Path
 import pytest
 
 from ontolith import Ontology
-from ontolith.core.errors import AuthError
+from ontolith.core.errors import AuthError, CapabilityError
 from ontolith.identity.token_auth import TokenAuthProvider, hash_token
+
+ADMIN = "admin@example.com"
 
 
 @pytest.fixture
@@ -16,6 +18,7 @@ def kb() -> Ontology:
         path = Path(f.name)
     kb = Ontology.connect(path)
     kb.create_principal("alice@example.com", kind="human", default_capability="write")
+    kb.create_principal(ADMIN, kind="human", default_capability="admin")
     yield kb
     kb.close()
     path.unlink()
@@ -34,7 +37,7 @@ class TestHashToken:
 
 class TestTokenAuthProvider:
     def test_resolve_returns_correct_principal(self, kb: Ontology) -> None:
-        token = kb.issue_token("alice@example.com")
+        token = kb.issue_token("alice@example.com", author=ADMIN)
         provider = TokenAuthProvider(kb.backend)
 
         principal = provider.resolve(token)
@@ -47,30 +50,30 @@ class TestTokenAuthProvider:
             provider.resolve("garbage-token")
 
     def test_resolve_revoked_token_raises_auth_error(self, kb: Ontology) -> None:
-        token = kb.issue_token("alice@example.com")
-        credential_id = kb.list_tokens("alice@example.com")[0].id
-        kb.revoke_token(credential_id)
+        token = kb.issue_token("alice@example.com", author=ADMIN)
+        credential_id = kb.list_tokens("alice@example.com", author=ADMIN)[0].id
+        kb.revoke_token(credential_id, author=ADMIN)
 
         provider = TokenAuthProvider(kb.backend)
         with pytest.raises(AuthError, match="Invalid or revoked token"):
             provider.resolve(token)
 
     def test_two_tokens_both_resolve_independently(self, kb: Ontology) -> None:
-        token_a = kb.issue_token("alice@example.com")
-        token_b = kb.issue_token("alice@example.com")
+        token_a = kb.issue_token("alice@example.com", author=ADMIN)
+        token_b = kb.issue_token("alice@example.com", author=ADMIN)
         provider = TokenAuthProvider(kb.backend)
 
         assert provider.resolve(token_a).id == "alice@example.com"
         assert provider.resolve(token_b).id == "alice@example.com"
 
     def test_revoking_one_token_does_not_invalidate_the_other(self, kb: Ontology) -> None:
-        token_a = kb.issue_token("alice@example.com")
-        token_b = kb.issue_token("alice@example.com")
-        credentials = kb.list_tokens("alice@example.com")
+        token_a = kb.issue_token("alice@example.com", author=ADMIN)
+        token_b = kb.issue_token("alice@example.com", author=ADMIN)
+        credentials = kb.list_tokens("alice@example.com", author=ADMIN)
         # Revoke whichever credential corresponds to token_a
         provider = TokenAuthProvider(kb.backend)
         cred_a = next(c for c in credentials if hash_token(token_a) == c.token_hash)
-        kb.revoke_token(cred_a.id)
+        kb.revoke_token(cred_a.id, author=ADMIN)
 
         with pytest.raises(AuthError):
             provider.resolve(token_a)
@@ -79,16 +82,16 @@ class TestTokenAuthProvider:
 
 class TestOntologyTokenIssuance:
     def test_issue_token_raw_value_not_the_stored_hash(self, kb: Ontology) -> None:
-        token = kb.issue_token("alice@example.com")
-        credential = kb.list_tokens("alice@example.com")[0]
+        token = kb.issue_token("alice@example.com", author=ADMIN)
+        credential = kb.list_tokens("alice@example.com", author=ADMIN)[0]
         assert token != credential.token_hash
 
     def test_issue_token_unknown_principal_raises_auth_error(self, kb: Ontology) -> None:
         with pytest.raises(AuthError, match="Principal not found"):
-            kb.issue_token("nobody@example.com")
+            kb.issue_token("nobody@example.com", author=ADMIN)
 
     def test_issue_token_round_trips_through_auth_provider(self, kb: Ontology) -> None:
-        token = kb.issue_token("alice@example.com")
+        token = kb.issue_token("alice@example.com", author=ADMIN)
         principal = TokenAuthProvider(kb.backend).resolve(token)
         assert principal.id == "alice@example.com"
 
@@ -96,19 +99,43 @@ class TestOntologyTokenIssuance:
         from ontolith.core.errors import NotFoundError
 
         with pytest.raises(NotFoundError, match="Token credential not found"):
-            kb.revoke_token("nonexistent")
+            kb.revoke_token("nonexistent", author=ADMIN)
 
     def test_list_tokens_reflects_issuance_and_revocation(self, kb: Ontology) -> None:
-        kb.issue_token("alice@example.com")
-        kb.issue_token("alice@example.com")
-        credentials = kb.list_tokens("alice@example.com")
+        kb.issue_token("alice@example.com", author=ADMIN)
+        kb.issue_token("alice@example.com", author=ADMIN)
+        credentials = kb.list_tokens("alice@example.com", author=ADMIN)
         assert len(credentials) == 2
         assert all(c.revoked_at is None for c in credentials)
 
-        kb.revoke_token(credentials[0].id)
-        refreshed = kb.list_tokens("alice@example.com")
+        kb.revoke_token(credentials[0].id, author=ADMIN)
+        refreshed = kb.list_tokens("alice@example.com", author=ADMIN)
         revoked = next(c for c in refreshed if c.id == credentials[0].id)
         assert revoked.revoked_at is not None
 
     def test_list_tokens_empty_for_principal_with_no_credentials(self, kb: Ontology) -> None:
-        assert kb.list_tokens("alice@example.com") == []
+        assert kb.list_tokens("alice@example.com", author=ADMIN) == []
+
+
+class TestTokenIssuanceRequiresAdmin:
+    """Issuing/revoking/listing credentials converts local access into a
+    remote, network-reachable bearer token — a higher-stakes action than
+    the target principal's own capability, so it requires an admin author."""
+
+    def test_issue_token_rejects_non_admin_author(self, kb: Ontology) -> None:
+        with pytest.raises(CapabilityError, match="lacks admin capability"):
+            kb.issue_token("alice@example.com", author="alice@example.com")
+
+    def test_issue_token_rejects_unknown_author(self, kb: Ontology) -> None:
+        with pytest.raises(AuthError, match="Principal not found"):
+            kb.issue_token("alice@example.com", author="nobody@example.com")
+
+    def test_revoke_token_rejects_non_admin_author(self, kb: Ontology) -> None:
+        kb.issue_token("alice@example.com", author=ADMIN)
+        credential_id = kb.list_tokens("alice@example.com", author=ADMIN)[0].id
+        with pytest.raises(CapabilityError, match="lacks admin capability"):
+            kb.revoke_token(credential_id, author="alice@example.com")
+
+    def test_list_tokens_rejects_non_admin_author(self, kb: Ontology) -> None:
+        with pytest.raises(CapabilityError, match="lacks admin capability"):
+            kb.list_tokens("alice@example.com", author="alice@example.com")

@@ -22,6 +22,7 @@ HUMAN = "alice@example.com"
 AI = "scout-agent"
 AI_OWNER = HUMAN
 REVIEWER = "bob@example.com"
+ADMIN = "admin@example.com"
 
 
 def _kb(tmp_path: Path) -> Ontology:
@@ -33,6 +34,7 @@ def _kb(tmp_path: Path) -> Ontology:
     kb.create_principal(
         AI, kind="ai", auth_method="apikey", owner=AI_OWNER, default_capability="propose"
     )
+    kb.create_principal(ADMIN, kind="human", auth_method="oidc", default_capability="admin")
     return kb
 
 
@@ -277,7 +279,7 @@ class TestProposeTool:
             predicate="Person.name",
             value="Ada",
             value_type="Text",
-            token=kb.issue_token(HUMAN),
+            token=kb.issue_token(HUMAN, author=ADMIN),
         )
 
         assert result["proposal"]["state"] == "auto_accepted"
@@ -295,7 +297,7 @@ class TestProposeTool:
             predicate="Person.name",
             value="Ada",
             value_type="Text",
-            token=kb.issue_token(AI),
+            token=kb.issue_token(AI, author=ADMIN),
         )
         assert "error" in result
         assert result["code"] == "validation_error"
@@ -310,7 +312,7 @@ class TestProposeTool:
             predicate="Person.name",
             value="Ada",
             value_type="Text",
-            token=kb.issue_token(AI),
+            token=kb.issue_token(AI, author=ADMIN),
             model="test-model-v1",
         )
 
@@ -337,9 +339,9 @@ class TestProposeTool:
     def test_propose_revoked_token_returns_auth_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
-        token = kb.issue_token(HUMAN)
-        credential_id = kb.list_tokens(HUMAN)[0].id
-        kb.revoke_token(credential_id)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        credential_id = kb.list_tokens(HUMAN, author=ADMIN)[0].id
+        kb.revoke_token(credential_id, author=ADMIN)
 
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.propose").fn(
@@ -366,7 +368,7 @@ class TestProposeTool:
             predicate="Person.name",
             value="Ada",
             value_type="Text",
-            token=kb.issue_token(AI),  # owner=alice
+            token=kb.issue_token(AI, author=ADMIN),  # owner=alice
             acting_as="carol@example.com",  # not AI's owner
             model="test-model-v1",
         )
@@ -384,7 +386,7 @@ class TestProposeTool:
             predicate="Person.name",
             value="Ada",
             value_type="Text",
-            token=kb.issue_token(AI),
+            token=kb.issue_token(AI, author=ADMIN),
             model="test-model-v1",
         )
 
@@ -402,7 +404,7 @@ class TestProposeTool:
             subject=person.id,
             predicate="Person.employer",
             target=org.id,
-            token=kb.issue_token(HUMAN),
+            token=kb.issue_token(HUMAN, author=ADMIN),
         )
 
         assert result["proposal"]["state"] == "auto_accepted"
@@ -421,7 +423,7 @@ class TestProposeTool:
         result = mcp._tool_manager.get_tool("ontolith.propose").fn(
             subject=entity.id,
             predicate="Person.name",
-            token=kb.issue_token(HUMAN),
+            token=kb.issue_token(HUMAN, author=ADMIN),
         )
 
         assert "error" in result
@@ -439,7 +441,7 @@ class TestProposeTool:
             value="Acme",
             value_type="Text",
             target=org.id,
-            token=kb.issue_token(HUMAN),
+            token=kb.issue_token(HUMAN, author=ADMIN),
         )
 
         assert "error" in result
@@ -502,12 +504,13 @@ class TestFlagContradictionTool:
         result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
             assertion_id_a=assertions[0].id,
             assertion_id_b=a2.id,
-            token=kb.issue_token(HUMAN),
+            token=kb.issue_token(HUMAN, author=ADMIN),
         )
 
         assert "contradiction_id" in result
         assert result["action"] == "created"
         assert set(result["member_ids"]) == {assertions[0].id, a2.id}
+        assert result["raised_by"] == HUMAN
 
     def test_flag_different_predicates_returns_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -523,7 +526,7 @@ class TestFlagContradictionTool:
         result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
             assertion_id_a=name_a.id,
             assertion_id_b=born_a.id,
-            token=kb.issue_token(HUMAN),
+            token=kb.issue_token(HUMAN, author=ADMIN),
         )
         assert "error" in result
 
@@ -570,7 +573,7 @@ class TestFlagContradictionTool:
         result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
             assertion_id_a=assertions[0].id,
             assertion_id_b=a2.id,
-            token=kb.issue_token("readonly@example.com"),
+            token=kb.issue_token("readonly@example.com", author=ADMIN),
         )
         assert "error" in result
         assert result["code"] == "capability_error"
@@ -585,7 +588,7 @@ class TestFlagContradictionTool:
         result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
             assertion_id_a="nonexistent",
             assertion_id_b=assertions[0].id,
-            token=kb.issue_token(HUMAN),
+            token=kb.issue_token(HUMAN, author=ADMIN),
         )
         assert "error" in result
         assert result["code"] == "not_found"
@@ -600,7 +603,7 @@ class TestFlagContradictionTool:
         result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
             assertion_id_a=assertions[0].id,
             assertion_id_b="nonexistent",
-            token=kb.issue_token(HUMAN),
+            token=kb.issue_token(HUMAN, author=ADMIN),
         )
         assert "error" in result
         assert result["code"] == "not_found"
@@ -637,7 +640,7 @@ class TestFlagContradictionTool:
         result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
             assertion_id_a=flagged[0].id,
             assertion_id_b=a3.id,
-            token=kb.issue_token(HUMAN),
+            token=kb.issue_token(HUMAN, author=ADMIN),
         )
 
         assert result["action"] == "extended"

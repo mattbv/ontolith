@@ -7,7 +7,7 @@ This module contains the fundamental building blocks:
 - Future: meta-model, IR, validation
 """
 
-from ontolith.core.assertion import Assertion
+from ontolith.core.assertion import Assertion, AssertionEvent
 from ontolith.core.clock import Clock, FixedClock, SystemClock
 from ontolith.core.entity import Entity
 from ontolith.core.errors import (
@@ -42,6 +42,7 @@ __all__ = [
     # Domain models
     "Entity",
     "Assertion",
+    "AssertionEvent",
     # Errors
     "OntolithError",
     "SchemaError",

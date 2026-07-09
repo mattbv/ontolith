@@ -248,6 +248,24 @@ Both call sites now use `assertions(status=None)` to search across all statuses.
 
 ---
 
+## KI-014 — No plugin capability isolation (deny-by-default network/fs/write, manifest enforcement)
+
+**Severity:** Architecture gap — security-relevant, but not yet exploitable since no plugin loading mechanism exists to secure
+**Milestone target:** Must land before plugin discovery/loading is enabled (M3+, tracked alongside KI-010's closure)
+**SPEC reference:** CLAUDE.md plugin isolation requirements; Implementation Plan `plugins/` module (registry, protocols, lifecycle, sandbox)
+
+### Description
+
+`src/ontolith/plugins/` contains only protocol stubs (`ports.py`, `Embedder`/`PolicyStrategy`) — no registry, no manifest schema, no entry-point discovery exercised end-to-end, and critically, no capability sandbox. CLAUDE.md requires plugins to "declare `name`, `version`, `capabilities` manifest" and reasoner-derived assertions to "enter through proposal path (never bypass governance)," but none of this is enforced anywhere because nothing loads a plugin yet.
+
+Surfaced during the 2026-07-08 post-remediation security re-audit: a hypothetical in-process plugin, once loading exists, would run fully trusted and could call `backend.put_assertion` directly (bypassing governance) or `Ontology.issue_token` (see the now-admin-gated fix, MED2 in the same remediation) to mint itself a high-capability MCP credential. Today this is not an active vulnerability — there is no code path that loads third-party plugin code — but the gap needs to be closed *before*, not after, plugin discovery is turned on, since retrofitting a sandbox onto already-trusted plugin code is a much harder migration than building it in from the start.
+
+### Fix
+
+Not attempted here — deliberately out of scope for a bug-fix pass. When plugin loading is implemented: (1) define the manifest schema (capabilities: read/propose/write/network/filesystem, deny-by-default), (2) enforce declared capabilities at the port boundary (e.g. a capability-restricted `StorageBackend` wrapper per plugin), (3) route all reasoner/importer-produced assertions through `propose()`, never direct writes, (4) keep `issue_token` and other admin-gated `Ontology` methods unreachable from plugin code regardless of declared capabilities. Needs its own ADR before implementation, per Appendix B's "open implementation questions" precedent (same pattern KI-010 followed for the LinkML dialect).
+
+---
+
 ## Format
 
 Each entry follows this structure:

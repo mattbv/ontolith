@@ -56,6 +56,13 @@ class TestSQLiteBackend:
 
         backend.close()
 
+    def test_wal_mode_enabled(self, temp_db: Path) -> None:
+        """SPEC §12.1 MUST: default backend uses WAL journal mode."""
+        backend = SQLiteBackend(temp_db)
+        mode = backend.conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert mode.lower() == "wal"
+        backend.close()
+
     def test_put_and_get_entity(self, backend: SQLiteBackend) -> None:
         """Entity can be persisted and retrieved."""
         entity = Entity(
@@ -115,6 +122,63 @@ class TestSQLiteBackend:
         assert len(assertions) == 1
         assert assertions[0].id == assertion.id
         assert assertions[0].value == "Ada Lovelace"
+
+    def test_get_assertion_by_id(self, backend: SQLiteBackend) -> None:
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(entity)
+        assertion = Assertion(
+            id="assertion-001",
+            namespace="test-ns",
+            subject="entity-001",
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada Lovelace",
+            author="alice@test.com",
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        backend.put_assertion(assertion)
+
+        fetched = backend.get_assertion("assertion-001")
+        assert fetched is not None
+        assert fetched.value == "Ada Lovelace"
+
+    def test_get_assertion_returns_none_when_not_found(self, backend: SQLiteBackend) -> None:
+        assert backend.get_assertion("nonexistent") is None
+
+    def test_get_assertion_finds_non_active_status(self, backend: SQLiteBackend) -> None:
+        """get_assertion must be status-agnostic, unlike the default assertions() filter."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(entity)
+        assertion = Assertion(
+            id="assertion-001",
+            namespace="test-ns",
+            subject="entity-001",
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada Lovelace",
+            author="alice@test.com",
+            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+            status="retracted",
+        )
+        backend.put_assertion(assertion)
+
+        fetched = backend.get_assertion("assertion-001")
+        assert fetched is not None
+        assert fetched.status == "retracted"
 
     def test_assertions_filter_by_subject(self, backend: SQLiteBackend) -> None:
         """Assertions can be filtered by subject."""
@@ -465,7 +529,7 @@ class TestSQLiteBackend:
         principal = Principal(
             id="bot-001",
             kind="ai",
-            owner="alice@example.com",
+            owner="alice@test.com",  # matches the backend fixture's seeded principal
             auth_method="workload",
             created_at=datetime(2025, 1, 1, tzinfo=UTC),
             metadata=metadata,

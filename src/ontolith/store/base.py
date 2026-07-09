@@ -13,7 +13,7 @@ from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Protocol
 
-from ontolith.core import Assertion, Entity
+from ontolith.core import Assertion, AssertionEvent, Entity
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential
@@ -169,6 +169,17 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def get_assertion(self, assertion_id: str) -> Assertion | None:
+        """Retrieve a single assertion by ID, regardless of status.
+
+        Args:
+            assertion_id: Assertion ID to retrieve
+
+        Returns:
+            Assertion if found, None otherwise
+        """
+        ...
+
     def assertions(
         self,
         subject: str | None = None,
@@ -211,6 +222,28 @@ class StorageBackend(Protocol):
 
         Raises:
             StorageError: If update fails or assertion not found
+        """
+        ...
+
+    def put_assertion_event(self, event: AssertionEvent) -> None:
+        """Persist an append-only assertion status-mutation event.
+
+        Args:
+            event: AssertionEvent to persist
+
+        Raises:
+            StorageError: If persistence fails
+        """
+        ...
+
+    def get_assertion_events(self, assertion_id: str) -> list[AssertionEvent]:
+        """Retrieve all status-mutation events for an assertion, oldest first.
+
+        Args:
+            assertion_id: Assertion to retrieve events for
+
+        Returns:
+            Events for this assertion, ordered by occurrence
         """
         ...
 
