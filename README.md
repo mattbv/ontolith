@@ -35,7 +35,7 @@ uv run mypy --strict src
 
 ## Development Status
 
-🚧 **Pre-Alpha** - M2 (Collaboration) in progress — M1 substrate complete
+🚧 **Pre-Alpha** - M3 (Extensible) in progress — M1 substrate and M2 collaboration complete
 
 See [docs/Ontolith_Implementation_Plan.md](docs/Ontolith_Implementation_Plan.md) for roadmap.
 
