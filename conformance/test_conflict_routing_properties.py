@@ -2,7 +2,7 @@
 
 route() is a pure function — no I/O, no storage — so these tests exercise it
 directly with Hypothesis-generated assertions rather than going through a KB.
-Covers the invariants CLAUDE.md calls out as first-class for property testing:
+Covers the invariants SPEC §10 calls out as first-class for property testing:
 conflict routing correctness and determinism.
 """
 

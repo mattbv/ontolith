@@ -38,7 +38,7 @@ Several design questions had to be settled to compile Python class bodies into `
 
 ### Explicit `compile_schema()`, no implicit global registry
 
-`compile_schema(namespace, version, *concepts, metadata=None) -> SchemaIR` takes the concepts to include as explicit arguments. There is no hidden module-level list of "every `Concept` subclass ever defined," which would create import-order-dependent behavior and hidden mutable global state — inconsistent with the project's Clock/IdProvider injection philosophy (CLAUDE.md: no hidden non-determinism in domain logic).
+`compile_schema(namespace, version, *concepts, metadata=None) -> SchemaIR` takes the concepts to include as explicit arguments. There is no hidden module-level list of "every `Concept` subclass ever defined," which would create import-order-dependent behavior and hidden mutable global state — inconsistent with the project's Clock/IdProvider injection philosophy (the Implementation Plan's determinism invariant: no hidden non-determinism in domain logic).
 
 ### `Property(...)` added alongside `Relation(...)`
 

@@ -76,6 +76,20 @@ class TestOntology:
         assert retrieved is not None
         assert retrieved.id == entity.id
 
+    def test_create_entity_unknown_author_raises_auth_error(self, kb: Ontology) -> None:
+        with pytest.raises(AuthError, match="Principal not found"):
+            kb.create_entity("Person", author="nobody@example.com")
+
+    def test_create_entity_read_only_author_raises_capability_error(self, kb: Ontology) -> None:
+        kb.create_principal("readonly@example.com", kind="human", default_capability="read")
+        with pytest.raises(CapabilityError, match="lacks propose capability"):
+            kb.create_entity("Person", author="readonly@example.com")
+
+    def test_create_entity_propose_capability_succeeds(self, kb: Ontology) -> None:
+        kb.create_principal("bob@example.com", kind="human", default_capability="propose")
+        entity = kb.create_entity("Person", author="bob@example.com")
+        assert entity.created_by == "bob@example.com"
+
     def test_assert_literal(self, kb: Ontology) -> None:
         """Literal assertions can be created."""
         entity = kb.create_entity("Person", author="alice@example.com")
