@@ -268,21 +268,21 @@ Surfaced during the 2026-07-08 post-remediation security re-audit: a hypothetica
 
 ---
 
-## KI-015 — `propose()`/`propose_ref()`/`retract()` have no capability floor at all
+## KI-015 — `propose()`/`propose_ref()`/`retract()` capability floor — RESOLVED (design clarification, no code change)
 
-**Severity:** Architecture gap — a `read`-capability principal can submit proposals through the primary governed-write path, even though `create_entity`/`flag_contradiction` explicitly reject `read` for the equivalent action
-**Milestone target:** Unscoped — pre-existing, surfaced as a side effect of ADR-0015's `create_entity` capability gate, not fixed there
-**SPEC reference:** SPEC §8.3 (capability lattice: `read < propose < write < review < admin` — the "propose" tier's name implies it is the floor for proposing)
+**Severity:** Informational — design clarification, not a defect
+**Milestone target:** N/A — resolved by clarifying intended behavior, no implementation needed
+**SPEC reference:** SPEC §8.3 (capability lattice: `read < propose < write < review < admin`), SPEC §9.1 (proposal state machine — `reject` as a terminal state reached via policy evaluation)
 
 ### Description
 
-`Ontology.propose()`/`propose_ref()`/`retract()` resolve the author principal and check AI-model requirements and delegation authorization, but never check `principal.default_capability` at all before proceeding to `ThresholdPolicy.evaluate()`. A `read`-capability principal can therefore call `propose()` and have a `Proposal` created and stored (routed to `RequireReview` by policy, but created nonetheless) — unlike `create_entity` and `flag_contradiction`, both of which explicitly raise `CapabilityError` for `read`-capability authors before doing anything.
+`Ontology.propose()`/`propose_ref()`/`retract()` resolve the author principal and check AI-model requirements and delegation authorization, but never check `principal.default_capability` directly before proceeding to `ThresholdPolicy.evaluate()` — unlike `create_entity` and `flag_contradiction`, both of which explicitly raise `CapabilityError` for `read`-capability authors before doing anything.
 
-Surfaced during the code review for ADR-0015 (plugin capability isolation): `create_entity` gained a `>= propose` capability gate as part of that work, which made the pre-existing asymmetry concrete — a `read`-only plugin principal is now blocked from `create_entity` but not from `propose()`/`propose_ref()`/`retract()`.
+Surfaced during the code review for ADR-0015 (plugin capability isolation): `create_entity` gained a `>= propose` capability gate as part of that work, which made the asymmetry concrete — a `read`-only plugin principal is blocked from `create_entity` but reaches `ThresholdPolicy.evaluate()` via `propose()`/`propose_ref()`/`retract()`. This looked like a missing gate.
 
-### Fix
+### Resolution
 
-Not attempted here — out of scope for a plugin-isolation change, since it would affect every `propose()`/`propose_ref()`/`retract()` caller in the codebase, not just plugins, and needs its own design pass to decide the right floor (should `read` be rejected outright, or is "anyone can propose, only capability determines auto-accept" the intended SPEC §9 behavior?). Needs a decision recorded before implementation.
+Not a gap — the two code paths are different by necessity, not inconsistent in effect. `create_entity`/`flag_contradiction` have no proposal/policy machinery at all, so a hard pre-check is their only mechanism for blocking `read`-capability authors. `propose`/`propose_ref`/`retract` already have that machinery, and route every author — including `read` capability — through `ThresholdPolicy.evaluate()`, which returns a `Reject` decision for `read`-capability principals (per KI-006's resolution): a persisted `Proposal` with `state="rejected"` and `decided_at` set, but no assertion ever written. This is SPEC §9.1's modeled behavior (`reject` is a first-class terminal state reached via policy, not a pre-check short-circuit), is covered by 8 existing conformance tests (`conformance/test_proposal_workflow.py::TestRejectDecision`), and is the contract documented in `interfaces/mcp.py`'s `propose_tool` docstring. Both mechanisms end in the same place — no assertion written, no elevated access granted — via the only path available to each. Adding a hard `CapabilityError` pre-check to `propose`/`propose_ref`/`retract` would not close a gap; it would regress all 8 conformance tests and contradict the SPEC-modeled state machine and the documented MCP contract.
 
 ---
 
