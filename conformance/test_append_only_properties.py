@@ -1,6 +1,6 @@
 """Property-based tests for the SPEC §5 append-only assertion invariant.
 
-CLAUDE.md calls out append-only as a first-class property-testing target:
+SPEC §5.3 requires append-only as a first-class property-testing target:
 no operation may mutate an assertion's `value` after creation, and nothing
 is ever deleted — only `status`, `valid_to`, and `supersedes` may change.
 """

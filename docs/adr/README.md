@@ -24,6 +24,10 @@ We use the [MADR](https://adr.github.io/madr/) (Markdown Any Decision Records) f
 - [ADR-0009](ADR-0009-trust-level-range.md) — **Trust Level Range** (0–10 integer with DB CHECK constraint)
 - [ADR-0010](ADR-0010-sqlite-transaction-model.md) — **SQLite Transaction Model** (Autocommit + explicit transaction flag)
 - [ADR-0011](ADR-0011-provenance-fk-enforcement.md) — **Provenance FK Enforcement** (DB-level FKs on `entity.created_by` and `assertion.author`)
+- [ADR-0012](ADR-0012-class-dsl-compiler.md) — **Class DSL Compiler** (`compile_schema()`, explicit concepts, no global registry)
+- [ADR-0013](ADR-0013-linkml-dialect-coverage.md) — **LinkML Dialect Coverage** (v1 scope, fail-loud on unsupported constructs)
+- [ADR-0014](ADR-0014-mcp-authentication.md) — **MCP Authentication** (Per-principal API keys)
+- [ADR-0015](ADR-0015-plugin-capability-isolation.md) — **Plugin Capability Isolation** (Service-principal-scoped views, storage capability enforced)
 
 ## Decision Process
 

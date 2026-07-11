@@ -219,7 +219,17 @@ class Ontology:
 
         Returns:
             Created entity
+
+        Raises:
+            AuthError: author is not a known principal
+            CapabilityError: author's capability is 'read'
         """
+        principal = self.backend.get_principal(author)
+        if principal is None:
+            raise AuthError(f"Principal not found: {author}")
+        if principal.default_capability == "read":
+            raise CapabilityError(f"Principal {author!r} lacks propose capability")
+
         entity = Entity(
             id=self.id_provider.next(),
             namespace=self.namespace,
@@ -1265,11 +1275,7 @@ class Ontology:
             CapabilityError: If the author lacks `admin` capability
             SchemaError: If `schema.version` is not the next monotonic version
         """
-        author_principal = self.backend.get_principal(author)
-        if author_principal is None:
-            raise AuthError(f"Principal not found: {author}")
-        if author_principal.default_capability != "admin":
-            raise CapabilityError(f"Principal {author} lacks admin capability")
+        self.require_admin(author)
 
         current = self.backend.get_schema(schema.namespace)
         expected_version = (current.version + 1) if current is not None else 1
@@ -1282,11 +1288,11 @@ class Ontology:
         self.backend.put_schema(schema)
         return schema
 
-    def _require_admin(self, author: str) -> Principal:
-        """Shared gate for credential-management actions (issue/revoke/list
-        tokens): minting or managing a bearer credential converts local
-        access into a remote, network-reachable capability, so it requires
-        `admin`, not just whatever capability the target principal has."""
+    def require_admin(self, author: str) -> Principal:
+        """Shared gate for admin-level actions (credential issuance/revocation,
+        plugin registration): these convert local access into a remote,
+        network-reachable capability or a standing in-process actor, so they
+        require `admin`, not just whatever capability the target has."""
         principal = self.backend.get_principal(author)
         if principal is None:
             raise AuthError(f"Principal not found: {author}")
@@ -1327,7 +1333,7 @@ class Ontology:
 
         from ontolith.identity.token_auth import hash_token
 
-        self._require_admin(author)
+        self.require_admin(author)
         principal = self.backend.get_principal(principal_id)
         if principal is None:
             raise AuthError(f"Principal not found: {principal_id}")
@@ -1356,7 +1362,7 @@ class Ontology:
             CapabilityError: author lacks admin capability
             NotFoundError: No credential with that ID exists
         """
-        self._require_admin(author)
+        self.require_admin(author)
         credential = self.backend.get_credential(credential_id)
         if credential is None:
             raise NotFoundError(f"Token credential not found: {credential_id}")
@@ -1380,7 +1386,7 @@ class Ontology:
             AuthError: author does not name an existing principal
             CapabilityError: author lacks admin capability
         """
-        self._require_admin(author)
+        self.require_admin(author)
         return self.backend.get_credentials_for_principal(principal_id)
 
     def close(self) -> None:

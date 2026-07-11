@@ -184,9 +184,9 @@ Added `Ontology.resolve_contradiction(contradiction_id, winner_assertion_id, res
 
 ### Description
 
-CLAUDE.md's M2 deliverable list includes "LinkML-aligned YAML, first 3 reference plugins" alongside review workflow, bitemporal time-travel, conflict handling, MCP server, and trust/delegation — all of which are now complete. The YAML dialect and plugin work were explicitly deferred: they require their own design pass (schema dialect coverage, bidirectional codegen, and the shape of the `Importer`/`Exporter`/`Reasoner`/`Validator` protocol implementations) rather than being folded into a conformance-gap sweep.
+The Implementation Plan's M2 deliverable list includes "LinkML-aligned YAML, first 3 reference plugins" alongside review workflow, bitemporal time-travel, conflict handling, MCP server, and trust/delegation — all of which are now complete. The YAML dialect and plugin work were explicitly deferred: they require their own design pass (schema dialect coverage, bidirectional codegen, and the shape of the `Importer`/`Exporter`/`Reasoner`/`Validator` protocol implementations) rather than being folded into a conformance-gap sweep.
 
-`src/ontolith/plugins/` currently contains only protocol stubs (`ports.py`) — no concrete plugin implementations, no entry-point discovery exercised end-to-end, no LinkML loader.
+**Update (M3):** the LinkML YAML dialect is now delivered (ADR-0013), and plugin capability isolation (KI-014) and protocol skeletons (`plugins/ports.py`) are now in place (ADR-0015). Concrete reference plugin implementations remain the one still-open item here.
 
 ### Fix
 
@@ -204,7 +204,7 @@ Scope as a dedicated chunk: (1) decide LinkML dialect coverage (Appendix B notes
 
 SPEC §19's SHOULD-vector list mentions "policy auto-accept vs. review by confidence threshold," and the informative Appendix A worked example shows an AI agent's proposal with confidence 0.82 going to `under_review` against an implied 0.9 auto-accept threshold — suggesting confidence ≥ 0.9 would auto-accept for an AI principal.
 
-This was considered and explicitly rejected for Ontolith's `ThresholdPolicy`. Both SPEC §19's vector list and Appendix A are non-normative (informative/SHOULD, not MUST). Letting an AI principal's self-reported confidence score grant `AutoAccept` would mean an AI proposal can be committed with zero human in the loop — which conflicts with the project's AI-safety posture (CLAUDE.md: AI principals default to `propose` not `write`, mandatory accountable owner, no direct MCP write tool). A model's own confidence number is not a trust signal strong enough to bypass human review.
+This was considered and explicitly rejected for Ontolith's `ThresholdPolicy`. Both SPEC §19's vector list and Appendix A are non-normative (informative/SHOULD, not MUST). Letting an AI principal's self-reported confidence score grant `AutoAccept` would mean an AI proposal can be committed with zero human in the loop — which conflicts with the project's AI-safety posture (SPEC §8.3: agents MUST default to `propose` and MUST NOT be granted `write` implicitly; SPEC §8.1: mandatory accountable owner; ADR-0008: no direct MCP write tool). A model's own confidence number is not a trust signal strong enough to bypass human review.
 
 ### Resolution
 
@@ -248,21 +248,41 @@ Both call sites now use `assertions(status=None)` to search across all statuses.
 
 ---
 
-## KI-014 — No plugin capability isolation (deny-by-default network/fs/write, manifest enforcement)
+## KI-014 — No plugin capability isolation (deny-by-default network/fs/write, manifest enforcement) — PARTIALLY RESOLVED (M3)
 
 **Severity:** Architecture gap — security-relevant, but not yet exploitable since no plugin loading mechanism exists to secure
-**Milestone target:** Must land before plugin discovery/loading is enabled (M3+, tracked alongside KI-010's closure)
-**SPEC reference:** CLAUDE.md plugin isolation requirements; Implementation Plan `plugins/` module (registry, protocols, lifecycle, sandbox)
+**Milestone target:** M3 — storage-capability isolation resolved via ADR-0015; network/filesystem enforcement remains open, tracked alongside KI-010's closure
+**SPEC reference:** SPEC §13 (plugin protocols and discovery), §17 (security model, plugin sandboxing); Implementation Plan `plugins/` module (registry, protocols, lifecycle, sandbox)
 
 ### Description
 
-`src/ontolith/plugins/` contains only protocol stubs (`ports.py`, `Embedder`/`PolicyStrategy`) — no registry, no manifest schema, no entry-point discovery exercised end-to-end, and critically, no capability sandbox. CLAUDE.md requires plugins to "declare `name`, `version`, `capabilities` manifest" and reasoner-derived assertions to "enter through proposal path (never bypass governance)," but none of this is enforced anywhere because nothing loads a plugin yet.
+`src/ontolith/plugins/` contained only protocol stubs (`ports.py`, `Embedder`/`PolicyStrategy`) — no registry, no manifest schema, no entry-point discovery exercised end-to-end, and critically, no capability sandbox. SPEC §13.1 requires plugins to declare a `name`/`version`/`capabilities` manifest and SPEC §13.2 requires reasoner-derived assertions to enter through the proposal path (never bypass governance), but none of this was enforced anywhere because nothing loaded a plugin.
 
-Surfaced during the 2026-07-08 post-remediation security re-audit: a hypothetical in-process plugin, once loading exists, would run fully trusted and could call `backend.put_assertion` directly (bypassing governance) or `Ontology.issue_token` (see the now-admin-gated fix, MED2 in the same remediation) to mint itself a high-capability MCP credential. Today this is not an active vulnerability — there is no code path that loads third-party plugin code — but the gap needs to be closed *before*, not after, plugin discovery is turned on, since retrofitting a sandbox onto already-trusted plugin code is a much harder migration than building it in from the start.
+Surfaced during the 2026-07-08 post-remediation security re-audit: a hypothetical in-process plugin, once loading exists, would run fully trusted and could call `backend.put_assertion` directly (bypassing governance) or `Ontology.issue_token` (see the now-admin-gated fix, MED2 in the same remediation) to mint itself a high-capability MCP credential.
 
 ### Fix
 
-Not attempted here — deliberately out of scope for a bug-fix pass. When plugin loading is implemented: (1) define the manifest schema (capabilities: read/propose/write/network/filesystem, deny-by-default), (2) enforce declared capabilities at the port boundary (e.g. a capability-restricted `StorageBackend` wrapper per plugin), (3) route all reasoner/importer-produced assertions through `propose()`, never direct writes, (4) keep `issue_token` and other admin-gated `Ontology` methods unreachable from plugin code regardless of declared capabilities. Needs its own ADR before implementation, per Appendix B's "open implementation questions" precedent (same pattern KI-010 followed for the LinkML dialect).
+**Storage-capability isolation: resolved (ADR-0015).** A plugin is registered as a `service`-kind `Principal` with a capped `default_capability`; the sandbox is a capability-scoped facade over `Ontology` (`ReadOnlyView`/`WriteView`, `src/ontolith/plugins/views.py`) rather than a capability-restricted `StorageBackend` wrapper — the original fix sketch here was superseded by that approach (see ADR-0015's Alternatives Considered for why: a `StorageBackend` wrapper would reimplement policy/conflict-routing/model-requirement checks a second time, and wouldn't naturally block `issue_token`/`apply_schema` since those aren't `StorageBackend` methods anyway). Admin-only methods and the direct-write bypass are structurally absent from the views, not runtime-checked. `PluginRegistry.register()` (`src/ontolith/plugins/registry.py`) requires `admin` capability and discovers plugins via `importlib.metadata.entry_points(group="ontolith.plugins")`.
+
+**Still open:** network/filesystem enforcement — the manifest schema declares these fields, but nothing enforces them yet; closing this requires process/wasm isolation, explicitly phased to later work in the Implementation Plan. ADR-0015 also states explicitly that the storage-isolation fix is a governance-correctness boundary, not a security sandbox against a plugin author who deliberately writes code to defeat the convention (Python has no true encapsulation) — that gap closes only with process/wasm isolation too.
+
+---
+
+## KI-015 — `propose()`/`propose_ref()`/`retract()` have no capability floor at all
+
+**Severity:** Architecture gap — a `read`-capability principal can submit proposals through the primary governed-write path, even though `create_entity`/`flag_contradiction` explicitly reject `read` for the equivalent action
+**Milestone target:** Unscoped — pre-existing, surfaced as a side effect of ADR-0015's `create_entity` capability gate, not fixed there
+**SPEC reference:** SPEC §8.3 (capability lattice: `read < propose < write < review < admin` — the "propose" tier's name implies it is the floor for proposing)
+
+### Description
+
+`Ontology.propose()`/`propose_ref()`/`retract()` resolve the author principal and check AI-model requirements and delegation authorization, but never check `principal.default_capability` at all before proceeding to `ThresholdPolicy.evaluate()`. A `read`-capability principal can therefore call `propose()` and have a `Proposal` created and stored (routed to `RequireReview` by policy, but created nonetheless) — unlike `create_entity` and `flag_contradiction`, both of which explicitly raise `CapabilityError` for `read`-capability authors before doing anything.
+
+Surfaced during the code review for ADR-0015 (plugin capability isolation): `create_entity` gained a `>= propose` capability gate as part of that work, which made the pre-existing asymmetry concrete — a `read`-only plugin principal is now blocked from `create_entity` but not from `propose()`/`propose_ref()`/`retract()`.
+
+### Fix
+
+Not attempted here — out of scope for a plugin-isolation change, since it would affect every `propose()`/`propose_ref()`/`retract()` caller in the codebase, not just plugins, and needs its own design pass to decide the right floor (should `read` be rejected outright, or is "anyone can propose, only capability determines auto-accept" the intended SPEC §9 behavior?). Needs a decision recorded before implementation.
 
 ---
 

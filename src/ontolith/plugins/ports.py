@@ -1,45 +1,61 @@
-"""Plugin port abstractions.
+"""Plugin protocol interfaces (SPEC §13.2, ADR-0015).
 
-Defines the Protocol interfaces that plugins must implement.
+Each protocol receives a capability-scoped view (ReadOnlyView or WriteView,
+plugins/views.py) rather than the raw Ontology/StorageBackend — this is what
+gives PluginRegistry's capability negotiation teeth. Method shapes here are
+skeletons for future reference-plugin implementations (KI-010); they are not
+yet exercised by any concrete plugin.
+
+Deliberately excludes StorageBackend, AuthProvider, and PolicyStrategy —
+those are infrastructure-extension ports the framework calls INTO, not
+principal-scoped actors that call INTO the framework via a view (see
+manifest.py's PluginKind docstring and ADR-0015 "Plugin kinds in scope").
+AuthProvider and PolicyStrategy already have real implementations elsewhere
+(identity/ports.py, govern/policy.py); StorageBackend's port lives in
+store/base.py. Embedder has no real port yet anywhere in the codebase — M1-M2
+never delivered it, and defining it isn't this pass's job either.
 """
 
 from typing import Protocol
 
+from ontolith.core import Assertion
+from ontolith.plugins.views import ReadOnlyView, WriteView
 
-class Embedder(Protocol):
-    """Abstract port for embedding providers.
 
-    Embedders convert text to vectors for semantic search.
-    Default implementation will use sentence-transformers or OpenAI.
+class Importer(Protocol):
+    """Imports external data into the KB through a governed WriteView."""
 
-    Attributes:
-        name: Embedder identifier
-        dim: Vector dimensionality
+    def import_(self, source: object, kb: WriteView) -> object: ...
 
-    This is a stub for M0. Full interface will be defined in M1-M2.
+
+class Exporter(Protocol):
+    """Exports KB data to an external target through a ReadOnlyView."""
+
+    def export(self, kb: ReadOnlyView, target: object) -> object: ...
+
+
+class Reasoner(Protocol):
+    """Derives new assertions from existing KB state through a WriteView.
+
+    Derived assertions MUST be submitted via kb.propose()/kb.propose_ref() —
+    WriteView has no other write path. This is what SPEC §13.2's "reasoner-
+    derived assertions MUST enter through the proposal path" means in
+    practice: there is no bypass to forget to block.
     """
 
-    name: str
-    dim: int
-
-    # Full interface in M1-M2:
-    # def embed(self, texts: list[str]) -> list[list[float]]: ...
+    def derive(self, kb: WriteView) -> None: ...
 
 
-class PolicyStrategy(Protocol):
-    """Abstract port for policy evaluation strategies.
+class Validator(Protocol):
+    """Validates an assertion against custom rules through a ReadOnlyView."""
 
-    Policy strategies decide whether proposals should be auto-accepted,
-    require review, or be rejected.
-
-    This is a stub for M0. Full interface will be defined in M1 based on
-    SPEC §9.2 requirements.
-    """
-
-    # Full interface in M1:
-    # def evaluate(
-    #     self, proposal: Proposal, principal: Principal, kb: ReadOnlyView
-    # ) -> Decision: ...
+    def validate(self, assertion: Assertion, kb: ReadOnlyView) -> list[str]: ...
 
 
-__all__ = ["Embedder", "PolicyStrategy"]
+class Connector(Protocol):
+    """Syncs KB state with an external system through a governed WriteView."""
+
+    def sync(self, kb: WriteView) -> object: ...
+
+
+__all__ = ["Importer", "Exporter", "Reasoner", "Validator", "Connector"]
