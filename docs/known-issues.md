@@ -176,21 +176,27 @@ Added `Ontology.resolve_contradiction(contradiction_id, winner_assertion_id, res
 
 ---
 
-## KI-010 — LinkML-aligned YAML schema dialect and reference plugins deferred
+## KI-010 — LinkML-aligned YAML schema dialect and reference plugins ✓ RESOLVED (M3)
 
-**Severity:** Informational — scoped M2 deliverable not yet started  
-**Milestone target:** Deferred to its own dedicated design pass (M2 follow-up or M3)  
-**SPEC reference:** Implementation Plan §2 (M2 exit list), ADR-0007 (interop priority)
+**Severity:** Informational — scoped M2 deliverable, now complete  
+**Milestone target:** M3 — LinkML dialect resolved via ADR-0013; reference plugins resolved via the reference plugin implementations below  
+**SPEC reference:** Implementation Plan §2 (M2 exit list), ADR-0007 (interop priority), SPEC §13 (plugin protocols)
 
 ### Description
 
 The Implementation Plan's M2 deliverable list includes "LinkML-aligned YAML, first 3 reference plugins" alongside review workflow, bitemporal time-travel, conflict handling, MCP server, and trust/delegation — all of which are now complete. The YAML dialect and plugin work were explicitly deferred: they require their own design pass (schema dialect coverage, bidirectional codegen, and the shape of the `Importer`/`Exporter`/`Reasoner`/`Validator` protocol implementations) rather than being folded into a conformance-gap sweep.
 
-**Update (M3):** the LinkML YAML dialect is now delivered (ADR-0013), and plugin capability isolation (KI-014) and protocol skeletons (`plugins/ports.py`) are now in place (ADR-0015). Concrete reference plugin implementations remain the one still-open item here.
-
 ### Fix
 
-Scope as a dedicated chunk: (1) decide LinkML dialect coverage (Appendix B notes this is an open question), (2) implement YAML → IR loader with round-trip codegen tests, (3) implement 3 reference plugins per SPEC's plugin protocols. Needs its own ADR or design discussion before implementation, per Appendix B's "open implementation questions."
+**LinkML YAML dialect: resolved (ADR-0013).**
+
+**Reference plugins: resolved.** Three first-party plugins, one per storage posture, implement the real `Importer`/`Exporter`/`Validator` protocols (`plugins/ports.py`) against the ADR-0015 capability-scoped views, and are registered as genuine `importlib.metadata` entry points in `pyproject.toml` (not test doubles) — proving plugin discovery, manifest negotiation, and view-scoped reads/writes end to end with working code:
+
+- `CsvImporter` (`plugins/reference/csv_importer.py`, entry point `csv-importer`) — `importer` kind, `storage="write"`. Creates entities/assertions from CSV rows through `WriteView`, deduplicating entities by `natural_key` within a single import run.
+- `JsonExporter` (`plugins/reference/json_exporter.py`, entry point `json-exporter`) — `exporter` kind, hard-capped `read`. Serializes active assertions to JSON through `ReadOnlyView`.
+- `RequiredFieldsValidator` (`plugins/reference/required_fields_validator.py`, entry point `required-fields-validator`) — `validator` kind, hard-capped `read`. Demonstrates the kind of domain rule a `Validator` plugin exists for: a configurable required-predicate-per-concept business rule the core schema doesn't itself enforce.
+
+`Reasoner`/`Connector` reference implementations were not built — the Implementation Plan's exit criterion is "first 3 reference plugins," met by the three above, one per storage posture (write/read/read+cross-check).
 
 ---
 
