@@ -28,6 +28,7 @@ We use the [MADR](https://adr.github.io/madr/) (Markdown Any Decision Records) f
 - [ADR-0013](ADR-0013-linkml-dialect-coverage.md) — **LinkML Dialect Coverage** (v1 scope, fail-loud on unsupported constructs)
 - [ADR-0014](ADR-0014-mcp-authentication.md) — **MCP Authentication** (Per-principal API keys)
 - [ADR-0015](ADR-0015-plugin-capability-isolation.md) — **Plugin Capability Isolation** (Service-principal-scoped views, storage capability enforced)
+- [ADR-0016](ADR-0016-duckdb-second-backend.md) — **DuckDB Second Backend** (M3 conformance-kit second backend adapter, DuckPGQ/traversal deferred)
 
 ## Decision Process
 
