@@ -17,7 +17,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from ontolith.plugins.manifest import PluginManifest
+from ontolith.plugins.manifest import PluginCapabilities, PluginManifest
 from ontolith.plugins.views import ReadOnlyView
 
 
@@ -31,9 +31,14 @@ class ExportReport:
 class JsonExporter:
     """Reference Exporter plugin: serializes active assertions to JSON."""
 
-    manifest = PluginManifest(name="json-exporter", version="0.1.0", kind="exporter")
+    manifest = PluginManifest(
+        name="json-exporter",
+        version="0.1.0",
+        kind="exporter",
+        capabilities=PluginCapabilities(filesystem=True),
+    )
 
-    def export(self, kb: ReadOnlyView, target: object) -> object:
+    def export(self, kb: ReadOnlyView, target: object) -> ExportReport:
         """Write every active assertion as a JSON array to `target`."""
         records = [assertion.model_dump(mode="json") for assertion in kb.assertions()]
 

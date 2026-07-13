@@ -50,10 +50,17 @@ class CsvImporter:
         name="csv-importer",
         version="0.1.0",
         kind="importer",
-        capabilities=PluginCapabilities(storage="write"),
+        # storage="write", not "propose": import_() itself only ever calls
+        # propose-level WriteView methods, but ThresholdPolicy only
+        # auto-accepts a service principal at "write" (propose-capability
+        # service principals go to RequireReview per-row, see govern/
+        # policy.py). Declaring "propose" here would cap every operator's
+        # grant at a ceiling that can never auto-accept a bulk import - the
+        # whole point of a trusted admin registering a bulk CsvImporter.
+        capabilities=PluginCapabilities(storage="write", filesystem=True),
     )
 
-    def import_(self, source: object, kb: WriteView) -> object:
+    def import_(self, source: object, kb: WriteView) -> ImportReport:
         """Import CSV rows from a file path or an iterable of row mappings."""
         rows = self._read_rows(source)
 
