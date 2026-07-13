@@ -73,6 +73,9 @@ ontolith = "ontolith.interfaces.cli:app"
 [project.entry-points."ontolith.plugins"]
 # Plugin discovery via entry points
 # Third-party plugins register here
+csv-importer = "ontolith.plugins.reference.csv_importer:CsvImporter"
+json-exporter = "ontolith.plugins.reference.json_exporter:JsonExporter"
+required-fields-validator = "ontolith.plugins.reference.required_fields_validator:RequiredFieldsValidator"
 
 [build-system]
 requires = ["hatchling"]
