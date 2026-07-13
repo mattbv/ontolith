@@ -9,10 +9,10 @@ Resolution is append-only: only status/state fields mutate, nothing is deleted.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
 
+from conformance.conftest import KbFactory
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
 from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
@@ -24,10 +24,10 @@ REVIEWER = "bob@example.com"
 NON_REVIEWER = "carol@example.com"
 
 
-def _kb(tmp_path: Path) -> Ontology:
+def _kb(make_kb: KbFactory) -> Ontology:
     clock = FixedClock(T0)
     ids = FixedIdProvider([f"id-{i}" for i in range(30)])
-    kb = Ontology.connect(tmp_path / "test.db", clock=clock, id_provider=ids)
+    kb = make_kb(clock, ids)
     kb.create_principal(HUMAN_WRITE, kind="human", auth_method="oidc", default_capability="write")
     kb.create_principal(REVIEWER, kind="human", auth_method="oidc", default_capability="review")
     kb.create_principal(
@@ -57,10 +57,10 @@ class TestContradictionRaisedBy:
     """Contradictions record who raised them, whether auto-detected during
     conflict routing or explicitly flagged via flag_contradiction()."""
 
-    def test_auto_detected_contradiction_records_raiser(self, tmp_path: Path) -> None:
+    def test_auto_detected_contradiction_records_raiser(self, make_kb: KbFactory) -> None:
         """The author of the assertion whose write triggered conflict-routing
         detection is recorded as raised_by."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, _, _ = _open_contradiction(kb, entity.id)
 
@@ -68,8 +68,8 @@ class TestContradictionRaisedBy:
         assert contradiction is not None
         assert contradiction.raised_by == HUMAN_WRITE
 
-    def test_explicit_flag_records_flagging_principal(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_explicit_flag_records_flagging_principal(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         kb.assert_literal(entity.id, "Person.born", "1815", "Text", HUMAN_WRITE)
         kb.create_principal(
@@ -91,16 +91,16 @@ class TestContradictionRaisedBy:
 
 
 class TestResolveContradiction:
-    def test_resolve_sets_contradiction_state(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_resolve_sets_contradiction_state(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, ada_id, _ = _open_contradiction(kb, entity.id)
 
         resolved = kb.resolve_contradiction(contradiction_id, ada_id, REVIEWER)
         assert resolved.state == "resolved"
 
-    def test_resolve_sets_resolved_by_and_resolved_at(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_resolve_sets_resolved_by_and_resolved_at(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, ada_id, _ = _open_contradiction(kb, entity.id)
 
@@ -108,8 +108,8 @@ class TestResolveContradiction:
         assert resolved.resolved_by == REVIEWER
         assert resolved.resolved_at is not None
 
-    def test_winner_reactivated(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_winner_reactivated(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, ada_id, _ = _open_contradiction(kb, entity.id)
 
@@ -119,8 +119,8 @@ class TestResolveContradiction:
         assert active[0].id == ada_id
         assert active[0].value == "Ada"
 
-    def test_losers_retracted(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_losers_retracted(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, ada_id, ava_id = _open_contradiction(kb, entity.id)
 
@@ -129,8 +129,8 @@ class TestResolveContradiction:
         assert len(retracted) == 1
         assert retracted[0].id == ava_id
 
-    def test_losers_no_longer_flagged(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_losers_no_longer_flagged(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, ada_id, _ = _open_contradiction(kb, entity.id)
 
@@ -138,9 +138,9 @@ class TestResolveContradiction:
         flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
         assert flagged == []
 
-    def test_resolution_is_append_only(self, tmp_path: Path) -> None:
+    def test_resolution_is_append_only(self, make_kb: KbFactory) -> None:
         """Both original assertion records must still exist with their original values."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, ada_id, ava_id = _open_contradiction(kb, entity.id)
 
@@ -150,8 +150,8 @@ class TestResolveContradiction:
         assert by_id[ada_id].value == "Ada"
         assert by_id[ava_id].value == "Ava"
 
-    def test_three_member_contradiction_resolves_all_losers(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_three_member_contradiction_resolves_all_losers(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE)
         kb.propose(entity.id, "Person.name", "Ava", "Text", HUMAN_WRITE)
@@ -174,37 +174,37 @@ class TestResolveContradiction:
 
 
 class TestResolveContradictionGuards:
-    def test_unknown_resolver_raises_auth_error(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_unknown_resolver_raises_auth_error(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, ada_id, _ = _open_contradiction(kb, entity.id)
 
         with pytest.raises(AuthError, match="Principal not found"):
             kb.resolve_contradiction(contradiction_id, ada_id, "nobody@example.com")
 
-    def test_non_reviewer_raises_capability_error(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_non_reviewer_raises_capability_error(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, ada_id, _ = _open_contradiction(kb, entity.id)
 
         with pytest.raises(CapabilityError, match="lacks review capability"):
             kb.resolve_contradiction(contradiction_id, ada_id, NON_REVIEWER)
 
-    def test_unknown_contradiction_raises_not_found(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_unknown_contradiction_raises_not_found(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         with pytest.raises(NotFoundError, match="Contradiction not found"):
             kb.resolve_contradiction("nonexistent-id", "some-assertion", REVIEWER)
 
-    def test_winner_not_a_member_raises_validation_error(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_winner_not_a_member_raises_validation_error(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, _, _ = _open_contradiction(kb, entity.id)
 
         with pytest.raises(ValidationError, match="is not a member"):
             kb.resolve_contradiction(contradiction_id, "not-a-real-assertion", REVIEWER)
 
-    def test_already_resolved_contradiction_raises(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_already_resolved_contradiction_raises(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, ada_id, _ = _open_contradiction(kb, entity.id)
         kb.resolve_contradiction(contradiction_id, ada_id, REVIEWER)

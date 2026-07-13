@@ -8,10 +8,10 @@ All tests use injected clocks and IDs.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
 
+from conformance.conftest import KbFactory
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
 from ontolith.core.errors import AuthError
@@ -24,7 +24,7 @@ AI_AUTHOR = "gpt-agent"
 AI_OWNER = "alice@example.com"
 
 
-def _kb_human(tmp_path: Path) -> Ontology:
+def _kb_human(make_kb: KbFactory) -> Ontology:
     """KB with a human/write principal."""
     clock = FixedClock(T0)
     ids = FixedIdProvider(
@@ -41,12 +41,12 @@ def _kb_human(tmp_path: Path) -> Ontology:
             "contra-1",
         ]
     )
-    kb = Ontology.connect(tmp_path / "test.db", clock=clock, id_provider=ids)
+    kb = make_kb(clock, ids)
     kb.create_principal(HUMAN_AUTHOR, kind="human", auth_method="oidc", default_capability="write")
     return kb
 
 
-def _kb_ai(tmp_path: Path) -> Ontology:
+def _kb_ai(make_kb: KbFactory) -> Ontology:
     """KB with an AI principal (owner = HUMAN_AUTHOR)."""
     clock = FixedClock(T0)
     ids = FixedIdProvider(
@@ -59,7 +59,7 @@ def _kb_ai(tmp_path: Path) -> Ontology:
             "prop-2",
         ]
     )
-    kb = Ontology.connect(tmp_path / "test.db", clock=clock, id_provider=ids)
+    kb = make_kb(clock, ids)
     kb.create_principal(HUMAN_AUTHOR, kind="human", auth_method="oidc", default_capability="write")
     kb.create_principal(
         AI_AUTHOR, kind="ai", auth_method="apikey", owner=AI_OWNER, default_capability="propose"
@@ -75,28 +75,28 @@ def _kb_ai(tmp_path: Path) -> Ontology:
 class TestAutoAccept:
     """SPEC §9 auto-accept path for trusted human principals."""
 
-    def test_proposal_state_is_auto_accepted(self, tmp_path: Path) -> None:
-        kb = _kb_human(tmp_path)
+    def test_proposal_state_is_auto_accepted(self, make_kb: KbFactory) -> None:
+        kb = _kb_human(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, decision = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         assert proposal.state == "auto_accepted"
 
-    def test_decision_is_auto_accept_instance(self, tmp_path: Path) -> None:
-        kb = _kb_human(tmp_path)
+    def test_decision_is_auto_accept_instance(self, make_kb: KbFactory) -> None:
+        kb = _kb_human(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         _, decision = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         assert isinstance(decision, AutoAccept)
 
-    def test_assertion_is_written_to_storage(self, tmp_path: Path) -> None:
-        kb = _kb_human(tmp_path)
+    def test_assertion_is_written_to_storage(self, make_kb: KbFactory) -> None:
+        kb = _kb_human(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
         assert len(active) == 1
         assert active[0].value == "Ada"
 
-    def test_proposal_is_stored_in_backend(self, tmp_path: Path) -> None:
-        kb = _kb_human(tmp_path)
+    def test_proposal_is_stored_in_backend(self, make_kb: KbFactory) -> None:
+        kb = _kb_human(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         stored = kb.backend.get_proposal(proposal.id)
@@ -104,16 +104,16 @@ class TestAutoAccept:
         assert stored.state == "auto_accepted"
         assert stored.id == proposal.id
 
-    def test_assertion_carries_proposal_id(self, tmp_path: Path) -> None:
-        kb = _kb_human(tmp_path)
+    def test_assertion_carries_proposal_id(self, make_kb: KbFactory) -> None:
+        kb = _kb_human(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
         assert len(active) == 1
         assert active[0].proposal_id == proposal.id
 
-    def test_payload_contains_operation(self, tmp_path: Path) -> None:
-        kb = _kb_human(tmp_path)
+    def test_payload_contains_operation(self, make_kb: KbFactory) -> None:
+        kb = _kb_human(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         ops = proposal.payload.get("operations", [])
@@ -125,21 +125,21 @@ class TestAutoAccept:
         assert op["value"] == "Ada"
         assert op["value_type"] == "Text"
 
-    def test_decided_at_is_set_on_auto_accepted(self, tmp_path: Path) -> None:
-        kb = _kb_human(tmp_path)
+    def test_decided_at_is_set_on_auto_accepted(self, make_kb: KbFactory) -> None:
+        kb = _kb_human(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         assert proposal.decided_at is not None
 
-    def test_policy_reason_is_set(self, tmp_path: Path) -> None:
-        kb = _kb_human(tmp_path)
+    def test_policy_reason_is_set(self, make_kb: KbFactory) -> None:
+        kb = _kb_human(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         assert proposal.policy_reason is not None
         assert len(proposal.policy_reason) > 0
 
-    def test_unknown_author_raises_storage_error(self, tmp_path: Path) -> None:
-        kb = _kb_human(tmp_path)
+    def test_unknown_author_raises_storage_error(self, make_kb: KbFactory) -> None:
+        kb = _kb_human(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         with pytest.raises(AuthError):
             kb.propose(entity.id, "Person.name", "Ada", "Text", "nobody@example.com")
@@ -153,31 +153,31 @@ class TestAutoAccept:
 class TestRequireReview:
     """SPEC §9 require-review path for AI principals."""
 
-    def test_proposal_state_is_require_review(self, tmp_path: Path) -> None:
-        kb = _kb_ai(tmp_path)
+    def test_proposal_state_is_require_review(self, make_kb: KbFactory) -> None:
+        kb = _kb_ai(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, decision = kb.propose(
             entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
         )
         assert proposal.state == "require_review"
 
-    def test_decision_is_require_review_instance(self, tmp_path: Path) -> None:
-        kb = _kb_ai(tmp_path)
+    def test_decision_is_require_review_instance(self, make_kb: KbFactory) -> None:
+        kb = _kb_ai(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         _, decision = kb.propose(
             entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
         )
         assert isinstance(decision, RequireReview)
 
-    def test_no_assertion_written_for_require_review(self, tmp_path: Path) -> None:
-        kb = _kb_ai(tmp_path)
+    def test_no_assertion_written_for_require_review(self, make_kb: KbFactory) -> None:
+        kb = _kb_ai(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1")
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
         assert active == []
 
-    def test_proposal_stored_with_require_review_state(self, tmp_path: Path) -> None:
-        kb = _kb_ai(tmp_path)
+    def test_proposal_stored_with_require_review_state(self, make_kb: KbFactory) -> None:
+        kb = _kb_ai(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(
             entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
@@ -186,8 +186,8 @@ class TestRequireReview:
         assert stored is not None
         assert stored.state == "require_review"
 
-    def test_ai_reviewers_include_owner(self, tmp_path: Path) -> None:
-        kb = _kb_ai(tmp_path)
+    def test_ai_reviewers_include_owner(self, make_kb: KbFactory) -> None:
+        kb = _kb_ai(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         _, decision = kb.propose(
             entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
@@ -195,8 +195,8 @@ class TestRequireReview:
         assert isinstance(decision, RequireReview)
         assert AI_OWNER in decision.reviewers
 
-    def test_decided_at_not_set_for_require_review(self, tmp_path: Path) -> None:
-        kb = _kb_ai(tmp_path)
+    def test_decided_at_not_set_for_require_review(self, make_kb: KbFactory) -> None:
+        kb = _kb_ai(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(
             entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
@@ -212,8 +212,8 @@ class TestRequireReview:
 class TestRetract:
     """SPEC §9 retract() — governed retraction via proposal path."""
 
-    def test_retract_auto_accepted_for_human_write(self, tmp_path: Path) -> None:
-        kb = _kb_human(tmp_path)
+    def test_retract_auto_accepted_for_human_write(self, make_kb: KbFactory) -> None:
+        kb = _kb_human(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
@@ -223,8 +223,8 @@ class TestRetract:
         assert isinstance(decision, AutoAccept)
         assert proposal.state == "auto_accepted"
 
-    def test_retracted_assertion_excluded_from_default_query(self, tmp_path: Path) -> None:
-        kb = _kb_human(tmp_path)
+    def test_retracted_assertion_excluded_from_default_query(self, make_kb: KbFactory) -> None:
+        kb = _kb_human(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
@@ -235,9 +235,9 @@ class TestRetract:
         still_active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
         assert still_active == []
 
-    def test_retracted_assertion_retained_in_storage(self, tmp_path: Path) -> None:
+    def test_retracted_assertion_retained_in_storage(self, make_kb: KbFactory) -> None:
         """Append-only invariant: retracted assertions must still exist."""
-        kb = _kb_human(tmp_path)
+        kb = _kb_human(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
@@ -250,8 +250,8 @@ class TestRetract:
         assert retracted[0].id == assertion_id
         assert retracted[0].value == "Ada"
 
-    def test_retract_unknown_principal_raises_storage_error(self, tmp_path: Path) -> None:
-        kb = _kb_human(tmp_path)
+    def test_retract_unknown_principal_raises_storage_error(self, make_kb: KbFactory) -> None:
+        kb = _kb_human(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
@@ -259,8 +259,8 @@ class TestRetract:
         with pytest.raises(AuthError):
             kb.retract(active[0].id, "nobody@example.com")
 
-    def test_retract_payload_contains_operation(self, tmp_path: Path) -> None:
-        kb = _kb_human(tmp_path)
+    def test_retract_payload_contains_operation(self, make_kb: KbFactory) -> None:
+        kb = _kb_human(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
@@ -280,7 +280,7 @@ class TestRetract:
 READ_ONLY_AUTHOR = "readonly@example.com"
 
 
-def _kb_read_only(tmp_path: Path) -> Ontology:
+def _kb_read_only(make_kb: KbFactory) -> Ontology:
     """KB with a human principal that has read-only capability."""
     clock = FixedClock(T0)
     ids = FixedIdProvider(
@@ -293,7 +293,7 @@ def _kb_read_only(tmp_path: Path) -> Ontology:
             "prop-2",
         ]
     )
-    kb = Ontology.connect(tmp_path / "test.db", clock=clock, id_provider=ids)
+    kb = make_kb(clock, ids)
     kb.create_principal(HUMAN_AUTHOR, kind="human", auth_method="oidc", default_capability="write")
     kb.create_principal(
         READ_ONLY_AUTHOR, kind="human", auth_method="oidc", default_capability="read"
@@ -304,47 +304,47 @@ def _kb_read_only(tmp_path: Path) -> Ontology:
 class TestRejectDecision:
     """SPEC §9.2 — Reject path: read-only principals cannot propose or retract."""
 
-    def test_propose_by_read_only_returns_reject_decision(self, tmp_path: Path) -> None:
-        kb = _kb_read_only(tmp_path)
+    def test_propose_by_read_only_returns_reject_decision(self, make_kb: KbFactory) -> None:
+        kb = _kb_read_only(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, decision = kb.propose(entity.id, "Person.name", "Ada", "Text", READ_ONLY_AUTHOR)
         assert isinstance(decision, Reject)
 
-    def test_propose_by_read_only_proposal_state_is_rejected(self, tmp_path: Path) -> None:
-        kb = _kb_read_only(tmp_path)
+    def test_propose_by_read_only_proposal_state_is_rejected(self, make_kb: KbFactory) -> None:
+        kb = _kb_read_only(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", READ_ONLY_AUTHOR)
         assert proposal.state == "rejected"
 
-    def test_propose_by_read_only_decided_at_is_set(self, tmp_path: Path) -> None:
-        kb = _kb_read_only(tmp_path)
+    def test_propose_by_read_only_decided_at_is_set(self, make_kb: KbFactory) -> None:
+        kb = _kb_read_only(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", READ_ONLY_AUTHOR)
         assert proposal.decided_at is not None
 
-    def test_propose_by_read_only_no_assertion_written(self, tmp_path: Path) -> None:
-        kb = _kb_read_only(tmp_path)
+    def test_propose_by_read_only_no_assertion_written(self, make_kb: KbFactory) -> None:
+        kb = _kb_read_only(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", READ_ONLY_AUTHOR)
         assert kb.assertions(subject=entity.id, predicate="Person.name") == []
 
-    def test_propose_by_read_only_proposal_persisted(self, tmp_path: Path) -> None:
-        kb = _kb_read_only(tmp_path)
+    def test_propose_by_read_only_proposal_persisted(self, make_kb: KbFactory) -> None:
+        kb = _kb_read_only(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", READ_ONLY_AUTHOR)
         stored = kb.backend.get_proposal(proposal.id)
         assert stored is not None
         assert stored.state == "rejected"
 
-    def test_propose_by_read_only_policy_reason_mentions_access(self, tmp_path: Path) -> None:
-        kb = _kb_read_only(tmp_path)
+    def test_propose_by_read_only_policy_reason_mentions_access(self, make_kb: KbFactory) -> None:
+        kb = _kb_read_only(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", READ_ONLY_AUTHOR)
         assert proposal.policy_reason is not None
         assert "read" in proposal.policy_reason.lower()
 
-    def test_retract_by_read_only_returns_reject_decision(self, tmp_path: Path) -> None:
-        kb = _kb_read_only(tmp_path)
+    def test_retract_by_read_only_returns_reject_decision(self, make_kb: KbFactory) -> None:
+        kb = _kb_read_only(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
@@ -352,9 +352,9 @@ class TestRejectDecision:
         proposal, decision = kb.retract(active[0].id, READ_ONLY_AUTHOR)
         assert isinstance(decision, Reject)
 
-    def test_retract_by_read_only_assertion_remains_active(self, tmp_path: Path) -> None:
+    def test_retract_by_read_only_assertion_remains_active(self, make_kb: KbFactory) -> None:
         """A rejected retraction must not change the assertion's state."""
-        kb = _kb_read_only(tmp_path)
+        kb = _kb_read_only(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")

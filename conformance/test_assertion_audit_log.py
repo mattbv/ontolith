@@ -10,8 +10,8 @@ retraction, and reactivation independently attributable and timestamped.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
 
+from conformance.conftest import KbFactory
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
 from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
@@ -22,10 +22,10 @@ AUTHOR = "alice@example.com"
 REVIEWER = "bob@example.com"
 
 
-def _kb(tmp_path: Path, *, time_varying: bool = False) -> Ontology:
+def _kb(make_kb: KbFactory, *, time_varying: bool = False) -> Ontology:
     clock = FixedClock(T0)
     ids = FixedIdProvider([f"id-{i}" for i in range(60)])
-    kb = Ontology.connect(tmp_path / "test.db", clock=clock, id_provider=ids)
+    kb = make_kb(clock, ids)
     kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
     kb.create_principal(REVIEWER, kind="human", auth_method="oidc", default_capability="review")
     if time_varying:
@@ -51,8 +51,8 @@ def _kb(tmp_path: Path, *, time_varying: bool = False) -> Ontology:
 
 
 class TestSupersessionEvent:
-    def test_supersede_records_event_with_new_authors_id(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path, time_varying=True)
+    def test_supersede_records_event_with_new_authors_id(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb, time_varying=True)
         entity = kb.create_entity("Person", author=AUTHOR)
         old = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)
@@ -65,9 +65,9 @@ class TestSupersessionEvent:
 
 class TestContradictionEvents:
     def test_fresh_contradiction_records_flag_for_pre_existing_member_only(
-        self, tmp_path: Path
+        self, make_kb: KbFactory
     ) -> None:
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         first = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         second = kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)
@@ -83,12 +83,12 @@ class TestContradictionEvents:
         assert kb.backend.get_assertion_events(second.id) == []
 
     def test_extending_open_contradiction_does_not_re_flag_existing_members(
-        self, tmp_path: Path
+        self, make_kb: KbFactory
     ) -> None:
         """Members already in an open contradiction are already flagged -
         adding a third conflicting value must not emit a duplicate 'flagged'
         event for members that didn't actually change status."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         first = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)
@@ -101,8 +101,8 @@ class TestContradictionEvents:
 
 
 class TestRetractionEvents:
-    def test_auto_accepted_retract_records_authors_id(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_auto_accepted_retract_records_authors_id(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         a = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
 
@@ -113,11 +113,11 @@ class TestRetractionEvents:
         assert events[0].action == "retracted"
         assert events[0].actor == AUTHOR
 
-    def test_review_accepted_retract_records_proposal_authors_id(self, tmp_path: Path) -> None:
+    def test_review_accepted_retract_records_proposal_authors_id(self, make_kb: KbFactory) -> None:
         """The proposal's author is recorded (who's accountable for the
         change), not the reviewer who executed the accept - review
         accountability is tracked separately via proposal_event."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         kb.create_principal(
             "bot@example.com", kind="ai", owner=AUTHOR, default_capability="propose"
         )
@@ -136,9 +136,9 @@ class TestRetractionEvents:
 
 class TestContradictionResolutionEvents:
     def test_resolution_records_retracted_for_losers_and_reactivated_for_winner(
-        self, tmp_path: Path
+        self, make_kb: KbFactory
     ) -> None:
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         winner = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         loser = kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)
@@ -159,8 +159,8 @@ class TestContradictionResolutionEvents:
 
 
 class TestExplicitFlagEvents:
-    def test_flag_contradiction_records_flagging_principal(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_flag_contradiction_records_flagging_principal(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.assert_literal(entity.id, "Person.born", "1815", "Text", AUTHOR)
         a = kb.assert_ref(entity.id, "Person.employer", entity.id, AUTHOR)
@@ -175,9 +175,9 @@ class TestExplicitFlagEvents:
             assert events[0].actor == REVIEWER
 
     def test_flag_contradiction_does_not_re_flag_already_flagged_member(
-        self, tmp_path: Path
+        self, make_kb: KbFactory
     ) -> None:
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         first = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         second = kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)
@@ -195,8 +195,8 @@ class TestExplicitFlagEvents:
 
 
 class TestAssertionEventOrderingAndScope:
-    def test_events_ordered_oldest_first(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path, time_varying=True)
+    def test_events_ordered_oldest_first(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb, time_varying=True)
         entity = kb.create_entity("Person", author=AUTHOR)
         a1 = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         kb.clock.advance(days=1)  # type: ignore[attr-defined]
@@ -208,8 +208,8 @@ class TestAssertionEventOrderingAndScope:
         assert [e.action for e in events] == ["superseded", "retracted"]
         assert events[0].at <= events[1].at
 
-    def test_events_scoped_to_their_own_assertion(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_events_scoped_to_their_own_assertion(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         a = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         b = kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)
@@ -217,6 +217,6 @@ class TestAssertionEventOrderingAndScope:
         assert [e.assertion_id for e in kb.backend.get_assertion_events(a.id)] == [a.id]
         assert kb.backend.get_assertion_events(b.id) == []
 
-    def test_no_events_for_unknown_assertion(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_no_events_for_unknown_assertion(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         assert kb.backend.get_assertion_events("nonexistent") == []

@@ -7,8 +7,8 @@ through the storage layer. All tests use injected clocks and IDs.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from pathlib import Path
 
+from conformance.conftest import KbFactory
 from ontolith import Ontology
 from ontolith.core import Assertion, FixedClock, FixedIdProvider
 from ontolith.govern.conflict import Activate, Contradict, Supersede, route
@@ -48,12 +48,12 @@ def _assertion(
     )
 
 
-def _kb(tmp_path: Path) -> Ontology:
+def _kb(make_kb: KbFactory) -> Ontology:
     clock = FixedClock(T0)
     ids = FixedIdProvider(
         ["p-0", "e-1", "a-1", "a-2", "a-3", "a-4", "a-5", "contra-1", "prop-1", "prop-2"]
     )
-    kb = Ontology.connect(tmp_path / "test.db", clock=clock, id_provider=ids)
+    kb = make_kb(clock, ids)
     kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
     kb.create_principal(ADMIN, kind="human", auth_method="oidc", default_capability="admin")
     # Person.employer is declared time_varying so conflict routing (schema-derived
@@ -166,8 +166,8 @@ class TestPureRouting:
 class TestStaticContradiction:
     """SPEC §10.3 — static facts flagged and routed to review."""
 
-    def test_first_assertion_activates(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_first_assertion_activates(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         proposal, decision = kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         assert proposal.state == "auto_accepted"
@@ -176,16 +176,16 @@ class TestStaticContradiction:
         assert active[0].value == "Ada"
         assert active[0].status == "active"
 
-    def test_corroborating_assertion_both_active(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_corroborating_assertion_both_active(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
         assert len(active) == 2  # corroboration: both retained
 
-    def test_conflicting_assertion_both_flagged(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_conflicting_assertion_both_flagged(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         kb.propose(entity.id, "Person.name", "Ava", "Text", AUTHOR)
@@ -199,8 +199,8 @@ class TestStaticContradiction:
         assert len(flagged) == 2
         assert {a.value for a in flagged} == {"Ada", "Ava"}
 
-    def test_contradiction_object_created(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_contradiction_object_created(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         kb.propose(entity.id, "Person.name", "Ava", "Text", AUTHOR)
@@ -210,8 +210,8 @@ class TestStaticContradiction:
         assert contradiction.state == "open"
         assert len(contradiction.member_ids) == 2
 
-    def test_third_conflicting_assertion_extends_contradiction(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_third_conflicting_assertion_extends_contradiction(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         kb.propose(entity.id, "Person.name", "Ava", "Text", AUTHOR)
@@ -221,9 +221,9 @@ class TestStaticContradiction:
         assert contradiction is not None
         assert len(contradiction.member_ids) == 3
 
-    def test_static_fact_never_silently_overwritten(self, tmp_path: Path) -> None:
+    def test_static_fact_never_silently_overwritten(self, make_kb: KbFactory) -> None:
         """Original value must still be in storage after a conflict."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         kb.propose(entity.id, "Person.name", "Ava", "Text", AUTHOR)
@@ -242,8 +242,8 @@ class TestStaticContradiction:
 class TestTemporalSupersession:
     """SPEC §10.2 — time_varying properties use temporal supersession."""
 
-    def test_superseded_assertion_window_closed(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_superseded_assertion_window_closed(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.propose(entity.id, "Person.employer", "Acme Corp", "Text", AUTHOR)
 
@@ -264,8 +264,8 @@ class TestTemporalSupersession:
         assert len(active) == 1
         assert active[0].value == "Beta Inc"
 
-    def test_supersession_chain_links_successor(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_supersession_chain_links_successor(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.propose(entity.id, "Person.employer", "Acme Corp", "Text", AUTHOR)
 
@@ -279,9 +279,9 @@ class TestTemporalSupersession:
         assert len(active) == 1
         assert active[0].supersedes is not None
 
-    def test_non_overlapping_windows_coexist(self, tmp_path: Path) -> None:
+    def test_non_overlapping_windows_coexist(self, make_kb: KbFactory) -> None:
         """Employment history: two non-overlapping windows can coexist as 'active'."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
 
         # First employment: [T0, T1)
@@ -318,9 +318,9 @@ class TestTemporalSupersession:
         active = kb.assertions(subject=entity.id, predicate="Person.employer", status="active")
         assert len(active) == 2
 
-    def test_supersession_no_contradiction_object_created(self, tmp_path: Path) -> None:
+    def test_supersession_no_contradiction_object_created(self, make_kb: KbFactory) -> None:
         """time_varying supersession must NOT create a contradiction."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.propose(entity.id, "Person.employer", "Acme Corp", "Text", AUTHOR)
 
@@ -342,12 +342,12 @@ class TestTemporalSupersession:
 class TestSchemaDerivedTemporality:
     """propose() resolves temporality from the active schema, not a caller arg."""
 
-    def test_no_schema_registered_falls_back_to_static(self, tmp_path: Path) -> None:
+    def test_no_schema_registered_falls_back_to_static(self, make_kb: KbFactory) -> None:
         """No schema in the namespace: propose() must still route (default static),
         not raise, and conflicting values must produce a contradiction."""
         clock = FixedClock(T0)
         ids = FixedIdProvider(["e-1", "a-1", "a-2", "contra-1", "prop-1", "prop-2"])
-        kb = Ontology.connect(tmp_path / "test.db", clock=clock, id_provider=ids)
+        kb = make_kb(clock, ids)
         kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
         entity = kb.create_entity("Person", author=AUTHOR)
 
@@ -357,9 +357,9 @@ class TestSchemaDerivedTemporality:
         contradiction = kb.backend.get_open_contradiction("default", entity.id, "Person.name")
         assert contradiction is not None
 
-    def test_schema_declared_static_property_contradicts(self, tmp_path: Path) -> None:
+    def test_schema_declared_static_property_contradicts(self, make_kb: KbFactory) -> None:
         """Person.name has no explicit temporality in the schema (defaults to static)."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         kb.propose(entity.id, "Person.name", "Ava", "Text", AUTHOR)
@@ -368,11 +368,11 @@ class TestSchemaDerivedTemporality:
         assert contradiction is not None
 
     def test_schema_declared_time_varying_property_supersedes_with_no_caller_override(
-        self, tmp_path: Path
+        self, make_kb: KbFactory
     ) -> None:
         """Person.employer is declared time_varying in the schema; propose() no longer
         accepts a temporality kwarg at all, so this exercises the schema-only path."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.propose(entity.id, "Person.employer", "Acme Corp", "Text", AUTHOR)
 

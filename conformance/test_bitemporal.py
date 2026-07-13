@@ -20,9 +20,12 @@ from pathlib import Path
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from conformance.conftest import KbFactory
 from ontolith import Ontology
-from ontolith.core import Assertion, FixedClock, FixedIdProvider
+from ontolith.core import Assertion, Clock, FixedClock, FixedIdProvider, IdProvider
 from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
+from ontolith.store.duckdb import DuckDBBackend
+from ontolith.store.sqlite import SQLiteBackend
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 T1 = datetime(2025, 6, 1, tzinfo=UTC)
@@ -31,12 +34,22 @@ T_BEFORE = datetime(2024, 12, 1, tzinfo=UTC)
 AUTHOR = "alice@example.com"
 
 
-def _kb(tmp_path: Path) -> Ontology:
+def _kb(make_kb: KbFactory) -> Ontology:
     clock = FixedClock(T0)
     ids = FixedIdProvider([f"id-{i}" for i in range(30)])
-    kb = Ontology.connect(tmp_path / "test.db", clock=clock, id_provider=ids)
+    kb = make_kb(clock, ids)
     kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
     return kb
+
+
+def _connect(backend_name: str, path: Path, clock: Clock, id_provider: IdProvider) -> Ontology:
+    """Build an Ontology directly for @given-decorated tests — see the
+    identical helper in test_append_only_properties.py for why make_kb/
+    tmp_path aren't used here (Hypothesis's function_scoped_fixture health
+    check).
+    """
+    backend_cls = SQLiteBackend if backend_name == "sqlite" else DuckDBBackend
+    return Ontology(backend_cls(path, clock=clock), clock=clock, id_provider=id_provider)
 
 
 def _put_assertion(kb: Ontology, entity_id: str, value: str, **kwargs: object) -> Assertion:
@@ -67,8 +80,8 @@ def _put_assertion(kb: Ontology, entity_id: str, value: str, **kwargs: object) -
 class TestAsOfBasics:
     """Core bitemporal visibility filter: valid_from <= t < valid_to AND asserted_at <= t"""
 
-    def test_assertion_visible_at_asserted_time(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_assertion_visible_at_asserted_time(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         _put_assertion(kb, entity.id, "Ada", asserted_at=T0)
 
@@ -76,33 +89,33 @@ class TestAsOfBasics:
         assert len(visible) == 1
         assert visible[0].value == "Ada"
 
-    def test_assertion_not_visible_before_asserted(self, tmp_path: Path) -> None:
+    def test_assertion_not_visible_before_asserted(self, make_kb: KbFactory) -> None:
         """asserted_at = T1; as_of(T0) must not reveal it."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         _put_assertion(kb, entity.id, "Ada", asserted_at=T1)
 
         assert kb.as_of(T0).assertions(subject=entity.id) == []
 
-    def test_assertion_excluded_when_validity_window_closed(self, tmp_path: Path) -> None:
+    def test_assertion_excluded_when_validity_window_closed(self, make_kb: KbFactory) -> None:
         """valid_to = T1; as_of(T1) must not show it (half-open interval: t < valid_to)."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         _put_assertion(kb, entity.id, "Ada", asserted_at=T0, valid_from=T0, valid_to=T1)
 
         assert kb.as_of(T1).assertions(subject=entity.id) == []
 
-    def test_assertion_excluded_when_validity_not_yet_started(self, tmp_path: Path) -> None:
+    def test_assertion_excluded_when_validity_not_yet_started(self, make_kb: KbFactory) -> None:
         """valid_from = T2; as_of(T1) must not show it."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         _put_assertion(kb, entity.id, "Ada", asserted_at=T0, valid_from=T2)
 
         assert kb.as_of(T1).assertions(subject=entity.id) == []
 
-    def test_assertion_visible_just_before_valid_to(self, tmp_path: Path) -> None:
+    def test_assertion_visible_just_before_valid_to(self, make_kb: KbFactory) -> None:
         """valid_to = T1; as_of(T1 - 1s) is still inside the window."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         _put_assertion(kb, entity.id, "Ada", asserted_at=T0, valid_from=T0, valid_to=T1)
         just_before = T1 - timedelta(seconds=1)
@@ -110,37 +123,37 @@ class TestAsOfBasics:
         visible = kb.as_of(just_before).assertions(subject=entity.id)
         assert len(visible) == 1
 
-    def test_null_valid_from_treated_as_always_started(self, tmp_path: Path) -> None:
+    def test_null_valid_from_treated_as_always_started(self, make_kb: KbFactory) -> None:
         """valid_from = NULL means open from the beginning; visible as long as asserted_at <= t."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         _put_assertion(kb, entity.id, "Ada", asserted_at=T0, valid_from=None)
 
         visible = kb.as_of(T0).assertions(subject=entity.id)
         assert len(visible) == 1
 
-    def test_string_iso_accepted(self, tmp_path: Path) -> None:
+    def test_string_iso_accepted(self, make_kb: KbFactory) -> None:
         """as_of() must accept ISO-format strings as well as datetimes."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         _put_assertion(kb, entity.id, "Ada", asserted_at=T0)
 
         visible = kb.as_of(T0.isoformat()).assertions(subject=entity.id)
         assert len(visible) == 1
 
-    def test_open_window_visible_well_into_future(self, tmp_path: Path) -> None:
+    def test_open_window_visible_well_into_future(self, make_kb: KbFactory) -> None:
         """An assertion with valid_to=NULL remains visible at any future t."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         _put_assertion(kb, entity.id, "Ada", asserted_at=T0, valid_from=T0)
 
         assert len(kb.as_of(T2).assertions(subject=entity.id)) == 1
 
-    def test_no_status_filter_applied(self, tmp_path: Path) -> None:
+    def test_no_status_filter_applied(self, make_kb: KbFactory) -> None:
         """as_of() does not filter non-flagged statuses — temporal dims decide
         visibility. ('flagged' is the one exception — see TestAsOfRetractionAndFlagging.)
         """
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         # Insert a 'superseded' assertion that was valid at T0
         _put_assertion(
@@ -160,9 +173,9 @@ class TestAsOfBasics:
 class TestAsOfSupersession:
     """Time-travel across a supersession chain for time_varying properties."""
 
-    def _setup_supersession(self, tmp_path: Path) -> tuple[Ontology, str]:
+    def _setup_supersession(self, make_kb: KbFactory) -> tuple[Ontology, str]:
         """Returns kb and entity_id with two employments: Acme[T0,T1) → Beta[T1,∞)."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         # Acme: [T0, T1) superseded
         _put_assertion(
@@ -184,27 +197,27 @@ class TestAsOfSupersession:
         )
         return kb, entity.id
 
-    def test_superseded_assertion_visible_before_supersession(self, tmp_path: Path) -> None:
-        kb, eid = self._setup_supersession(tmp_path)
+    def test_superseded_assertion_visible_before_supersession(self, make_kb: KbFactory) -> None:
+        kb, eid = self._setup_supersession(make_kb)
         visible = kb.as_of(T0).assertions(subject=eid, predicate="Person.name")
         assert len(visible) == 1
         assert visible[0].value == "Acme Corp"
 
-    def test_new_assertion_not_visible_before_its_assertion_time(self, tmp_path: Path) -> None:
-        kb, eid = self._setup_supersession(tmp_path)
+    def test_new_assertion_not_visible_before_its_assertion_time(self, make_kb: KbFactory) -> None:
+        kb, eid = self._setup_supersession(make_kb)
         # Beta was asserted at T1; as_of(T0) must not reveal it
         visible = kb.as_of(T0).assertions(subject=eid, predicate="Person.name")
         assert all(a.value != "Beta Inc" for a in visible)
 
-    def test_as_of_after_supersession_shows_new_assertion(self, tmp_path: Path) -> None:
-        kb, eid = self._setup_supersession(tmp_path)
+    def test_as_of_after_supersession_shows_new_assertion(self, make_kb: KbFactory) -> None:
+        kb, eid = self._setup_supersession(make_kb)
         visible = kb.as_of(T2).assertions(subject=eid, predicate="Person.name")
         assert len(visible) == 1
         assert visible[0].value == "Beta Inc"
 
-    def test_at_transition_time_only_new_assertion_visible(self, tmp_path: Path) -> None:
+    def test_at_transition_time_only_new_assertion_visible(self, make_kb: KbFactory) -> None:
         """At exactly T1: Acme window is [T0, T1) so T1 is excluded; Beta starts at T1."""
-        kb, eid = self._setup_supersession(tmp_path)
+        kb, eid = self._setup_supersession(make_kb)
         visible = kb.as_of(T1).assertions(subject=eid, predicate="Person.name")
         assert len(visible) == 1
         assert visible[0].value == "Beta Inc"
@@ -220,8 +233,8 @@ class TestAsOfRetractionAndFlagging:
     from as_of by default, same as default (non-as_of) queries (SPEC §10.3).
     """
 
-    def test_retract_visible_as_of_before_retraction(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_retract_visible_as_of_before_retraction(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
@@ -236,8 +249,8 @@ class TestAsOfRetractionAndFlagging:
         assert len(visible) == 1
         assert visible[0].id == active[0].id
 
-    def test_retract_not_visible_as_of_after_retraction(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_retract_not_visible_as_of_after_retraction(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
@@ -252,8 +265,8 @@ class TestAsOfRetractionAndFlagging:
         visible = kb.as_of(after_retraction).assertions(subject=entity.id, predicate="Person.name")
         assert visible == []
 
-    def test_flagged_excluded_from_as_of_by_default(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_flagged_excluded_from_as_of_by_default(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)  # -> contradiction
@@ -262,8 +275,8 @@ class TestAsOfRetractionAndFlagging:
         visible = kb.as_of(now).assertions(subject=entity.id, predicate="Person.name")
         assert visible == []
 
-    def test_flagged_included_with_include_flagged_true(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_flagged_included_with_include_flagged_true(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)
@@ -275,10 +288,10 @@ class TestAsOfRetractionAndFlagging:
         assert len(visible) == 2
         assert {a.value for a in visible} == {"Ada", "Ava"}
 
-    def test_contradiction_resolution_closes_losers_valid_to(self, tmp_path: Path) -> None:
+    def test_contradiction_resolution_closes_losers_valid_to(self, make_kb: KbFactory) -> None:
         """A retracted (losing) contradiction member's window closes at
         resolution time; as_of() after resolution must not show it."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         kb.create_principal("carol@example.com", kind="human", default_capability="review")
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
@@ -299,12 +312,12 @@ class TestAsOfRetractionAndFlagging:
         )
         assert {a.id for a in visible} == {winner.id}
 
-    def test_retract_never_widens_an_already_closed_valid_to(self, tmp_path: Path) -> None:
+    def test_retract_never_widens_an_already_closed_valid_to(self, make_kb: KbFactory) -> None:
         """Retracting an already-superseded assertion must not push its
         valid_to forward — that would resurrect it as visible in as_of
         queries between the original close point and the retraction time,
         corrupting history (bitemporal.md invariants 1-2)."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         # Acme: [T0, T1) already closed by supersession
         acme = _put_assertion(
@@ -336,10 +349,10 @@ class TestAsOfRetractionAndFlagging:
         )
         assert {a.value for a in between} == {"Beta Inc"}
 
-    def test_retract_still_closes_an_open_valid_to(self, tmp_path: Path) -> None:
+    def test_retract_still_closes_an_open_valid_to(self, make_kb: KbFactory) -> None:
         """Sanity check: the fix for the widening bug must not regress the
         ordinary case of retracting a still-open assertion."""
-        kb = _kb(tmp_path)
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
         active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
@@ -364,21 +377,21 @@ class TestAsOfRetractionAndFlagging:
 class TestAsOfQuery:
     """kb.as_of(t).query(concept) reconstructs entity set at time t."""
 
-    def test_entity_not_visible_before_creation(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_entity_not_visible_before_creation(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         # Entity created at T0 (default clock)
         kb.create_entity("Person", author=AUTHOR)
 
         assert kb.as_of(T_BEFORE).query("Person").all() == []
 
-    def test_entity_visible_at_creation_time(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_entity_visible_at_creation_time(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         kb.create_entity("Person", author=AUTHOR)
 
         assert len(kb.as_of(T0).query("Person").all()) == 1
 
-    def test_query_where_applies_temporal_filter(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_query_where_applies_temporal_filter(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         # Assertion recorded at T1, so invisible as_of T0
         _put_assertion(kb, entity.id, "Ada", asserted_at=T1, valid_from=T1)
@@ -386,8 +399,8 @@ class TestAsOfQuery:
         assert kb.as_of(T0).query("Person").where(name="Ada").all() == []
         assert len(kb.as_of(T1).query("Person").where(name="Ada").all()) == 1
 
-    def test_query_where_respects_closed_validity_window(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_query_where_respects_closed_validity_window(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         _put_assertion(kb, entity.id, "Ada", asserted_at=T0, valid_from=T0, valid_to=T1)
 
@@ -396,8 +409,8 @@ class TestAsOfQuery:
         # Not visible at T1 (half-open interval)
         assert kb.as_of(T1).query("Person").where(name="Ada").all() == []
 
-    def test_query_count_at_different_times(self, tmp_path: Path) -> None:
-        kb = _kb(tmp_path)
+    def test_query_count_at_different_times(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
         advance_days = 180
         e1 = kb.create_entity("Person", author=AUTHOR)
 
@@ -452,6 +465,7 @@ def assertion_scenarios(draw: st.DrawFn) -> tuple[list[dict[str, object]], int]:
 )
 def test_as_of_reconstruction_matches_theoretical_filter(
     scenario: tuple[list[dict[str, object]], int],
+    backend_name: str,
 ) -> None:
     """Property: as_of(t) returns exactly the assertions whose temporal fields satisfy
     the bitemporal filter: valid_from <= t < (valid_to or ∞) AND asserted_at <= t.
@@ -462,7 +476,7 @@ def test_as_of_reconstruction_matches_theoretical_filter(
     with tempfile.TemporaryDirectory() as tmpdir:
         clock = FixedClock(T0)
         ids = FixedIdProvider([f"id-{i}" for i in range(len(records) + 10)])
-        kb = Ontology.connect(Path(tmpdir) / "prop.db", clock=clock, id_provider=ids)
+        kb = _connect(backend_name, Path(tmpdir) / "prop.db", clock, ids)
         kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
         entity = kb.create_entity("Person", author=AUTHOR)
 
@@ -521,6 +535,7 @@ def test_as_of_visibility_matches_ground_truth_across_assert_retract_sequence(
     n_asserts: int,
     retract_after: list[bool],
     query_offset: int,
+    backend_name: str,
 ) -> None:
     """Property: for any sequence of static-predicate assertions (distinct
     values, so every 2nd+ triggers a contradiction) with optional retraction
@@ -533,7 +548,7 @@ def test_as_of_visibility_matches_ground_truth_across_assert_retract_sequence(
     with tempfile.TemporaryDirectory() as tmpdir:
         clock = FixedClock(T0)
         ids = FixedIdProvider([f"id-{i}" for i in range(n_asserts * 3 + 10)])
-        kb = Ontology.connect(Path(tmpdir) / "prop2.db", clock=clock, id_provider=ids)
+        kb = _connect(backend_name, Path(tmpdir) / "prop2.db", clock, ids)
         kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
         entity = kb.create_entity("Person", author=AUTHOR)
 
@@ -579,7 +594,9 @@ def test_as_of_visibility_matches_ground_truth_across_assert_retract_sequence(
     deadline=None,
     suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
-def test_valid_to_never_widens_once_closed(n_values: int, retract_indices: list[int]) -> None:
+def test_valid_to_never_widens_once_closed(
+    n_values: int, retract_indices: list[int], backend_name: str
+) -> None:
     """Property: once an assertion's valid_to is closed (by supersession or
     retraction), no later operation - including retracting that same
     already-closed record - may change it to a different value. Regression
@@ -588,7 +605,7 @@ def test_valid_to_never_widens_once_closed(n_values: int, retract_indices: list[
     with tempfile.TemporaryDirectory() as tmpdir:
         clock = FixedClock(T0)
         ids = FixedIdProvider([f"id-{i}" for i in range(n_values * 3 + 10)])
-        kb = Ontology.connect(Path(tmpdir) / "prop3.db", clock=clock, id_provider=ids)
+        kb = _connect(backend_name, Path(tmpdir) / "prop3.db", clock, ids)
         kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
         schema = SchemaIR(
             namespace="default",
