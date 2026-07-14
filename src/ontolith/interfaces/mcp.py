@@ -186,8 +186,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             Dict with assertion details including author, confidence, source,
             rationale, proposal link, and temporal fields.
         """
-        results = kb.backend.assertions(status=None)
-        match = next((a for a in results if a.id == assertion_id), None)
+        match = kb.backend.get_assertion(assertion_id)
         if match is None:
             return {"error": f"Assertion {assertion_id!r} not found"}
 

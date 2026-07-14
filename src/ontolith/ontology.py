@@ -968,6 +968,13 @@ class Ontology:
                         )
             flagged = assertion.model_copy(update={"status": "flagged"})
             self.backend.put_assertion(flagged)
+            # The incoming assertion is created already-flagged, but it still
+            # needs its own event: as_of() reconstructs flagged-status-at-t
+            # from assertion_event, and an assertion with zero events looks
+            # like it was never flagged, silently hiding pre-dispute history.
+            self._record_assertion_event(
+                flagged.id, assertion.author, "flagged", assertion.asserted_at
+            )
             if result.existing_contradiction_id and open_contradiction:
                 merged = list(dict.fromkeys(open_contradiction.member_ids + result.member_ids))
                 self.backend.update_contradiction_members(result.existing_contradiction_id, merged)
@@ -1232,13 +1239,10 @@ class Ontology:
         if principal.default_capability == "read":
             raise CapabilityError(f"Principal {author!r} lacks propose capability")
 
-        # Resolve both assertions (status=None: a flagged/superseded assertion
-        # must still be resolvable here, e.g. when extending an open contradiction)
-        all_assertions = self.backend.assertions(status=None)
-        a_map = {a.id: a for a in all_assertions}
-
-        a = a_map.get(assertion_id_a)
-        b = a_map.get(assertion_id_b)
+        # get_assertion is status-agnostic: a flagged/superseded assertion
+        # must still be resolvable here, e.g. when extending an open contradiction
+        a = self.backend.get_assertion(assertion_id_a)
+        b = self.backend.get_assertion(assertion_id_b)
         if a is None:
             raise NotFoundError(f"Assertion not found: {assertion_id_a}")
         if b is None:
@@ -1278,8 +1282,8 @@ class Ontology:
                 )
                 action = "created"
 
-            for aid in (assertion_id_a, assertion_id_b):
-                if a_map[aid].status != "flagged":
+            for aid, assertion in ((assertion_id_a, a), (assertion_id_b, b)):
+                if assertion.status != "flagged":
                     self.backend.set_assertion_status(aid, "flagged")
                     self._record_assertion_event(aid, author, "flagged", now)
 

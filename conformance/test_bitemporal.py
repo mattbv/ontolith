@@ -311,6 +311,98 @@ class TestAsOfRetractionAndFlagging:
         assert len(visible) == 2
         assert {a.value for a in visible} == {"Ada", "Ava"}
 
+    def test_as_of_before_dispute_shows_predispute_value(self, make_kb: KbFactory) -> None:
+        """as_of(t) for t strictly before a contradiction arose must still
+        show the value that was active and undisputed at t - flagging is
+        permanent (never sets valid_to), so using current status instead of
+        status-at-t would erase history from before the flag existed."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        before_dispute = kb.clock.now()
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)  # -> contradiction
+
+        visible = kb.as_of(before_dispute).assertions(subject=entity.id, predicate="Person.name")
+        assert len(visible) == 1
+        assert visible[0].value == "Ada"
+
+    def test_as_of_well_into_an_open_dispute_still_excludes_both_members(
+        self, make_kb: KbFactory
+    ) -> None:
+        """as_of(t) for t well after a contradiction opened (and still
+        unresolved) excludes both members - the fix must correctly exclude
+        at any t within the disputed window, not just t == now."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)  # -> contradiction
+        clock.advance(days=5)  # still unresolved, well after the dispute started
+
+        visible = kb.as_of(clock.now()).assertions(subject=entity.id, predicate="Person.name")
+        assert visible == []
+
+    def test_as_of_mid_dispute_excludes_even_after_later_resolution(
+        self, make_kb: KbFactory
+    ) -> None:
+        """as_of(t) for t between when a contradiction opened and when it
+        was later resolved must still show nothing active - resolution must
+        not retroactively "unflag" the disputed window that already passed."""
+        kb = _kb(make_kb)
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)
+        mid_dispute = clock.now()
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        contradiction = kb.backend.get_open_contradiction("default", entity.id, "Person.name")
+        assert contradiction is not None
+
+        clock.advance(days=1)
+        winner = flagged[0]
+        kb.resolve_contradiction(contradiction.id, winner.id, "carol@example.com")
+
+        visible = kb.as_of(mid_dispute).assertions(subject=entity.id, predicate="Person.name")
+        assert visible == []
+
+    def test_as_of_after_same_instant_flag_and_resolve_shows_winner(
+        self, make_kb: KbFactory
+    ) -> None:
+        """Regression: if a contradiction is flagged and resolved without
+        the clock advancing between them (both events share the same `at`),
+        the winner's 'reactivated' event must still win the tiebreak in
+        as_of()'s event-log reconstruction - not silently hidden because
+        `at` alone can't order two events recorded at the same instant."""
+        kb = _kb(make_kb)
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)  # -> contradiction
+
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        contradiction = kb.backend.get_open_contradiction("default", entity.id, "Person.name")
+        assert contradiction is not None
+        winner = flagged[0]
+
+        # No clock.advance() here - resolution happens at the same instant
+        # the flag did.
+        kb.resolve_contradiction(contradiction.id, winner.id, "carol@example.com")
+
+        visible = kb.as_of(kb.clock.now()).assertions(subject=entity.id, predicate="Person.name")
+        assert len(visible) == 1
+        assert visible[0].id == winner.id
+
     def test_contradiction_resolution_closes_losers_valid_to(self, make_kb: KbFactory) -> None:
         """A retracted (losing) contradiction member's window closes at
         resolution time; as_of() after resolution must not show it."""
@@ -563,10 +655,13 @@ def test_as_of_visibility_matches_ground_truth_across_assert_retract_sequence(
     """Property: for any sequence of static-predicate assertions (distinct
     values, so every 2nd+ triggers a contradiction) with optional retraction
     after each, as_of(t) visibility exactly matches the bitemporal formula
-    applied to the assertions' *actual persisted* temporal fields/status —
-    i.e. retraction must close valid_to, and flagged must be excluded unless
-    include_flagged=True. Ground truth is the non-as_of status=None query, a
-    codepath this fix does not touch.
+    applied to the assertions' *actual persisted* temporal fields, plus
+    flagged-status *at query_t* (not current status — a static conflict
+    flags an assertion permanently, so current status can't tell you
+    whether it was flagged yet at some earlier t). Ground truth for the
+    temporal fields is the non-as_of status=None query; ground truth for
+    flagged-at-t is reconstructed from the assertion_event log, mirroring
+    exactly what the as_of() SQL under test does.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         clock = FixedClock(T0)
@@ -589,11 +684,21 @@ def test_as_of_visibility_matches_ground_truth_across_assert_retract_sequence(
 
         INF = datetime(9999, 12, 31, tzinfo=UTC)
 
+        def flagged_at(a: Assertion, t: datetime) -> bool:
+            events = [
+                e
+                for e in kb.backend.get_assertion_events(a.id)
+                if e.at <= t and e.action in ("flagged", "reactivated")
+            ]
+            if not events:
+                return False
+            return max(events, key=lambda e: e.at).action == "flagged"
+
         def is_visible(a: Assertion, include_flagged: bool) -> bool:
             vf = a.valid_from if a.valid_from is not None else datetime(1970, 1, 1, tzinfo=UTC)
             vt = a.valid_to if a.valid_to is not None else INF
             temporally_visible = vf <= query_t < vt and a.asserted_at <= query_t
-            return temporally_visible and (include_flagged or a.status != "flagged")
+            return temporally_visible and (include_flagged or not flagged_at(a, query_t))
 
         for include_flagged in (False, True):
             expected_ids = {a.id for a in ground_truth if is_visible(a, include_flagged)}

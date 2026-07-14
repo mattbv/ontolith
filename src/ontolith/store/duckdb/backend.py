@@ -300,6 +300,31 @@ class DuckDBBackend:
             ON assertion(valid_from, valid_to)
         """)
 
+        # idx_assertion_spo above leads with namespace, which every query
+        # leaves unconstrained (single-namespace today), making it unusable
+        # for the actual filter shapes in assertions()/entities_where() —
+        # confirmed via EXPLAIN (full table scan, not index search). These
+        # two match the real WHERE clauses without requiring namespace.
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_assertion_subj_pred_status
+            ON assertion(subject, predicate, status)
+        """)
+
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_assertion_pred_value
+            ON assertion(predicate, value_lit, status)
+        """)
+
+        # Note: DuckDB's optimizer does not use secondary ART indexes for
+        # this equality-filter shape (confirmed via EXPLAIN at 20k+ rows —
+        # always SEQ_SCAN, unlike SQLite which switches to an index SEARCH
+        # with the equivalent indexes above). Its vectorized scan is still
+        # within budget regardless (measured ~3.4ms/call at 100k assertions
+        # vs SQLite's ~0.14ms indexed and ~7ms pre-fix scanned), so these
+        # indexes are kept for schema parity with SQLiteBackend and in case
+        # a future DuckDB version leverages them, not because they currently
+        # change this backend's query plan.
+
     @staticmethod
     def _row_to_dict(cursor: duckdb.DuckDBPyConnection, row: tuple[Any, ...]) -> dict[str, Any]:
         """Zip a positional result row with its cursor's column names."""
@@ -672,7 +697,26 @@ class DuckDBBackend:
             query += " AND (valid_to IS NULL OR valid_to > ?)"
             params.append(t_iso)
             if not include_flagged:
-                query += " AND status != 'flagged'"
+                # Flagged-at-t, not current status: a static conflict flags an
+                # assertion permanently (no valid_to change), so using current
+                # status here would hide it from as_of() queries for times
+                # before the dispute existed. Reconstruct from the event log
+                # instead — every flagged transition (including an assertion
+                # born already-flagged) has a 'flagged' event, see
+                # Ontology._apply_with_conflict_routing. "at" is quoted -
+                # reserved word in DuckDB. Tiebreak on ae.id (ULID/sequential,
+                # monotonic with recording order) — two events can share the
+                # same `at` under a clock that hasn't advanced (e.g.
+                # flag-then-resolve in the same tick), and `at` alone would
+                # make "last recorded wins" nondeterministic.
+                query += """ AND COALESCE(
+                    (SELECT ae.action FROM assertion_event ae
+                     WHERE ae.assertion_id = assertion.id AND ae."at" <= ?
+                       AND ae.action IN ('flagged', 'reactivated')
+                     ORDER BY ae."at" DESC, ae.id DESC LIMIT 1),
+                    'reactivated'
+                ) != 'flagged'"""
+                params.append(t_iso)
         elif status is not None:
             query += " AND status = ?"
             params.append(status)
