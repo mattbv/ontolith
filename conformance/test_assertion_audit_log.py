@@ -64,9 +64,7 @@ class TestSupersessionEvent:
 
 
 class TestContradictionEvents:
-    def test_fresh_contradiction_records_flag_for_pre_existing_member_only(
-        self, make_kb: KbFactory
-    ) -> None:
+    def test_fresh_contradiction_records_flag_for_both_members(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)
         first = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
@@ -78,9 +76,13 @@ class TestContradictionEvents:
         assert first_events[0].action == "flagged"
         assert first_events[0].actor == AUTHOR
 
-        # The second (incoming) assertion is created already-flagged - that's
-        # not a transition, so it gets no event of its own.
-        assert kb.backend.get_assertion_events(second.id) == []
+        # The second (incoming) assertion is created already-flagged - it
+        # still gets its own "flagged" event (at its own asserted_at), so
+        # as_of() can reconstruct that it was never active/undisputed.
+        second_events = kb.backend.get_assertion_events(second.id)
+        assert len(second_events) == 1
+        assert second_events[0].action == "flagged"
+        assert second_events[0].actor == AUTHOR
 
     def test_extending_open_contradiction_does_not_re_flag_existing_members(
         self, make_kb: KbFactory
@@ -96,8 +98,12 @@ class TestContradictionEvents:
 
         # first was only ever flagged once, not once per subsequent conflict.
         assert len(kb.backend.get_assertion_events(first.id)) == 1
-        # third is the new incoming assertion each time - never its own transition.
-        assert kb.backend.get_assertion_events(third.id) == []
+        # third is the new incoming assertion - it gets its own birth "flagged"
+        # event (unlike existing members, it has no prior state to transition
+        # from, but as_of() still needs a timestamp for when it became flagged).
+        third_events = kb.backend.get_assertion_events(third.id)
+        assert len(third_events) == 1
+        assert third_events[0].action == "flagged"
 
 
 class TestRetractionEvents:
@@ -184,7 +190,7 @@ class TestExplicitFlagEvents:
         third = kb.assert_literal(entity.id, "Person.name", "Eve", "Text", AUTHOR)
         # first and second are already flagged via auto-detected conflict routing.
         assert len(kb.backend.get_assertion_events(first.id)) == 1
-        assert kb.backend.get_assertion_events(second.id) == []
+        assert len(kb.backend.get_assertion_events(second.id)) == 1
 
         # Explicitly flagging an already-flagged assertion alongside another
         # existing member of the same open contradiction must not duplicate
@@ -215,7 +221,7 @@ class TestAssertionEventOrderingAndScope:
         b = kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)
 
         assert [e.assertion_id for e in kb.backend.get_assertion_events(a.id)] == [a.id]
-        assert kb.backend.get_assertion_events(b.id) == []
+        assert [e.assertion_id for e in kb.backend.get_assertion_events(b.id)] == [b.id]
 
     def test_no_events_for_unknown_assertion(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)
