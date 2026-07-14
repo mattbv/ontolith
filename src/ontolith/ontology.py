@@ -999,7 +999,13 @@ class Ontology:
     def accept_proposal(self, proposal_id: str, reviewer: str) -> Proposal:
         """Accept a pending proposal, replaying its operations (SPEC §9).
 
-        The reviewer must have `review` or `admin` capability.
+        The reviewer must have `review` or `admin` capability, must not be
+        an AI principal (ThresholdPolicy always routes AI proposals to
+        require_review — an AI reviewer would defeat that guarantee), and
+        must not be the proposal's own author or delegating principal
+        (self-review would let a misconfigured AI principal with `review`
+        capability, or a delegate reviewing their own delegated proposal,
+        approve its own work).
         Only proposals in `require_review` or `under_review` state can be accepted.
         Operations are replayed through SPEC §10 conflict routing inside a single transaction.
 
@@ -1015,10 +1021,14 @@ class Ontology:
             raise AuthError(f"Principal not found: {reviewer}")
         if reviewer_principal.default_capability not in ("review", "admin"):
             raise CapabilityError(f"Principal {reviewer} lacks review capability")
+        if reviewer_principal.kind == "ai":
+            raise CapabilityError(f"Principal {reviewer!r} is an AI principal and cannot review")
 
         proposal = self.backend.get_proposal(proposal_id)
         if proposal is None:
             raise NotFoundError(f"Proposal not found: {proposal_id}")
+        if reviewer in (proposal.author, proposal.acting_as):
+            raise CapabilityError(f"Principal {reviewer!r} cannot review their own proposal")
         if proposal.state not in ("require_review", "under_review"):
             raise ValidationError(
                 f"Proposal {proposal_id} is not pending review (state: {proposal.state})"
@@ -1105,7 +1115,10 @@ class Ontology:
     def reject_proposal(self, proposal_id: str, reviewer: str, reason: str = "") -> Proposal:
         """Reject a pending proposal (SPEC §9).
 
-        The reviewer must have `review` or `admin` capability.
+        The reviewer must have `review` or `admin` capability, must not be
+        an AI principal, and must not be the proposal's own author or
+        delegating principal — same guard rails as accept_proposal, for
+        symmetry (see its docstring for the rationale).
         No operations are applied; the proposal is marked rejected.
 
         Args:
@@ -1121,10 +1134,14 @@ class Ontology:
             raise AuthError(f"Principal not found: {reviewer}")
         if reviewer_principal.default_capability not in ("review", "admin"):
             raise CapabilityError(f"Principal {reviewer} lacks review capability")
+        if reviewer_principal.kind == "ai":
+            raise CapabilityError(f"Principal {reviewer!r} is an AI principal and cannot review")
 
         proposal = self.backend.get_proposal(proposal_id)
         if proposal is None:
             raise NotFoundError(f"Proposal not found: {proposal_id}")
+        if reviewer in (proposal.author, proposal.acting_as):
+            raise CapabilityError(f"Principal {reviewer!r} cannot review their own proposal")
         if proposal.state not in ("require_review", "under_review"):
             raise ValidationError(
                 f"Proposal {proposal_id} is not pending review (state: {proposal.state})"
@@ -1148,6 +1165,33 @@ class Ontology:
         assert rejected is not None
         return rejected
 
+    def proposals(self, state: str | None = "require_review") -> list[Proposal]:
+        """List proposals, defaulting to those pending review (SPEC §14.1).
+
+        Without this, `route_to_review` (SPEC §10.3) has no way to surface
+        what it routed — a reviewer would need direct backend access to
+        discover pending proposals.
+
+        Args:
+            state: Filter by proposal state; None returns every state
+
+        Returns:
+            Matching proposals, most recently created first
+        """
+        return self.backend.proposals(state=state)
+
+    def contradictions(self, state: str | None = "open") -> list[Contradiction]:
+        """List contradictions, defaulting to open (unresolved) ones (SPEC §14.1).
+
+        Args:
+            state: Filter by contradiction state ("open" or "resolved");
+                None returns every state
+
+        Returns:
+            Matching contradictions, most recently created first
+        """
+        return self.backend.contradictions(state=state)
+
     def resolve_contradiction(
         self,
         contradiction_id: str,
@@ -1157,7 +1201,10 @@ class Ontology:
         """Resolve an open contradiction by selecting a winning assertion (SPEC §10.3).
 
         All other member assertions are retracted; the winning assertion is
-        reactivated. The resolver must have `review` or `admin` capability.
+        reactivated. The resolver must have `review` or `admin` capability
+        and must not be an AI principal (ThresholdPolicy always routes AI
+        proposals to require_review; an AI resolver would let it approve
+        its own or another AI's disputed value unsupervised).
         Resolution is recorded on the contradiction and appears in provenance.
 
         Args:
@@ -1173,6 +1220,8 @@ class Ontology:
             raise AuthError(f"Principal not found: {resolver}")
         if resolver_principal.default_capability not in ("review", "admin"):
             raise CapabilityError(f"Principal {resolver} lacks review capability")
+        if resolver_principal.kind == "ai":
+            raise CapabilityError(f"Principal {resolver!r} is an AI principal and cannot review")
 
         contradiction = self.backend.get_contradiction(contradiction_id)
         if contradiction is None:

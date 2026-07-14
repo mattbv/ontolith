@@ -943,13 +943,14 @@ class SQLiteBackend:
 
     def get_proposal(self, proposal_id: str) -> Proposal | None:
         """Retrieve a proposal by ID."""
-        import json
-
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM proposal WHERE id = ?", (proposal_id,))
         row = cursor.fetchone()
-        if row is None:
-            return None
+        return self._row_to_proposal(row) if row else None
+
+    @staticmethod
+    def _row_to_proposal(row: sqlite3.Row) -> Proposal:
+        import json
 
         return Proposal(
             id=row["id"],
@@ -963,6 +964,18 @@ class SQLiteBackend:
             payload=json.loads(row["payload"]),
             metadata=json.loads(row["metadata"]),
         )
+
+    def proposals(self, state: str | None = None) -> list[Proposal]:
+        """Query proposals, optionally filtered by state (SPEC §14.1)."""
+        cursor = self.conn.cursor()
+        if state is not None:
+            cursor.execute(
+                "SELECT * FROM proposal WHERE state = ? ORDER BY created_at DESC, id DESC",
+                (state,),
+            )
+        else:
+            cursor.execute("SELECT * FROM proposal ORDER BY created_at DESC, id DESC")
+        return [self._row_to_proposal(row) for row in cursor.fetchall()]
 
     def update_proposal_state(
         self,
@@ -1175,6 +1188,18 @@ class SQLiteBackend:
         cursor.execute("SELECT * FROM contradiction WHERE id = ?", (contradiction_id,))
         row = cursor.fetchone()
         return self._row_to_contradiction(row) if row else None
+
+    def contradictions(self, state: str | None = None) -> list[Contradiction]:
+        """Query contradictions, optionally filtered by state (SPEC §14.1)."""
+        cursor = self.conn.cursor()
+        if state is not None:
+            cursor.execute(
+                "SELECT * FROM contradiction WHERE state = ? ORDER BY created_at DESC, id DESC",
+                (state,),
+            )
+        else:
+            cursor.execute("SELECT * FROM contradiction ORDER BY created_at DESC, id DESC")
+        return [self._row_to_contradiction(row) for row in cursor.fetchall()]
 
     def resolve_contradiction(
         self,

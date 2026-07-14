@@ -493,3 +493,84 @@ class TestErrorPaths:
             ],
         )
         assert result.exit_code == 1
+
+
+class TestProposalList:
+    def test_lists_pending_proposals_by_default(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        bot = kb.create_principal(
+            "bot@example.com",
+            kind="ai",
+            auth_method="apikey",
+            owner=alice.id,
+            default_capability="propose",
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", alice.id)  # auto_accepted
+        pending, _ = kb.propose(
+            entity.id, "Person.born", "1815", "Text", bot.id, model="test-model-v1"
+        )
+        kb.close()
+
+        result = runner.invoke(app, ["--db", str(temp_db), "proposal", "list"])
+        assert result.exit_code == 0
+        assert pending.id in result.output
+        assert "require_review" in result.output
+
+    def test_no_proposals_message(self, temp_db: Path) -> None:
+        result = runner.invoke(app, ["--db", str(temp_db), "proposal", "list"])
+        assert result.exit_code == 0
+        assert "No proposals found." in result.output
+
+    def test_all_flag_includes_every_state(self, seeded_db: tuple[Path, str, str]) -> None:
+        db, author, entity_id = seeded_db
+        kb = Ontology.connect(db)
+        kb.propose(
+            entity_id, "Person.name", "Ada", "Text", author
+        )  # write capability -> auto_accepted
+        proposals = kb.proposals(state=None)
+        kb.close()
+        assert len(proposals) == 1  # auto_accepted, invisible to the default require_review filter
+
+        default_result = runner.invoke(app, ["--db", str(db), "proposal", "list"])
+        assert "No proposals found." in default_result.output
+
+        all_result = runner.invoke(app, ["--db", str(db), "proposal", "list", "--all"])
+        assert "auto_accepted" in all_result.output
+
+
+class TestContradictionList:
+    def test_lists_open_contradictions_by_default(self, seeded_db: tuple[Path, str, str]) -> None:
+        db, author, entity_id = seeded_db
+        kb = Ontology.connect(db)
+        kb.assert_literal(entity_id, "Person.name", "Ada", "Text", author)
+        kb.assert_literal(entity_id, "Person.name", "Ava", "Text", author)  # -> contradiction
+        kb.close()
+
+        result = runner.invoke(app, ["--db", str(db), "contradiction", "list"])
+        assert result.exit_code == 0
+        assert "state=open" in result.output
+        assert entity_id in result.output
+
+    def test_no_contradictions_message(self, temp_db: Path) -> None:
+        result = runner.invoke(app, ["--db", str(temp_db), "contradiction", "list"])
+        assert result.exit_code == 0
+        assert "No contradictions found." in result.output
+
+    def test_resolved_excluded_by_default(self, seeded_db: tuple[Path, str, str]) -> None:
+        db, author, entity_id = seeded_db
+        kb = Ontology.connect(db)
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        kb.assert_literal(entity_id, "Person.name", "Ada", "Text", author)
+        kb.assert_literal(entity_id, "Person.name", "Ava", "Text", author)
+        flagged = kb.assertions(subject=entity_id, predicate="Person.name", status="flagged")
+        [contradiction] = kb.contradictions()
+        kb.resolve_contradiction(contradiction.id, flagged[0].id, "carol@example.com")
+        kb.close()
+
+        default_result = runner.invoke(app, ["--db", str(db), "contradiction", "list"])
+        assert "No contradictions found." in default_result.output
+
+        all_result = runner.invoke(app, ["--db", str(db), "contradiction", "list", "--all"])
+        assert "state=resolved" in all_result.output
