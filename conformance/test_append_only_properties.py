@@ -89,7 +89,13 @@ def test_assertion_status_cannot_be_mutated_directly(make_kb: KbFactory) -> None
 
 
 @given(values=st.lists(_short_values, min_size=1, max_size=8))
-@settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=50,
+    deadline=None,  # DuckDB's per-example file+schema setup is heavier
+    # than SQLite's, and this test is parametrized over both backends —
+    # a fixed deadline flakes under load (mirrors test_bitemporal.py).
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 def test_propose_sequence_never_mutates_prior_assertion_values(
     values: list[str], backend_name: str
 ) -> None:
@@ -133,7 +139,13 @@ def test_propose_sequence_never_mutates_prior_assertion_values(
 
 
 @given(values=st.lists(_short_values, min_size=1, max_size=6))
-@settings(max_examples=50, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@settings(
+    max_examples=50,
+    deadline=None,  # DuckDB's per-example file+schema setup is heavier
+    # than SQLite's, and this test is parametrized over both backends —
+    # a fixed deadline flakes under load (mirrors test_bitemporal.py).
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
 def test_assertion_count_never_decreases_across_propose_and_retract(
     values: list[str], backend_name: str
 ) -> None:

@@ -16,12 +16,19 @@ notes at each divergence point:
   duckdb==1.5.4), so "row not found" detection can't use sqlite3's rowcount
   check. Where the target table has no incoming foreign key from another
   table (contradiction, principal_credential), `UPDATE ... RETURNING id`
-  substitutes cleanly. Where it does (assertion, referenced by
-  assertion_event.assertion_id; proposal, referenced by
-  proposal_event.proposal_id), RETURNING raises a false-positive constraint
-  violation on an otherwise-valid update (confirmed empirically, a documented
-  DuckDB limitation) — those methods use a SELECT existence check followed by
-  a plain UPDATE instead.
+  substitutes cleanly. assertion (referenced by assertion_event.assertion_id)
+  and proposal (referenced by proposal_event.proposal_id) instead use a
+  SELECT existence check followed by a plain UPDATE — RETURNING against
+  either raises a false-positive constraint violation unconditionally, and
+  even a plain UPDATE raises the same false-positive once the full schema
+  (this project's actual indexes/CHECK constraints, not a minimal repro) is
+  in play and a child row already references the target (confirmed
+  empirically against the real schema in both forms, a documented DuckDB
+  limitation). Dropping these two FK declarations entirely — not just
+  avoiding RETURNING — is what actually fixes it; see the comments on each
+  table for the reproduction. Referential integrity for both links is
+  enforced at the application layer instead (Ontology only ever calls
+  put_assertion_event/put_proposal_event with a real, just-persisted id).
 - DuckDB rows are plain tuples, not dict-like sqlite3.Row objects; row-mapping
   goes through a small _row_to_dict() helper keyed off cursor.description.
 - `confidence` is declared DOUBLE, not REAL: DuckDB's REAL is 4-byte single
@@ -68,7 +75,6 @@ class DuckDBBackend:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = duckdb.connect(str(self.path))
-        self._in_transaction: bool = False
         self._clock: Clock = clock or SystemClock()
         self._create_schema()
 
@@ -174,18 +180,20 @@ class DuckDBBackend:
         # The assertion row itself only carries current status; this table
         # makes each transition independently attributable and timestamped.
         #
-        # No FOREIGN KEY(assertion_id) REFERENCES assertion(id): DuckDB
-        # (confirmed on 1.5.4) spuriously raises a constraint violation on a
-        # later UPDATE to a row that's already referenced by a child FK row —
-        # reproduced with: insert assertion, UPDATE its status, insert an
-        # assertion_event row referencing it, then UPDATE its status again.
-        # That exact sequence (mutate the assertion's status again after its
-        # own audit trail already has an entry) is this table's whole reason
-        # to exist, so the FK can't be kept without breaking normal appends.
-        # Referential integrity for assertion_id is enforced at the
-        # application layer (Ontology only ever calls put_assertion_event
-        # with a real, just-persisted assertion id) — SQLiteBackend keeps the
-        # FK since sqlite3 doesn't have this limitation.
+        # No FOREIGN KEY(assertion_id) REFERENCES assertion(id): with the full
+        # schema below (this table's own CHECK/indexes included, not a
+        # trimmed-down repro), DuckDB 1.5.4 spuriously raises a constraint
+        # violation on a later UPDATE to assertion.status once a child
+        # assertion_event row already references it — reproduced against the
+        # real DuckDBBackend-created schema with both `UPDATE ... RETURNING`
+        # and a plain `UPDATE` (see set_assertion_status). That exact sequence
+        # (mutate the assertion's status again after its own audit trail
+        # already has an entry) is this table's whole reason to exist, so the
+        # FK can't be kept without breaking normal appends. Referential
+        # integrity for assertion_id is enforced at the application layer
+        # instead (Ontology only ever calls put_assertion_event with a real,
+        # just-persisted assertion id) — SQLiteBackend keeps the FK since
+        # sqlite3 doesn't have this limitation.
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS assertion_event (
                 id TEXT PRIMARY KEY,
@@ -300,7 +308,6 @@ class DuckDBBackend:
     def begin(self) -> None:
         """Begin an explicit transaction."""
         self.conn.execute("BEGIN TRANSACTION")
-        self._in_transaction = True
 
     def commit(self) -> None:
         """Commit the current explicit transaction."""
@@ -308,7 +315,6 @@ class DuckDBBackend:
             self.conn.execute("COMMIT")
         except duckdb.Error as e:
             raise StorageError(f"Failed to commit transaction: {e}") from e
-        self._in_transaction = False
 
     def rollback(self) -> None:
         """Rollback the current explicit transaction."""
@@ -316,7 +322,6 @@ class DuckDBBackend:
             self.conn.execute("ROLLBACK")
         except duckdb.Error as e:
             raise StorageError(f"Failed to rollback transaction: {e}") from e
-        self._in_transaction = False
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
