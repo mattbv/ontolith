@@ -255,6 +255,21 @@ class SQLiteBackend:
             ON assertion(valid_from, valid_to)
         """)
 
+        # idx_assertion_spo above leads with namespace, which every query
+        # leaves unconstrained (single-namespace today), making it unusable
+        # for the actual filter shapes in assertions()/entities_where() —
+        # confirmed via EXPLAIN QUERY PLAN (full table SCAN, not SEARCH).
+        # These two match the real WHERE clauses without requiring namespace.
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_assertion_subj_pred_status
+            ON assertion(subject, predicate, status)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_assertion_pred_value
+            ON assertion(predicate, value_lit, status)
+        """)
+
         self.conn.commit()
 
     def begin(self) -> None:
@@ -654,7 +669,25 @@ class SQLiteBackend:
             query += " AND (valid_to IS NULL OR valid_to > ?)"
             params.append(t_iso)
             if not include_flagged:
-                query += " AND status != 'flagged'"
+                # Flagged-at-t, not current status: a static conflict flags an
+                # assertion permanently (no valid_to change), so using current
+                # status here would hide it from as_of() queries for times
+                # before the dispute existed. Reconstruct from the event log
+                # instead — every flagged transition (including an assertion
+                # born already-flagged) has a 'flagged' event, see
+                # Ontology._apply_with_conflict_routing. Tiebreak on ae.id
+                # (ULID/sequential, monotonic with recording order) — two
+                # events can share the same `at` under a clock that hasn't
+                # advanced (e.g. flag-then-resolve in the same tick), and
+                # `at` alone would make "last recorded wins" nondeterministic.
+                query += """ AND COALESCE(
+                    (SELECT ae.action FROM assertion_event ae
+                     WHERE ae.assertion_id = assertion.id AND ae.at <= ?
+                       AND ae.action IN ('flagged', 'reactivated')
+                     ORDER BY ae.at DESC, ae.id DESC LIMIT 1),
+                    'reactivated'
+                ) != 'flagged'"""
+                params.append(t_iso)
         elif status is not None:
             query += " AND status = ?"
             params.append(status)
