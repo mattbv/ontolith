@@ -350,3 +350,126 @@ class TestReviewGuards:
 
         with pytest.raises(ValidationError, match="not pending review"):
             kb.accept_proposal(proposal.id, REVIEWER)
+
+    def test_ai_reviewer_cannot_accept(self, make_kb: KbFactory) -> None:
+        """A misconfigured AI principal with review capability must still be
+        blocked — ADR-0003's human-in-the-loop guarantee doesn't hold if an
+        AI can review (its own or anyone else's) proposals."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "misconfigured-ai-reviewer",
+            kind="ai",
+            auth_method="apikey",
+            owner=HUMAN_AUTHOR,
+            default_capability="review",
+        )
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        with pytest.raises(CapabilityError, match="AI principal and cannot review"):
+            kb.accept_proposal(proposal.id, "misconfigured-ai-reviewer")
+
+    def test_ai_reviewer_cannot_reject(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "misconfigured-ai-reviewer",
+            kind="ai",
+            auth_method="apikey",
+            owner=HUMAN_AUTHOR,
+            default_capability="review",
+        )
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        with pytest.raises(CapabilityError, match="AI principal and cannot review"):
+            kb.reject_proposal(proposal.id, "misconfigured-ai-reviewer")
+
+    def test_delegating_principal_cannot_review_its_own_delegated_proposal(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A propose-capability principal delegates (acting_as) to a
+        review-capability owner; the delegated proposal still requires
+        review (SPEC §8.4: capability is capped at min(), not elevated).
+        The owner must not be able to review a proposal made in their own
+        name via delegation — that's still self-approval in effect."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "carol@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        kb.create_principal(
+            "erin@example.com",
+            kind="human",
+            auth_method="oidc",
+            owner="carol@example.com",
+            default_capability="propose",
+            trust_level=0,
+        )
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, decision = kb.propose(
+            entity.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            "erin@example.com",
+            acting_as="carol@example.com",
+        )
+        assert proposal.state == "require_review"
+
+        with pytest.raises(CapabilityError, match="cannot review their own proposal"):
+            kb.accept_proposal(proposal.id, "carol@example.com")
+
+
+class TestProposalAndContradictionListing:
+    """kb.proposals()/kb.contradictions() — the SDK surface reviewers need to
+    discover pending work (SPEC §14.1); route_to_review otherwise routes
+    into a void with no way to enumerate what it routed."""
+
+    def test_proposals_defaults_to_require_review(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)  # auto_accepted
+        pending, _ = kb.propose(
+            entity.id, "Person.born", "1815", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        assert pending.state == "require_review"
+
+        listed = kb.proposals()
+        assert [p.id for p in listed] == [pending.id]
+
+    def test_proposals_state_none_returns_all(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        auto, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
+        pending, _ = kb.propose(
+            entity.id, "Person.born", "1815", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        listed = kb.proposals(state=None)
+        assert {p.id for p in listed} == {auto.id, pending.id}
+
+    def test_contradictions_defaults_to_open(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
+        kb.propose(entity.id, "Person.name", "Ava", "Text", HUMAN_AUTHOR)  # -> contradiction
+
+        listed = kb.contradictions()
+        assert len(listed) == 1
+        assert listed[0].state == "open"
+
+    def test_contradictions_excludes_resolved_by_default(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
+        kb.propose(entity.id, "Person.name", "Ava", "Text", HUMAN_AUTHOR)
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        [contradiction] = kb.contradictions()
+        kb.resolve_contradiction(contradiction.id, flagged[0].id, REVIEWER)
+
+        assert kb.contradictions() == []
+        assert len(kb.contradictions(state=None)) == 1
+        assert kb.contradictions(state="resolved")[0].id == contradiction.id

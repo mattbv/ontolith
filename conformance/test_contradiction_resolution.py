@@ -211,3 +211,20 @@ class TestResolveContradictionGuards:
 
         with pytest.raises(ValidationError, match="is not open"):
             kb.resolve_contradiction(contradiction_id, ada_id, REVIEWER)
+
+    def test_ai_resolver_raises_capability_error(self, make_kb: KbFactory) -> None:
+        """A misconfigured AI principal with review capability must still be
+        blocked from resolving contradictions (ADR-0003)."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "misconfigured-ai-reviewer",
+            kind="ai",
+            auth_method="apikey",
+            owner=HUMAN_WRITE,
+            default_capability="review",
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        contradiction_id, ada_id, _ = _open_contradiction(kb, entity.id)
+
+        with pytest.raises(CapabilityError, match="AI principal and cannot review"):
+            kb.resolve_contradiction(contradiction_id, ada_id, "misconfigured-ai-reviewer")

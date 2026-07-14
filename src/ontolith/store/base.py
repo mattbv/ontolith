@@ -339,6 +339,18 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def proposals(self, state: str | None = None) -> list[Proposal]:
+        """Query proposals, optionally filtered by state (SPEC §14.1).
+
+        Args:
+            state: Filter by proposal state (e.g. "require_review");
+                None returns proposals in every state
+
+        Returns:
+            Matching proposals, most recently created first
+        """
+        ...
+
     def update_proposal_state(
         self,
         proposal_id: str,
@@ -432,6 +444,18 @@ class StorageBackend(Protocol):
 
         Returns:
             Contradiction if found, None otherwise
+        """
+        ...
+
+    def contradictions(self, state: str | None = None) -> list[Contradiction]:
+        """Query contradictions, optionally filtered by state (SPEC §14.1).
+
+        Args:
+            state: Filter by contradiction state ("open" or "resolved");
+                None returns contradictions in every state
+
+        Returns:
+            Matching contradictions, most recently created first
         """
         ...
 
