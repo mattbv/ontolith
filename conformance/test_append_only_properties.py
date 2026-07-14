@@ -12,12 +12,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from pydantic import ValidationError
 
+from conformance.conftest import KbFactory
 from ontolith import Ontology
-from ontolith.core import FixedClock, FixedIdProvider
+from ontolith.core import Clock, FixedClock, FixedIdProvider, IdProvider
+from ontolith.store.duckdb import DuckDBBackend
+from ontolith.store.sqlite import SQLiteBackend
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 AUTHOR = "alice@example.com"
@@ -27,47 +30,57 @@ _short_values = st.text(
 )
 
 
+def _connect(backend_name: str, path: Path, clock: Clock, id_provider: IdProvider) -> Ontology:
+    """Build an Ontology directly, not via the make_kb fixture: Hypothesis's
+    function_scoped_fixture health check flags function-scoped fixtures used
+    alongside @given (fixture setup runs once, but the test body runs once
+    per example) - backend_name (a plain immutable string) is safe to use
+    that way, but make_kb/tmp_path are not, so backends are built inline
+    here instead, preserving the existing fresh-tempdir-per-example pattern.
+    """
+    backend_cls = SQLiteBackend if backend_name == "sqlite" else DuckDBBackend
+    return Ontology(backend_cls(path, clock=clock), clock=clock, id_provider=id_provider)
+
+
 # ===========================================================================
 # Direct invariant: the frozen model rejects in-place mutation (KI-003)
 # ===========================================================================
 
 
-def test_assertion_value_mutation_raises() -> None:
+def test_assertion_value_mutation_raises(make_kb: KbFactory) -> None:
     """Attempting to mutate assertion.value in-place raises ValidationError (SPEC §5)."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        clock = FixedClock(T0)
-        ids = FixedIdProvider(["e-1", "a-1", "prop-1"])
-        kb = Ontology.connect(Path(tmpdir) / "test.db", clock=clock, id_provider=ids)
-        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
-        entity = kb.create_entity("Person", author=AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
-        assertion = kb.assertions(subject=entity.id, predicate="Person.name")[0]
+    clock = FixedClock(T0)
+    ids = FixedIdProvider(["e-1", "a-1", "prop-1"])
+    kb = make_kb(clock, ids)
+    kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+    entity = kb.create_entity("Person", author=AUTHOR)
+    proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+    assertion = kb.assertions(subject=entity.id, predicate="Person.name")[0]
 
-        try:
-            with pytest.raises(ValidationError):
-                assertion.value = "tampered"  # type: ignore[misc]
-        finally:
-            kb.close()
+    try:
+        with pytest.raises(ValidationError):
+            assertion.value = "tampered"  # type: ignore[misc]
+    finally:
+        kb.close()
 
 
-def test_assertion_status_cannot_be_mutated_directly() -> None:
+def test_assertion_status_cannot_be_mutated_directly(make_kb: KbFactory) -> None:
     """Status transitions ARE allowed (SPEC §5), but only via the backend's
     set_assertion_status() — never by assigning to the frozen model in-place.
     """
-    with tempfile.TemporaryDirectory() as tmpdir:
-        clock = FixedClock(T0)
-        ids = FixedIdProvider(["e-1", "a-1", "prop-1"])
-        kb = Ontology.connect(Path(tmpdir) / "test.db", clock=clock, id_provider=ids)
-        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
-        entity = kb.create_entity("Person", author=AUTHOR)
-        kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
-        assertion = kb.assertions(subject=entity.id, predicate="Person.name")[0]
+    clock = FixedClock(T0)
+    ids = FixedIdProvider(["e-1", "a-1", "prop-1"])
+    kb = make_kb(clock, ids)
+    kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+    entity = kb.create_entity("Person", author=AUTHOR)
+    kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+    assertion = kb.assertions(subject=entity.id, predicate="Person.name")[0]
 
-        try:
-            with pytest.raises(ValidationError):
-                assertion.status = "retracted"  # type: ignore[misc]
-        finally:
-            kb.close()
+    try:
+        with pytest.raises(ValidationError):
+            assertion.status = "retracted"  # type: ignore[misc]
+    finally:
+        kb.close()
 
 
 # ===========================================================================
@@ -76,15 +89,23 @@ def test_assertion_status_cannot_be_mutated_directly() -> None:
 
 
 @given(values=st.lists(_short_values, min_size=1, max_size=8))
-@settings(max_examples=50)
-def test_propose_sequence_never_mutates_prior_assertion_values(values: list[str]) -> None:
+@settings(
+    max_examples=50,
+    deadline=None,  # DuckDB's per-example file+schema setup is heavier
+    # than SQLite's, and this test is parametrized over both backends —
+    # a fixed deadline flakes under load (mirrors test_bitemporal.py).
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+def test_propose_sequence_never_mutates_prior_assertion_values(
+    values: list[str], backend_name: str
+) -> None:
     """For any sequence of static-property proposals (triggering corroboration or
     contradiction), every assertion ever created keeps its original value forever.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         clock = FixedClock(T0)
         ids = FixedIdProvider([f"id-{i}" for i in range(len(values) * 3 + 10)])
-        kb = Ontology.connect(Path(tmpdir) / "prop.db", clock=clock, id_provider=ids)
+        kb = _connect(backend_name, Path(tmpdir) / "prop.db", clock, ids)
         try:
             kb.create_principal(
                 AUTHOR, kind="human", auth_method="oidc", default_capability="write"
@@ -118,8 +139,16 @@ def test_propose_sequence_never_mutates_prior_assertion_values(values: list[str]
 
 
 @given(values=st.lists(_short_values, min_size=1, max_size=6))
-@settings(max_examples=50)
-def test_assertion_count_never_decreases_across_propose_and_retract(values: list[str]) -> None:
+@settings(
+    max_examples=50,
+    deadline=None,  # DuckDB's per-example file+schema setup is heavier
+    # than SQLite's, and this test is parametrized over both backends —
+    # a fixed deadline flakes under load (mirrors test_bitemporal.py).
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+def test_assertion_count_never_decreases_across_propose_and_retract(
+    values: list[str], backend_name: str
+) -> None:
     """Interleave propose() and retract() calls; the total count of assertion
     records (status=None) must be monotonically non-decreasing — retraction
     changes status, it never deletes a row.
@@ -127,7 +156,7 @@ def test_assertion_count_never_decreases_across_propose_and_retract(values: list
     with tempfile.TemporaryDirectory() as tmpdir:
         clock = FixedClock(T0)
         ids = FixedIdProvider([f"id-{i}" for i in range(len(values) * 3 + 10)])
-        kb = Ontology.connect(Path(tmpdir) / "prop.db", clock=clock, id_provider=ids)
+        kb = _connect(backend_name, Path(tmpdir) / "prop.db", clock, ids)
         try:
             kb.create_principal(
                 AUTHOR, kind="human", auth_method="oidc", default_capability="write"

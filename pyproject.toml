@@ -30,13 +30,14 @@ dependencies = [
 vec = [
 	"sqlite-vec==0.1.1", # pinned: pre-v1, breaking changes possible
 ]
+store-duckdb = ["duckdb>=1.0"]
 rest = ["fastapi>=0.110", "uvicorn>=0.27"]
 graphql = ["strawberry-graphql>=0.219"]
 mcp = [
     "mcp>=1.0",
 ]
 interop = ["pyyaml>=6.0"]
-all = ["ontolith[vec,rest,graphql,mcp,interop]"]
+all = ["ontolith[vec,rest,graphql,mcp,interop,store-duckdb]"]
 dev = [
 	"ontolith[all]",
 	# Testing
@@ -204,7 +205,7 @@ source_modules = [
 	"ontolith.query",
 	"ontolith.identity",
 ]
-forbidden_modules = ["ontolith.store.sqlite", "ontolith.interfaces"]
+forbidden_modules = ["ontolith.store.sqlite", "ontolith.store.duckdb", "ontolith.interfaces"]
 
 # NOTE: The "layers" contract is disabled because store.base (the StorageBackend
 # protocol) needs to import Entity/Assertion from core to type its methods.
