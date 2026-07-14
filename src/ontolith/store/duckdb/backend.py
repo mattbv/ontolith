@@ -959,20 +959,33 @@ class DuckDBBackend:
         row = cursor.fetchone()
         if row is None:
             return None
+        return self._row_to_proposal(self._row_to_dict(cursor, row))
 
-        d = self._row_to_dict(cursor, row)
+    @staticmethod
+    def _row_to_proposal(row: dict[str, Any]) -> Proposal:
         return Proposal(
-            id=d["id"],
-            namespace=d["namespace"],
-            author=d["author"],
-            acting_as=d["acting_as"],
-            state=d["state"],
-            created_at=datetime.fromisoformat(d["created_at"]),
-            decided_at=datetime.fromisoformat(d["decided_at"]) if d["decided_at"] else None,
-            policy_reason=d["policy_reason"],
-            payload=json.loads(d["payload"]),
-            metadata=json.loads(d["metadata"]),
+            id=row["id"],
+            namespace=row["namespace"],
+            author=row["author"],
+            acting_as=row["acting_as"],
+            state=row["state"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            decided_at=datetime.fromisoformat(row["decided_at"]) if row["decided_at"] else None,
+            policy_reason=row["policy_reason"],
+            payload=json.loads(row["payload"]),
+            metadata=json.loads(row["metadata"]),
         )
+
+    def proposals(self, state: str | None = None) -> list[Proposal]:
+        """Query proposals, optionally filtered by state (SPEC §14.1)."""
+        if state is not None:
+            cursor = self.conn.execute(
+                "SELECT * FROM proposal WHERE state = ? ORDER BY created_at DESC, id DESC", [state]
+            )
+        else:
+            cursor = self.conn.execute("SELECT * FROM proposal ORDER BY created_at DESC, id DESC")
+        rows = cursor.fetchall()
+        return [self._row_to_proposal(self._row_to_dict(cursor, row)) for row in rows]
 
     def update_proposal_state(
         self,
@@ -1168,6 +1181,20 @@ class DuckDBBackend:
         cursor = self.conn.execute("SELECT * FROM contradiction WHERE id = ?", [contradiction_id])
         row = cursor.fetchone()
         return self._row_to_contradiction(self._row_to_dict(cursor, row)) if row else None
+
+    def contradictions(self, state: str | None = None) -> list[Contradiction]:
+        """Query contradictions, optionally filtered by state (SPEC §14.1)."""
+        if state is not None:
+            cursor = self.conn.execute(
+                "SELECT * FROM contradiction WHERE state = ? ORDER BY created_at DESC, id DESC",
+                [state],
+            )
+        else:
+            cursor = self.conn.execute(
+                "SELECT * FROM contradiction ORDER BY created_at DESC, id DESC"
+            )
+        rows = cursor.fetchall()
+        return [self._row_to_contradiction(self._row_to_dict(cursor, row)) for row in rows]
 
     def resolve_contradiction(
         self,
