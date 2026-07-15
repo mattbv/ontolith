@@ -308,6 +308,28 @@ Implemented `DuckDBBackend` (`src/ontolith/store/duckdb/`), recorded in ADR-0016
 
 ---
 
+## KI-017 — `PolicyStrategy.evaluate()` has no `kb: ReadOnlyView` parameter
+
+**Severity:** Architecture gap — blocks one class of policy strategy, not a defect in what exists
+**Milestone target:** Backlog (design work needed before this can be scheduled)
+**SPEC reference:** SPEC §9.2 (Policy engine contract — `evaluate` signature, purity requirement), §14 (Plugin protocols)
+
+### Description
+
+SPEC §9.2/§14 specify `PolicyStrategy.evaluate(self, proposal, principal, kb: ReadOnlyView) -> Decision`. The actual `PolicyStrategy` Protocol (`src/ontolith/govern/policy.py`) has `evaluate(self, proposal, principal, acting_as=None)` — no `kb` parameter, plus an `acting_as` parameter (needed for SPEC §8.4 delegation) the SPEC signature doesn't name. Without `kb`, a policy strategy cannot inspect KB state — `SourceQuorum` (one of SPEC §9.2's four SHOULD-have built-in strategies, which needs to count corroborating sources) cannot be implemented.
+
+Recorded during a whole-project audit (2026-07-14) alongside ADR-0018, which made `PolicyStrategy` actually injectable (`Ontology(backend, policy=...)`) — closing the "not pluggable at all" half of the gap while deliberately deferring this half.
+
+### Why not fixed now
+
+Adding `kb: ReadOnlyView` isn't blocked by the SPEC's purity requirement ("no writes, deterministic given inputs" permits reads), but SPEC §9.2 also requires evaluation to be "testable and replayable" — a live `ReadOnlyView` over an open, potentially-concurrently-mutated connection has no fixed state to be reproducible against. Resolving this needs a snapshot/consistency contract (e.g., an `as_of`-pinned view at proposal-creation time) that doesn't exist yet, and design work against a real `SourceQuorum`-shaped consumer rather than speculatively. See ADR-0018's Rationale and Alternatives Considered for the full analysis.
+
+### Suggested fix
+
+When a concrete KB-inspecting policy strategy is actually being built: design the snapshot contract `evaluate()`'s `kb` parameter needs to satisfy "replayable," add it to the `PolicyStrategy` Protocol, and update the three `self.policy.evaluate(...)` call sites in `src/ontolith/ontology.py` to pass it.
+
+---
+
 ## Format
 
 Each entry follows this structure:

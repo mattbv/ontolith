@@ -170,3 +170,74 @@ class TestTemporalityOf:
 
     def test_unknown_field_on_known_concept_falls_back_to_static(self) -> None:
         assert self._schema().temporality_of("Person.unknown_field") == "static"
+
+
+class TestCardinalityOf:
+    """SchemaIR.cardinality_of() — cardinality-aware conflict routing (ADR-0017)."""
+
+    def _schema(self) -> SchemaIR:
+        return SchemaIR(
+            namespace="test",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "name": PropertyDef(name="name", value_type="Text"),
+                        "phone": PropertyDef(name="phone", value_type="Text", cardinality="many"),
+                    },
+                    relations={
+                        "friend": RelationDef(
+                            name="friend", target_concept="Person", cardinality="many"
+                        ),
+                    },
+                ),
+            },
+        )
+
+    def test_resolves_single_cardinality_default(self) -> None:
+        assert self._schema().cardinality_of("Person.name") == "single"
+
+    def test_resolves_many_cardinality_property(self) -> None:
+        assert self._schema().cardinality_of("Person.phone") == "many"
+
+    def test_resolves_many_cardinality_relation(self) -> None:
+        assert self._schema().cardinality_of("Person.friend") == "many"
+
+    def test_unknown_predicate_falls_back_to_single(self) -> None:
+        assert self._schema().cardinality_of("Person.unknown_field") == "single"
+
+
+class TestHasPredicate:
+    """SchemaIR.has_predicate() — write-time unknown-predicate validation."""
+
+    def _schema(self) -> SchemaIR:
+        return SchemaIR(
+            namespace="test",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={"name": PropertyDef(name="name", value_type="Text")},
+                    relations={
+                        "employer": RelationDef(name="employer", target_concept="Organization"),
+                    },
+                ),
+                "Organization": ConceptDef(name="Organization"),
+            },
+        )
+
+    def test_known_property_is_true(self) -> None:
+        assert self._schema().has_predicate("Person.name") is True
+
+    def test_known_relation_is_true(self) -> None:
+        assert self._schema().has_predicate("Person.employer") is True
+
+    def test_unknown_field_on_known_concept_is_false(self) -> None:
+        assert self._schema().has_predicate("Person.nmae") is False
+
+    def test_unknown_concept_is_false(self) -> None:
+        assert self._schema().has_predicate("Vehicle.make") is False
+
+    def test_malformed_predicate_is_false(self) -> None:
+        assert self._schema().has_predicate("NoDotHere") is False

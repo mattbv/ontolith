@@ -65,6 +65,7 @@ def route(
     existing: list[Assertion],
     temporality: Literal["static", "time_varying"],
     existing_contradiction_id: str | None = None,
+    cardinality: Literal["single", "many"] = "single",
 ) -> ConflictResult:
     """Determine how to handle incoming vs existing assertions (SPEC §10).
 
@@ -74,6 +75,11 @@ def route(
         temporality: Schema-declared temporality for this predicate.
         existing_contradiction_id: ID of an open Contradiction for this
             (subject, predicate), if one already exists.
+        cardinality: Schema-declared cardinality for this predicate.
+            "many" static properties coexist on a differing value instead
+            of contradicting (ADR-0017). Not consulted for time_varying
+            properties — they already support coexistence via
+            non-overlapping windows regardless of cardinality.
 
     Returns:
         Activate  — no conflict; caller persists incoming as-is.
@@ -86,7 +92,7 @@ def route(
     if temporality == "time_varying":
         return _route_time_varying(incoming, existing)
     else:
-        return _route_static(incoming, existing, existing_contradiction_id)
+        return _route_static(incoming, existing, existing_contradiction_id, cardinality)
 
 
 def _route_time_varying(incoming: Assertion, existing: list[Assertion]) -> ConflictResult:
@@ -107,15 +113,30 @@ def _route_static(
     incoming: Assertion,
     existing: list[Assertion],
     existing_contradiction_id: str | None,
+    cardinality: Literal["single", "many"] = "single",
 ) -> ConflictResult:
-    """Contradiction routing (SPEC §10.3).
+    """Contradiction routing (SPEC §10.3), cardinality-aware (ADR-0017).
 
-    Static facts must never be silently overwritten. Any value disagreement
-    flags all parties and routes to review.
+    Static facts must never be silently overwritten. For cardinality="single"
+    (the default), any value disagreement on an overlapping window flags all
+    parties and routes to review. For cardinality="many", a differing value
+    coexists instead — the property is schema-declared as legitimately
+    multi-valued (e.g. phone numbers), so distinct values aren't in dispute.
+
+    Only assertions whose validity window overlaps the incoming one are
+    considered (SPEC §10.1's own formula, mirroring _route_time_varying) —
+    a value that was true in a disjoint, already-closed window is not in
+    conflict with a value true now.
     """
-    conflicting = [e for e in existing if e.value != incoming.value]
+    conflicting = [
+        e for e in existing if _windows_overlap(e, incoming) and e.value != incoming.value
+    ]
     if not conflicting:
         # Corroboration: keep both, do NOT merge confidence (v1 rule)
+        return Activate()
+
+    if cardinality == "many":
+        # Distinct values legitimately coexist for a multi-valued property.
         return Activate()
 
     member_ids = [e.id for e in conflicting] + [incoming.id]
