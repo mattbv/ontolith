@@ -109,6 +109,7 @@ class PluginRegistry:
         )
 
     def _load_entry_point(self, name: str) -> Any:
+        """Resolve and instantiate the plugin class registered under `name`."""
         matches = [ep for ep in entry_points(group=_ENTRY_POINT_GROUP) if ep.name == name]
         if not matches:
             raise PluginError(f"Plugin entry point not found: {name!r}")
@@ -127,6 +128,7 @@ class PluginRegistry:
             raise PluginError(f"Failed to instantiate plugin {name!r}: {exc}") from exc
 
     def _load_manifest(self, plugin_obj: Any, entry_point_name: str) -> PluginManifest:
+        """Validate and return `plugin_obj`'s declared manifest."""
         manifest = getattr(plugin_obj, "manifest", None)
         if manifest is None:
             raise PluginError(f"Plugin {entry_point_name!r} has no `manifest` attribute")
@@ -149,6 +151,7 @@ class PluginRegistry:
         return capped
 
     def _ensure_principal(self, manifest: PluginManifest, effective_capability: str) -> str:
+        """Get or create the service principal bound to this plugin, and return its ID."""
         existing = self._kb.get_principal(manifest.name)
         if existing is None:
             principal = self._kb.create_principal(

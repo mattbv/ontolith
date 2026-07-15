@@ -38,6 +38,7 @@ class ReadOnlyView:
 
     @property
     def principal_id(self) -> str:
+        """The principal id this view is bound to."""
         return self._principal_id
 
     def get_entity(self, entity_id: str) -> Entity | None:

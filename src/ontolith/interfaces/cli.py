@@ -24,6 +24,7 @@ _db_path: Path = Path("ontolith.db")
 
 
 def _kb() -> Ontology:
+    """Connect to the KB at the module-level `_db_path`."""
     return Ontology.connect(_db_path)
 
 

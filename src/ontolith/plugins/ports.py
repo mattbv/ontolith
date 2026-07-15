@@ -25,13 +25,17 @@ from ontolith.plugins.views import ReadOnlyView, WriteView
 class Importer(Protocol):
     """Imports external data into the KB through a governed WriteView."""
 
-    def import_(self, source: object, kb: WriteView) -> object: ...
+    def import_(self, source: object, kb: WriteView) -> object:
+        """Read `source` and write the resulting entities/assertions via `kb`."""
+        ...
 
 
 class Exporter(Protocol):
     """Exports KB data to an external target through a ReadOnlyView."""
 
-    def export(self, kb: ReadOnlyView, target: object) -> object: ...
+    def export(self, kb: ReadOnlyView, target: object) -> object:
+        """Read KB state via `kb` and write it out to `target`."""
+        ...
 
 
 class Reasoner(Protocol):
@@ -43,19 +47,25 @@ class Reasoner(Protocol):
     practice: there is no bypass to forget to block.
     """
 
-    def derive(self, kb: WriteView) -> None: ...
+    def derive(self, kb: WriteView) -> None:
+        """Inspect KB state via `kb` and propose any derived assertions."""
+        ...
 
 
 class Validator(Protocol):
     """Validates an assertion against custom rules through a ReadOnlyView."""
 
-    def validate(self, assertion: Assertion, kb: ReadOnlyView) -> list[str]: ...
+    def validate(self, assertion: Assertion, kb: ReadOnlyView) -> list[str]:
+        """Return a list of validation error messages, empty if `assertion` is valid."""
+        ...
 
 
 class Connector(Protocol):
     """Syncs KB state with an external system through a governed WriteView."""
 
-    def sync(self, kb: WriteView) -> object: ...
+    def sync(self, kb: WriteView) -> object:
+        """Reconcile the external system's state with the KB via `kb`."""
+        ...
 
 
 __all__ = ["Importer", "Exporter", "Reasoner", "Validator", "Connector"]

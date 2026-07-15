@@ -302,6 +302,7 @@ class DuckDBBackend:
 
     @staticmethod
     def _row_to_dict(cursor: duckdb.DuckDBPyConnection, row: tuple[Any, ...]) -> dict[str, Any]:
+        """Zip a positional result row with its cursor's column names."""
         columns = [d[0] for d in cursor.description]
         return dict(zip(columns, row, strict=True))
 
@@ -388,6 +389,7 @@ class DuckDBBackend:
 
     @staticmethod
     def _row_to_principal(row: dict[str, Any]) -> Principal:
+        """Deserialize a `principal` table row into a Principal."""
         return Principal(
             id=row["id"],
             kind=row["kind"],
@@ -492,6 +494,7 @@ class DuckDBBackend:
 
     @staticmethod
     def _row_to_credential(row: dict[str, Any]) -> PrincipalCredential:
+        """Deserialize a `principal_credential` table row into a PrincipalCredential."""
         return PrincipalCredential(
             id=row["id"],
             principal_id=row["principal_id"],
@@ -680,6 +683,7 @@ class DuckDBBackend:
 
     @staticmethod
     def _row_to_assertion(row: dict[str, Any]) -> Assertion:
+        """Deserialize an `assertion` table row into an Assertion."""
         # Reconstruct unified value from value_lit/value_ref
         value = row["value_lit"] if row["value_kind"] == "literal" else row["value_ref"]
 
@@ -1072,6 +1076,7 @@ class DuckDBBackend:
 
     @staticmethod
     def _row_to_contradiction(row: dict[str, Any]) -> Contradiction:
+        """Deserialize a `contradiction` table row into a Contradiction."""
         return Contradiction(
             id=row["id"],
             namespace=row["namespace"],

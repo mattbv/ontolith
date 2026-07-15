@@ -297,10 +297,12 @@ class Ontology:
         return principal, delegating
 
     def _resolve_temporality(self, predicate: str) -> Literal["static", "time_varying"]:
+        """Look up a predicate's temporality, defaulting to static (SPEC §10.1)."""
         schema = self.backend.get_schema(self.namespace)
         return schema.temporality_of(predicate) if schema is not None else "static"
 
     def _resolve_cardinality(self, predicate: str) -> Literal["single", "many"]:
+        """Look up a predicate's cardinality, defaulting to single (ADR-0017)."""
         schema = self.backend.get_schema(self.namespace)
         return schema.cardinality_of(predicate) if schema is not None else "single"
 
