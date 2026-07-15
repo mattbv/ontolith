@@ -4,7 +4,7 @@ The Ontology class is the primary API surface for users. It wraps the storage
 backend and provides high-level methods for entities, assertions, and queries.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -36,7 +36,7 @@ from ontolith.store.base import StorageBackend
 
 
 class AsOfView:
-    """Read-only bitemporal view at a specific point in time (SPEC §10).
+    """Read-only bitemporal view at a specific point in time (SPEC §11.4).
 
     Reconstructs what was known and true at time `t`:
         valid_from <= t < (valid_to or ∞)  AND  asserted_at <= t
@@ -91,9 +91,13 @@ class Ontology:
 
     Example:
         >>> kb = Ontology.connect("my-kb.db")
-        >>> alice = kb.create_principal("alice@example.com", kind="human")
+        >>> alice = kb.create_principal(
+        ...     "alice@example.com", kind="human", default_capability="write"
+        ... )
         >>> entity = kb.create_entity("Person", author=alice.id)
-        >>> kb.assert_literal(entity.id, "name", "Ada Lovelace", author=alice.id)
+        >>> assertion = kb.assert_literal(
+        ...     entity.id, "Person.name", "Ada Lovelace", "Text", author=alice.id
+        ... )
     """
 
     def __init__(
@@ -275,9 +279,7 @@ class Ontology:
         if delegating is None:
             raise AuthError(f"Delegating principal not found: {acting_as}")
         if principal.owner != acting_as:
-            raise CapabilityError(
-                f"Principal {author!r} is not authorized to act as {acting_as!r}"
-            )
+            raise CapabilityError(f"Principal {author!r} is not authorized to act as {acting_as!r}")
         return delegating
 
     def _finalize_non_accepted_decision(
@@ -596,19 +598,26 @@ class Ontology:
         )
 
     def as_of(self, t: datetime | str) -> AsOfView:
-        """Return a read-only bitemporal view at time t (SPEC §10).
+        """Return a read-only bitemporal view at time t (SPEC §11.4).
 
         Reconstructs what was known and true at t:
             valid_from <= t < (valid_to or ∞)  AND  asserted_at <= t
 
         Args:
-            t: Point in time — datetime or ISO-format string
+            t: Point in time — datetime or ISO-format string. Naive values
+                (no tzinfo) are treated as UTC, matching Clock's contract
+                that all stored timestamps are UTC — otherwise a naive `t`
+                would be compared against UTC-aware stored timestamps as
+                a plain ISO string, silently misordering results instead
+                of erroring.
 
         Returns:
             AsOfView for querying the knowledge base as it stood at t
         """
         if isinstance(t, str):
             t = datetime.fromisoformat(t)
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=UTC)
         return AsOfView(self.backend, t, self.namespace)
 
     def propose(
