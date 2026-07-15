@@ -5,6 +5,7 @@ Budgets (enforced M4, baselined here per implementation plan §9):
   - propose + policy eval + commit:     p95 < 50 ms
   - 3-hop traversal, 100k-assertion KB: p95 < 200 ms
   - Symbolic query (concept + filter):  p95 < 150 ms
+  - as_of(t) reconstruction, 100k-assertion KB: p95 < 300 ms
 
 These benchmarks are informational in M1 (no budget gate).
 Run with: uv run pytest tests/benchmarks/ --benchmark-only
@@ -43,7 +44,15 @@ def seeded_db_path() -> Path:
     f.close()
 
     backend = SQLiteBackend(path)
-    backend.put_principal(Principal(id=AUTHOR_ID, kind="human", auth_method="oidc", created_at=T0))
+    backend.put_principal(
+        Principal(
+            id=AUTHOR_ID,
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            created_at=T0,
+        )
+    )
 
     # 1 000 Person entities, each with 100 literal assertions = 100 000 assertions.
     num_entities = 1_000
@@ -78,7 +87,8 @@ def seeded_db_path() -> Path:
                     )
                 )
 
-    # Wire 2-hop ref chain: entity-0 → entity-1 → entity-2 (for traversal bench)
+    # Wire 3-hop ref chain: entity-0 → entity-1 → entity-2 → entity-3
+    # (matches the 3-hop traversal budget in the module docstring).
     with backend.transaction():
         backend.put_assertion(
             Assertion(
@@ -100,6 +110,18 @@ def seeded_db_path() -> Path:
                 predicate="Person.knows",
                 value_kind="ref",
                 value="entity-000002",
+                author=AUTHOR_ID,
+                asserted_at=T0,
+            )
+        )
+        backend.put_assertion(
+            Assertion(
+                id="ref-hop-2",
+                namespace="default",
+                subject="entity-000002",
+                predicate="Person.knows",
+                value_kind="ref",
+                value="entity-000003",
                 author=AUTHOR_ID,
                 asserted_at=T0,
             )
@@ -172,11 +194,7 @@ def test_bench_write_assert_literal(benchmark, seeded_kb: Ontology) -> None:
 
 @pytest.mark.benchmark
 def test_bench_symbolic_query_concept_filter(benchmark, seeded_kb: Ontology) -> None:
-    """p95 target: < 150 ms — Symbolic query: concept + attribute filter.
-
-    M1 baseline: ~15s mean (N+1 query pattern in QueryBuilder.where()).
-    See docs/known-issues.md — tracked for M2 fix.
-    """
+    """p95 target: < 150 ms — Symbolic query: concept + attribute filter."""
 
     def query() -> list:
         return seeded_kb.query("Person").where(attr000="value-0-0").all()
@@ -197,30 +215,46 @@ def test_bench_query_all_entities_of_concept(benchmark, seeded_backend: SQLiteBa
 
 
 @pytest.mark.benchmark
-def test_bench_2hop_traversal(benchmark, seeded_backend: SQLiteBackend) -> None:
-    """p95 target: < 200 ms (3-hop budget) — 2-hop ref traversal via assertions.
+def test_bench_3hop_traversal(benchmark, seeded_backend: SQLiteBackend) -> None:
+    """p95 target: < 200 ms — 3-hop ref traversal via chained assertion lookups.
 
-    M1 has no dedicated traversal API; this manually chains assertion lookups.
-    A proper graph traversal query is a M2+ feature.
+    M1 has no dedicated graph traversal API; this manually chains
+    `assertions(subject=, predicate=)` calls, one per hop, which is the only
+    traversal path available to callers today. A proper traversal query
+    (single call, N hops) is a future feature — see docs/known-issues.md.
     """
 
-    def traverse_2hop() -> list[str]:
-        # Hop 1: entity-000000 → knows → entity-000001
-        hop1 = seeded_backend.assertions(subject="entity-000000", predicate="Person.knows")
-        if not hop1:
-            return []
-        mid_id = hop1[0].value
+    def traverse_3hop() -> list[str]:
+        current = "entity-000000"
+        visited: list[str] = []
+        for _ in range(3):
+            hop = seeded_backend.assertions(subject=current, predicate="Person.knows")
+            if not hop:
+                break
+            current = str(hop[0].value)
+            visited.append(current)
+        return visited
 
-        # Hop 2: entity-000001 → knows → entity-000002
-        hop2 = seeded_backend.assertions(subject=mid_id, predicate="Person.knows")
-        return [a.value for a in hop2]
-
-    result = benchmark(traverse_2hop)
-    assert result == ["entity-000002"]
+    result = benchmark(traverse_3hop)
+    assert result == ["entity-000001", "entity-000002", "entity-000003"]
 
 
 @pytest.mark.benchmark
 def test_bench_assertions_by_subject(benchmark, seeded_backend: SQLiteBackend) -> None:
     """Retrieve all 100 assertions for a single entity."""
     results = benchmark(seeded_backend.assertions, subject="entity-000500")
+    assert len(results) == 100
+
+
+@pytest.mark.benchmark
+def test_bench_as_of_reconstruction(benchmark, seeded_kb: Ontology) -> None:
+    """p95 target: < 300 ms — as_of(t) point-in-time reconstruction over a
+    100k-assertion KB (all assertions predate t, so this exercises full
+    bitemporal filtering rather than an empty-result fast path)."""
+    t = datetime(2025, 6, 1, tzinfo=UTC)
+
+    def query() -> list:
+        return seeded_kb.as_of(t).assertions(subject="entity-000500")
+
+    results = benchmark(query)
     assert len(results) == 100
