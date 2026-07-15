@@ -23,7 +23,6 @@ dependencies = [
 	"pydantic>=2.0",
 	"typer>=0.9",
 	"python-ulid>=2.0",
-	"structlog>=24.0",
 ]
 
 [project.optional-dependencies]
@@ -63,10 +62,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ontolith/ontolith"
+Homepage = "https://github.com/mattbv/ontolith"
 Documentation = "https://ontolith.readthedocs.io"
-Repository = "https://github.com/ontolith/ontolith"
-Issues = "https://github.com/ontolith/ontolith/issues"
+Repository = "https://github.com/mattbv/ontolith"
+Issues = "https://github.com/mattbv/ontolith/issues"
 
 [project.scripts]
 ontolith = "ontolith.interfaces.cli:app"
