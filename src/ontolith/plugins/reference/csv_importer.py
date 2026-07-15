@@ -117,6 +117,7 @@ class CsvImporter:
 
     @staticmethod
     def _read_rows(source: object) -> list[dict[str, str]]:
+        """Load `source` (a path or an iterable of row mappings) into row dicts."""
         import csv
 
         if isinstance(source, (str, Path)):
@@ -128,6 +129,7 @@ class CsvImporter:
 
     @staticmethod
     def _require_columns(row: dict[str, str], index: int) -> None:
+        """Raise ValidationError if `row` is missing any required CSV column."""
         missing = [column for column in _REQUIRED_COLUMNS if not row.get(column)]
         if missing:
             raise ValidationError(
@@ -137,6 +139,7 @@ class CsvImporter:
 
     @staticmethod
     def _parse_confidence(raw: str | None, index: int) -> float | None:
+        """Parse the optional confidence column, or None if blank."""
         if raw is None or raw == "":
             return None
         try:

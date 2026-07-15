@@ -139,18 +139,8 @@ markers = [
 	"benchmark: marks tests as benchmarks",
 ]
 
-[tool.hypothesis]
-[tool.hypothesis.profiles.dev]
-max_examples = 20
-deadline = 500    # ms
-
-[tool.hypothesis.profiles.ci]
-max_examples = 100
-deadline = 1000
-
-[tool.hypothesis.profiles.nightly]
-max_examples = 1000
-deadline = 5000
+# Hypothesis profiles (dev/ci/nightly) are registered in the root conftest.py —
+# Hypothesis has no native pyproject.toml support, so they can't live here.
 
 [tool.coverage.run]
 source = ["src/ontolith"]

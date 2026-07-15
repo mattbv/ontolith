@@ -137,6 +137,7 @@ def to_yaml(schema: SchemaIR) -> str:
 
 
 def _property_to_slot(prop: PropertyDef) -> dict[str, Any]:
+    """Render a PropertyDef as a LinkML slot mapping."""
     slot: dict[str, Any] = {"range": _VALUE_TYPE_TO_LINKML_RANGE[prop.value_type]}
     if prop.required:
         slot["required"] = True
@@ -157,6 +158,7 @@ def _property_to_slot(prop: PropertyDef) -> dict[str, Any]:
 
 
 def _relation_to_slot(rel: RelationDef) -> dict[str, Any]:
+    """Render a RelationDef as a LinkML slot mapping."""
     slot: dict[str, Any] = {"range": rel.target_concept}
     if rel.required:
         slot["required"] = True
@@ -242,6 +244,7 @@ def from_yaml(text: str) -> SchemaIR:
 def _parse_class(
     class_name: str, class_doc: Any, known_class_names: list[str], default_range: str
 ) -> ConceptDef:
+    """Parse one LinkML class mapping into a ConceptDef, raising SchemaError on v1-dialect violations."""
     if not isinstance(class_doc, dict):
         raise SchemaError(f"Class {class_name!r} must be a mapping")
 

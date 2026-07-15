@@ -140,6 +140,7 @@ class _RefAlias:
     """
 
     def __class_getitem__(cls, target_concept: str) -> Any:
+        """Return an Annotated[str, _RefMarker(target_concept)] type for `Ref["X"]`."""
         if not isinstance(target_concept, str):
             raise SchemaError(
                 f"Ref[...] target must be a string concept name, got {target_concept!r}"
@@ -187,6 +188,7 @@ class ConceptMeta(type):
     """
 
     def __new__(mcs, name: str, bases: tuple[type, ...], namespace: dict[str, Any]) -> ConceptMeta:
+        """Compile the class body's annotations into a ConceptDef and attach it to the class."""
         cls = super().__new__(mcs, name, bases, namespace)
         if bases == ():
             # This is the `Concept` base class itself — nothing to compile.

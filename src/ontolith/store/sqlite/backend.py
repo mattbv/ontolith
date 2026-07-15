@@ -352,6 +352,7 @@ class SQLiteBackend:
 
     @staticmethod
     def _row_to_principal(row: sqlite3.Row) -> Principal:
+        """Deserialize a `principal` table row into a Principal."""
         import json
 
         return Principal(
@@ -463,6 +464,7 @@ class SQLiteBackend:
 
     @staticmethod
     def _row_to_credential(row: sqlite3.Row) -> PrincipalCredential:
+        """Deserialize a `principal_credential` table row into a PrincipalCredential."""
         return PrincipalCredential(
             id=row["id"],
             principal_id=row["principal_id"],
@@ -666,6 +668,7 @@ class SQLiteBackend:
 
     @staticmethod
     def _row_to_assertion(row: sqlite3.Row) -> Assertion:
+        """Deserialize an `assertion` table row into an Assertion."""
         import json
 
         # Reconstruct unified value from value_lit/value_ref
@@ -1077,6 +1080,7 @@ class SQLiteBackend:
 
     @staticmethod
     def _row_to_contradiction(row: sqlite3.Row) -> Contradiction:
+        """Deserialize a `contradiction` table row into a Contradiction."""
         import json
 
         return Contradiction(
