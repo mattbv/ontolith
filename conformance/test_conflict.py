@@ -8,9 +8,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from conformance.conftest import KbFactory
 from ontolith import Ontology
 from ontolith.core import Assertion, FixedClock, FixedIdProvider
+from ontolith.core.errors import ValidationError
 from ontolith.govern.conflict import Activate, Contradict, Supersede, route
 from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 
@@ -58,6 +61,7 @@ def _kb(make_kb: KbFactory) -> Ontology:
     kb.create_principal(ADMIN, kind="human", auth_method="oidc", default_capability="admin")
     # Person.employer is declared time_varying so conflict routing (schema-derived
     # per SPEC §10.1) exercises supersession; Person.name defaults to static.
+    # Person.phone is static + cardinality="many" (ADR-0017).
     schema = SchemaIR(
         namespace="default",
         version=1,
@@ -69,6 +73,7 @@ def _kb(make_kb: KbFactory) -> Ontology:
                     "employer": PropertyDef(
                         name="employer", value_type="Text", temporality="time_varying"
                     ),
+                    "phone": PropertyDef(name="phone", value_type="Text", cardinality="many"),
                 },
             ),
         },
@@ -388,3 +393,239 @@ class TestSchemaDerivedTemporality:
         assert len(superseded) == 1
         contradiction = kb.backend.get_open_contradiction("default", entity.id, "Person.employer")
         assert contradiction is None
+
+
+# ===========================================================================
+# Cardinality-aware static routing (ADR-0017)
+# ===========================================================================
+
+
+class TestCardinalityAwareRouting:
+    """cardinality="many" static properties coexist on a differing value
+    instead of contradicting; cardinality="single" (default) is unchanged."""
+
+    def test_many_cardinality_differing_values_coexist(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.propose(entity.id, "Person.phone", "555-0100", "Text", AUTHOR)
+        kb.propose(entity.id, "Person.phone", "555-0200", "Text", AUTHOR)
+
+        active = kb.assertions(subject=entity.id, predicate="Person.phone", status="active")
+        assert {a.value for a in active} == {"555-0100", "555-0200"}
+        assert kb.backend.get_open_contradiction("default", entity.id, "Person.phone") is None
+
+    def test_single_cardinality_default_still_contradicts(self, make_kb: KbFactory) -> None:
+        """Regression guard: cardinality="single" (Person.name's default)
+        must still contradict on a differing value, unaffected by ADR-0017."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        kb.propose(entity.id, "Person.name", "Ava", "Text", AUTHOR)
+
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        assert active == []
+        assert kb.backend.get_open_contradiction("default", entity.id, "Person.name") is not None
+
+    def test_explicit_flag_contradiction_overrides_many_cardinality_coexistence(
+        self, make_kb: KbFactory
+    ) -> None:
+        """ADR-0017: flag_contradiction() is an explicit human dispute, not
+        schema-driven inference - it deliberately does not consult
+        cardinality. Once a contradiction is manually opened on a
+        many-cardinality predicate, subsequent same-predicate assertions
+        are still swept in for review (the existing "extend open
+        contradiction" behavior), not silently activated."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        a = kb.assert_literal(entity.id, "Person.phone", "555-0100", "Text", AUTHOR)
+        b = kb.assert_literal(entity.id, "Person.phone", "555-0200", "Text", AUTHOR)
+        active = kb.assertions(subject=entity.id, predicate="Person.phone", status="active")
+        assert {x.value for x in active} == {"555-0100", "555-0200"}  # normal many-coexistence
+
+        # A reviewer explicitly disputes these two (e.g. suspected duplicate/typo).
+        kb.flag_contradiction(a.id, b.id, AUTHOR)
+        assert kb.backend.get_open_contradiction("default", entity.id, "Person.phone") is not None
+
+        # A third, otherwise-legitimate phone number is swept into the
+        # dispute rather than silently coexisting.
+        kb.assert_literal(entity.id, "Person.phone", "555-0300", "Text", AUTHOR)
+        active_after = kb.assertions(subject=entity.id, predicate="Person.phone", status="active")
+        assert active_after == []
+        flagged = kb.assertions(subject=entity.id, predicate="Person.phone", status="flagged")
+        assert {x.value for x in flagged} == {"555-0100", "555-0200", "555-0300"}
+
+
+# ===========================================================================
+# Static routing respects validity windows (SPEC §10.1)
+# ===========================================================================
+
+
+class TestStaticRoutingRespectsWindows:
+    """A static value true only in a disjoint, already-closed window is not
+    in conflict with a differing value true now — SPEC §10.1's overlap
+    formula applies to the static branch, not just time_varying."""
+
+    def test_non_overlapping_static_windows_do_not_contradict(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        # Historical, already-closed record: true only in [T0, T1).
+        kb.assert_literal(
+            entity.id, "Person.name", "Old Name", "Text", AUTHOR, valid_from=T0, valid_to=T1
+        )
+        # Current record: true from T1 onward - disjoint window, no overlap.
+        kb.assert_literal(entity.id, "Person.name", "New Name", "Text", AUTHOR, valid_from=T1)
+
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        assert {a.value for a in active} == {"Old Name", "New Name"}
+        assert kb.backend.get_open_contradiction("default", entity.id, "Person.name") is None
+
+    def test_overlapping_static_windows_still_contradict(self, make_kb: KbFactory) -> None:
+        """Regression guard: overlapping windows (the common case — both
+        default to an open window from asserted_at) still contradict."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)
+
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        assert active == []
+        assert kb.backend.get_open_contradiction("default", entity.id, "Person.name") is not None
+
+
+# ===========================================================================
+# Unknown predicate rejected at write time (SPEC §4)
+# ===========================================================================
+
+
+class TestUnknownPredicateRejected:
+    def test_propose_unknown_predicate_raises(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        with pytest.raises(ValidationError, match="Unknown predicate"):
+            kb.propose(entity.id, "Person.nmae", "Ada", "Text", AUTHOR)
+
+    def test_assert_literal_unknown_predicate_raises(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        with pytest.raises(ValidationError, match="Unknown predicate"):
+            kb.assert_literal(entity.id, "Person.nmae", "Ada", "Text", AUTHOR)
+
+    def test_unknown_predicate_permitted_without_a_registered_schema(
+        self, make_kb: KbFactory
+    ) -> None:
+        """No schema in the namespace: nothing to validate a predicate
+        against, so any predicate is accepted (falls back to static)."""
+        clock = FixedClock(T0)
+        ids = FixedIdProvider(["p-0", "e-1", "a-1"])
+        kb = make_kb(clock, ids)
+        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+        entity = kb.create_entity("Person", author=AUTHOR)
+
+        assertion = kb.assert_literal(entity.id, "Person.whatever", "Ada", "Text", AUTHOR)
+        assert assertion.value == "Ada"
+
+
+# ===========================================================================
+# Explicit valid_from/valid_to on the governed write API
+# ===========================================================================
+
+
+class TestValidityWindowWriteAPI:
+    """assert_literal/assert_ref/propose/propose_ref accept valid_from/
+    valid_to (SPEC §5.3) - previously only reachable by bypassing
+    governance entirely (direct backend.put_assertion)."""
+
+    def test_assert_literal_explicit_window_persisted(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        assertion = kb.assert_literal(
+            entity.id, "Person.name", "Old Name", "Text", AUTHOR, valid_from=T0, valid_to=T1
+        )
+        assert assertion.valid_from == T0
+        assert assertion.valid_to == T1
+
+    def test_propose_auto_accepted_explicit_window_persisted(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        proposal, decision = kb.propose(
+            entity.id, "Person.name", "Old Name", "Text", AUTHOR, valid_from=T0, valid_to=T1
+        )
+        assert proposal.state == "auto_accepted"
+        [assertion] = kb.assertions(subject=entity.id, predicate="Person.name", status=None)
+        assert assertion.valid_from == T0
+        assert assertion.valid_to == T1
+
+    def test_assert_ref_explicit_window_persisted(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        target = kb.create_entity("Person", author=AUTHOR)
+        assertion = kb.assert_ref(
+            entity.id, "Person.employer", target.id, AUTHOR, valid_from=T0, valid_to=T1
+        )
+        assert assertion.valid_from == T0
+        assert assertion.valid_to == T1
+
+    def test_propose_ref_reviewed_explicit_window_survives_replay(self, make_kb: KbFactory) -> None:
+        """Mirrors test_propose_reviewed_explicit_window_survives_replay for
+        propose_ref()'s replay path, not just propose()'s."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "bot@example.com", kind="ai", owner=AUTHOR, default_capability="propose"
+        )
+        kb.create_principal(
+            "reviewer@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        entity = kb.create_entity("Person", author=AUTHOR)
+        target = kb.create_entity("Person", author=AUTHOR)
+        proposal, decision = kb.propose_ref(
+            entity.id,
+            "Person.employer",
+            target.id,
+            "bot@example.com",
+            model="test-model-v1",
+            valid_from=T0,
+            valid_to=T1,
+        )
+        assert proposal.state == "require_review"
+        kb.accept_proposal(proposal.id, "reviewer@example.com")
+
+        [assertion] = kb.assertions(subject=entity.id, predicate="Person.employer", status=None)
+        assert assertion.valid_from == T0
+        assert assertion.valid_to == T1
+
+    def test_propose_reviewed_explicit_window_survives_replay(self, make_kb: KbFactory) -> None:
+        """A require_review proposal's requested window must survive
+        accept_proposal's operation replay, not just the auto-accept path."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "bot@example.com", kind="ai", owner=AUTHOR, default_capability="propose"
+        )
+        kb.create_principal(
+            "reviewer@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        entity = kb.create_entity("Person", author=AUTHOR)
+        proposal, decision = kb.propose(
+            entity.id,
+            "Person.name",
+            "Old Name",
+            "Text",
+            "bot@example.com",
+            model="test-model-v1",
+            valid_from=T0,
+            valid_to=T1,
+        )
+        assert proposal.state == "require_review"
+        kb.accept_proposal(proposal.id, "reviewer@example.com")
+
+        [assertion] = kb.assertions(subject=entity.id, predicate="Person.name", status=None)
+        assert assertion.valid_from == T0
+        assert assertion.valid_to == T1
+
+    def test_default_window_unchanged_when_not_specified(self, make_kb: KbFactory) -> None:
+        """Regression guard: omitting valid_from/valid_to keeps the existing
+        default behavior (valid_from defaults to asserted_at, valid_to open)."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        assert assertion.valid_from == assertion.asserted_at
+        assert assertion.valid_to is None

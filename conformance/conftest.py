@@ -21,6 +21,7 @@ import pytest
 
 from ontolith import Ontology
 from ontolith.core import Clock, IdProvider
+from ontolith.govern.policy import PolicyStrategy
 from ontolith.store.base import StorageBackend
 from ontolith.store.duckdb import DuckDBBackend
 from ontolith.store.sqlite import SQLiteBackend
@@ -57,6 +58,7 @@ class KbFactory(Protocol):
         id_provider: IdProvider | None = None,
         *,
         reuse_path: Path | None = None,
+        policy: PolicyStrategy | None = None,
     ) -> Ontology: ...
 
 
@@ -81,12 +83,13 @@ class _KbFactoryImpl:
         id_provider: IdProvider | None = None,
         *,
         reuse_path: Path | None = None,
+        policy: PolicyStrategy | None = None,
     ) -> Ontology:
         self._counter += 1
         path = reuse_path or (self._tmp_path / f"kb-{self._counter}.db")
         self.last_path = path
         backend = self._factory(path, clock)
-        return Ontology(backend, clock=clock, id_provider=id_provider)
+        return Ontology(backend, clock=clock, id_provider=id_provider, policy=policy)
 
 
 @pytest.fixture

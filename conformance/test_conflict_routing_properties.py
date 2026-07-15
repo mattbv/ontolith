@@ -120,16 +120,21 @@ def test_route_is_deterministic(
 
 @given(data=existing_and_incoming())
 @settings(max_examples=100)
-def test_static_routing_contradicts_iff_value_differs(
+def test_static_routing_contradicts_iff_overlapping_value_differs(
     data: tuple[list[Assertion], Assertion],
 ) -> None:
-    """SPEC §10.3: static routing ignores validity windows entirely — only value
-    equality matters. Contradict iff at least one existing value differs.
+    """SPEC §10.1/§10.3: static routing only considers assertions whose
+    validity window overlaps the incoming one (the same formula
+    _route_time_varying already applies) — a value true only in a disjoint,
+    already-closed window is not in conflict with a value true now.
+    Contradict iff at least one *overlapping* existing value differs.
     """
     existing, incoming = data
     result = route(incoming, existing, "static")
 
-    conflicting_ids = {e.id for e in existing if e.value != incoming.value}
+    conflicting_ids = {
+        e.id for e in existing if _windows_overlap(e, incoming) and e.value != incoming.value
+    }
 
     if not conflicting_ids:
         assert result == Activate()
@@ -138,6 +143,20 @@ def test_static_routing_contradicts_iff_value_differs(
         assert set(result.member_ids) == conflicting_ids | {incoming.id}
         # incoming is always last, conflicting existing members precede it
         assert result.member_ids[-1] == incoming.id
+
+
+@given(data=existing_and_incoming())
+@settings(max_examples=100)
+def test_static_many_cardinality_activates_instead_of_contradicting(
+    data: tuple[list[Assertion], Assertion],
+) -> None:
+    """ADR-0017: cardinality="many" static properties coexist on a
+    differing overlapping value instead of contradicting — the schema
+    declares the property as legitimately multi-valued, so distinct
+    simultaneous values aren't in dispute."""
+    existing, incoming = data
+    result = route(incoming, existing, "static", cardinality="many")
+    assert result == Activate()
 
 
 # ===========================================================================

@@ -106,34 +106,53 @@ class SchemaIR(BaseModel):
 
     model_config = {"frozen": True}
 
+    def _resolve_field(self, predicate: str) -> PropertyDef | RelationDef | None:
+        """Resolve a dotted "Concept.field" predicate to its declaration.
+
+        Returns None if the concept or field isn't declared in this schema —
+        e.g. a schema-less namespace, or a field not yet added to the
+        active schema version.
+        """
+        concept_name, _, field_name = predicate.partition(".")
+        if not field_name:
+            return None
+        concept = self.concepts.get(concept_name)
+        if concept is None:
+            return None
+        prop = concept.properties.get(field_name)
+        if prop is not None:
+            return prop
+        return concept.relations.get(field_name)
+
+    def has_predicate(self, predicate: str) -> bool:
+        """Return whether a dotted "Concept.field" predicate is declared in this schema."""
+        return self._resolve_field(predicate) is not None
+
     def temporality_of(self, predicate: str) -> Literal["static", "time_varying"]:
         """Resolve the declared temporality of a predicate (SPEC §10.1).
-
-        ``predicate`` is a flat ``"Concept.field"`` string. Falls back to
-        ``"static"`` (SPEC's stated default) when the concept or field isn't
-        declared in this schema — e.g. a schema-less namespace, or a field
-        not yet added to the active schema version.
 
         Args:
             predicate: Dotted predicate, e.g. "Person.name" or "Person.employer"
 
         Returns:
             The property's or relation's declared temporality, or "static"
-            if unresolvable.
+            (SPEC's stated default) if unresolvable.
         """
-        concept_name, _, field_name = predicate.partition(".")
-        if not field_name:
-            return "static"
-        concept = self.concepts.get(concept_name)
-        if concept is None:
-            return "static"
-        prop = concept.properties.get(field_name)
-        if prop is not None:
-            return prop.temporality
-        relation = concept.relations.get(field_name)
-        if relation is not None:
-            return relation.temporality
-        return "static"
+        field = self._resolve_field(predicate)
+        return field.temporality if field is not None else "static"
+
+    def cardinality_of(self, predicate: str) -> Literal["single", "many"]:
+        """Resolve the declared cardinality of a predicate (SPEC §4, ADR-0017).
+
+        Args:
+            predicate: Dotted predicate, e.g. "Person.name" or "Person.phone"
+
+        Returns:
+            The property's or relation's declared cardinality, or "single"
+            (the schema default) if unresolvable.
+        """
+        field = self._resolve_field(predicate)
+        return field.cardinality if field is not None else "single"
 
     def to_json(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""

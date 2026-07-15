@@ -27,7 +27,7 @@ from ontolith.core.errors import (
 from ontolith.govern import AutoAccept, ThresholdPolicy
 from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, route
 from ontolith.govern.contradiction import Contradiction
-from ontolith.govern.policy import Decision, Reject
+from ontolith.govern.policy import Decision, PolicyStrategy, Reject
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential, min_capability
 from ontolith.query import QueryBuilder
@@ -101,6 +101,7 @@ class Ontology:
         backend: StorageBackend,
         clock: Clock | None = None,
         id_provider: IdProvider | None = None,
+        policy: PolicyStrategy | None = None,
     ) -> None:
         """Initialize Ontology with a storage backend.
 
@@ -108,10 +109,14 @@ class Ontology:
             backend: Storage backend implementation
             clock: Clock for deterministic timestamps (defaults to SystemClock)
             id_provider: ID provider for deterministic IDs (defaults to UlidProvider)
+            policy: Policy strategy for proposal evaluation (defaults to
+                ThresholdPolicy — ADR-0018). ADR-0006 names PolicyStrategy
+                as an open-core extension point for proprietary strategies.
         """
         self.backend = backend
         self.clock = clock or SystemClock()
         self.id_provider = id_provider or UlidProvider()
+        self.policy = policy or ThresholdPolicy()
         self.namespace = "default"  # For M1, single namespace
 
     @classmethod
@@ -121,6 +126,7 @@ class Ontology:
         *,
         clock: Clock | None = None,
         id_provider: IdProvider | None = None,
+        policy: PolicyStrategy | None = None,
     ) -> "Ontology":
         """Connect to a knowledge base.
 
@@ -128,6 +134,8 @@ class Ontology:
             path: Path to SQLite database file
             clock: Optional clock for deterministic behavior
             id_provider: Optional ID provider for deterministic behavior
+            policy: Optional policy strategy (defaults to ThresholdPolicy —
+                ADR-0018)
 
         Returns:
             Ontology instance connected to the database
@@ -136,7 +144,7 @@ class Ontology:
 
         effective_clock = clock or SystemClock()
         backend = SQLiteBackend(path, clock=effective_clock)
-        return cls(backend, clock=effective_clock, id_provider=id_provider)
+        return cls(backend, clock=effective_clock, id_provider=id_provider, policy=policy)
 
     def create_principal(
         self,
@@ -292,6 +300,24 @@ class Ontology:
         schema = self.backend.get_schema(self.namespace)
         return schema.temporality_of(predicate) if schema is not None else "static"
 
+    def _resolve_cardinality(self, predicate: str) -> Literal["single", "many"]:
+        schema = self.backend.get_schema(self.namespace)
+        return schema.cardinality_of(predicate) if schema is not None else "single"
+
+    def _require_known_predicate(self, predicate: str) -> None:
+        """Reject an unknown predicate at write time (SPEC §4) rather than
+        silently defaulting its temporality/cardinality to static/single.
+
+        No-op when no schema is registered for the namespace yet — a
+        schema-less namespace has nothing to validate a predicate against.
+        """
+        schema = self.backend.get_schema(self.namespace)
+        if schema is not None and not schema.has_predicate(predicate):
+            raise ValidationError(
+                f"Unknown predicate {predicate!r}: not declared in schema "
+                f"{schema.namespace!r} version {schema.version}"
+            )
+
     def _retraction_valid_to(self, assertion_id: str, now: datetime) -> str | None:
         """Compute valid_to for a retraction.
 
@@ -303,6 +329,14 @@ class Ontology:
         if current is not None and current.valid_to is not None:
             return None
         return now.isoformat()
+
+    @staticmethod
+    def _parse_window(op: dict[str, Any], key: str) -> datetime | None:
+        """Parse a valid_from/valid_to ISO string back out of a proposal
+        operation payload (propose()/propose_ref() serialize datetimes to
+        strings since Proposal.payload is a JSON-compatible dict)."""
+        raw = op.get(key)
+        return datetime.fromisoformat(raw) if raw else None
 
     def _record_assertion_event(
         self,
@@ -348,6 +382,8 @@ class Ontology:
         rationale: str | None = None,
         acting_as: str | None = None,
         model: str | None = None,
+        valid_from: datetime | None = None,
+        valid_to: datetime | None = None,
     ) -> Assertion:
         """Make a literal assertion about an entity, bypassing the proposal queue.
 
@@ -367,11 +403,16 @@ class Ontology:
             model: Model family+version (AI principals cannot reach this
                 direct-write path — see _check_direct_write_capability — so
                 this is accepted but never required here)
+            valid_from: When the fact became/becomes true (defaults to now —
+                SPEC §5.3). Set explicitly to backfill historical windows,
+                e.g. time_varying employment history.
+            valid_to: When the fact stopped being true (defaults to open/None)
 
         Returns:
             Assertion as persisted (status/supersedes reflect conflict routing)
         """
         self._check_direct_write_capability(author, acting_as)
+        self._require_known_predicate(predicate)
         temporality = self._resolve_temporality(predicate)
 
         assertion = Assertion(
@@ -389,6 +430,8 @@ class Ontology:
             rationale=rationale,
             model=model,
             asserted_at=self.clock.now(),
+            valid_from=valid_from,
+            valid_to=valid_to,
         )
 
         with self.backend.transaction():
@@ -405,6 +448,8 @@ class Ontology:
         source: str | None = None,
         acting_as: str | None = None,
         model: str | None = None,
+        valid_from: datetime | None = None,
+        valid_to: datetime | None = None,
     ) -> Assertion:
         """Make a reference assertion (relation) between entities, bypassing the
         proposal queue.
@@ -423,11 +468,16 @@ class Ontology:
             model: Model family+version (AI principals cannot reach this
                 direct-write path — see _check_direct_write_capability — so
                 this is accepted but never required here)
+            valid_from: When the fact became/becomes true (defaults to now —
+                SPEC §5.3). Set explicitly to backfill historical windows,
+                e.g. time_varying employment history.
+            valid_to: When the fact stopped being true (defaults to open/None)
 
         Returns:
             Assertion as persisted (status/supersedes reflect conflict routing)
         """
         self._check_direct_write_capability(author, acting_as)
+        self._require_known_predicate(predicate)
         temporality = self._resolve_temporality(predicate)
 
         assertion = Assertion(
@@ -443,6 +493,8 @@ class Ontology:
             source=source,
             model=model,
             asserted_at=self.clock.now(),
+            valid_from=valid_from,
+            valid_to=valid_to,
         )
 
         with self.backend.transaction():
@@ -524,11 +576,14 @@ class Ontology:
         rationale: str | None = None,
         acting_as: str | None = None,
         model: str | None = None,
+        valid_from: datetime | None = None,
+        valid_to: datetime | None = None,
     ) -> tuple[Proposal, Decision]:
         """Submit a literal assertion through the proposal/policy path (SPEC §9).
 
-        Evaluates ThresholdPolicy. Auto-accepted proposals are committed
-        immediately with SPEC §10 conflict routing; others are stored for review.
+        Evaluates ``self.policy`` (``ThresholdPolicy`` by default — ADR-0018).
+        Auto-accepted proposals are committed immediately with SPEC §10
+        conflict routing; others are stored for review.
 
         Conflict-routing temporality is resolved from the active schema's
         declared temporality for ``predicate`` (SPEC §10.1: ``t :=
@@ -542,18 +597,25 @@ class Ontology:
         principal (delegation, ADR-0003). Policy is evaluated using the
         delegating principal's capability and trust level.
 
+        Args:
+            valid_from: When the fact became/becomes true (defaults to now —
+                SPEC §5.3). Set explicitly to backfill historical windows.
+            valid_to: When the fact stopped being true (defaults to open/None)
+
         Returns:
             (Proposal, Decision) tuple
 
         Raises:
             AuthError: author or acting_as is not a known principal
             CapabilityError: delegation is unauthorized
-            ValidationError: author is ai-kind and model is not provided
+            ValidationError: author is ai-kind and model is not provided, or
+                predicate is not declared in the active schema
         """
         principal = self.backend.get_principal(author)
         if principal is None:
             raise AuthError(f"Principal not found: {author}")
         self._require_model_for_ai(principal, model)
+        self._require_known_predicate(predicate)
 
         delegating: Principal | None = None
         if acting_as is not None and acting_as != author:
@@ -593,6 +655,8 @@ class Ontology:
                         "source": source,
                         "rationale": rationale,
                         "model": model,
+                        "valid_from": valid_from.isoformat() if valid_from else None,
+                        "valid_to": valid_to.isoformat() if valid_to else None,
                     }
                 ]
             },
@@ -600,7 +664,7 @@ class Ontology:
 
         # SPEC §8.4: effective capability is min(author, acting_as) when
         # delegating, not a wholesale substitution (ADR-0003).
-        decision = ThresholdPolicy().evaluate(proposal, principal, acting_as=delegating)
+        decision = self.policy.evaluate(proposal, principal, acting_as=delegating)
 
         if isinstance(decision, AutoAccept):
             assertion = Assertion(
@@ -619,6 +683,8 @@ class Ontology:
                 model=model,
                 asserted_at=now,
                 proposal_id=proposal_id,
+                valid_from=valid_from,
+                valid_to=valid_to,
             )
             accepted = proposal.model_copy(
                 update={
@@ -664,16 +730,18 @@ class Ontology:
         rationale: str | None = None,
         acting_as: str | None = None,
         model: str | None = None,
+        valid_from: datetime | None = None,
+        valid_to: datetime | None = None,
     ) -> tuple[Proposal, Decision]:
         """Submit a reference (relation) assertion through the proposal/policy path (SPEC §9).
 
         Mirrors ``propose()`` for relations — the only difference is the
         operation kind and that ``target`` (an entity ID) replaces
-        ``value``/``value_type``. Evaluates ThresholdPolicy; auto-accepted
-        proposals are committed immediately with SPEC §10 conflict routing.
-        Conflict-routing temporality is resolved from the active schema's
-        declared temporality for ``predicate`` (SPEC §10.1), never
-        caller-supplied.
+        ``value``/``value_type``. Evaluates ``self.policy`` (``ThresholdPolicy``
+        by default — ADR-0018); auto-accepted proposals are committed
+        immediately with SPEC §10 conflict routing. Conflict-routing
+        temporality is resolved from the active schema's declared
+        temporality for ``predicate`` (SPEC §10.1), never caller-supplied.
 
         ``model`` (the AI model family+version) is REQUIRED when ``author``
         is an ``ai``-kind principal (SPEC §7.4/§14.4).
@@ -682,18 +750,25 @@ class Ontology:
         principal (delegation, ADR-0003). Policy is evaluated using the
         delegating principal's capability and trust level.
 
+        Args:
+            valid_from: When the fact became/becomes true (defaults to now —
+                SPEC §5.3). Set explicitly to backfill historical windows.
+            valid_to: When the fact stopped being true (defaults to open/None)
+
         Returns:
             (Proposal, Decision) tuple
 
         Raises:
             AuthError: author or acting_as is not a known principal
             CapabilityError: delegation is unauthorized
-            ValidationError: author is ai-kind and model is not provided
+            ValidationError: author is ai-kind and model is not provided, or
+                predicate is not declared in the active schema
         """
         principal = self.backend.get_principal(author)
         if principal is None:
             raise AuthError(f"Principal not found: {author}")
         self._require_model_for_ai(principal, model)
+        self._require_known_predicate(predicate)
 
         delegating: Principal | None = None
         if acting_as is not None and acting_as != author:
@@ -732,6 +807,8 @@ class Ontology:
                         "source": source,
                         "rationale": rationale,
                         "model": model,
+                        "valid_from": valid_from.isoformat() if valid_from else None,
+                        "valid_to": valid_to.isoformat() if valid_to else None,
                     }
                 ]
             },
@@ -739,7 +816,7 @@ class Ontology:
 
         # SPEC §8.4: effective capability is min(author, acting_as) when
         # delegating, not a wholesale substitution (ADR-0003).
-        decision = ThresholdPolicy().evaluate(proposal, principal, acting_as=delegating)
+        decision = self.policy.evaluate(proposal, principal, acting_as=delegating)
 
         if isinstance(decision, AutoAccept):
             assertion = Assertion(
@@ -757,6 +834,8 @@ class Ontology:
                 model=model,
                 asserted_at=now,
                 proposal_id=proposal_id,
+                valid_from=valid_from,
+                valid_to=valid_to,
             )
             accepted = proposal.model_copy(
                 update={
@@ -833,7 +912,7 @@ class Ontology:
 
         # SPEC §8.4: effective capability is min(author, acting_as) when
         # delegating, not a wholesale substitution (ADR-0003).
-        decision = ThresholdPolicy().evaluate(proposal, principal, acting_as=delegating)
+        decision = self.policy.evaluate(proposal, principal, acting_as=delegating)
 
         if isinstance(decision, AutoAccept):
             accepted = proposal.model_copy(
@@ -905,6 +984,7 @@ class Ontology:
                 existing=existing,
                 temporality=temporality,
                 existing_contradiction_id=open_contradiction.id if open_contradiction else None,
+                cardinality=self._resolve_cardinality(assertion.predicate),
             )
 
         if isinstance(result, Supersede):
@@ -1007,6 +1087,8 @@ class Ontology:
                         model=op.get("model"),
                         asserted_at=now,
                         proposal_id=proposal_id,
+                        valid_from=self._parse_window(op, "valid_from"),
+                        valid_to=self._parse_window(op, "valid_to"),
                     )
                     self._apply_with_conflict_routing(
                         assertion, self._resolve_temporality(op["predicate"])
@@ -1027,6 +1109,8 @@ class Ontology:
                         model=op.get("model"),
                         asserted_at=now,
                         proposal_id=proposal_id,
+                        valid_from=self._parse_window(op, "valid_from"),
+                        valid_to=self._parse_window(op, "valid_to"),
                     )
                     self._apply_with_conflict_routing(
                         ref_assertion, self._resolve_temporality(op["predicate"])
