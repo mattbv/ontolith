@@ -330,6 +330,42 @@ When a concrete KB-inspecting policy strategy is actually being built: design th
 
 ---
 
+## KI-018 — Hybrid retrieval (vector search + `Embedder`) never implemented
+
+**Severity:** Architecture gap — SPEC-normative surface entirely missing, not partially built
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §11.3 (Hybrid retrieval), §12.2 (`StorageBackend.vector_upsert`/`vector_search`), §14 (`Embedder` Protocol)
+
+### Description
+
+SPEC §11.3 specifies semantic search over entity/assertion embeddings via an `Embedder` port and a vector store, defaulting to `sqlite-vec`; SPEC §12.2's normative `StorageBackend` shape includes `vector_upsert(scope, id, vec)` and `vector_search(scope, vec, k)`; SPEC §14 defines the `Embedder` Protocol itself. None of this exists: `StorageBackend` (`src/ontolith/store/base.py`) has no vector methods on either backend, `Embedder` has no concrete Protocol anywhere in the codebase (`plugins/ports.py` documents its own absence explicitly), and `QueryBuilder` has no `.semantic()` method. `sqlite-vec==0.1.1` is a pinned dependency in `pyproject.toml` but is never imported anywhere — it does not back any working code path.
+
+Surfaced during a whole-project docs/known-issues refresh (2026-07-14); this is a pre-existing gap, not a regression — hybrid retrieval was never scheduled before M4 in the Implementation Plan, so its absence through M3 is expected. Recorded here so it stops being an implicit assumption and starts being an explicit, trackable gap against the SPEC's normative surface.
+
+### Fix
+
+Design and implement in the milestone where hybrid retrieval is actually scheduled: add `vector_upsert`/`vector_search` to the `StorageBackend` Protocol and both adapters (SQLite via `sqlite-vec`, DuckDB via its native vector/array support or an equivalent extension), define the `Embedder` Protocol for real (currently only a doc comment describing its absence), and add `QueryBuilder.semantic()` to compose symbolic and vector filters per SPEC §11.3's example. Until then, `sqlite-vec` should either stay pinned as a forward-looking placeholder (documented as such) or be dropped from dependencies — a decision for whichever chunk actually schedules this work.
+
+---
+
+## KI-019 — `as_of(t)` does not resolve the schema version effective at `t`
+
+**Severity:** Correctness gap — bitemporal reconstruction is schema-version-blind
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §19 (informative SHOULD-vector: "`as_of` reconstruction across a schema migration"), `.claude/rules/bitemporal.md` ("Schema is resolved to the `schema_version` effective at `t`")
+
+### Description
+
+Bitemporal reconstruction is documented (and, per SPEC §19, expected to be tested) to resolve the schema that was active at time `t`, not the current schema — otherwise `as_of()` can misreport a property's `temporality`/`cardinality` for a point in time before a schema migration changed them. In practice, every schema-consulting call in `Ontology` (`_resolve_temporality`, `_resolve_cardinality`, `_require_known_predicate`, and `AsOfView` itself) calls `self.backend.get_schema(self.namespace)` with no version argument, which always returns the latest schema version regardless of the `as_of` timestamp in play. `StorageBackend.get_schema()` does accept an explicit `version: int | None` and schema versions are never deleted (`put_schema`'s docstring: "required for time-travel"), so the storage layer already retains what's needed — but nothing resolves *which* version was effective at a given `t`, because `SchemaIR` itself carries no timestamp (no `created_at`/`effective_at` field, and the schema table persists none either). This is a real gap, not yet exercised by any conformance vector, and only observable once a namespace has more than one schema version and an `as_of()` call spans the migration boundary.
+
+Surfaced during a whole-project docs/known-issues refresh (2026-07-14).
+
+### Fix
+
+Add an effective-timestamp to schema persistence (either a new `SchemaIR` field populated via the injected `Clock` at `apply_schema()` time, or a separate table column not exposed on the IR itself), then add a `get_schema_at(namespace, t)` (or equivalent) resolution path that `AsOfView` and the temporality/cardinality/predicate-validation helpers use when operating under `as_of()`, instead of always resolving latest. Needs a conformance vector matching SPEC §19's own suggested case: a schema migration that changes a property's `temporality` or `cardinality`, with `as_of()` calls on both sides of the migration boundary asserting the pre-migration semantics still apply to pre-migration reconstruction.
+
+---
+
 ## Format
 
 Each entry follows this structure:
