@@ -6,7 +6,7 @@
 
 **Deciders:** Ontolith Core Team
 
-**Related:** ADR-0003 (Agent Identity), SPEC §7 (Assertions), SPEC §8 (Principals), SPEC §12.2 (SQLite schema)
+**Related:** ADR-0003 (Agent Identity), ADR-0016 (DuckDB Backend), SPEC §7 (Assertions), SPEC §8 (Principals), SPEC §12.2 (SQLite schema)
 
 ---
 
@@ -62,6 +62,12 @@ The `Importer` protocol (SPEC §13.2) writes through `WriteView` — the same go
 **Why `PRAGMA foreign_keys = ON` is sufficient:**
 
 SQLite's FK enforcement is per-connection and must be enabled explicitly. `SQLiteBackend.__init__` sets this pragma immediately after opening the connection, before any application code runs, so enforcement is reliable for all writes through this backend.
+
+## Amendment (2026-07-14): DuckDB backend drops two non-provenance FKs
+
+M3 added `DuckDBBackend` as a second `StorageBackend` implementation (ADR-0016). Its schema keeps every provenance FK this ADR mandates (`entity.created_by`, `assertion.author`, and the equivalent columns on `proposal`, `contradiction`, `principal_credential`) — the decision above is unaffected for provenance attribution.
+
+Two *non-provenance* FKs were dropped, DuckDB-only: `assertion_event.assertion_id → assertion.id` and `proposal_event.proposal_id → proposal.id`. DuckDB 1.5.4 raises a false-positive constraint violation on `UPDATE ... RETURNING` against a row that is the target of an incoming FK from another table — confirmed empirically with a minimal repro — which breaks the existence-check pattern `set_assertion_status`/`update_proposal_state` rely on for status transitions. `SQLiteBackend` keeps both FKs; SQLite has no such interaction. This is a backend-specific workaround for a query-execution bug, not a reconsideration of this ADR's rationale: `assertion_event.assertion_id`/`proposal_event.proposal_id` reference rows created moments earlier in the same write path (never externally supplied like `author`/`created_by`), so the referential-integrity risk this ADR was written to close does not apply to them the same way. Referential integrity for these two columns is enforced at the application layer only, on the DuckDB backend, matching `Ontology`'s own write discipline. See `src/ontolith/store/duckdb/backend.py` (inline comments at the two `CREATE TABLE` statements) and KI-016 for the full empirical account.
 
 ## Consequences
 
