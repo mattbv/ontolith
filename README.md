@@ -13,7 +13,7 @@ A Python framework/SDK for building collaborative knowledge bases where humans a
 - **Governed collaboration**: Configurable proposal/review workflow
 - **Bitemporal time-travel**: Query knowledge as of any point in time
 - **Conflict handling**: Temporal supersession and explicit contradictions
-- **Plugin extensibility**: Importers, exporters, reasoners, validators, embedders
+- **Plugin extensibility**: Importers, exporters, reasoners, validators
 
 ## Quick Start
 

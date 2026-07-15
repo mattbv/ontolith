@@ -3,6 +3,7 @@
 
 This example demonstrates:
 - Creating a knowledge base
+- Defining a schema with the class DSL
 - Creating principals (human and AI)
 - Creating entities
 - Making assertions (literal and reference)
@@ -14,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 from ontolith import Ontology
+from ontolith.schema import Concept, Date, Ref, Relation, Text, compile_schema
 
 
 def main() -> None:
@@ -34,7 +36,7 @@ def main() -> None:
         "alice@example.com",
         kind="human",
         auth_method="oidc",
-        default_capability="write",
+        default_capability="admin",
         trust_level=8,
     )
     print(f"✓ Created human principal: {alice.id}")
@@ -48,6 +50,23 @@ def main() -> None:
         trust_level=5,
     )
     print(f"✓ Created AI principal: {research_bot.id} (owner: {research_bot.owner})")
+    print()
+
+    # Define and apply a schema via the class DSL (SPEC §6.2)
+    print("Defining schema...")
+
+    class InventedThing(Concept):
+        name: Text
+
+    class Person(Concept):
+        name: Text
+        born: Date | None = None
+        collaboratedWith: Ref["Person"] = Relation()
+        contributedTo: Ref["InventedThing"] = Relation()
+
+    schema = compile_schema("default", 1, Person, InventedThing)
+    kb.apply_schema(schema, author=alice.id)
+    print(f"✓ Applied schema version {schema.version}: {', '.join(schema.concepts)}")
     print()
 
     # Create entities
@@ -108,6 +127,17 @@ def main() -> None:
         confidence=1.0,
     )
     print(f"✓ Asserted: {charles.id} name = 'Charles Babbage'")
+
+    kb.assert_literal(
+        subject=analytical_engine.id,
+        predicate="InventedThing.name",
+        value="Analytical Engine",
+        value_type="Text",
+        author=alice.id,
+        source="Wikipedia",
+        confidence=1.0,
+    )
+    print(f"✓ Asserted: {analytical_engine.id} name = 'Analytical Engine'")
     print()
 
     # Make reference assertions (relations)
