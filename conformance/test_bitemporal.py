@@ -1,4 +1,4 @@
-"""Conformance vectors for SPEC §10 bitemporal as_of() time-travel.
+"""Conformance vectors for SPEC §11.4 bitemporal as_of() time-travel.
 
 Two time dimensions:
   valid_from / valid_to — when the fact was true in the real world
@@ -139,6 +139,29 @@ class TestAsOfBasics:
         _put_assertion(kb, entity.id, "Ada", asserted_at=T0)
 
         visible = kb.as_of(T0.isoformat()).assertions(subject=entity.id)
+        assert len(visible) == 1
+
+    def test_naive_datetime_treated_as_utc(self, make_kb: KbFactory) -> None:
+        """A naive `t` (no tzinfo) must be normalized to UTC, not compared
+        as a raw ISO string against UTC-aware stored timestamps — otherwise
+        it silently misorders instead of matching T0's assertion."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        _put_assertion(kb, entity.id, "Ada", asserted_at=T0)
+
+        naive_t0 = T0.replace(tzinfo=None)
+        visible = kb.as_of(naive_t0).assertions(subject=entity.id)
+        assert len(visible) == 1
+        assert visible[0].value == "Ada"
+
+    def test_naive_iso_string_treated_as_utc(self, make_kb: KbFactory) -> None:
+        """Same as test_naive_datetime_treated_as_utc, for the string input path."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        _put_assertion(kb, entity.id, "Ada", asserted_at=T0)
+
+        naive_iso = T0.replace(tzinfo=None).isoformat()
+        visible = kb.as_of(naive_iso).assertions(subject=entity.id)
         assert len(visible) == 1
 
     def test_open_window_visible_well_into_future(self, make_kb: KbFactory) -> None:

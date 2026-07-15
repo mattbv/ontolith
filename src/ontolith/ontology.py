@@ -4,7 +4,7 @@ The Ontology class is the primary API surface for users. It wraps the storage
 backend and provides high-level methods for entities, assertions, and queries.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -36,7 +36,7 @@ from ontolith.store.base import StorageBackend
 
 
 class AsOfView:
-    """Read-only bitemporal view at a specific point in time (SPEC §10).
+    """Read-only bitemporal view at a specific point in time (SPEC §11.4).
 
     Reconstructs what was known and true at time `t`:
         valid_from <= t < (valid_to or ∞)  AND  asserted_at <= t
@@ -91,9 +91,13 @@ class Ontology:
 
     Example:
         >>> kb = Ontology.connect("my-kb.db")
-        >>> alice = kb.create_principal("alice@example.com", kind="human")
+        >>> alice = kb.create_principal(
+        ...     "alice@example.com", kind="human", default_capability="write"
+        ... )
         >>> entity = kb.create_entity("Person", author=alice.id)
-        >>> kb.assert_literal(entity.id, "name", "Ada Lovelace", author=alice.id)
+        >>> assertion = kb.assert_literal(
+        ...     entity.id, "Person.name", "Ada Lovelace", "Text", author=alice.id
+        ... )
     """
 
     def __init__(
@@ -250,6 +254,60 @@ class Ontology:
         self.backend.put_entity(entity)
         return entity
 
+    def _get_principal_or_raise(self, principal_id: str) -> Principal:
+        """Look up `principal_id`, raising AuthError if unknown."""
+        principal = self.backend.get_principal(principal_id)
+        if principal is None:
+            raise AuthError(f"Principal not found: {principal_id}")
+        return principal
+
+    def _resolve_delegation(
+        self, principal: Principal, author: str, acting_as: str | None
+    ) -> Principal | None:
+        """Resolve and authorize the delegating principal for `acting_as` (ADR-0003).
+
+        Returns None when `acting_as` is absent or equals `author` (no
+        delegation). `author` must be owned by `acting_as` to delegate.
+
+        Raises:
+            AuthError: acting_as is not a known principal
+            CapabilityError: author is not owned by acting_as
+        """
+        if acting_as is None or acting_as == author:
+            return None
+        delegating = self.backend.get_principal(acting_as)
+        if delegating is None:
+            raise AuthError(f"Delegating principal not found: {acting_as}")
+        if principal.owner != acting_as:
+            raise CapabilityError(f"Principal {author!r} is not authorized to act as {acting_as!r}")
+        return delegating
+
+    def _finalize_non_accepted_decision(
+        self, proposal: Proposal, decision: Decision, now: datetime
+    ) -> tuple[Proposal, Decision] | None:
+        """Persist and return the Reject/require-review outcome shared by
+        propose/propose_ref/retract. Returns None for AutoAccept, signaling
+        the caller must still apply the operation-specific side effects.
+        """
+        if isinstance(decision, Reject):
+            rejected = proposal.model_copy(
+                update={"state": "rejected", "decided_at": now, "policy_reason": decision.reason}
+            )
+            self.backend.put_proposal(rejected)
+            return rejected, decision
+
+        if not isinstance(decision, AutoAccept):
+            pending = proposal.model_copy(
+                update={
+                    "state": "require_review",
+                    "policy_reason": getattr(decision, "reason", None),
+                }
+            )
+            self.backend.put_proposal(pending)
+            return pending, decision
+
+        return None
+
     def _check_direct_write_capability(
         self, author: str, acting_as: str | None
     ) -> tuple[Principal, Principal | None]:
@@ -270,21 +328,11 @@ class Ontology:
             CapabilityError: author is AI-kind, delegation is unauthorized, or
                 effective capability is below `write`
         """
-        principal = self.backend.get_principal(author)
-        if principal is None:
-            raise AuthError(f"Principal not found: {author}")
+        principal = self._get_principal_or_raise(author)
         if principal.kind == "ai":
             raise CapabilityError(f"AI principal {author!r} cannot make direct writes")
 
-        delegating: Principal | None = None
-        if acting_as is not None and acting_as != author:
-            delegating = self.backend.get_principal(acting_as)
-            if delegating is None:
-                raise AuthError(f"Delegating principal not found: {acting_as}")
-            if principal.owner != acting_as:
-                raise CapabilityError(
-                    f"Principal {author!r} is not authorized to act as {acting_as!r}"
-                )
+        delegating = self._resolve_delegation(principal, author, acting_as)
 
         # SPEC §8.4: effective capability is min(author, acting_as) when
         # delegating, not a wholesale substitution.
@@ -550,19 +598,26 @@ class Ontology:
         )
 
     def as_of(self, t: datetime | str) -> AsOfView:
-        """Return a read-only bitemporal view at time t (SPEC §10).
+        """Return a read-only bitemporal view at time t (SPEC §11.4).
 
         Reconstructs what was known and true at t:
             valid_from <= t < (valid_to or ∞)  AND  asserted_at <= t
 
         Args:
-            t: Point in time — datetime or ISO-format string
+            t: Point in time — datetime or ISO-format string. Naive values
+                (no tzinfo) are treated as UTC, matching Clock's contract
+                that all stored timestamps are UTC — otherwise a naive `t`
+                would be compared against UTC-aware stored timestamps as
+                a plain ISO string, silently misordering results instead
+                of erroring.
 
         Returns:
             AsOfView for querying the knowledge base as it stood at t
         """
         if isinstance(t, str):
             t = datetime.fromisoformat(t)
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=UTC)
         return AsOfView(self.backend, t, self.namespace)
 
     def propose(
@@ -613,27 +668,11 @@ class Ontology:
             ValidationError: author is ai-kind and model is not provided, or
                 predicate is not declared in the active schema
         """
-        principal = self.backend.get_principal(author)
-        if principal is None:
-            raise AuthError(f"Principal not found: {author}")
+        principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
         self._require_known_predicate(predicate)
-
-        delegating: Principal | None = None
-        if acting_as is not None and acting_as != author:
-            delegating = self.backend.get_principal(acting_as)
-            if delegating is None:
-                raise AuthError(f"Delegating principal not found: {acting_as}")
-            # Authorization: author must be owned by acting_as (ADR-0003)
-            if principal.owner != acting_as:
-                raise CapabilityError(
-                    f"Principal {author!r} is not authorized to act as {acting_as!r}"
-                )
-
-        schema = self.backend.get_schema(self.namespace)
-        temporality: Literal["static", "time_varying"] = (
-            schema.temporality_of(predicate) if schema is not None else "static"
-        )
+        delegating = self._resolve_delegation(principal, author, acting_as)
+        temporality = self._resolve_temporality(predicate)
 
         now = self.clock.now()
         proposal_id = self.id_provider.next()
@@ -667,58 +706,37 @@ class Ontology:
         # SPEC §8.4: effective capability is min(author, acting_as) when
         # delegating, not a wholesale substitution (ADR-0003).
         decision = self.policy.evaluate(proposal, principal, acting_as=delegating)
+        finalized = self._finalize_non_accepted_decision(proposal, decision, now)
+        if finalized is not None:
+            return finalized
+        assert isinstance(decision, AutoAccept)
 
-        if isinstance(decision, AutoAccept):
-            assertion = Assertion(
-                id=self.id_provider.next(),
-                namespace=self.namespace,
-                subject=subject,
-                predicate=predicate,
-                value_kind="literal",
-                value_type=value_type,
-                value=value,
-                author=author,
-                acting_as=acting_as,
-                confidence=confidence,
-                source=source,
-                rationale=rationale,
-                model=model,
-                asserted_at=now,
-                proposal_id=proposal_id,
-                valid_from=valid_from,
-                valid_to=valid_to,
-            )
-            accepted = proposal.model_copy(
-                update={
-                    "state": "auto_accepted",
-                    "decided_at": now,
-                    "policy_reason": decision.reason,
-                }
-            )
-            with self.backend.transaction():
-                self.backend.put_proposal(accepted)
-                self._apply_with_conflict_routing(assertion, temporality)
-            return accepted, decision
-
-        if isinstance(decision, Reject):
-            rejected = proposal.model_copy(
-                update={
-                    "state": "rejected",
-                    "decided_at": now,
-                    "policy_reason": decision.reason,
-                }
-            )
-            self.backend.put_proposal(rejected)
-            return rejected, decision
-
-        pending = proposal.model_copy(
-            update={
-                "state": "require_review",
-                "policy_reason": getattr(decision, "reason", None),
-            }
+        assertion = Assertion(
+            id=self.id_provider.next(),
+            namespace=self.namespace,
+            subject=subject,
+            predicate=predicate,
+            value_kind="literal",
+            value_type=value_type,
+            value=value,
+            author=author,
+            acting_as=acting_as,
+            confidence=confidence,
+            source=source,
+            rationale=rationale,
+            model=model,
+            asserted_at=now,
+            proposal_id=proposal_id,
+            valid_from=valid_from,
+            valid_to=valid_to,
         )
-        self.backend.put_proposal(pending)
-        return pending, decision
+        accepted = proposal.model_copy(
+            update={"state": "auto_accepted", "decided_at": now, "policy_reason": decision.reason}
+        )
+        with self.backend.transaction():
+            self.backend.put_proposal(accepted)
+            self._apply_with_conflict_routing(assertion, temporality)
+        return accepted, decision
 
     def propose_ref(
         self,
@@ -766,27 +784,11 @@ class Ontology:
             ValidationError: author is ai-kind and model is not provided, or
                 predicate is not declared in the active schema
         """
-        principal = self.backend.get_principal(author)
-        if principal is None:
-            raise AuthError(f"Principal not found: {author}")
+        principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
         self._require_known_predicate(predicate)
-
-        delegating: Principal | None = None
-        if acting_as is not None and acting_as != author:
-            delegating = self.backend.get_principal(acting_as)
-            if delegating is None:
-                raise AuthError(f"Delegating principal not found: {acting_as}")
-            # Authorization: author must be owned by acting_as (ADR-0003)
-            if principal.owner != acting_as:
-                raise CapabilityError(
-                    f"Principal {author!r} is not authorized to act as {acting_as!r}"
-                )
-
-        schema = self.backend.get_schema(self.namespace)
-        temporality: Literal["static", "time_varying"] = (
-            schema.temporality_of(predicate) if schema is not None else "static"
-        )
+        delegating = self._resolve_delegation(principal, author, acting_as)
+        temporality = self._resolve_temporality(predicate)
 
         now = self.clock.now()
         proposal_id = self.id_provider.next()
@@ -819,57 +821,36 @@ class Ontology:
         # SPEC §8.4: effective capability is min(author, acting_as) when
         # delegating, not a wholesale substitution (ADR-0003).
         decision = self.policy.evaluate(proposal, principal, acting_as=delegating)
+        finalized = self._finalize_non_accepted_decision(proposal, decision, now)
+        if finalized is not None:
+            return finalized
+        assert isinstance(decision, AutoAccept)
 
-        if isinstance(decision, AutoAccept):
-            assertion = Assertion(
-                id=self.id_provider.next(),
-                namespace=self.namespace,
-                subject=subject,
-                predicate=predicate,
-                value_kind="ref",
-                value=target,
-                author=author,
-                acting_as=acting_as,
-                confidence=confidence,
-                source=source,
-                rationale=rationale,
-                model=model,
-                asserted_at=now,
-                proposal_id=proposal_id,
-                valid_from=valid_from,
-                valid_to=valid_to,
-            )
-            accepted = proposal.model_copy(
-                update={
-                    "state": "auto_accepted",
-                    "decided_at": now,
-                    "policy_reason": decision.reason,
-                }
-            )
-            with self.backend.transaction():
-                self.backend.put_proposal(accepted)
-                self._apply_with_conflict_routing(assertion, temporality)
-            return accepted, decision
-
-        if isinstance(decision, Reject):
-            rejected = proposal.model_copy(
-                update={
-                    "state": "rejected",
-                    "decided_at": now,
-                    "policy_reason": decision.reason,
-                }
-            )
-            self.backend.put_proposal(rejected)
-            return rejected, decision
-
-        pending = proposal.model_copy(
-            update={
-                "state": "require_review",
-                "policy_reason": getattr(decision, "reason", None),
-            }
+        assertion = Assertion(
+            id=self.id_provider.next(),
+            namespace=self.namespace,
+            subject=subject,
+            predicate=predicate,
+            value_kind="ref",
+            value=target,
+            author=author,
+            acting_as=acting_as,
+            confidence=confidence,
+            source=source,
+            rationale=rationale,
+            model=model,
+            asserted_at=now,
+            proposal_id=proposal_id,
+            valid_from=valid_from,
+            valid_to=valid_to,
         )
-        self.backend.put_proposal(pending)
-        return pending, decision
+        accepted = proposal.model_copy(
+            update={"state": "auto_accepted", "decided_at": now, "policy_reason": decision.reason}
+        )
+        with self.backend.transaction():
+            self.backend.put_proposal(accepted)
+            self._apply_with_conflict_routing(assertion, temporality)
+        return accepted, decision
 
     def retract(
         self,
@@ -886,19 +867,8 @@ class Ontology:
         Returns:
             (Proposal, Decision) tuple
         """
-        principal = self.backend.get_principal(author)
-        if principal is None:
-            raise AuthError(f"Principal not found: {author}")
-
-        delegating: Principal | None = None
-        if acting_as is not None and acting_as != author:
-            delegating = self.backend.get_principal(acting_as)
-            if delegating is None:
-                raise AuthError(f"Delegating principal not found: {acting_as}")
-            if principal.owner != acting_as:
-                raise CapabilityError(
-                    f"Principal {author!r} is not authorized to act as {acting_as!r}"
-                )
+        principal = self._get_principal_or_raise(author)
+        delegating = self._resolve_delegation(principal, author, acting_as)
 
         now = self.clock.now()
         proposal_id = self.id_provider.next()
@@ -915,42 +885,21 @@ class Ontology:
         # SPEC §8.4: effective capability is min(author, acting_as) when
         # delegating, not a wholesale substitution (ADR-0003).
         decision = self.policy.evaluate(proposal, principal, acting_as=delegating)
+        finalized = self._finalize_non_accepted_decision(proposal, decision, now)
+        if finalized is not None:
+            return finalized
+        assert isinstance(decision, AutoAccept)
 
-        if isinstance(decision, AutoAccept):
-            accepted = proposal.model_copy(
-                update={
-                    "state": "auto_accepted",
-                    "decided_at": now,
-                    "policy_reason": decision.reason,
-                }
-            )
-            with self.backend.transaction():
-                self.backend.put_proposal(accepted)
-                self.backend.set_assertion_status(
-                    assertion_id, "retracted", valid_to=self._retraction_valid_to(assertion_id, now)
-                )
-                self._record_assertion_event(assertion_id, author, "retracted", now)
-            return accepted, decision
-
-        if isinstance(decision, Reject):
-            rejected = proposal.model_copy(
-                update={
-                    "state": "rejected",
-                    "decided_at": now,
-                    "policy_reason": decision.reason,
-                }
-            )
-            self.backend.put_proposal(rejected)
-            return rejected, decision
-
-        pending = proposal.model_copy(
-            update={
-                "state": "require_review",
-                "policy_reason": getattr(decision, "reason", None),
-            }
+        accepted = proposal.model_copy(
+            update={"state": "auto_accepted", "decided_at": now, "policy_reason": decision.reason}
         )
-        self.backend.put_proposal(pending)
-        return pending, decision
+        with self.backend.transaction():
+            self.backend.put_proposal(accepted)
+            self.backend.set_assertion_status(
+                assertion_id, "retracted", valid_to=self._retraction_valid_to(assertion_id, now)
+            )
+            self._record_assertion_event(assertion_id, author, "retracted", now)
+        return accepted, decision
 
     def _apply_with_conflict_routing(
         self,

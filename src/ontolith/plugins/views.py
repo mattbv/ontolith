@@ -59,7 +59,7 @@ class ReadOnlyView:
         return self._kb.query(concept)
 
     def as_of(self, t: datetime | str) -> AsOfView:
-        """Return a read-only bitemporal view at time t (SPEC §10)."""
+        """Return a read-only bitemporal view at time t (SPEC §11.4)."""
         return self._kb.as_of(t)
 
 
