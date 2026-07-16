@@ -9,6 +9,7 @@ import pytest
 
 from ontolith.core import Assertion, Entity
 from ontolith.core.errors import StorageError
+from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential
 from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
@@ -642,6 +643,44 @@ class TestSQLiteBackend:
             )
         )
 
+    def test_proposals_filter_by_state(self, backend: SQLiteBackend) -> None:
+        self._put_proposal(backend, "prop-pending")
+        backend.put_proposal(
+            Proposal(
+                id="prop-accepted",
+                namespace="default",
+                author="alice@test.com",
+                state="accepted",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+
+        assert [p.id for p in backend.proposals(state="require_review")] == ["prop-pending"]
+        assert {p.id for p in backend.proposals()} == {"prop-pending", "prop-accepted"}
+        assert backend.proposals(state="rejected") == []
+
+    def test_proposals_ordered_most_recently_created_first(self, backend: SQLiteBackend) -> None:
+        backend.put_proposal(
+            Proposal(
+                id="prop-older",
+                namespace="default",
+                author="alice@test.com",
+                state="require_review",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+        backend.put_proposal(
+            Proposal(
+                id="prop-newer",
+                namespace="default",
+                author="alice@test.com",
+                state="require_review",
+                created_at=datetime(2025, 1, 2, tzinfo=UTC),
+            )
+        )
+
+        assert [p.id for p in backend.proposals()] == ["prop-newer", "prop-older"]
+
     def test_put_and_get_proposal_events(self, backend: SQLiteBackend) -> None:
         self._put_proposal(backend, "prop-1")
         backend.put_proposal_event(
@@ -962,3 +1001,59 @@ class TestSQLiteBackend:
                 )
             )
         assert len(backend.entities()) == 3
+
+    def test_contradictions_filter_by_state(self, backend: SQLiteBackend) -> None:
+        backend.put_contradiction(
+            Contradiction(
+                id="contra-open",
+                namespace="default",
+                subject="entity-001",
+                predicate="Person.name",
+                member_ids=["a-1", "a-2"],
+                state="open",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+        backend.put_contradiction(
+            Contradiction(
+                id="contra-resolved",
+                namespace="default",
+                subject="entity-002",
+                predicate="Person.name",
+                member_ids=["a-3", "a-4"],
+                state="resolved",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                resolved_by="alice@test.com",
+                resolved_at=datetime(2025, 1, 2, tzinfo=UTC),
+            )
+        )
+
+        assert [c.id for c in backend.contradictions(state="open")] == ["contra-open"]
+        assert {c.id for c in backend.contradictions()} == {"contra-open", "contra-resolved"}
+        assert backend.contradictions(state="resolved")[0].id == "contra-resolved"
+
+    def test_contradictions_ordered_most_recently_created_first(
+        self, backend: SQLiteBackend
+    ) -> None:
+        backend.put_contradiction(
+            Contradiction(
+                id="contra-older",
+                namespace="default",
+                subject="entity-001",
+                predicate="Person.name",
+                member_ids=["a-1", "a-2"],
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+        backend.put_contradiction(
+            Contradiction(
+                id="contra-newer",
+                namespace="default",
+                subject="entity-002",
+                predicate="Person.name",
+                member_ids=["a-3", "a-4"],
+                created_at=datetime(2025, 1, 2, tzinfo=UTC),
+            )
+        )
+
+        assert [c.id for c in backend.contradictions()] == ["contra-newer", "contra-older"]

@@ -16,8 +16,12 @@ app = typer.Typer(
 )
 principal_app = typer.Typer(help="Manage principals.", no_args_is_help=True)
 entity_app = typer.Typer(help="Manage entities.", no_args_is_help=True)
+proposal_app = typer.Typer(help="Inspect proposals.", no_args_is_help=True)
+contradiction_app = typer.Typer(help="Inspect contradictions.", no_args_is_help=True)
 app.add_typer(principal_app, name="principal")
 app.add_typer(entity_app, name="entity")
+app.add_typer(proposal_app, name="proposal")
+app.add_typer(contradiction_app, name="contradiction")
 
 # Module-level DB path, set by the root callback before any command runs.
 _db_path: Path = Path("ontolith.db")
@@ -290,6 +294,73 @@ def query_entities(
             typer.echo(f"{entity.id}  concept={entity.concept}  key={entity.natural_key or '-'}")
     except typer.Exit:
         raise
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
+# ─── proposal ─────────────────────────────────────────────────────────────────
+
+
+@proposal_app.command("list")
+def list_proposals(
+    state: Annotated[
+        str | None,
+        typer.Option("--state", help="Filter by state (default: require_review)."),
+    ] = "require_review",
+    all_states: Annotated[
+        bool,
+        typer.Option("--all", help="Show proposals in every state, ignoring --state."),
+    ] = False,
+) -> None:
+    """List proposals, defaulting to those pending review.
+
+    Without this, a reviewer has no way to discover what route_to_review
+    (SPEC §10.3) routed to them short of querying the backend directly.
+    """
+    kb = _kb()
+    try:
+        results = kb.proposals(state=None if all_states else state)
+        if not results:
+            typer.echo("No proposals found.")
+            return
+        for p in results:
+            typer.echo(f"{p.id}  state={p.state}  author={p.author}  created={p.created_at}")
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
+# ─── contradiction ────────────────────────────────────────────────────────────
+
+
+@contradiction_app.command("list")
+def list_contradictions(
+    state: Annotated[
+        str | None,
+        typer.Option("--state", help="Filter by state (default: open)."),
+    ] = "open",
+    all_states: Annotated[
+        bool,
+        typer.Option("--all", help="Show contradictions in every state, ignoring --state."),
+    ] = False,
+) -> None:
+    """List contradictions, defaulting to open (unresolved) ones."""
+    kb = _kb()
+    try:
+        results = kb.contradictions(state=None if all_states else state)
+        if not results:
+            typer.echo("No contradictions found.")
+            return
+        for c in results:
+            typer.echo(
+                f"{c.id}  state={c.state}  subject={c.subject}  "
+                f"predicate={c.predicate}  members={len(c.member_ids)}"
+            )
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None

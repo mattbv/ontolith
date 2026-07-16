@@ -16,6 +16,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a fail-loud policy on unsupported LinkML constructs (`abstract`, `identifier`, `key`,
   `alias`, `ifabsent`, `readonly`, `recommended`, and others) rather than silently
   dropping them
+- `Ontology.proposals(state=)`/`contradictions(state=)` — reviewer-queue listing, backed
+  by new `StorageBackend.proposals()`/`contradictions()` port methods; CLI commands
+  `ontolith proposal list`/`ontolith contradiction list` (`--state`, `--all`)
+
+#### Fixed
+- **HIGH:** `as_of(t)` excluded flagged assertions by current status instead of
+  status-at-t; since flagging never sets `valid_to`, once any contradiction had ever
+  touched a `(subject, predicate)`, `as_of(t)` returned nothing for it at any t, including
+  times before the dispute existed. Fixed by recording a `flagged` event for the newly
+  incoming assertion in a fresh contradiction (previously only the pre-existing member
+  got one) and reconstructing flagged-status-at-t from `assertion_event` instead of
+  trusting current status
+- **HIGH:** `accept_proposal`/`reject_proposal`/`resolve_contradiction` now reject a
+  reviewer who is the proposal's own author or delegate (`acting_as`) — self-review,
+  including via delegation chain, was previously possible for a misconfigured principal
+  with review capability
+- `ontolith.provenance` (MCP) and `flag_contradiction` fetched and deserialized every
+  assertion in the KB to find one or two rows by ID; both now use the indexed
+  `get_assertion(id)` lookup
+- `assertions()`'s composite index led with `namespace`, which no query filters on
+  (single-namespace today), making it unusable — confirmed via `EXPLAIN QUERY PLAN` (full
+  `SCAN`, not `SEARCH`). Added indexes matching the actual filter shapes in both backends
 
 ### Security & Correctness Remediation (2026-07-06 – 2026-07-09)
 

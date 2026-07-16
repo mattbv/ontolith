@@ -255,6 +255,21 @@ class SQLiteBackend:
             ON assertion(valid_from, valid_to)
         """)
 
+        # idx_assertion_spo above leads with namespace, which every query
+        # leaves unconstrained (single-namespace today), making it unusable
+        # for the actual filter shapes in assertions()/entities_where() —
+        # confirmed via EXPLAIN QUERY PLAN (full table SCAN, not SEARCH).
+        # These two match the real WHERE clauses without requiring namespace.
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_assertion_subj_pred_status
+            ON assertion(subject, predicate, status)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_assertion_pred_value
+            ON assertion(predicate, value_lit, status)
+        """)
+
         self.conn.commit()
 
     def begin(self) -> None:
@@ -656,7 +671,30 @@ class SQLiteBackend:
             query += " AND (valid_to IS NULL OR valid_to > ?)"
             params.append(t_iso)
             if not include_flagged:
-                query += " AND status != 'flagged'"
+                # Flagged-at-t, not current status: a static conflict flags an
+                # assertion permanently (no valid_to change), so using current
+                # status here would hide it from as_of() queries for times
+                # before the dispute existed. Reconstruct from the event log
+                # instead — every flagged transition (including an assertion
+                # born already-flagged) has a 'flagged' event, see
+                # Ontology._apply_with_conflict_routing. Tiebreak on ae.id:
+                # two events can share the same `at` under a clock that
+                # hasn't advanced (e.g. flag-then-resolve in the same tick),
+                # and `at` alone would make "last recorded wins"
+                # nondeterministic. Under SequentialIdProvider/FixedIdProvider
+                # (used in tests) id order matches recording order exactly;
+                # under the production UlidProvider, id is monotonic across
+                # milliseconds but not guaranteed within one, so same-`at`
+                # AND same-millisecond ties are a residual (low-probability,
+                # not exploitable) nondeterminism.
+                query += """ AND COALESCE(
+                    (SELECT ae.action FROM assertion_event ae
+                     WHERE ae.assertion_id = assertion.id AND ae.at <= ?
+                       AND ae.action IN ('flagged', 'reactivated')
+                     ORDER BY ae.at DESC, ae.id DESC LIMIT 1),
+                    'reactivated'
+                ) != 'flagged'"""
+                params.append(t_iso)
         elif status is not None:
             query += " AND status = ?"
             params.append(status)
@@ -910,13 +948,14 @@ class SQLiteBackend:
 
     def get_proposal(self, proposal_id: str) -> Proposal | None:
         """Retrieve a proposal by ID."""
-        import json
-
         cursor = self.conn.cursor()
         cursor.execute("SELECT * FROM proposal WHERE id = ?", (proposal_id,))
         row = cursor.fetchone()
-        if row is None:
-            return None
+        return self._row_to_proposal(row) if row else None
+
+    @staticmethod
+    def _row_to_proposal(row: sqlite3.Row) -> Proposal:
+        import json
 
         return Proposal(
             id=row["id"],
@@ -930,6 +969,18 @@ class SQLiteBackend:
             payload=json.loads(row["payload"]),
             metadata=json.loads(row["metadata"]),
         )
+
+    def proposals(self, state: str | None = None) -> list[Proposal]:
+        """Query proposals, optionally filtered by state (SPEC §14.1)."""
+        cursor = self.conn.cursor()
+        if state is not None:
+            cursor.execute(
+                "SELECT * FROM proposal WHERE state = ? ORDER BY created_at DESC, id DESC",
+                (state,),
+            )
+        else:
+            cursor.execute("SELECT * FROM proposal ORDER BY created_at DESC, id DESC")
+        return [self._row_to_proposal(row) for row in cursor.fetchall()]
 
     def update_proposal_state(
         self,
@@ -1142,6 +1193,18 @@ class SQLiteBackend:
         cursor.execute("SELECT * FROM contradiction WHERE id = ?", (contradiction_id,))
         row = cursor.fetchone()
         return self._row_to_contradiction(row) if row else None
+
+    def contradictions(self, state: str | None = None) -> list[Contradiction]:
+        """Query contradictions, optionally filtered by state (SPEC §14.1)."""
+        cursor = self.conn.cursor()
+        if state is not None:
+            cursor.execute(
+                "SELECT * FROM contradiction WHERE state = ? ORDER BY created_at DESC, id DESC",
+                (state,),
+            )
+        else:
+            cursor.execute("SELECT * FROM contradiction ORDER BY created_at DESC, id DESC")
+        return [self._row_to_contradiction(row) for row in cursor.fetchall()]
 
     def resolve_contradiction(
         self,

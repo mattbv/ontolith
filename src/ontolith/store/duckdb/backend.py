@@ -300,6 +300,31 @@ class DuckDBBackend:
             ON assertion(valid_from, valid_to)
         """)
 
+        # idx_assertion_spo above leads with namespace, which every query
+        # leaves unconstrained (single-namespace today), making it unusable
+        # for the actual filter shapes in assertions()/entities_where() —
+        # confirmed via EXPLAIN (full table scan, not index search). These
+        # two match the real WHERE clauses without requiring namespace.
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_assertion_subj_pred_status
+            ON assertion(subject, predicate, status)
+        """)
+
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_assertion_pred_value
+            ON assertion(predicate, value_lit, status)
+        """)
+
+        # Note: DuckDB's optimizer does not use secondary ART indexes for
+        # this equality-filter shape (confirmed via EXPLAIN at 20k+ rows —
+        # always SEQ_SCAN, unlike SQLite which switches to an index SEARCH
+        # with the equivalent indexes above). Its vectorized scan is still
+        # within budget regardless (measured ~3.4ms/call at 100k assertions
+        # vs SQLite's ~0.14ms indexed and ~7ms pre-fix scanned), so these
+        # indexes are kept for schema parity with SQLiteBackend and in case
+        # a future DuckDB version leverages them, not because they currently
+        # change this backend's query plan.
+
     @staticmethod
     def _row_to_dict(cursor: duckdb.DuckDBPyConnection, row: tuple[Any, ...]) -> dict[str, Any]:
         """Zip a positional result row with its cursor's column names."""
@@ -672,7 +697,31 @@ class DuckDBBackend:
             query += " AND (valid_to IS NULL OR valid_to > ?)"
             params.append(t_iso)
             if not include_flagged:
-                query += " AND status != 'flagged'"
+                # Flagged-at-t, not current status: a static conflict flags an
+                # assertion permanently (no valid_to change), so using current
+                # status here would hide it from as_of() queries for times
+                # before the dispute existed. Reconstruct from the event log
+                # instead — every flagged transition (including an assertion
+                # born already-flagged) has a 'flagged' event, see
+                # Ontology._apply_with_conflict_routing. "at" is quoted -
+                # reserved word in DuckDB. Tiebreak on ae.id: two events can
+                # share the same `at` under a clock that hasn't advanced
+                # (e.g. flag-then-resolve in the same tick), and `at` alone
+                # would make "last recorded wins" nondeterministic. Under
+                # SequentialIdProvider/FixedIdProvider (used in tests) id
+                # order matches recording order exactly; under the production
+                # UlidProvider, id is monotonic across milliseconds but not
+                # guaranteed within one, so same-`at` AND same-millisecond
+                # ties are a residual (low-probability, not exploitable)
+                # nondeterminism.
+                query += """ AND COALESCE(
+                    (SELECT ae.action FROM assertion_event ae
+                     WHERE ae.assertion_id = assertion.id AND ae."at" <= ?
+                       AND ae.action IN ('flagged', 'reactivated')
+                     ORDER BY ae."at" DESC, ae.id DESC LIMIT 1),
+                    'reactivated'
+                ) != 'flagged'"""
+                params.append(t_iso)
         elif status is not None:
             query += " AND status = ?"
             params.append(status)
@@ -919,20 +968,33 @@ class DuckDBBackend:
         row = cursor.fetchone()
         if row is None:
             return None
+        return self._row_to_proposal(self._row_to_dict(cursor, row))
 
-        d = self._row_to_dict(cursor, row)
+    @staticmethod
+    def _row_to_proposal(row: dict[str, Any]) -> Proposal:
         return Proposal(
-            id=d["id"],
-            namespace=d["namespace"],
-            author=d["author"],
-            acting_as=d["acting_as"],
-            state=d["state"],
-            created_at=datetime.fromisoformat(d["created_at"]),
-            decided_at=datetime.fromisoformat(d["decided_at"]) if d["decided_at"] else None,
-            policy_reason=d["policy_reason"],
-            payload=json.loads(d["payload"]),
-            metadata=json.loads(d["metadata"]),
+            id=row["id"],
+            namespace=row["namespace"],
+            author=row["author"],
+            acting_as=row["acting_as"],
+            state=row["state"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            decided_at=datetime.fromisoformat(row["decided_at"]) if row["decided_at"] else None,
+            policy_reason=row["policy_reason"],
+            payload=json.loads(row["payload"]),
+            metadata=json.loads(row["metadata"]),
         )
+
+    def proposals(self, state: str | None = None) -> list[Proposal]:
+        """Query proposals, optionally filtered by state (SPEC §14.1)."""
+        if state is not None:
+            cursor = self.conn.execute(
+                "SELECT * FROM proposal WHERE state = ? ORDER BY created_at DESC, id DESC", [state]
+            )
+        else:
+            cursor = self.conn.execute("SELECT * FROM proposal ORDER BY created_at DESC, id DESC")
+        rows = cursor.fetchall()
+        return [self._row_to_proposal(self._row_to_dict(cursor, row)) for row in rows]
 
     def update_proposal_state(
         self,
@@ -1129,6 +1191,20 @@ class DuckDBBackend:
         cursor = self.conn.execute("SELECT * FROM contradiction WHERE id = ?", [contradiction_id])
         row = cursor.fetchone()
         return self._row_to_contradiction(self._row_to_dict(cursor, row)) if row else None
+
+    def contradictions(self, state: str | None = None) -> list[Contradiction]:
+        """Query contradictions, optionally filtered by state (SPEC §14.1)."""
+        if state is not None:
+            cursor = self.conn.execute(
+                "SELECT * FROM contradiction WHERE state = ? ORDER BY created_at DESC, id DESC",
+                [state],
+            )
+        else:
+            cursor = self.conn.execute(
+                "SELECT * FROM contradiction ORDER BY created_at DESC, id DESC"
+            )
+        rows = cursor.fetchall()
+        return [self._row_to_contradiction(self._row_to_dict(cursor, row)) for row in rows]
 
     def resolve_contradiction(
         self,
