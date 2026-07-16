@@ -704,11 +704,16 @@ class DuckDBBackend:
                 # instead — every flagged transition (including an assertion
                 # born already-flagged) has a 'flagged' event, see
                 # Ontology._apply_with_conflict_routing. "at" is quoted -
-                # reserved word in DuckDB. Tiebreak on ae.id (ULID/sequential,
-                # monotonic with recording order) — two events can share the
-                # same `at` under a clock that hasn't advanced (e.g.
-                # flag-then-resolve in the same tick), and `at` alone would
-                # make "last recorded wins" nondeterministic.
+                # reserved word in DuckDB. Tiebreak on ae.id: two events can
+                # share the same `at` under a clock that hasn't advanced
+                # (e.g. flag-then-resolve in the same tick), and `at` alone
+                # would make "last recorded wins" nondeterministic. Under
+                # SequentialIdProvider/FixedIdProvider (used in tests) id
+                # order matches recording order exactly; under the production
+                # UlidProvider, id is monotonic across milliseconds but not
+                # guaranteed within one, so same-`at` AND same-millisecond
+                # ties are a residual (low-probability, not exploitable)
+                # nondeterminism.
                 query += """ AND COALESCE(
                     (SELECT ae.action FROM assertion_event ae
                      WHERE ae.assertion_id = assertion.id AND ae."at" <= ?
