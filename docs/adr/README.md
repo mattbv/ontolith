@@ -31,6 +31,7 @@ We use the [MADR](https://adr.github.io/madr/) (Markdown Any Decision Records) f
 - [ADR-0016](ADR-0016-duckdb-second-backend.md) — **DuckDB Second Backend** (M3 conformance-kit second backend adapter, DuckPGQ/traversal deferred)
 - [ADR-0017](ADR-0017-cardinality-conflict-semantics.md) — **Cardinality-Aware Conflict Routing** (many-cardinality static properties coexist instead of contradicting)
 - [ADR-0018](ADR-0018-policy-strategy-injection.md) — **PolicyStrategy Injection** (Ontology accepts a custom policy; SPEC's kb parameter deferred pending a replay/snapshot design)
+- [ADR-0019](ADR-0019-public-api-stability-policy.md) — **Public API Stability Policy** (`__all__`-defined surface, pinned-export regression test, `griffe` CI gate deferred)
 
 ## Decision Process
 

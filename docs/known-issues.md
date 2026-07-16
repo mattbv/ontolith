@@ -366,6 +366,24 @@ Add an effective-timestamp to schema persistence (either a new `SchemaIR` field 
 
 ---
 
+## KI-020 — No automated `griffe diff` CI gate for public API breaking changes
+
+**Severity:** Test gap — breaking changes to the public API surface are caught by convention/review, not CI
+**Milestone target:** Backlog (bundle with the `security.yml`/`nightly.yml`/`release.yml` CI-hardening pass)
+**SPEC reference:** Implementation Plan §5 (quality gates table — `griffe diff`, "warn pre-1.0, block post-1.0"), §7.1 (CI pipeline description)
+
+### Description
+
+ADR-0019 defines the public API surface and adds a pinned-`__all__` regression test (`tests/unit/test_public_api_surface.py`) as the M3-level starting point for "public API stability policy begins," but the Implementation Plan's quality-gates table separately names a `griffe diff` CI gate that would catch signature-level breakage (a parameter added/removed/retyped on an already-exported symbol) that the pinned-export-list test cannot. Investigated during ADR-0019: the installed `griffe` (via `griffelib` 2.1.0, pulled in transitively by `mkdocstrings[python]`) has its CLI split into a separate `griffecli` distribution not currently a project dependency — `python -m griffe` fails with `ModuleNotFoundError: griffecli`.
+
+More fundamentally, this gate is one piece of a CI-hardening pass (alongside `bandit`, `gitleaks`, `pip-audit`, SBOM generation) described in Implementation Plan §7.1's `security.yml`/`nightly.yml`/`release.yml` workflows, none of which exist yet (only `ci.yml` does). Standing up `griffe` diffing in isolation, ahead of that surrounding pipeline, risks committing to tooling/config choices that should be made together.
+
+### Fix
+
+When the `security.yml` CI-hardening pass is built: add `griffecli` (or whatever the then-current griffe CLI package is) as a dev dependency, generate a baseline API snapshot (`griffe dump`), and wire a CI step that diffs the current surface against `main`'s baseline — informational/warn-only pre-1.0 per the Implementation Plan's own threshold, blocking only post-1.0.
+
+---
+
 ## Format
 
 Each entry follows this structure:
