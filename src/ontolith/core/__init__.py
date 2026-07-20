@@ -2,6 +2,7 @@
 
 This module contains the fundamental building blocks:
 - Clock and IdProvider ports for deterministic behavior
+- Embedder port for hybrid retrieval (SPEC §11.3)
 - Error taxonomy for stable error handling
 - Entity and Assertion value objects
 - Future: meta-model, IR, validation
@@ -9,6 +10,7 @@ This module contains the fundamental building blocks:
 
 from ontolith.core.assertion import Assertion, AssertionEvent
 from ontolith.core.clock import Clock, FixedClock, SystemClock
+from ontolith.core.embedder import Embedder, HashingEmbedder, LookupEmbedder
 from ontolith.core.entity import Entity
 from ontolith.core.errors import (
     AuthError,
@@ -39,6 +41,10 @@ __all__ = [
     "UlidProvider",
     "SequentialIdProvider",
     "FixedIdProvider",
+    # Embedder
+    "Embedder",
+    "HashingEmbedder",
+    "LookupEmbedder",
     # Domain models
     "Entity",
     "Assertion",

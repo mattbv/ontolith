@@ -73,6 +73,9 @@ _EXPECTED: dict[str, frozenset[str]] = {
             "NotFoundError",
             "StorageError",
             "PluginError",
+            "Embedder",
+            "HashingEmbedder",
+            "LookupEmbedder",
         }
     ),
     "ontolith.identity": frozenset({"Principal", "PrincipalCredential", "min_capability"}),
