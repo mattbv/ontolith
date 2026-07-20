@@ -33,7 +33,7 @@ class TestPluginCapabilities:
 
 class TestPluginManifest:
     def test_construction_per_kind(self) -> None:
-        for kind in ("importer", "exporter", "reasoner", "validator", "embedder", "connector"):
+        for kind in ("importer", "exporter", "reasoner", "validator", "connector"):
             manifest = PluginManifest(name=f"test-{kind}", version="1.0.0", kind=kind)  # type: ignore[arg-type]
             assert manifest.kind == kind
 

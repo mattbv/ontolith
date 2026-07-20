@@ -10,15 +10,18 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-PluginKind = Literal["importer", "exporter", "reasoner", "validator", "embedder", "connector"]
+PluginKind = Literal["importer", "exporter", "reasoner", "validator", "connector"]
 """Plugin kinds covered by capability isolation.
 
-Deliberately excludes StorageBackend/AuthProvider/PolicyStrategy plugins:
-those are infrastructure-extension points the framework calls INTO (e.g. a
-StorageBackend plugin IS the persistence substrate underneath WriteView, not
-a principal-scoped actor calling through it) — they don't fit the
-capability-scoped-view model this module implements. See ADR-0015 "Plugin
-kinds in scope".
+Deliberately excludes StorageBackend/AuthProvider/PolicyStrategy/Embedder
+plugins: those are infrastructure-extension points the framework calls INTO
+(e.g. a StorageBackend plugin IS the persistence substrate underneath
+WriteView, not a principal-scoped actor calling through it) — they don't fit
+the capability-scoped-view model this module implements. See ADR-0015
+"Plugin kinds in scope" and ADR-0020 (Embedder specifically: its Protocol
+takes no `kb` view parameter at all, so it structurally cannot participate
+in this module's ReadOnlyView/WriteView dispatch; it lives in
+core/embedder.py, injected into Ontology directly like Clock/IdProvider).
 """
 
 

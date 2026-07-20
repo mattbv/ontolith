@@ -6,14 +6,16 @@ gives PluginRegistry's capability negotiation teeth. Method shapes here are
 skeletons for future reference-plugin implementations (KI-010); they are not
 yet exercised by any concrete plugin.
 
-Deliberately excludes StorageBackend, AuthProvider, and PolicyStrategy —
-those are infrastructure-extension ports the framework calls INTO, not
-principal-scoped actors that call INTO the framework via a view (see
-manifest.py's PluginKind docstring and ADR-0015 "Plugin kinds in scope").
-AuthProvider and PolicyStrategy already have real implementations elsewhere
-(identity/ports.py, govern/policy.py); StorageBackend's port lives in
-store/base.py. Embedder has no real port yet anywhere in the codebase — M1-M2
-never delivered it, and defining it isn't this pass's job either.
+Deliberately excludes StorageBackend, AuthProvider, PolicyStrategy, and
+Embedder — those are infrastructure-extension ports the framework calls
+INTO, not principal-scoped actors that call INTO the framework via a view
+(see manifest.py's PluginKind docstring and ADR-0015 "Plugin kinds in
+scope"). AuthProvider and PolicyStrategy already have real implementations
+elsewhere (identity/ports.py, govern/policy.py); StorageBackend's port lives
+in store/base.py; Embedder's port lives in core/embedder.py (ADR-0020) —
+its Protocol takes no `kb` parameter, so it can't fit this file's
+view-based pattern the way Importer/Exporter/Reasoner/Validator/Connector
+do.
 """
 
 from typing import Protocol
