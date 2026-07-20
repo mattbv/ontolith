@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `Ontology.proposals(state=)`/`contradictions(state=)` — reviewer-queue listing, backed
   by new `StorageBackend.proposals()`/`contradictions()` port methods; CLI commands
   `ontolith proposal list`/`ontolith contradiction list` (`--state`, `--all`)
+- Hybrid retrieval (SPEC §11.3/§12.3/§14, ADR-0020, closes KI-018): `Embedder` port
+  (`ontolith.core.embedder`) with a dependency-free default (`HashingEmbedder`) and a
+  deterministic test double (`LookupEmbedder`); `StorageBackend.vector_upsert`/
+  `vector_search` on both SQLite (via `sqlite-vec`, now a required dependency) and DuckDB
+  (via native `list_distance`); `QueryBuilder.semantic(text)`, `.min_confidence(t)`,
+  `.trust_at_least(l)`, `.limit(n)`; `Ontology.reindex(concept=)` to explicitly (re-)embed
+  entities into the vector index; CLI `ontolith reindex [--concept]`
 
 #### Fixed
 - **HIGH:** `as_of(t)` excluded flagged assertions by current status instead of

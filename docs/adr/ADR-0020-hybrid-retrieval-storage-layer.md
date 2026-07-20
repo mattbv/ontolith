@@ -1,12 +1,12 @@
-# ADR-0020: Hybrid Retrieval — Embedder Port and Vector Storage
+# ADR-0020: Hybrid Retrieval — Embedder Port, Vector Storage, and Query Layer
 
 **Status**: Accepted
-**Date**: 2026-07-20
+**Date**: 2026-07-20 (amended 2026-07-20 — query layer)
 **Deciders**: Ontolith Core Team
-**Related**: ADR-0001 (Storage Default), ADR-0010 (SQLite Transaction Model), ADR-0015 (Plugin
-Capability Isolation), ADR-0016 (DuckDB Second Backend), SPEC §11.3 (Hybrid retrieval), SPEC §12.1
-(Storage MUSTs), SPEC §12.3 (StorageBackend normative shape), SPEC §14 (Embedder), Implementation
-Plan §2 (M3 scope)
+**Related**: ADR-0001 (Storage Default), ADR-0004 (Confidence Semantics), ADR-0010 (SQLite
+Transaction Model), ADR-0015 (Plugin Capability Isolation), ADR-0016 (DuckDB Second Backend),
+SPEC §11.3 (Hybrid retrieval), SPEC §12.1 (Storage MUSTs), SPEC §12.3 (StorageBackend normative
+shape), SPEC §14 (Embedder), Implementation Plan §2 (M3 scope), §9 (perf budgets), KI-018, KI-019
 
 ---
 
@@ -18,12 +18,11 @@ normatively require an `Embedder` port, two new `StorageBackend` methods (`vecto
 existed: `sqlite-vec` was pinned as an optional dependency but never imported, `Embedder` had no
 Protocol anywhere, and `QueryBuilder` had no vector-aware method.
 
-This ADR covers the **storage layer** — the `Embedder` port, its default implementation, and the
-two new `StorageBackend` methods on both backends. It is deliberately scoped to what is
-implemented in this PR. The query layer (`QueryBuilder.semantic()`, ranking algorithm,
-`Ontology.reindex()`) depends on this storage layer and lands in a follow-up PR; its
-design decisions will be recorded as an amendment to this ADR once that PR is under review, rather
-than speculatively decided here ahead of the code that implements them.
+This ADR originally covered the **storage layer** only — the `Embedder` port, its default
+implementation, and the two new `StorageBackend` methods on both backends — deliberately scoped to
+what was implemented in the first of two sequential PRs. The **Amendment** section below records
+the query-layer decisions (`QueryBuilder.semantic()`, ranking algorithm, `.min_confidence()`/
+`.trust_at_least()`, `Ontology.reindex()`) made in the follow-up PR that depends on it.
 
 Two live-verified technical facts anchor the storage design:
 - `sqlite-vec`'s `vec0` virtual table returns **L2 (Euclidean) distance** by default and does
@@ -106,6 +105,60 @@ SPEC §12.1 states the default SQLite backend MUST back embeddings with `sqlite-
 from `[project.optional-dependencies].vec` to the main `dependencies` list in `pyproject.toml`,
 version-pinned (`sqlite-vec==0.1.1`) per the project's stated pre-v1 posture for this dependency.
 
+## Amendment (2026-07-20): Query layer — `semantic()`, ranking, filters, `reindex()`
+
+The follow-up PR wires the storage layer above into `QueryBuilder` and `Ontology`.
+
+### 5. Ranking algorithm: vector-search-first, symbolic-intersect (not "prefilter + rerank")
+
+Implementation Plan §9's perf-budget row names the query "hybrid query (symbolic prefilter +
+vector rerank), k=10" — the opposite order from what's implemented. `QueryBuilder.all()`, when
+`.semantic(text)` is set, instead:
+
+1. Embeds `text` via the configured `Embedder`.
+2. Overfetches from the vector index: `vector_search("entity", query_vec, k_overfetch)` where
+   `k_overfetch = min(max(limit or 20, 10 * (limit or 20)), 1000)`, ascending distance.
+3. If `.where()` is also set, intersects the overfetched ids with `entities_where()`'s symbolic
+   matches, preserving vector rank order — not the reverse (symbolic first, then rerank).
+4. Applies `.min_confidence()`/`.trust_at_least()` as post-filters (§6 below), then `.limit()`.
+
+Chosen over the Plan's literal wording because: (a) it needs zero non-normative storage additions
+beyond `vector_search`'s SPEC-exact two-method shape; (b) bounded, predictable cost matters more
+than exactness for a p95 budget; (c) `HashingEmbedder` is pure-Python — literally re-embedding and
+re-ranking every symbolic candidate (the Plan's reading) would not stay within budget on a
+realistic KB. The `Ontolith_Implementation_Plan.md` §9 wording should be read as superseded by this
+ADR for the actual query order; a documentation follow-up should reconcile the phrasing.
+
+**Consequence — recall-cutoff limitation:** a true symbolic match ranked below the overfetch window
+in the *global* vector ranking is missed, even though it would satisfy `.where()`. This is a
+deliberate v1 trade-off, not an oversight — see Consequences below.
+
+### 6. `.min_confidence()`/`.trust_at_least()` — independent existential filters
+
+An entity passes `.min_confidence(t)` iff it has **at least one** active assertion with
+`confidence is not None and confidence >= t` (`None` never satisfies a numeric threshold, per
+ADR-0004). An entity passes `.trust_at_least(l)` iff it has **at least one** active assertion
+whose author has `Principal.trust_level >= l`. The two filters are independent of each other and
+of `.where()`/`.semantic()` — nothing requires the *same* assertion to satisfy both, or requires
+these filters to combine with `.semantic()` at all (they compose with the plain `.where()`/
+`.entities()` path too). An entity has many assertions across many predicates; inventing a notion
+of "the one assertion representing this entity" isn't supported elsewhere in the model, so an
+existential (any-matching-assertion) reading is the only one consistent with how assertions already
+work. Recency (`asserted_at`) is not used as an implicit tiebreaker beyond `.semantic()`'s own
+distance-based order — no `.recent_first()` method is invented beyond what SPEC names.
+
+### 7. No auto-embed-on-write; explicit `Ontology.reindex()`
+
+`propose`/`accept_proposal` remain untouched — they have been through two audit-remediation arcs
+and adding embedding side effects to the write path was out of scope for this decision. Instead,
+`Ontology.reindex(concept: str | None = None) -> int` walks entities (optionally filtered by
+concept), concatenates each entity's `Text`-typed active-assertion values into one string (stable
+order: sorted by predicate, then `asserted_at`), embeds the batch, and upserts into
+`scope="entity"`. Entities with no `Text`-typed active assertions are **skipped**, not
+zero-vector-upserted — a zero vector would spuriously rank as "close" to other empty entities,
+polluting `.semantic()` results. `reindex()` is idempotent (each call fully re-embeds and upserts)
+and is exposed via `ontolith reindex [--concept]` in the CLI.
+
 ## Rationale
 
 **Why not extend `plugins/ports.py`'s `kb`-parameterized pattern to `Embedder`:** every existing
@@ -150,9 +203,24 @@ schema migration story for v1.
   neighbors under feature hashing correlate with shared vocabulary, not meaning. This is
   acceptable for v1 (any real ML-backed `Embedder` is a drop-in replacement via the same
   Protocol) but should not be mistaken for production-quality retrieval.
-- The query-layer decisions this storage layer enables (ranking algorithm, `min_confidence`/
-  `trust_at_least` filter semantics, `reindex()` behavior) are intentionally deferred to a
-  follow-up amendment of this ADR, made alongside the PR that implements them.
+- **Recall-cutoff limitation (§5):** `.semantic()` combined with `.where()` can miss a true
+  symbolic match if it ranks below the vector-search overfetch window globally. Acceptable for a
+  bounded-cost v1; revisit if this proves user-visible (e.g. by widening the overfetch multiplier
+  or, later, pushing `.where()` down into the vector search itself if the storage layer grows
+  metadata-filtered search).
+- `.semantic()` operates on current entity state only — it is not `as_of()`-aware in the way
+  symbolic queries are (vectors represent "what `reindex()` last saw," not a bitemporal snapshot).
+  `AsOfView.query(...).semantic(...)` is not rejected, but its results reflect the current vector
+  index regardless of the `as_of` timestamp. Not fixed here: reconciling this needs the same
+  schema-version-at-t machinery KI-019 already tracks as a separate gap.
+- No write path auto-embeds; a caller who forgets to call `reindex()` after writing new Text
+  assertions gets stale or empty `.semantic()` results with no error. This is deliberate (§7) but
+  is a real footgun — worth a doc callout (README/quickstart) beyond this ADR.
+- `reindex()` only upserts; it never purges. If an entity's Text-typed assertions are all later
+  retracted/superseded, `_entity_text` correctly stops including it in the next `reindex()` call
+  (§7's skip case), but its previously-upserted vector is not deleted — it stays in the index and
+  can still surface in `.semantic()` results until a real `vector_delete`-style port method exists.
+  No such method is added here; not exercised by any test.
 
 ## Alternatives Considered
 
@@ -170,11 +238,23 @@ of native array columns:** rejected — neither backend's distance function oper
 JSON-encoded arrays; both `vec0 MATCH` and `list_distance` require the engine's native vector/array
 column types.
 
+**Symbolic-prefilter-then-rerank ranking (Implementation Plan §9's literal wording):** rejected —
+see Amendment §5. Would require the query layer to re-embed and re-rank every symbolic match on
+every call, which does not stay within the p95 budget under a pure-Python default `Embedder`, and
+gains nothing the overfetch-and-intersect approach doesn't already provide at bounded cost.
+
+**Requiring `.min_confidence()`/`.trust_at_least()` to be satisfied by the same assertion:**
+rejected — see Amendment §6. Would require inventing a notion of "the entity's representative
+assertion" that doesn't exist anywhere else in the model; every other query/filter operates over
+the entity's full assertion set independently per predicate.
+
 ## References
 
 - ADR-0001: Storage Default (SQLite + sqlite-vec)
+- ADR-0004: Confidence Semantics
 - ADR-0010: SQLite Backend Transaction Model
 - ADR-0015: Plugin Capability Isolation
 - ADR-0016: DuckDB Second Backend
 - SPEC §11.3 (Hybrid retrieval), §12.1 (Storage MUSTs), §12.3 (StorageBackend), §14 (Embedder)
-- Implementation Plan §2 (M3 scope)
+- Implementation Plan §2 (M3 scope), §9 (perf budgets)
+- KI-018 (this ADR's resolution), KI-019 (related `as_of()` schema-version gap, §7 consequence)
