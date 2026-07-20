@@ -443,6 +443,58 @@ class TestQuery:
         assert result.exit_code == 1
 
 
+class TestReindex:
+    def test_reindexes_text_assertions(self, seeded_db: tuple[Path, str, str]) -> None:
+        db, author, entity_id = seeded_db
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ada",
+                "--type",
+                "Text",
+                "--author",
+                author,
+            ],
+        )
+        result = runner.invoke(app, ["--db", str(db), "reindex"])
+        assert result.exit_code == 0
+        assert "Reindexed 1 entity." in result.output
+
+    def test_reindex_with_no_text_assertions_reports_zero(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        db, _, _ = seeded_db
+        result = runner.invoke(app, ["--db", str(db), "reindex"])
+        assert result.exit_code == 0
+        assert "Reindexed 0 entities." in result.output
+
+    def test_reindex_concept_filter(self, seeded_db: tuple[Path, str, str]) -> None:
+        db, author, entity_id = seeded_db
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ada",
+                "--type",
+                "Text",
+                "--author",
+                author,
+            ],
+        )
+        result = runner.invoke(app, ["--db", str(db), "reindex", "--concept", "Organization"])
+        assert result.exit_code == 0
+        assert "Reindexed 0 entities." in result.output
+
+
 class TestErrorPaths:
     def test_ai_principal_without_owner_exits_nonzero(self, temp_db: Path) -> None:
         result = runner.invoke(
