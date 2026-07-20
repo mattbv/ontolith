@@ -12,7 +12,9 @@ from ontolith.core import (
     Assertion,
     AssertionEvent,
     Clock,
+    Embedder,
     Entity,
+    HashingEmbedder,
     IdProvider,
     SystemClock,
     UlidProvider,
@@ -52,10 +54,12 @@ class AsOfView:
         backend: "StorageBackend",
         as_of: datetime,
         namespace: str,
+        embedder: Embedder | None = None,
     ) -> None:
         self._backend = backend
         self._as_of = as_of
         self._namespace = namespace
+        self._embedder = embedder
 
     def assertions(
         self,
@@ -80,6 +84,7 @@ class AsOfView:
             namespace=self._namespace,
             concept=concept,
             as_of_time=self._as_of,
+            embedder=self._embedder,
         )
 
 
@@ -106,6 +111,7 @@ class Ontology:
         clock: Clock | None = None,
         id_provider: IdProvider | None = None,
         policy: PolicyStrategy | None = None,
+        embedder: Embedder | None = None,
     ) -> None:
         """Initialize Ontology with a storage backend.
 
@@ -116,11 +122,14 @@ class Ontology:
             policy: Policy strategy for proposal evaluation (defaults to
                 ThresholdPolicy — ADR-0018). ADR-0006 names PolicyStrategy
                 as an open-core extension point for proprietary strategies.
+            embedder: Embedder for .semantic() queries and reindex() (defaults
+                to HashingEmbedder — ADR-0020).
         """
         self.backend = backend
         self.clock = clock or SystemClock()
         self.id_provider = id_provider or UlidProvider()
         self.policy = policy or ThresholdPolicy()
+        self.embedder = embedder or HashingEmbedder()
         self.namespace = "default"  # For M1, single namespace
 
     @classmethod
@@ -131,6 +140,7 @@ class Ontology:
         clock: Clock | None = None,
         id_provider: IdProvider | None = None,
         policy: PolicyStrategy | None = None,
+        embedder: Embedder | None = None,
     ) -> "Ontology":
         """Connect to a knowledge base.
 
@@ -140,6 +150,7 @@ class Ontology:
             id_provider: Optional ID provider for deterministic behavior
             policy: Optional policy strategy (defaults to ThresholdPolicy —
                 ADR-0018)
+            embedder: Optional Embedder (defaults to HashingEmbedder)
 
         Returns:
             Ontology instance connected to the database
@@ -148,7 +159,13 @@ class Ontology:
 
         effective_clock = clock or SystemClock()
         backend = SQLiteBackend(path, clock=effective_clock)
-        return cls(backend, clock=effective_clock, id_provider=id_provider, policy=policy)
+        return cls(
+            backend,
+            clock=effective_clock,
+            id_provider=id_provider,
+            policy=policy,
+            embedder=embedder,
+        )
 
     def create_principal(
         self,
@@ -595,6 +612,7 @@ class Ontology:
             backend=self.backend,
             namespace=self.namespace,
             concept=concept,
+            embedder=self.embedder,
         )
 
     def as_of(self, t: datetime | str) -> AsOfView:
@@ -618,7 +636,64 @@ class Ontology:
             t = datetime.fromisoformat(t)
         if t.tzinfo is None:
             t = t.replace(tzinfo=UTC)
-        return AsOfView(self.backend, t, self.namespace)
+        return AsOfView(self.backend, t, self.namespace, embedder=self.embedder)
+
+    def reindex(self, concept: str | None = None) -> int:
+        """Re-embed entities' Text content into the vector index (SPEC §11.3).
+
+        No write path (propose/accept_proposal) auto-embeds on write — this
+        is the only way vectors enter the index (ADR-0020 amendment). Safe
+        to call repeatedly: each call re-embeds and upserts, so it is
+        idempotent and picks up any Text assertions added since the last
+        call.
+
+        For each entity, concatenates its Text-typed active-assertion values
+        (sorted by predicate then asserted_at) into one string and embeds
+        it. Entities with no Text-typed active assertions are skipped, not
+        zero-vector-upserted — a zero vector would spuriously rank as
+        "close" to other empty entities in `.semantic()` results.
+
+        Args:
+            concept: If set, only re-index entities of this concept.
+                Otherwise all entities in this namespace.
+
+        Returns:
+            Number of entities actually embedded (excludes skipped ones).
+        """
+        entities = self.backend.entities(namespace=self.namespace, concept=concept)
+
+        indexed_entities = []
+        texts = []
+        for entity in entities:
+            text = self._entity_text(entity)
+            if text is None:
+                continue
+            indexed_entities.append(entity)
+            texts.append(text)
+
+        if not texts:
+            return 0
+
+        vectors = self.embedder.embed(texts)
+        for entity, vector in zip(indexed_entities, vectors, strict=True):
+            self.backend.vector_upsert("entity", entity.id, vector)
+
+        return len(indexed_entities)
+
+    def _entity_text(self, entity: Entity) -> str | None:
+        """Concatenate an entity's Text-typed active assertion values.
+
+        Returns None if the entity has no Text-typed active assertions.
+        """
+        text_assertions = [
+            a
+            for a in self.backend.assertions(subject=entity.id, status="active")
+            if a.value_type == "Text"
+        ]
+        if not text_assertions:
+            return None
+        text_assertions.sort(key=lambda a: (a.predicate, a.asserted_at))
+        return " ".join(a.value for a in text_assertions)
 
     def propose(
         self,
