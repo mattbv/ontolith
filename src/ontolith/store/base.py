@@ -194,7 +194,7 @@ class StorageBackend(Protocol):
         self,
         subject: str | None = None,
         predicate: str | None = None,
-        status: str | None = None,
+        status: str | None = "active",
         as_of_time: datetime | None = None,
         include_flagged: bool = False,
     ) -> list[Assertion]:
@@ -203,7 +203,8 @@ class StorageBackend(Protocol):
         Args:
             subject: Filter by subject entity ID
             predicate: Filter by predicate
-            status: Filter by current status (ignored when as_of_time is set)
+            status: Filter by current status (ignored when as_of_time is set).
+                Defaults to "active"; pass status=None for every status.
             as_of_time: If set, applies bitemporal filter:
                 valid_from <= t < (valid_to or ∞) AND asserted_at <= t
             include_flagged: When as_of_time is set, whether to include
