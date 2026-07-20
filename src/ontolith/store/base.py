@@ -19,6 +19,16 @@ from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
 
+VECTOR_SCOPES = frozenset({"entity", "assertion"})
+"""Closed set of embedding scopes (SPEC §11.3): entity- and assertion-level.
+
+Deliberately not an arbitrary caller-supplied string — both backends use
+`scope` to name per-scope storage (SQLite: a vec0 virtual table per scope;
+DuckDB: a plain table per scope), so an open string would mean dynamic DDL
+driven by caller input. vector_upsert/vector_search MUST reject any scope
+outside this set with ValidationError.
+"""
+
 
 class StorageBackend(Protocol):
     """Abstract port for storage adapters.
@@ -314,6 +324,48 @@ class StorageBackend(Protocol):
 
         Returns:
             List of entities where all filters match at the given time
+        """
+        ...
+
+    def vector_upsert(self, scope: str, id: str, vec: list[float]) -> None:
+        """Insert or replace the embedding vector for (scope, id).
+
+        The dimensionality of the first vector ever upserted into a scope
+        establishes that scope's dimension for the life of the store; later
+        upserts into the same scope must match it.
+
+        Args:
+            scope: Embedding scope. Must be one of VECTOR_SCOPES.
+            id: Entity or assertion ID the vector represents.
+            vec: Embedding vector.
+
+        Raises:
+            ValidationError: scope is not in VECTOR_SCOPES, or vec's length
+                does not match the scope's already-established dimension.
+            StorageError: If persistence fails.
+        """
+        ...
+
+    def vector_search(self, scope: str, vec: list[float], k: int) -> list[tuple[str, float]]:
+        """Return the k nearest ids to vec within scope, ascending distance.
+
+        Distance is L2 (Euclidean). Embedder implementations MUST return
+        L2-unit-normalized vectors, which makes ascending-L2-distance order
+        equivalent to descending-cosine-similarity order.
+
+        Args:
+            scope: Embedding scope. Must be one of VECTOR_SCOPES.
+            vec: Query vector.
+            k: Maximum number of results.
+
+        Returns:
+            (id, distance) tuples, nearest first. Fewer than k if the scope
+            has fewer than k vectors; empty list if the scope has never
+            been populated.
+
+        Raises:
+            ValidationError: scope is not in VECTOR_SCOPES, or vec's length
+                does not match the scope's already-established dimension.
         """
         ...
 
