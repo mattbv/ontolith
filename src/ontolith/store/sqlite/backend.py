@@ -4,21 +4,30 @@ Default storage adapter for Ontolith. Provides:
 - Append-only entity and assertion storage
 - Transaction management
 - Query interface
-- Vector search via sqlite-vec (future)
+- Vector search via sqlite-vec (ADR-0020)
 """
 
 import sqlite3
+import struct
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+import sqlite_vec
+
 from ontolith.core import Assertion, AssertionEvent, Clock, Entity, SystemClock
-from ontolith.core.errors import StorageError
+from ontolith.core.errors import StorageError, ValidationError
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
+from ontolith.store.base import VECTOR_SCOPES
+
+
+def _pack_vector(vec: list[float]) -> bytes:
+    """Serialize a vector for sqlite-vec's vec0 FLOAT[N] column format."""
+    return struct.pack(f"{len(vec)}f", *vec)
 
 
 class SQLiteBackend:
@@ -50,6 +59,9 @@ class SQLiteBackend:
         # process handling concurrent tool calls. No-op (falls back to a
         # different mode) for in-memory/`:memory:` databases.
         self.conn.execute("PRAGMA journal_mode = WAL")
+        self.conn.enable_load_extension(True)
+        sqlite_vec.load(self.conn)
+        self.conn.enable_load_extension(False)
         self._in_transaction: bool = False
         self._clock: Clock = clock or SystemClock()
         self._create_schema()
@@ -268,6 +280,38 @@ class SQLiteBackend:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_assertion_pred_value
             ON assertion(predicate, value_lit, status)
+        """)
+
+        # Tracks the embedding dimension established per scope (ADR-0020).
+        # vec0 virtual tables (vector_{scope}) are created lazily, on first
+        # vector_upsert for that scope, once the dimension is known — this
+        # table lets vector_upsert/vector_search validate dimension without
+        # introspecting vec0's own DDL.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS vector_scope (
+                scope TEXT PRIMARY KEY,
+                dim INTEGER NOT NULL
+            )
+        """)
+
+        # Maps our caller-facing TEXT (scope, id) to a vec0 table's internal
+        # rowid. vec0 (this sqlite-vec version) doesn't support DELETE/UPDATE
+        # by a TEXT primary key column (confirmed empirically — only rowid-
+        # keyed DELETE works), so vector_{scope} tables are rowid-only and
+        # this table is the id<->rowid index that makes upsert/lookup by id
+        # possible.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS vector_id_map (
+                scope TEXT NOT NULL,
+                id TEXT NOT NULL,
+                vec_rowid INTEGER NOT NULL,
+                PRIMARY KEY (scope, id)
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_vector_id_map_rowid
+            ON vector_id_map(scope, vec_rowid)
         """)
 
         self.conn.commit()
@@ -1301,6 +1345,131 @@ class SQLiteBackend:
             )
             for row in cursor.fetchall()
         ]
+
+    def _validate_scope(self, scope: str) -> None:
+        if scope not in VECTOR_SCOPES:
+            raise ValidationError(
+                f"Unknown vector scope: {scope!r} (must be one of {sorted(VECTOR_SCOPES)})"
+            )
+
+    def _ensure_vector_table(self, scope: str, vec_len: int) -> None:
+        """Establish (or validate against) the dimension for `scope`.
+
+        The first vector ever upserted into a scope fixes its dimension: the
+        vec0 virtual table is created lazily here, at that dimension. Later
+        calls validate `vec_len` matches.
+
+        Raises:
+            ValidationError: `vec_len` doesn't match the established dim.
+            StorageError: If lazy table creation fails.
+        """
+        cursor = self.conn.cursor()
+        row = cursor.execute("SELECT dim FROM vector_scope WHERE scope = ?", (scope,)).fetchone()
+        if row is None:
+            try:
+                cursor.execute(
+                    f"CREATE VIRTUAL TABLE vector_{scope} USING vec0(embedding FLOAT[{vec_len}])"
+                )
+                cursor.execute(
+                    "INSERT INTO vector_scope (scope, dim) VALUES (?, ?)", (scope, vec_len)
+                )
+                if not self._in_transaction:
+                    self.conn.commit()
+            except sqlite3.Error as e:
+                if not self._in_transaction:
+                    self.conn.rollback()
+                raise StorageError(f"Failed to create vector table for scope {scope!r}: {e}") from e
+            return
+        if row["dim"] != vec_len:
+            raise ValidationError(
+                f"Vector for scope {scope!r} has dimension {vec_len}, "
+                f"but this scope is established at dimension {row['dim']}"
+            )
+
+    def vector_upsert(self, scope: str, id: str, vec: list[float]) -> None:
+        """Insert or replace the embedding vector for (scope, id).
+
+        Args:
+            scope: Embedding scope. Must be one of VECTOR_SCOPES.
+            id: Entity or assertion ID the vector represents.
+            vec: Embedding vector.
+
+        Raises:
+            ValidationError: scope is not in VECTOR_SCOPES, or vec's length
+                does not match the scope's already-established dimension.
+            StorageError: If persistence fails.
+        """
+        self._validate_scope(scope)
+        self._ensure_vector_table(scope, len(vec))
+        table = f"vector_{scope}"
+
+        try:
+            was_in_transaction = self._in_transaction
+            if not was_in_transaction:
+                self.begin()
+            cursor = self.conn.cursor()
+            existing = cursor.execute(
+                "SELECT vec_rowid FROM vector_id_map WHERE scope = ? AND id = ?", (scope, id)
+            ).fetchone()
+            cursor.execute(f"INSERT INTO {table}(embedding) VALUES (?)", (_pack_vector(vec),))
+            new_rowid = cursor.lastrowid
+            if existing is not None:
+                cursor.execute(f"DELETE FROM {table} WHERE rowid = ?", (existing["vec_rowid"],))
+            cursor.execute(
+                "INSERT OR REPLACE INTO vector_id_map (scope, id, vec_rowid) VALUES (?, ?, ?)",
+                (scope, id, new_rowid),
+            )
+            if not was_in_transaction:
+                self.commit()
+        except sqlite3.Error as e:
+            if not was_in_transaction:
+                self.rollback()
+            raise StorageError(f"Failed to upsert vector (scope={scope}, id={id}): {e}") from e
+
+    def vector_search(self, scope: str, vec: list[float], k: int) -> list[tuple[str, float]]:
+        """Return the k nearest ids to vec within scope, ascending distance.
+
+        Args:
+            scope: Embedding scope. Must be one of VECTOR_SCOPES.
+            vec: Query vector.
+            k: Maximum number of results.
+
+        Returns:
+            (id, distance) tuples, nearest first. Empty list if the scope
+            has never been populated.
+
+        Raises:
+            ValidationError: scope is not in VECTOR_SCOPES, or vec's length
+                does not match the scope's already-established dimension.
+        """
+        self._validate_scope(scope)
+        cursor = self.conn.cursor()
+        row = cursor.execute("SELECT dim FROM vector_scope WHERE scope = ?", (scope,)).fetchone()
+        if row is None:
+            return []
+        if row["dim"] != len(vec):
+            raise ValidationError(
+                f"Query vector for scope {scope!r} has dimension {len(vec)}, "
+                f"but this scope is established at dimension {row['dim']}"
+            )
+
+        table = f"vector_{scope}"
+        rows = cursor.execute(
+            f"SELECT rowid, distance FROM {table} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+            (_pack_vector(vec), k),
+        ).fetchall()
+        if not rows:
+            return []
+
+        rowids = [r["rowid"] for r in rows]
+        placeholders = ",".join("?" for _ in rowids)
+        id_rows = cursor.execute(
+            f"SELECT vec_rowid, id FROM vector_id_map WHERE scope = ? AND vec_rowid IN ({placeholders})",
+            (scope, *rowids),
+        ).fetchall()
+        id_by_rowid = {r["vec_rowid"]: r["id"] for r in id_rows}
+
+        return [(id_by_rowid[r["rowid"]], r["distance"]) for r in rows]
 
     def close(self) -> None:
         """Close the database connection."""

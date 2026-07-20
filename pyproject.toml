@@ -23,12 +23,12 @@ dependencies = [
 	"pydantic>=2.0",
 	"typer>=0.9",
 	"python-ulid>=2.0",
+	# Required, not optional (SPEC §12.1 MUST): the default SQLite backend
+	# uses sqlite-vec for embeddings (ADR-0020).
+	"sqlite-vec==0.1.1", # pinned: pre-v1, breaking changes possible
 ]
 
 [project.optional-dependencies]
-vec = [
-	"sqlite-vec==0.1.1", # pinned: pre-v1, breaking changes possible
-]
 store-duckdb = ["duckdb>=1.0"]
 rest = ["fastapi>=0.110", "uvicorn>=0.27"]
 graphql = ["strawberry-graphql>=0.219"]
@@ -36,7 +36,7 @@ mcp = [
     "mcp>=1.0",
 ]
 interop = ["pyyaml>=6.0"]
-all = ["ontolith[vec,rest,graphql,mcp,interop,store-duckdb]"]
+all = ["ontolith[rest,graphql,mcp,interop,store-duckdb]"]
 dev = [
 	"ontolith[all]",
 	# Testing
@@ -124,6 +124,10 @@ ignore_missing_imports = false
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "sqlite_vec"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 minversion = "8.0"

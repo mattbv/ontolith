@@ -48,11 +48,12 @@ from typing import Any
 import duckdb
 
 from ontolith.core import Assertion, AssertionEvent, Clock, Entity, SystemClock
-from ontolith.core.errors import StorageError
+from ontolith.core.errors import StorageError, ValidationError
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
+from ontolith.store.base import VECTOR_SCOPES
 
 
 class DuckDBBackend:
@@ -313,6 +314,20 @@ class DuckDBBackend:
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_assertion_pred_value
             ON assertion(predicate, value_lit, status)
+        """)
+
+        # Vector storage bookkeeping (SPEC §11.3, ADR-0020). One plain table
+        # per scope (`vector_entity`, `vector_assertion`), created lazily on
+        # first vector_upsert once the scope's dimension is known — see
+        # _ensure_vector_table. Unlike SQLite's vec0 tables, DuckDB's plain
+        # TEXT-PRIMARY-KEY table supports INSERT OR REPLACE directly
+        # (verified empirically), so no rowid-indirection table is needed
+        # here the way SQLiteBackend requires.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS vector_scope (
+                scope TEXT PRIMARY KEY,
+                dim INTEGER NOT NULL
+            )
         """)
 
         # Note: DuckDB's optimizer does not use secondary ART indexes for
@@ -1229,6 +1244,95 @@ class DuckDBBackend:
             raise StorageError(
                 f"Failed to resolve contradiction (id={contradiction_id}): {e}"
             ) from e
+
+    def _validate_scope(self, scope: str) -> None:
+        """Raise ValidationError unless scope is one of VECTOR_SCOPES."""
+        if scope not in VECTOR_SCOPES:
+            raise ValidationError(
+                f"Unknown vector scope: {scope!r} (must be one of {sorted(VECTOR_SCOPES)})"
+            )
+
+    def _ensure_vector_table(self, scope: str, vec_len: int) -> None:
+        """Establish (or validate against) the dimension for `scope`.
+
+        The first vector ever upserted into a scope fixes its dimension: the
+        table is created at that width, and later mismatched upserts raise
+        ValidationError rather than silently corrupting search results.
+
+        Raises:
+            ValidationError: `vec_len` doesn't match the established dim.
+            StorageError: If lazy table creation fails.
+        """
+        row = self.conn.execute("SELECT dim FROM vector_scope WHERE scope = ?", [scope]).fetchone()
+        if row is None:
+            try:
+                self.conn.execute(
+                    f"CREATE TABLE vector_{scope} (id TEXT PRIMARY KEY, embedding FLOAT[{vec_len}])"
+                )
+                self.conn.execute(
+                    "INSERT INTO vector_scope (scope, dim) VALUES (?, ?)", [scope, vec_len]
+                )
+            except duckdb.Error as e:
+                raise StorageError(f"Failed to create vector table for scope {scope!r}: {e}") from e
+            return
+        if row[0] != vec_len:
+            raise ValidationError(
+                f"Vector for scope {scope!r} has dimension {vec_len}, "
+                f"but this scope is established at dimension {row[0]}"
+            )
+
+    def vector_upsert(self, scope: str, id: str, vec: list[float]) -> None:
+        """Insert or replace the embedding vector for (scope, id).
+
+        Args:
+            scope: Embedding scope. Must be one of VECTOR_SCOPES.
+            id: Entity or assertion ID the vector represents.
+            vec: Embedding vector.
+
+        Raises:
+            ValidationError: scope is not in VECTOR_SCOPES, or vec's length
+                does not match the scope's already-established dimension.
+            StorageError: If persistence fails.
+        """
+        self._validate_scope(scope)
+        self._ensure_vector_table(scope, len(vec))
+        try:
+            self.conn.execute(f"INSERT OR REPLACE INTO vector_{scope} VALUES (?, ?)", [id, vec])
+        except duckdb.Error as e:
+            raise StorageError(f"Failed to upsert vector (scope={scope}, id={id}): {e}") from e
+
+    def vector_search(self, scope: str, vec: list[float], k: int) -> list[tuple[str, float]]:
+        """Return the k nearest ids to vec within scope, ascending distance.
+
+        Args:
+            scope: Embedding scope. Must be one of VECTOR_SCOPES.
+            vec: Query vector.
+            k: Maximum number of results.
+
+        Returns:
+            (id, distance) tuples, nearest first. Empty list if the scope
+            has never been populated.
+
+        Raises:
+            ValidationError: scope is not in VECTOR_SCOPES, or vec's length
+                does not match the scope's already-established dimension.
+        """
+        self._validate_scope(scope)
+        row = self.conn.execute("SELECT dim FROM vector_scope WHERE scope = ?", [scope]).fetchone()
+        if row is None:
+            return []
+        if row[0] != len(vec):
+            raise ValidationError(
+                f"Query vector for scope {scope!r} has dimension {len(vec)}, "
+                f"but this scope is established at dimension {row[0]}"
+            )
+
+        rows = self.conn.execute(
+            f"SELECT id, list_distance(embedding, ?) AS distance FROM vector_{scope} "
+            "ORDER BY distance LIMIT ?",
+            [vec, k],
+        ).fetchall()
+        return [(r[0], r[1]) for r in rows]
 
     def entities_where(
         self,

@@ -1057,3 +1057,23 @@ class TestSQLiteBackend:
         )
 
         assert [c.id for c in backend.contradictions()] == ["contra-newer", "contra-older"]
+
+    def test_vector_table_created_lazily_on_first_upsert(self, backend: SQLiteBackend) -> None:
+        """vector_{scope} is only created once a vector is actually upserted."""
+        cursor = backend.conn.cursor()
+        before = cursor.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'vector_entity'"
+        ).fetchall()
+        assert before == []
+
+        backend.vector_upsert("entity", "e1", [1.0, 0.0])
+
+        after = cursor.execute(
+            "SELECT name FROM sqlite_master WHERE name = 'vector_entity'"
+        ).fetchall()
+        assert len(after) == 1
+
+    def test_load_extension_disabled_after_init(self, backend: SQLiteBackend) -> None:
+        """enable_load_extension is toggled back off after loading sqlite-vec (supply-chain hygiene)."""
+        with pytest.raises(sqlite3.OperationalError, match="not authorized"):
+            backend.conn.load_extension("vec0")

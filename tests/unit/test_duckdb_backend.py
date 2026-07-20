@@ -1164,3 +1164,17 @@ class TestDuckDBBackend:
         events = backend.get_assertion_events("assertion-001")
         assert [e.id for e in events] == ["event-1", "event-2"]
         assert backend.get_assertion_events("nonexistent") == []
+
+    def test_vector_table_created_lazily_on_first_upsert(self, backend: DuckDBBackend) -> None:
+        """vector_{scope} is only created once a vector is actually upserted."""
+        before = backend.conn.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_name = 'vector_entity'"
+        ).fetchall()
+        assert before == []
+
+        backend.vector_upsert("entity", "e1", [1.0, 0.0])
+
+        after = backend.conn.execute(
+            "SELECT table_name FROM information_schema.tables WHERE table_name = 'vector_entity'"
+        ).fetchall()
+        assert len(after) == 1
