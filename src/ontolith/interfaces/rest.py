@@ -189,6 +189,45 @@ class ProvenanceOut(BaseModel):
     review_events: list[ReviewEventOut]
 
 
+class ProposeIn(BaseModel):
+    """Request body for POST /proposals.
+
+    Exactly one of (``value`` and ``value_type``) or ``target`` must be
+    set — a literal assertion or a relation, never both, never neither.
+    """
+
+    subject: str
+    predicate: str
+    value: str | None = None
+    value_type: str | None = None
+    target: str | None = None
+    confidence: float | None = None
+    source: str | None = None
+    rationale: str | None = None
+    acting_as: str | None = None
+    model: str | None = None
+
+
+class ProposalOut(BaseModel):
+    """A proposal's summary fields, returned by both proposal routes."""
+
+    id: str
+    namespace: str
+    author: str
+    acting_as: str | None
+    state: str
+    created_at: str
+    decided_at: str | None
+    policy_reason: str | None
+
+
+class ProposeOut(BaseModel):
+    """Response body for POST /proposals."""
+
+    proposal: ProposalOut
+    decision: str
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -373,6 +412,68 @@ def create_rest_app(kb: Ontology, auth_provider: AuthProvider, name: str = "onto
             proposal_id=match.proposal_id,
             supersedes=match.supersedes,
             review_events=review_events,
+        )
+
+    # ------------------------------------------------------------------
+    # POST /proposals
+    # ------------------------------------------------------------------
+
+    @app.post("/proposals", status_code=201)
+    def create_proposal_route(
+        body: ProposeIn,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> ProposeOut:
+        """Create a proposal to assert a fact or relation. Does NOT write directly.
+
+        Conflict-routing temporality is resolved server-side from the
+        active schema (SPEC §10.1). The acting principal is resolved from
+        the bearer token (ADR-0014), never taken from the request body.
+        """
+        has_literal = body.value is not None and body.value_type is not None
+        has_ref = body.target is not None
+        if has_literal == has_ref:
+            raise ValidationError("Provide exactly one of (value and value_type) or target")
+
+        if has_ref:
+            assert body.target is not None
+            proposal, decision = kb.propose_ref(
+                subject=body.subject,
+                predicate=body.predicate,
+                target=body.target,
+                author=principal.id,
+                confidence=body.confidence,
+                source=body.source,
+                rationale=body.rationale,
+                acting_as=body.acting_as,
+                model=body.model,
+            )
+        else:
+            assert body.value is not None and body.value_type is not None
+            proposal, decision = kb.propose(
+                subject=body.subject,
+                predicate=body.predicate,
+                value=body.value,
+                value_type=body.value_type,
+                author=principal.id,
+                confidence=body.confidence,
+                source=body.source,
+                rationale=body.rationale,
+                acting_as=body.acting_as,
+                model=body.model,
+            )
+
+        return ProposeOut(
+            proposal=ProposalOut(
+                id=proposal.id,
+                namespace=proposal.namespace,
+                author=proposal.author,
+                acting_as=proposal.acting_as,
+                state=proposal.state,
+                created_at=proposal.created_at.isoformat(),
+                decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
+                policy_reason=proposal.policy_reason,
+            ),
+            decision=type(decision).__name__,
         )
 
     return app

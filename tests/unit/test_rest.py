@@ -327,3 +327,143 @@ class TestProvenanceRoute:
         body = response.json()
         assert body["id"] == active[0].id
         assert body["status"] == "retracted"
+
+
+# ---------------------------------------------------------------------------
+# POST /proposals
+# ---------------------------------------------------------------------------
+
+
+class TestCreateProposalRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        client, _ = _client(kb)
+        response = client.post(
+            "/proposals",
+            json={
+                "subject": entity.id,
+                "predicate": "Person.name",
+                "value": "Ada",
+                "value_type": "Text",
+            },
+        )
+        assert response.status_code == 401
+
+    def test_human_auto_accepted(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/proposals",
+            json={
+                "subject": entity.id,
+                "predicate": "Person.name",
+                "value": "Ada",
+                "value_type": "Text",
+            },
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["proposal"]["state"] == "auto_accepted"
+        assert body["decision"] == "AutoAccept"
+
+    def test_ai_without_model_returns_400(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(AI, author=ADMIN)
+        response = client.post(
+            "/proposals",
+            json={
+                "subject": entity.id,
+                "predicate": "Person.name",
+                "value": "Ada",
+                "value_type": "Text",
+            },
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "VALIDATION_ERROR"
+
+    def test_ai_requires_review(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(AI, author=ADMIN)
+        response = client.post(
+            "/proposals",
+            json={
+                "subject": entity.id,
+                "predicate": "Person.name",
+                "value": "Ada",
+                "value_type": "Text",
+                "model": "test-model-v1",
+            },
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["proposal"]["state"] == "require_review"
+        assert body["decision"] == "RequireReview"
+
+    def test_both_value_and_target_returns_400(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        other = kb.create_entity("Person", author=HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/proposals",
+            json={
+                "subject": entity.id,
+                "predicate": "Person.name",
+                "value": "Ada",
+                "value_type": "Text",
+                "target": other.id,
+            },
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "VALIDATION_ERROR"
+
+    def test_neither_value_nor_target_returns_400(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/proposals",
+            json={"subject": entity.id, "predicate": "Person.name"},
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "VALIDATION_ERROR"
+
+    def test_ref_target_auto_accepted(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        person = kb.create_entity("Person", author=HUMAN)
+        org = kb.create_entity("Organization", author=HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/proposals",
+            json={"subject": person.id, "predicate": "Person.employer", "target": org.id},
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 201
+        assert response.json()["proposal"]["state"] == "auto_accepted"
