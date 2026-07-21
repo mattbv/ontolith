@@ -434,6 +434,26 @@ GraphQL (SPEC §14.3's other named half) is untouched by this KI and remains ful
 
 ---
 
+## KI-023 — SQLite backend's single connection is not safe under concurrent writes from an ASGI server
+
+**Severity:** Architecture gap — data-integrity risk under real concurrent traffic, not yet triggered by any test (single-threaded today)
+**Milestone target:** Backlog (address before REST, KI-022, is exposed to concurrent traffic; today's slice is expected to run single-worker)
+**SPEC reference:** SPEC §12.1 (SQLite default backend, WAL mode), CLAUDE.md "One transaction per proposal acceptance"
+
+### Description
+
+`SQLiteBackend.__init__` (`src/ontolith/store/sqlite/backend.py`) opens its connection with `check_same_thread=False`, added when the REST interface (KI-022) was built: an ASGI server dispatches sync route handlers onto a worker threadpool, a different OS thread than the one that constructed the backend, which stock `sqlite3` blocks regardless of whether the cross-thread access is ever actually concurrent.
+
+That flag only lifts the same-thread check — it does not serialize access. The connection's transaction state (`self._in_transaction`, `transaction()`'s `BEGIN`/`COMMIT` in `backend.py`) is shared, mutable, unguarded state. Two genuinely concurrent requests that both write (e.g. two overlapping `POST /proposals` that auto-accept) can interleave on the same connection: a second `BEGIN` while the first transaction is still open raises `sqlite3.OperationalError` (surfaced as a 500 `StorageError`), or worse, non-transactional autocommit statements from one request can interleave with another's open transaction, violating "one transaction per proposal acceptance" (CLAUDE.md) without necessarily raising anything.
+
+Found during `ontolith-reviewer`'s pass on the REST interface's first PR (KI-022) — flagged MEDIUM there ("would elevate to HIGH if this REST surface is intended to serve concurrent traffic"). Not yet triggered: all existing tests exercise the backend from a single thread at a time (either directly, or serially through `TestClient`), and `uvicorn`'s default deployment for this project has not yet been decided (single-worker sequential dispatch would not trigger this at all).
+
+### Fix
+
+Before deploying the REST interface behind a concurrent-capable ASGI worker configuration: either (a) serialize access with a lock around `transaction()` and every direct read/write method — the correct general fix, but touches most of `SQLiteBackend`'s surface and needs its own dedicated concurrency test coverage (not a bolt-on to an unrelated PR), or (b) constrain deployment to single-worker/sequential request handling (e.g. `uvicorn --workers 1` with no threadpool concurrency for sync routes — would need routes converted to `async def` too, since FastAPI threadpools sync handlers regardless of worker count) and document that constraint where the REST server is actually stood up. A per-request connection (connection pool) is a third option worth evaluating against WAL mode's own concurrent-reader support.
+
+---
+
 ## Format
 
 Each entry follows this structure:
