@@ -95,6 +95,36 @@ class ErrorOut(BaseModel):
     detail: dict[str, Any]
 
 
+class AssertionOut(BaseModel):
+    """A single active assertion, as returned nested under an entity."""
+
+    id: str
+    predicate: str
+    value: str
+    value_type: str | None
+    confidence: float | None
+    author: str
+    asserted_at: str
+
+
+class EntityOut(BaseModel):
+    """An entity's own fields, without its assertions."""
+
+    id: str
+    concept: str
+    namespace: str
+    natural_key: str | None
+    created_at: str
+    created_by: str
+
+
+class EntityDetailOut(BaseModel):
+    """Response body for GET /entities/{entity_id}."""
+
+    entity: EntityOut
+    assertions: list[AssertionOut]
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -164,6 +194,43 @@ def create_rest_app(kb: Ontology, auth_provider: AuthProvider, name: str = "onto
             for concept_name, concept_def in ir.concepts.items()
         ]
         return SchemaOut(namespace=namespace, version=ir.version, concepts=concepts)
+
+    # ------------------------------------------------------------------
+    # GET /entities/{entity_id}
+    # ------------------------------------------------------------------
+
+    @app.get("/entities/{entity_id}")
+    def get_entity_route(
+        entity_id: str,
+        _principal: Principal = Depends(_resolve_principal),
+    ) -> EntityDetailOut:
+        """Fetch an entity and its currently active assertions."""
+        entity = kb.backend.get_entity(entity_id)
+        if entity is None:
+            raise NotFoundError(f"Entity {entity_id!r} not found")
+        assertions = kb.backend.assertions(subject=entity_id, status="active")
+        return EntityDetailOut(
+            entity=EntityOut(
+                id=entity.id,
+                concept=entity.concept,
+                namespace=entity.namespace,
+                natural_key=entity.natural_key,
+                created_at=entity.created_at.isoformat(),
+                created_by=entity.created_by,
+            ),
+            assertions=[
+                AssertionOut(
+                    id=a.id,
+                    predicate=a.predicate,
+                    value=a.value,
+                    value_type=a.value_type,
+                    confidence=a.confidence,
+                    author=a.author,
+                    asserted_at=a.asserted_at.isoformat(),
+                )
+                for a in assertions
+            ],
+        )
 
     return app
 

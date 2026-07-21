@@ -117,3 +117,53 @@ class TestSchemaRoute:
         response = client.get("/schema", params={"namespace": "other"}, headers=_auth(token))
         assert response.status_code == 200
         assert response.json() == {"namespace": None, "version": None, "concepts": []}
+
+
+# ---------------------------------------------------------------------------
+# GET /entities/{entity_id}
+# ---------------------------------------------------------------------------
+
+
+class TestEntityRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        client, _ = _client(kb)
+        response = client.get(f"/entities/{entity.id}")
+        assert response.status_code == 401
+
+    def test_known_entity(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get(f"/entities/{entity.id}", headers=_auth(token))
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["entity"]["id"] == entity.id
+        assert body["entity"]["concept"] == "Person"
+        assert len(body["assertions"]) == 1
+        assert body["assertions"][0]["value"] == "Ada"
+
+    def test_unknown_entity_returns_404(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get("/entities/does-not-exist", headers=_auth(token))
+        assert response.status_code == 404
+        assert response.json()["code"] == "NOT_FOUND"
+
+    def test_excludes_non_active_assertions(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        kb.retract(active[0].id, HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get(f"/entities/{entity.id}", headers=_auth(token))
+        assert response.json()["assertions"] == []
