@@ -240,6 +240,72 @@ class TestQueryRoute:
         assert body["count"] == 0
         assert body["entities"] == []
 
+    def test_semantic_ranks_by_similarity(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada Lovelace", "Text", HUMAN)
+        kb.reindex()
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/query",
+            json={"concept": "Person", "semantic": "Ada Lovelace"},
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["count"] == 1
+        assert body["entities"][0]["id"] == entity.id
+
+    def test_min_confidence_filters_entities(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        confident = kb.create_entity("Person", author=HUMAN)
+        unsure = kb.create_entity("Person", author=HUMAN)
+        kb.propose(confident.id, "Person.name", "Ada", "Text", HUMAN, confidence=0.9)
+        kb.propose(unsure.id, "Person.name", "Bob", "Text", HUMAN, confidence=0.1)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/query",
+            json={"concept": "Person", "min_confidence": 0.5},
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["count"] == 1
+        assert body["entities"][0]["id"] == confident.id
+
+    def test_trust_at_least_filters_entities(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "trusted@example.com",
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            trust_level=8,
+        )
+        trusted_entity = kb.create_entity("Person", author=HUMAN)
+        untrusted_entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(trusted_entity.id, "Person.name", "Ada", "Text", "trusted@example.com")
+        kb.propose(untrusted_entity.id, "Person.name", "Bob", "Text", HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/query",
+            json={"concept": "Person", "trust_at_least": 5},
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["count"] == 1
+        assert body["entities"][0]["id"] == trusted_entity.id
+
 
 # ---------------------------------------------------------------------------
 # GET /provenance/{assertion_id}
@@ -533,3 +599,74 @@ class TestListProposalsRoute:
         response = client.get("/proposals", headers=_auth(token))
         assert response.status_code == 200
         assert response.json() == []
+
+
+# ---------------------------------------------------------------------------
+# OntolithError -> HTTP status mapping (SPEC §16)
+# ---------------------------------------------------------------------------
+
+
+class TestErrorMapping:
+    """One assertion per error type actually reachable through this slice's
+    routes — guards against the status-code table in ADR-0021 silently
+    drifting as routes are added or changed."""
+
+    def test_auth_error_maps_to_401(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        response = client.get("/schema", headers=_auth("garbage"))
+        assert response.status_code == 401
+        body = response.json()
+        assert body["code"] == "AUTH_ERROR"
+        assert "message" in body
+        assert "detail" in body
+
+    def test_not_found_error_maps_to_404(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get("/entities/nope", headers=_auth(token))
+        assert response.status_code == 404
+        assert response.json()["code"] == "NOT_FOUND"
+
+    def test_validation_error_maps_to_400(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/proposals",
+            json={"subject": entity.id, "predicate": "Person.name"},
+            headers=_auth(token),
+        )
+        assert response.status_code == 400
+        assert response.json()["code"] == "VALIDATION_ERROR"
+
+    def test_capability_error_maps_to_403(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "readonly@example.com",
+            kind="human",
+            auth_method="oidc",
+            default_capability="read",
+        )
+        entity = kb.create_entity("Person", author=HUMAN)
+        client, _ = _client(kb)
+        token = kb.issue_token("readonly@example.com", author=ADMIN)
+        response = client.post(
+            "/proposals",
+            json={
+                "subject": entity.id,
+                "predicate": "Person.name",
+                "value": "Ada",
+                "value_type": "Text",
+            },
+            headers=_auth(token),
+        )
+        # ThresholdPolicy resolves a read-capability author to a persisted
+        # Reject decision (SPEC §9.1's modeled state, not an exception) —
+        # this asserts the response is a normal 201 with state="rejected",
+        # not that CapabilityError fires here. See KI-015/known-issues.md
+        # for why this is deliberate, not a gap.
+        assert response.status_code == 201
+        assert response.json()["proposal"]["state"] == "rejected"

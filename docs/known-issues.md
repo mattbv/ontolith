@@ -408,7 +408,7 @@ Add a `token: str` parameter to `schema_tool`/`get_tool`/`query_tool`/`provenanc
 
 ---
 
-## KI-022 — REST interface (SPEC §14.3) not yet implemented
+## KI-022 — REST interface (SPEC §14.3) — PARTIALLY RESOLVED (M3)
 
 **Severity:** Architecture gap — named M3 scope item with zero implementation
 **Milestone target:** M3 (first slice); full SPEC §14.3 parity is Backlog
@@ -428,7 +428,9 @@ GraphQL (SPEC §14.3's other named half) is untouched by this KI and remains ful
 
 ### Fix
 
-Implement the first-PR slice above; update this entry to PARTIALLY RESOLVED (mirroring KI-014's pattern) noting what landed and what of the deferred list remains. Full resolution requires the follow-up PR closing the remaining bullet list, plus a decision on GraphQL's own scoping (separate KI or folded into this one once REST's shape is settled).
+**Read + propose slice: resolved.** `src/ontolith/interfaces/rest.py` (`create_rest_app`, ADR-0021) implements `GET /schema`, `GET /entities/{id}`, `POST /query`, `GET /provenance/{id}`, `POST /proposals`, `GET /proposals` — all requiring an ADR-0014 bearer token, all errors mapped through one `OntolithError -> HTTP status` handler per SPEC §16.
+
+**Still open:** `/assertions` direct write, `/proposals/{id}/accept|reject|review`, `/contradictions` (list + resolve) and `flag_contradiction`, `/principals` (create/list, token issue/revoke/list), `/namespaces`, and `/query` offset pagination — see this entry's original scope list above for the full breakdown. GraphQL remains fully unscoped.
 
 ---
 
