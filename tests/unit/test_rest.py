@@ -239,3 +239,91 @@ class TestQueryRoute:
         body = response.json()
         assert body["count"] == 0
         assert body["entities"] == []
+
+
+# ---------------------------------------------------------------------------
+# GET /provenance/{assertion_id}
+# ---------------------------------------------------------------------------
+
+
+class TestProvenanceRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        client, _ = _client(kb)
+        response = client.get(f"/provenance/{assertion.id}")
+        assert response.status_code == 401
+
+    def test_known_assertion(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN, confidence=0.95, source="wiki")
+        assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get(f"/provenance/{assertions[0].id}", headers=_auth(token))
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["id"] == assertions[0].id
+        assert body["author"] == HUMAN
+        assert body["confidence"] == 0.95
+        assert body["source"] == "wiki"
+        assert body["subject"] == entity.id
+
+    def test_surfaces_review_events_after_accept(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI, model="claude-sonnet-4"
+        )
+        kb.accept_proposal(proposal.id, REVIEWER)
+        assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get(f"/provenance/{assertions[0].id}", headers=_auth(token))
+
+        body = response.json()
+        assert len(body["review_events"]) == 1
+        assert body["review_events"][0]["type"] == "accept"
+        assert body["review_events"][0]["actor"] == REVIEWER
+
+    def test_review_events_empty_for_direct_write(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get(f"/provenance/{assertion.id}", headers=_auth(token))
+
+        body = response.json()
+        assert body["proposal_id"] is None
+        assert body["review_events"] == []
+
+    def test_unknown_assertion_returns_404(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get("/provenance/nonexistent", headers=_auth(token))
+        assert response.status_code == 404
+        assert response.json()["code"] == "NOT_FOUND"
+
+    def test_reachable_for_retracted_assertion(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        kb.retract(active[0].id, HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get(f"/provenance/{active[0].id}", headers=_auth(token))
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["id"] == active[0].id
+        assert body["status"] == "retracted"

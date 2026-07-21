@@ -158,6 +158,37 @@ class QueryOut(BaseModel):
     entities: list[EntitySummaryOut]
 
 
+class ReviewEventOut(BaseModel):
+    """A single review-decision event in an assertion's provenance trail."""
+
+    actor: str
+    type: str
+    detail: str | None
+    at: str
+
+
+class ProvenanceOut(BaseModel):
+    """Response body for GET /provenance/{assertion_id}."""
+
+    id: str
+    subject: str
+    predicate: str
+    value: str
+    value_type: str | None
+    status: str
+    author: str
+    confidence: float | None
+    source: str | None
+    rationale: str | None
+    model: str | None
+    asserted_at: str
+    valid_from: str | None
+    valid_to: str | None
+    proposal_id: str | None
+    supersedes: str | None
+    review_events: list[ReviewEventOut]
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -299,6 +330,49 @@ def create_rest_app(kb: Ontology, auth_provider: AuthProvider, name: str = "onto
                 )
                 for e in entities
             ],
+        )
+
+    # ------------------------------------------------------------------
+    # GET /provenance/{assertion_id}
+    # ------------------------------------------------------------------
+
+    @app.get("/provenance/{assertion_id}")
+    def provenance_route(
+        assertion_id: str,
+        _principal: Principal = Depends(_resolve_principal),
+    ) -> ProvenanceOut:
+        """Return the full provenance record for a single assertion."""
+        match = kb.backend.get_assertion(assertion_id)
+        if match is None:
+            raise NotFoundError(f"Assertion {assertion_id!r} not found")
+
+        review_events = (
+            [
+                ReviewEventOut(actor=e.actor, type=e.type, detail=e.detail, at=e.at.isoformat())
+                for e in kb.backend.get_proposal_events(match.proposal_id)
+            ]
+            if match.proposal_id
+            else []
+        )
+
+        return ProvenanceOut(
+            id=match.id,
+            subject=match.subject,
+            predicate=match.predicate,
+            value=match.value,
+            value_type=match.value_type,
+            status=match.status,
+            author=match.author,
+            confidence=match.confidence,
+            source=match.source,
+            rationale=match.rationale,
+            model=match.model,
+            asserted_at=match.asserted_at.isoformat(),
+            valid_from=match.valid_from.isoformat() if match.valid_from else None,
+            valid_to=match.valid_to.isoformat() if match.valid_to else None,
+            proposal_id=match.proposal_id,
+            supersedes=match.supersedes,
+            review_events=review_events,
         )
 
     return app
