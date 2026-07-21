@@ -33,6 +33,7 @@ We use the [MADR](https://adr.github.io/madr/) (Markdown Any Decision Records) f
 - [ADR-0018](ADR-0018-policy-strategy-injection.md) — **PolicyStrategy Injection** (Ontology accepts a custom policy; SPEC's kb parameter deferred pending a replay/snapshot design)
 - [ADR-0019](ADR-0019-public-api-stability-policy.md) — **Public API Stability Policy** (`__all__`-defined surface, pinned-export regression test, `griffe` CI gate deferred)
 - [ADR-0020](ADR-0020-hybrid-retrieval-storage-layer.md) — **Hybrid Retrieval** (`Embedder` port in `core/`, per-scope lazy vector tables, `sqlite-vec` required, `.semantic()` vector-search-first ranking, `Ontology.reindex()`)
+- [ADR-0021](ADR-0021-rest-interface.md) — **REST Interface — Read + Propose Slice** (`create_rest_app()` factory, bearer-token auth on all routes, 6 MCP-mirrored endpoints + `GET /proposals`, centralized error mapping, typed Pydantic responses)
 
 ## Decision Process
 
