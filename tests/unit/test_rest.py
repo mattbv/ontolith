@@ -167,3 +167,75 @@ class TestEntityRoute:
         token = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get(f"/entities/{entity.id}", headers=_auth(token))
         assert response.json()["assertions"] == []
+
+
+# ---------------------------------------------------------------------------
+# POST /query
+# ---------------------------------------------------------------------------
+
+
+class TestQueryRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        response = client.post("/query", json={"concept": "Person"})
+        assert response.status_code == 401
+
+    def test_all_of_concept(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_entity("Person", author=HUMAN)
+        kb.create_entity("Person", author=HUMAN)
+        kb.create_entity("Organization", author=HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post("/query", json={"concept": "Person"}, headers=_auth(token))
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["count"] == 2
+        assert len(body["entities"]) == 2
+
+    def test_with_filter(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        e1 = kb.create_entity("Person", author=HUMAN)
+        e2 = kb.create_entity("Person", author=HUMAN)
+        kb.propose(e1.id, "Person.name", "Ada", "Text", HUMAN)
+        kb.propose(e2.id, "Person.name", "Grace", "Text", HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/query",
+            json={"concept": "Person", "filters": {"name": "Ada"}},
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["count"] == 1
+        assert body["entities"][0]["id"] == e1.id
+
+    def test_limit_is_applied(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        for _ in range(3):
+            kb.create_entity("Person", author=HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/query", json={"concept": "Person", "limit": 2}, headers=_auth(token)
+        )
+
+        assert response.status_code == 200
+        assert response.json()["count"] == 2
+
+    def test_empty_concept_returns_empty(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post("/query", json={"concept": "Organization"}, headers=_auth(token))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["count"] == 0
+        assert body["entities"] == []

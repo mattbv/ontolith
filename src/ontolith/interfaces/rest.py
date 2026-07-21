@@ -125,6 +125,39 @@ class EntityDetailOut(BaseModel):
     assertions: list[AssertionOut]
 
 
+class EntitySummaryOut(BaseModel):
+    """A single entity's summary fields, as returned in a query result list."""
+
+    id: str
+    concept: str
+    natural_key: str | None
+    created_at: str
+
+
+class QueryIn(BaseModel):
+    """Request body for POST /query.
+
+    No ``namespace`` field: ``Ontology.namespace`` is hardcoded to
+    ``"default"`` (M1 limitation), so ``kb.query()`` has no namespace
+    argument to forward one to.
+    """
+
+    concept: str
+    filters: dict[str, str] | None = None
+    semantic: str | None = None
+    min_confidence: float | None = None
+    trust_at_least: int | None = None
+    limit: int | None = None
+
+
+class QueryOut(BaseModel):
+    """Response body for POST /query."""
+
+    concept: str
+    count: int
+    entities: list[EntitySummaryOut]
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -229,6 +262,42 @@ def create_rest_app(kb: Ontology, auth_provider: AuthProvider, name: str = "onto
                     asserted_at=a.asserted_at.isoformat(),
                 )
                 for a in assertions
+            ],
+        )
+
+    # ------------------------------------------------------------------
+    # POST /query
+    # ------------------------------------------------------------------
+
+    @app.post("/query")
+    def query_route(
+        body: QueryIn,
+        _principal: Principal = Depends(_resolve_principal),
+    ) -> QueryOut:
+        """Query entities of a concept, optionally filtered/ranked."""
+        builder = kb.query(body.concept)
+        if body.filters:
+            builder = builder.where(**body.filters)
+        if body.semantic is not None:
+            builder = builder.semantic(body.semantic)
+        if body.min_confidence is not None:
+            builder = builder.min_confidence(body.min_confidence)
+        if body.trust_at_least is not None:
+            builder = builder.trust_at_least(body.trust_at_least)
+        if body.limit is not None:
+            builder = builder.limit(body.limit)
+        entities = builder.all()
+        return QueryOut(
+            concept=body.concept,
+            count=len(entities),
+            entities=[
+                EntitySummaryOut(
+                    id=e.id,
+                    concept=e.concept,
+                    natural_key=e.natural_key,
+                    created_at=e.created_at.isoformat(),
+                )
+                for e in entities
             ],
         )
 
