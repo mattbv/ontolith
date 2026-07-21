@@ -232,10 +232,18 @@ Set in M1 as baselines, enforced as gates by M4 (illustrative starting targets �
 | `propose` + policy eval + commit | p95 < 50 ms |
 | Single-entity `get` with provenance | p95 < 10 ms |
 | 3-hop traversal, 100k-assertion KB | p95 < 200 ms |
-| Hybrid query (symbolic prefilter + vector rerank), k=10 | p95 < 150 ms |
+| Hybrid query (symbolic prefilter + vector rerank), k=10 [^1] | p95 < 150 ms |
 | `as_of` reconstruction, 100k assertions | p95 < 300 ms |
 
 The 3-hop traversal budget is the canary for the SQLite-default decision; if real graphs blow it, that's the signal to graduate the scale-out backend (PRD §15).
+
+[^1]: As implemented (ADR-0020, M3), the actual order is the reverse: vector-search-first with an
+overfetch, then intersected with any symbolic `.where()` filter, preserving vector rank order —
+not a symbolic prefilter reranked by vector distance. See ADR-0020 §5 for the rationale (a
+literal prefilter-then-rerank would re-embed and re-rank every symbolic candidate per call, which
+does not stay within this budget under the pure-Python default `Embedder`) and its recorded
+recall-cutoff consequence. The budget number itself (p95 < 150 ms) is unaffected and was
+comfortably met in benchmarking (`tests/benchmarks/test_hybrid_query.py`) at 1k entities.
 
 ---
 

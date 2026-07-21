@@ -301,6 +301,25 @@ def query_entities(
         kb.close()
 
 
+@app.command("reindex")
+def reindex(
+    concept: Annotated[
+        str | None,
+        typer.Option("--concept", help="Only re-index entities of this concept."),
+    ] = None,
+) -> None:
+    """Re-embed entities' Text content into the vector index (SPEC §11.3)."""
+    kb = _kb()
+    try:
+        count = kb.reindex(concept=concept)
+        typer.echo(f"Reindexed {count} entit{'y' if count == 1 else 'ies'}.")
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
 # ─── proposal ─────────────────────────────────────────────────────────────────
 
 

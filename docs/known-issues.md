@@ -330,21 +330,25 @@ When a concrete KB-inspecting policy strategy is actually being built: design th
 
 ---
 
-## KI-018 — Hybrid retrieval (vector search + `Embedder`) never implemented
+## KI-018 — Hybrid retrieval (vector search + `Embedder`) never implemented ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — SPEC-normative surface entirely missing, not partially built
-**Milestone target:** Backlog
+**Milestone target:** M3
 **SPEC reference:** SPEC §11.3 (Hybrid retrieval), §12.2 (`StorageBackend.vector_upsert`/`vector_search`), §14 (`Embedder` Protocol)
 
 ### Description
 
-SPEC §11.3 specifies semantic search over entity/assertion embeddings via an `Embedder` port and a vector store, defaulting to `sqlite-vec`; SPEC §12.2's normative `StorageBackend` shape includes `vector_upsert(scope, id, vec)` and `vector_search(scope, vec, k)`; SPEC §14 defines the `Embedder` Protocol itself. None of this exists: `StorageBackend` (`src/ontolith/store/base.py`) has no vector methods on either backend, `Embedder` has no concrete Protocol anywhere in the codebase (`plugins/ports.py` documents its own absence explicitly), and `QueryBuilder` has no `.semantic()` method. `sqlite-vec==0.1.1` is a pinned dependency in `pyproject.toml` but is never imported anywhere — it does not back any working code path.
+SPEC §11.3 specifies semantic search over entity/assertion embeddings via an `Embedder` port and a vector store, defaulting to `sqlite-vec`; SPEC §12.2's normative `StorageBackend` shape includes `vector_upsert(scope, id, vec)` and `vector_search(scope, vec, k)`; SPEC §14 defines the `Embedder` Protocol itself. None of this existed: `StorageBackend` (`src/ontolith/store/base.py`) had no vector methods on either backend, `Embedder` had no concrete Protocol anywhere in the codebase (`plugins/ports.py` documented its own absence explicitly), and `QueryBuilder` had no `.semantic()` method. `sqlite-vec==0.1.1` was a pinned optional dependency in `pyproject.toml` but was never imported anywhere — it did not back any working code path.
 
-Surfaced during a whole-project docs/known-issues refresh (2026-07-14); this is a pre-existing gap, not a regression — hybrid retrieval was never scheduled before M4 in the Implementation Plan, so its absence through M3 is expected. Recorded here so it stops being an implicit assumption and starts being an explicit, trackable gap against the SPEC's normative surface.
+Surfaced during a whole-project docs/known-issues refresh (2026-07-14); this was a pre-existing gap, not a regression — hybrid retrieval was never scheduled before M4 in the Implementation Plan, so its absence through M3 was expected. Recorded so it stopped being an implicit assumption and started being an explicit, trackable gap against the SPEC's normative surface.
 
 ### Fix
 
-Design and implement in the milestone where hybrid retrieval is actually scheduled: add `vector_upsert`/`vector_search` to the `StorageBackend` Protocol and both adapters (SQLite via `sqlite-vec`, DuckDB via its native vector/array support or an equivalent extension), define the `Embedder` Protocol for real (currently only a doc comment describing its absence), and add `QueryBuilder.semantic()` to compose symbolic and vector filters per SPEC §11.3's example. Until then, `sqlite-vec` should either stay pinned as a forward-looking placeholder (documented as such) or be dropped from dependencies — a decision for whichever chunk actually schedules this work.
+Implemented across two sequential PRs, per ADR-0020 (amended for the query-layer decisions below):
+
+**Storage layer:** `Embedder` Protocol (`src/ontolith/core/embedder.py`) with `HashingEmbedder` (dependency-free sha256 feature-hashing default) and `LookupEmbedder` (deterministic test double). `StorageBackend.vector_upsert`/`vector_search` added to the port and both adapters — SQLite via `sqlite-vec`'s `vec0` virtual tables (with a rowid-indirection table working around `vec0`'s lack of TEXT-primary-key upsert/delete support), DuckDB via its native `list_distance()` scalar function. `sqlite-vec` moved from optional to a required dependency, matching SPEC §12.1's MUST.
+
+**Query layer:** `QueryBuilder.semantic(text)` composes with `.where()` per SPEC §11.3's example — a vector-search-first, symbolic-intersect algorithm (overfetches from the vector index, then intersects with `.where()` matches preserving vector rank order; see ADR-0020 for why this diverges from the Implementation Plan's literal "symbolic prefilter + vector rerank" phrasing, and the resulting recall-cutoff limitation). `.min_confidence(threshold)`/`.trust_at_least(level)` add independent existential post-filters; `.limit(n)` caps results. `Ontology.reindex(concept=None)` is the explicit (non-auto) entry point that embeds entities' Text-typed assertion content into the vector index — no write path auto-embeds on write. A CLI `ontolith reindex [--concept]` command and an informational hybrid-query benchmark (`tests/benchmarks/test_hybrid_query.py`, p95 well under the 150ms budget at 1k entities) were added alongside.
 
 ---
 

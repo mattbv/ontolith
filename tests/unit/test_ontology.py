@@ -699,3 +699,84 @@ class TestFlagContradiction:
         assert action == "extended"
         assert second.id == first.id
         assert set(second.member_ids) == {a_id, b_id, c_assertion.id}
+
+
+class TestReindex:
+    """Tests for Ontology.reindex() (SPEC §11.3, ADR-0020)."""
+
+    def test_reindex_embeds_text_properties(self, kb: Ontology) -> None:
+        """A Text-typed assertion's entity is embedded and becomes findable via .semantic()."""
+        entity = kb.create_entity("Person", author="alice@example.com")
+        kb.assert_literal(entity.id, "Person.name", "Ada Lovelace", "Text", "alice@example.com")
+
+        count = kb.reindex()
+
+        assert count == 1
+        results = kb.query("Person").semantic("Ada Lovelace").all()
+        assert results[0].id == entity.id
+
+    def test_reindex_skips_entities_without_text_assertions(self, kb: Ontology) -> None:
+        """An entity with only non-Text assertions is not upserted into the vector index."""
+        with_text = kb.create_entity("Person", author="alice@example.com")
+        kb.assert_literal(with_text.id, "Person.name", "Ada", "Text", "alice@example.com")
+
+        without_text = kb.create_entity("Person", author="alice@example.com")
+        kb.assert_literal(without_text.id, "Person.born", "1815", "Integer", "alice@example.com")
+
+        count = kb.reindex()
+
+        assert count == 1
+        vec = kb.embedder.embed(["Ada"])[0]
+        results = kb.backend.vector_search("entity", vec, k=10)
+        assert [entity_id for entity_id, _ in results] == [with_text.id]
+
+    def test_reindex_no_entities_returns_zero(self, kb: Ontology) -> None:
+        assert kb.reindex() == 0
+
+    def test_reindex_returns_zero_when_no_text_assertions(self, kb: Ontology) -> None:
+        kb.create_entity("Person", author="alice@example.com")
+        assert kb.reindex() == 0
+
+    def test_reindex_concept_filter(self, kb: Ontology) -> None:
+        """reindex(concept=...) only embeds entities of that concept."""
+        person = kb.create_entity("Person", author="alice@example.com")
+        kb.assert_literal(person.id, "Person.name", "Ada", "Text", "alice@example.com")
+
+        org = kb.create_entity("Organization", author="alice@example.com")
+        kb.assert_literal(org.id, "Organization.name", "Acme", "Text", "alice@example.com")
+
+        count = kb.reindex(concept="Person")
+
+        assert count == 1
+        vec = kb.embedder.embed(["Acme"])[0]
+        results = kb.backend.vector_search("entity", vec, k=10)
+        assert org.id not in {entity_id for entity_id, _ in results}
+
+    def test_reindex_is_idempotent(self, kb: Ontology) -> None:
+        """Calling reindex() repeatedly upserts (replaces), not duplicates."""
+        entity = kb.create_entity("Person", author="alice@example.com")
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", "alice@example.com")
+
+        first = kb.reindex()
+        second = kb.reindex()
+
+        assert first == 1
+        assert second == 1
+        vec = kb.embedder.embed(["Ada"])[0]
+        results = kb.backend.vector_search("entity", vec, k=10)
+        assert len(results) == 1
+        assert results[0][0] == entity.id
+
+    def test_reindex_concatenates_multiple_text_properties(self, kb: Ontology) -> None:
+        """Multiple Text-typed assertions on one entity are concatenated, sorted by predicate."""
+        entity = kb.create_entity("Person", author="alice@example.com")
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", "alice@example.com")
+        kb.assert_literal(entity.id, "Person.bio", "Mathematician", "Text", "alice@example.com")
+
+        assert kb.reindex() == 1
+
+        # "Person.bio" < "Person.name" alphabetically.
+        vec = kb.embedder.embed(["Mathematician Ada"])[0]
+        results = kb.backend.vector_search("entity", vec, k=10)
+        assert results[0][0] == entity.id
+        assert results[0][1] == pytest.approx(0.0, abs=1e-6)
