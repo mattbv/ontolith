@@ -476,6 +476,39 @@ def create_rest_app(kb: Ontology, auth_provider: AuthProvider, name: str = "onto
             decision=type(decision).__name__,
         )
 
+    # ------------------------------------------------------------------
+    # GET /proposals
+    # ------------------------------------------------------------------
+
+    @app.get("/proposals")
+    def list_proposals_route(
+        state: str | None = "require_review",
+        _principal: Principal = Depends(_resolve_principal),
+    ) -> list[ProposalOut]:
+        """List proposals, defaulting to those pending review.
+
+        Pass ``state=all`` to list proposals in every state — a plain
+        empty query string value can't express "no filter" unambiguously,
+        so ``"all"`` is used as an explicit sentinel instead (mirrors the
+        CLI's ``proposal list --all`` flag, expressed as a query value
+        here since REST has no separate boolean-flag convention).
+        """
+        effective_state = None if state == "all" else state
+        results = kb.proposals(state=effective_state)
+        return [
+            ProposalOut(
+                id=p.id,
+                namespace=p.namespace,
+                author=p.author,
+                acting_as=p.acting_as,
+                state=p.state,
+                created_at=p.created_at.isoformat(),
+                decided_at=p.decided_at.isoformat() if p.decided_at else None,
+                policy_reason=p.policy_reason,
+            )
+            for p in results
+        ]
+
     return app
 
 

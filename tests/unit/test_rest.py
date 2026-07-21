@@ -467,3 +467,69 @@ class TestCreateProposalRoute:
 
         assert response.status_code == 201
         assert response.json()["proposal"]["state"] == "auto_accepted"
+
+
+# ---------------------------------------------------------------------------
+# GET /proposals
+# ---------------------------------------------------------------------------
+
+
+class TestListProposalsRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        response = client.get("/proposals")
+        assert response.status_code == 401
+
+    def test_defaults_to_require_review(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)  # auto-accepted
+        kb.propose(
+            entity.id, "Person.name", "Grace", "Text", AI, model="test-model"
+        )  # require_review
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get("/proposals", headers=_auth(token))
+
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["state"] == "require_review"
+        assert body[0]["author"] == AI
+
+    def test_state_filter(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get("/proposals", params={"state": "auto_accepted"}, headers=_auth(token))
+
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["state"] == "auto_accepted"
+
+    def test_all_states_via_sentinel(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        kb.propose(entity.id, "Person.name", "Grace", "Text", AI, model="test-model")
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get("/proposals", params={"state": "all"}, headers=_auth(token))
+
+        assert response.status_code == 200
+        assert len(response.json()) == 2
+
+    def test_no_matches_returns_empty_list(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get("/proposals", headers=_auth(token))
+        assert response.status_code == 200
+        assert response.json() == []
