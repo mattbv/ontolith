@@ -24,6 +24,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -267,6 +268,21 @@ def create_rest_app(kb: Ontology, auth_provider: AuthProvider, name: str = "onto
         status = _STATUS_BY_ERROR_TYPE.get(type(exc), 500)
         body = ErrorOut(code=exc.code, message=exc.message, detail=exc.detail)
         return JSONResponse(status_code=status, content=body.model_dump())
+
+    @app.exception_handler(RequestValidationError)
+    def _handle_request_validation_error(
+        _request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        """Map FastAPI's own request-body/query validation failures onto the
+        same envelope as ValidationError (SPEC §16) — malformed input is a
+        validation failure regardless of whether Pydantic or domain code
+        caught it first."""
+        body = ErrorOut(
+            code=ValidationError.code,
+            message="Request validation failed",
+            detail={"errors": exc.errors()},
+        )
+        return JSONResponse(status_code=400, content=body.model_dump())
 
     # ------------------------------------------------------------------
     # GET /schema

@@ -82,6 +82,14 @@ current per-call-site duplication (`{"error": str(exc), "code":
 | `StorageError` | 500 |
 | `PluginError` | 500 |
 
+A second handler, registered for FastAPI's own `RequestValidationError`
+(malformed request bodies caught by Pydantic before a route body ever
+runs — e.g. a missing required field), maps onto the same envelope with
+`code="VALIDATION_ERROR"`, status 400, and `detail={"errors": [...]}`
+(Pydantic's own structured error list) — otherwise this class of failure
+would surface FastAPI's default 422 body shape instead of the SPEC §16
+envelope, undermining "one mapping for every failure."
+
 **4. Endpoints (read + propose slice).** Direct mapping from MCP's 6 tools,
 adapted to REST verbs, plus one read-only addition (`GET /proposals`,
 already on `Ontology` — used by the CLI's `proposal list` — with no MCP

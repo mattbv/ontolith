@@ -670,3 +670,19 @@ class TestErrorMapping:
         # for why this is deliberate, not a gap.
         assert response.status_code == 201
         assert response.json()["proposal"]["state"] == "rejected"
+
+    def test_request_validation_error_maps_to_400_with_ontolith_envelope(
+        self, tmp_path: Path
+    ) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        # Missing required "concept" field — a FastAPI/Pydantic-level
+        # RequestValidationError, not an OntolithError raised by a route
+        # body. Must still come back in the SPEC §16 envelope.
+        response = client.post("/query", json={}, headers=_auth(token))
+        assert response.status_code == 400
+        body = response.json()
+        assert body["code"] == "VALIDATION_ERROR"
+        assert "message" in body
+        assert "detail" in body
