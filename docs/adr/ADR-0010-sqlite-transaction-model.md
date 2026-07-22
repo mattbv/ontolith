@@ -94,8 +94,73 @@ def rollback(self) -> None:
 **Use SQLAlchemy for connection management:**
 - Rejected for M1: Unnecessary dependency; adds complexity the `StorageBackend` port abstraction already handles.
 
+## Update (2026-07-22, closes KI-023): thread-safety for `_in_transaction`
+
+This ADR's own Consequences flagged `_in_transaction` as "mutable state on the
+backend; callers must pair `begin()`/`commit()` correctly" — written when the
+connection was only ever touched from one thread. That stopped being true
+once the REST interface (ADR-0021) added `check_same_thread=False`: an ASGI
+server dispatches sync route handlers onto a worker threadpool, so two
+genuinely concurrent requests could call `begin()` back-to-back before the
+first `commit()`/`rollback()` ran, corrupting `_in_transaction` and, in the
+worst case, raising a raw `sqlite3.OperationalError` ("cannot start a
+transaction within a transaction") that bypassed the REST error mapping
+entirely (SPEC §16). Tracked as KI-023; confirmed reproducible with a
+`ThreadPoolExecutor`-based regression test before this fix landed.
+
+**Fix:** `SQLiteBackend` now holds a `threading.RLock` (`self._lock`).
+`begin()` acquires it, held for the full span of an explicit transaction —
+not just one method call. Every other public method is wrapped with a
+`@_synchronized` decorator that acquires the same lock for its own duration.
+RLock, not a plain `Lock`, because a method called from inside an
+already-`begin()`-locked transaction (e.g. `put_entity` inside `with
+backend.transaction():`) re-acquires on the same thread without blocking;
+a different thread calling any method — standalone or transactional —
+blocks until the lock is free. Net effect: the single shared connection is
+never touched by two threads at once, whether or not either is inside an
+explicit transaction.
+
+`commit()`/`rollback()` release the lock asymmetrically, not both
+unconditionally via `finally` — an `ontolith-reviewer` pass on this fix
+caught the reason why that matters: `transaction()` calls `rollback()`
+after catching *any* exception raised inside its `try` block, including one
+raised by `commit()` itself failing. If `commit()` also released the lock
+unconditionally on failure, `rollback()`'s own release would be a *second*
+release of an already-free lock, which `RLock.release()` rejects with
+`RuntimeError: cannot release un-acquired lock` — masking the original
+`StorageError` and, since that exception fires before `_in_transaction =
+False` is reached, leaving the flag stuck `True` (lock free, flag says
+"still in a transaction," forever) after every future call. So `commit()`
+releases the lock (and resets `_in_transaction`) only on success; on
+failure it leaves both alone, so `rollback()` — the only thing that runs
+next — is unambiguously the sole method that resolves and releases the
+transaction. `rollback()` itself keeps the unconditional `finally` release,
+since it is the terminal cleanup step regardless of outcome: leaving the
+lock held after a failed rollback would deadlock every future caller, a
+strictly worse failure mode than a stale flag. Regression-tested directly:
+`tests/unit/test_sqlite_backend.py::TestConcurrency::test_commit_failure_inside_transaction_raises_storage_error_and_frees_lock`
+forces `conn.commit()` to fail inside a `transaction()` block and asserts a
+clean `StorageError` (not `RuntimeError`), a freed lock, and
+`_in_transaction is False` afterward — confirmed to fail with exactly the
+predicted `RuntimeError` against the unconditional-`finally` version before
+this asymmetric-release design was adopted.
+
+This trades true write concurrency for correctness — SQLite's own WAL mode
+concurrent-reader support is unaffected (readers still don't block behind
+writers at the SQLite level), but two threads can no longer make
+*application-level* progress on this connection simultaneously. Deemed the
+right tradeoff for now: this is a single shared connection object, not a
+connection pool, so there was never real write parallelism to lose. A
+connection-pool design (one connection per request, relying on SQLite's own
+file-level locking instead of an in-process lock) remains a valid future
+alternative if this serialization point becomes a measured bottleneck —
+not pursued now since no throughput data suggests it is one yet.
+
 ## References
 
 - ADR-0001: Storage Default (SQLite + sqlite-vec)
+- ADR-0021: REST interface (introduced `check_same_thread=False`, surfaced this gap)
 - SPEC §9: Proposal workflow and acceptance
+- SPEC §12.1: SQLite default backend, WAL mode
 - Python `sqlite3` docs: `isolation_level` parameter
+- `docs/known-issues.md` KI-023

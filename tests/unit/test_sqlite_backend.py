@@ -2,6 +2,8 @@
 
 import sqlite3
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1077,3 +1079,146 @@ class TestSQLiteBackend:
         """enable_load_extension is toggled back off after loading sqlite-vec (supply-chain hygiene)."""
         with pytest.raises(sqlite3.OperationalError, match="not authorized"):
             backend.conn.load_extension("vec0")
+
+
+class TestConcurrency:
+    """KI-023: the shared connection must survive genuinely concurrent access
+    from multiple threads (the shape an ASGI server's worker threadpool
+    produces), not just serial or single-threaded use.
+    """
+
+    N_THREADS = 8
+
+    def test_concurrent_transaction_blocks_survive_and_all_commit(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """N threads each run a full transaction() block concurrently.
+
+        Before the fix, a second begin() while another thread's transaction
+        was still open raised a raw (unmapped) sqlite3.OperationalError —
+        the exact scenario KI-023 describes. With the lock, each thread's
+        transaction is fully serialized: no exception, and every write
+        survives.
+        """
+        barrier = threading.Barrier(self.N_THREADS)
+        errors: list[BaseException] = []
+
+        def worker(i: int) -> None:
+            barrier.wait()  # maximize actual concurrent contention on begin()
+            try:
+                with backend.transaction():
+                    backend.put_entity(
+                        Entity(
+                            id=f"entity-{i}",
+                            namespace="test-ns",
+                            concept="Person",
+                            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                            created_by="alice@test.com",
+                        )
+                    )
+                    backend.put_assertion(
+                        Assertion(
+                            id=f"assertion-{i}",
+                            namespace="test-ns",
+                            subject=f"entity-{i}",
+                            predicate="Person.name",
+                            value_kind="literal",
+                            value_type="Text",
+                            value=f"Person {i}",
+                            author="alice@test.com",
+                            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+                        )
+                    )
+            except BaseException as e:  # noqa: BLE001 - captured for the assertion below
+                errors.append(e)
+
+        with ThreadPoolExecutor(max_workers=self.N_THREADS) as pool:
+            list(pool.map(worker, range(self.N_THREADS)))
+
+        assert errors == []
+        for i in range(self.N_THREADS):
+            assert backend.get_entity(f"entity-{i}") is not None
+            assert backend.get_assertion(f"assertion-{i}") is not None
+
+    def test_concurrent_non_transactional_writes_are_serialized(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """N threads each call put_entity() directly (autocommit path, no
+        explicit transaction()) concurrently — exercises the @_synchronized
+        wrapper on a standalone write, not just the begin()/commit() path.
+        """
+        barrier = threading.Barrier(self.N_THREADS)
+        errors: list[BaseException] = []
+
+        def worker(i: int) -> None:
+            barrier.wait()
+            try:
+                backend.put_entity(
+                    Entity(
+                        id=f"solo-entity-{i}",
+                        namespace="test-ns",
+                        concept="Person",
+                        created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                        created_by="alice@test.com",
+                    )
+                )
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        with ThreadPoolExecutor(max_workers=self.N_THREADS) as pool:
+            list(pool.map(worker, range(self.N_THREADS)))
+
+        assert errors == []
+        entities = backend.entities(namespace="test-ns", concept="Person")
+        assert {e.id for e in entities} == {f"solo-entity-{i}" for i in range(self.N_THREADS)}
+
+    def test_commit_failure_inside_transaction_raises_storage_error_and_frees_lock(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """Regression test for a lock double-release found reviewing KI-023.
+
+        commit() releasing self._lock unconditionally (e.g. via `finally`)
+        double-releases it when commit() fails inside a transaction() block,
+        since transaction()'s except clause then calls rollback(), which
+        also releases — the second release raises RuntimeError, masking the
+        real StorageError and leaving _in_transaction stuck True forever
+        (self._lock itself is not left deadlocked, since a release on an
+        already-free RLock raises rather than corrupting lock state, but
+        the masked error and stuck flag are still a real regression).
+        """
+
+        class _FailingCommitConn:
+            """Delegates everything to the real connection except commit()."""
+
+            def __init__(self, real_conn: sqlite3.Connection) -> None:
+                self._real = real_conn
+
+            def commit(self) -> None:
+                raise sqlite3.OperationalError("simulated commit failure")
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._real, name)
+
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+
+        real_conn = backend.conn
+        backend.conn = _FailingCommitConn(real_conn)  # type: ignore[assignment]
+        try:
+            with pytest.raises(StorageError, match="Failed to commit transaction"):
+                with backend.transaction():
+                    backend.put_entity(entity)
+        finally:
+            backend.conn = real_conn
+
+        assert backend._in_transaction is False
+        assert backend.get_entity("entity-001") is None  # rollback() undid the insert
+
+        # The lock must be free — acquire(blocking=False) succeeds only if so.
+        assert backend._lock.acquire(blocking=False)
+        backend._lock.release()
