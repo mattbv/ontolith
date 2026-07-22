@@ -52,8 +52,17 @@ class TestSchemaTool:
     def test_schema_returns_empty_when_no_schema_stored(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
-        result = mcp._tool_manager.get_tool("ontolith.schema").fn()
+        result = mcp._tool_manager.get_tool("ontolith.schema").fn(
+            token=kb.issue_token(HUMAN, author=ADMIN)
+        )
         assert result == {"concepts": []}
+
+    def test_schema_invalid_token_returns_auth_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.schema").fn(token="not-a-real-token")
+        assert "error" in result
+        assert result["code"] == "auth_error"
 
     def test_schema_returns_concepts_and_properties(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -75,7 +84,9 @@ class TestSchemaTool:
         kb.backend.put_schema(schema)
 
         mcp, _ = _server(kb)
-        result = mcp._tool_manager.get_tool("ontolith.schema").fn()
+        result = mcp._tool_manager.get_tool("ontolith.schema").fn(
+            token=kb.issue_token(HUMAN, author=ADMIN)
+        )
 
         assert result["namespace"] == "default"
         assert result["version"] == 1
@@ -90,7 +101,9 @@ class TestSchemaTool:
     def test_schema_respects_namespace_argument(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
-        result = mcp._tool_manager.get_tool("ontolith.schema").fn(namespace="other")
+        result = mcp._tool_manager.get_tool("ontolith.schema").fn(
+            token=kb.issue_token(HUMAN, author=ADMIN), namespace="other"
+        )
         assert result == {"concepts": []}
 
 
@@ -106,7 +119,9 @@ class TestGetTool:
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
 
         mcp, _ = _server(kb)
-        result = mcp._tool_manager.get_tool("ontolith.get").fn(entity_id=entity.id)
+        result = mcp._tool_manager.get_tool("ontolith.get").fn(
+            entity_id=entity.id, token=kb.issue_token(HUMAN, author=ADMIN)
+        )
 
         assert result["entity"]["id"] == entity.id
         assert result["entity"]["concept"] == "Person"
@@ -116,8 +131,20 @@ class TestGetTool:
     def test_get_unknown_entity_returns_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
-        result = mcp._tool_manager.get_tool("ontolith.get").fn(entity_id="does-not-exist")
+        result = mcp._tool_manager.get_tool("ontolith.get").fn(
+            entity_id="does-not-exist", token=kb.issue_token(HUMAN, author=ADMIN)
+        )
         assert "error" in result
+
+    def test_get_invalid_token_returns_auth_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.get").fn(
+            entity_id=entity.id, token="not-a-real-token"
+        )
+        assert "error" in result
+        assert result["code"] == "auth_error"
 
     def test_get_excludes_non_active_assertions(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -127,7 +154,9 @@ class TestGetTool:
         kb.retract(active[0].id, HUMAN)
 
         mcp, _ = _server(kb)
-        result = mcp._tool_manager.get_tool("ontolith.get").fn(entity_id=entity.id)
+        result = mcp._tool_manager.get_tool("ontolith.get").fn(
+            entity_id=entity.id, token=kb.issue_token(HUMAN, author=ADMIN)
+        )
         assert result["assertions"] == []
 
 
@@ -144,7 +173,9 @@ class TestQueryTool:
         kb.create_entity("Organization", author=HUMAN)
 
         mcp, _ = _server(kb)
-        result = mcp._tool_manager.get_tool("ontolith.query").fn(concept="Person")
+        result = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person", token=kb.issue_token(HUMAN, author=ADMIN)
+        )
         assert result["count"] == 2
         assert len(result["entities"]) == 2
 
@@ -157,7 +188,9 @@ class TestQueryTool:
 
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.query").fn(
-            concept="Person", filters={"name": "Ada"}
+            concept="Person",
+            token=kb.issue_token(HUMAN, author=ADMIN),
+            filters={"name": "Ada"},
         )
         assert result["count"] == 1
         assert result["entities"][0]["id"] == e1.id
@@ -165,9 +198,20 @@ class TestQueryTool:
     def test_query_empty_concept_returns_empty(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
-        result = mcp._tool_manager.get_tool("ontolith.query").fn(concept="Organization")
+        result = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Organization", token=kb.issue_token(HUMAN, author=ADMIN)
+        )
         assert result["count"] == 0
         assert result["entities"] == []
+
+    def test_query_invalid_token_returns_auth_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person", token="not-a-real-token"
+        )
+        assert "error" in result
+        assert result["code"] == "auth_error"
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +227,9 @@ class TestProvenanceTool:
         assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
 
         mcp, _ = _server(kb)
-        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(assertion_id=assertions[0].id)
+        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
+            assertion_id=assertions[0].id, token=kb.issue_token(HUMAN, author=ADMIN)
+        )
 
         assert result["id"] == assertions[0].id
         assert result["author"] == HUMAN
@@ -204,7 +250,9 @@ class TestProvenanceTool:
         assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
 
         mcp, _ = _server(kb)
-        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(assertion_id=assertions[0].id)
+        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
+            assertion_id=assertions[0].id, token=kb.issue_token(HUMAN, author=ADMIN)
+        )
 
         assert result["model"] == "claude-sonnet-4"
 
@@ -221,7 +269,9 @@ class TestProvenanceTool:
         assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
 
         mcp, _ = _server(kb)
-        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(assertion_id=assertions[0].id)
+        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
+            assertion_id=assertions[0].id, token=kb.issue_token(HUMAN, author=ADMIN)
+        )
 
         assert len(result["review_events"]) == 1
         assert result["review_events"][0]["type"] == "accept"
@@ -235,7 +285,9 @@ class TestProvenanceTool:
         assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
 
         mcp, _ = _server(kb)
-        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(assertion_id=assertion.id)
+        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
+            assertion_id=assertion.id, token=kb.issue_token(HUMAN, author=ADMIN)
+        )
 
         assert result["proposal_id"] is None
         assert result["review_events"] == []
@@ -243,8 +295,19 @@ class TestProvenanceTool:
     def test_provenance_unknown_assertion_returns_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
-        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(assertion_id="nonexistent")
+        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
+            assertion_id="nonexistent", token=kb.issue_token(HUMAN, author=ADMIN)
+        )
         assert "error" in result
+
+    def test_provenance_invalid_token_returns_auth_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
+            assertion_id="nonexistent", token="not-a-real-token"
+        )
+        assert "error" in result
+        assert result["code"] == "auth_error"
 
     def test_provenance_reachable_for_retracted_assertion(self, tmp_path: Path) -> None:
         """Provenance must be resolvable for non-active assertions too — that's
@@ -258,7 +321,9 @@ class TestProvenanceTool:
         kb.retract(active[0].id, HUMAN)
 
         mcp, _ = _server(kb)
-        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(assertion_id=active[0].id)
+        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
+            assertion_id=active[0].id, token=kb.issue_token(HUMAN, author=ADMIN)
+        )
         assert result["id"] == active[0].id
         assert result["status"] == "retracted"
 

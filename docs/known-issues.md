@@ -388,23 +388,23 @@ When the `security.yml` CI-hardening pass is built: add `griffecli` (or whatever
 
 ---
 
-## KI-021 — MCP read tools accept unauthenticated calls, contradicting SPEC §8.3
+## KI-021 — MCP read tools accept unauthenticated calls, contradicting SPEC §8.3 ✓ RESOLVED
 
 **Severity:** Architecture gap — SPEC compliance gap in a shipped interface, not yet exploitable beyond information disclosure (read-only)
-**Milestone target:** Backlog (resolve alongside the REST interface work, KI-022, so both interfaces converge on one auth posture instead of being fixed twice)
+**Milestone target:** Backlog (resolved alongside the REST interface work, KI-022, so both interfaces converge on one auth posture instead of being fixed twice)
 **SPEC reference:** SPEC §8.3 ("`read`/`query`: required for any retrieval"), §17 ("every operation MUST be capability-checked ... against the resolved principal")
 
 ### Description
 
-`src/ontolith/interfaces/mcp.py`'s `schema_tool`, `get_tool`, `query_tool`, and `provenance_tool` take no `token` parameter and call straight into `kb.backend`/`kb.query()` with no principal resolution at all — any MCP client can call them with zero credentials. Only `propose_tool` and `flag_contradiction_tool` require a bearer `token` (ADR-0014). SPEC §8.3 states plainly that `read`/`query` "required for any retrieval," and §17 states every operation MUST be capability-checked against a resolved principal — the four read tools currently satisfy neither.
+`src/ontolith/interfaces/mcp.py`'s `schema_tool`, `get_tool`, `query_tool`, and `provenance_tool` took no `token` parameter and called straight into `kb.backend`/`kb.query()` with no principal resolution at all — any MCP client could call them with zero credentials. Only `propose_tool` and `flag_contradiction_tool` required a bearer `token` (ADR-0014). SPEC §8.3 states plainly that `read`/`query` "required for any retrieval," and §17 states every operation MUST be capability-checked against a resolved principal — the four read tools satisfied neither.
 
-Surfaced while scoping the REST interface (KI-022): REST's read routes are being designed to require auth from the start (matching SPEC §14.3's "auth required" language for REST resources), which would leave MCP and REST diverging on an identical class of operation for no principled reason — REST enforcing something SPEC already required of MCP too, and MCP simply never got it.
+Surfaced while scoping the REST interface (KI-022): REST's read routes were designed to require auth from the start (matching SPEC §14.3's "auth required" language for REST resources), which would have left MCP and REST diverging on an identical class of operation for no principled reason — REST enforcing something SPEC already required of MCP too, and MCP simply never got it.
 
-In practice this is a lower-severity gap than the CRITICAL/HIGH findings closed in the 2026-07-06/07 security remediation arc (see project memory) — it grants unauthenticated *reads*, not writes, capability escalation, or governance bypass. But it is a genuine, currently-live SPEC violation, not a documentation gap.
+In practice this was a lower-severity gap than the CRITICAL/HIGH findings closed in the 2026-07-06/07 security remediation arc (see project memory) — it granted unauthenticated *reads*, not writes, capability escalation, or governance bypass. But it was a genuine, live SPEC violation, not a documentation gap.
 
 ### Fix
 
-Add a `token: str` parameter to `schema_tool`/`get_tool`/`query_tool`/`provenance_tool`, resolve it via the same `AuthProvider` already injected into `create_mcp_server`, and raise/return the same `auth_error` shape `propose_tool`/`flag_contradiction_tool` already use on failure. Since every capability level is `>= read` in the SPEC §8.3 ordering, this is purely "must resolve to *some* valid principal" — no new capability-tier logic needed, mirroring the read-auth design settled for REST in KI-022. Do this in the same pass as (or immediately after) the REST read-auth work so both interfaces are fixed from one shared understanding instead of two separate patches.
+Added a `token: str` parameter to `schema_tool`/`get_tool`/`query_tool`/`provenance_tool` (`src/ontolith/interfaces/mcp.py`), resolved via the same `AuthProvider` already injected into `create_mcp_server`, returning the same `{"error": ..., "code": "auth_error"}` shape `propose_tool`/`flag_contradiction_tool` already used on failure. Since every capability level is `>= read` in the SPEC §8.3 ordering, this was purely "must resolve to *some* valid principal" — no new capability-tier logic needed, mirroring the read-auth design settled for REST in ADR-0021. Documented as an update to ADR-0014. All 6 MCP tools now require a bearer token, closing the divergence with REST's read routes.
 
 ---
 
@@ -420,7 +420,7 @@ SPEC §14.3 defines a REST resource set — `/namespaces`, `/entities`, `/assert
 
 Scoped (design approved 2026-07-21) as two PRs rather than one, given the full resource set's span across capability tiers is a materially bigger surface than MCP's deliberately narrow read/propose-only tool set (ADR-0008):
 
-- **First PR (planned next):** read + propose slice mirroring MCP's proven 6-tool surface — `GET /schema`, `GET /entities/{id}`, `POST /query`, `GET /provenance/{assertion_id}`, `POST /proposals`, `GET /proposals` — reusing ADR-0014's bearer-token `AuthProvider` unchanged, with auth required on every route including reads (see KI-021 for why that's the deliberate choice, and the resulting MCP inconsistency it surfaces). A new ADR records the auth-on-reads decision, the `OntolithError`→HTTP status mapping (SPEC §16), and the endpoint-to-MCP-tool mapping when this lands.
+- **First PR:** read + propose slice mirroring MCP's proven 6-tool surface — `GET /schema`, `GET /entities/{id}`, `POST /query`, `GET /provenance/{assertion_id}`, `POST /proposals`, `GET /proposals` — reusing ADR-0014's bearer-token `AuthProvider` unchanged, with auth required on every route including reads (see KI-021, since resolved, for why that was the deliberate choice and the MCP inconsistency it surfaced at the time). ADR-0021 records the auth-on-reads decision, the `OntolithError`→HTTP status mapping (SPEC §16), and the endpoint-to-MCP-tool mapping.
 - **Deferred to a follow-up PR:** direct write (`/assertions` POST/PUT via `assert_literal`/`assert_ref`), `/proposals/{id}/accept|reject|review`, `/contradictions` (list + resolve) and `flag_contradiction`, `/principals` (create/list, token issue/revoke/list), `/namespaces`.
 - **Deferred, separate concern:** offset/cursor-based pagination on `/query` — `QueryBuilder` itself only supports `.limit()` today, no `.offset()`; extending it is a `query/`+`store/` change, not an `interfaces/` one, and is out of scope for "expose the existing SDK over HTTP."
 

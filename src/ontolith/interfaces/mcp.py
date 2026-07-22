@@ -11,14 +11,16 @@ Tools (ADR-0008):
   ontolith.propose          — create a proposal (NOT write)
   ontolith.flag_contradiction — open/extend a contradiction for review
 
-Authentication (ADR-0014): ``propose`` and ``flag_contradiction`` take a
-bearer ``token`` instead of a caller-supplied ``author`` ID. The server
-resolves the token to a Principal via the injected AuthProvider — the acting
-principal is always server-derived from a verified credential, never
-client-asserted. One server (one AuthProvider/backend) can serve many
-principals, each with their own issued token (``kb.issue_token(principal_id,
-author=admin_id)`` via SDK/CLI — requires the issuing author to hold `admin`
-capability).
+Authentication (ADR-0014): every tool, reads included, takes a bearer
+``token``. The server resolves the token to a Principal via the injected
+AuthProvider — the acting principal is always server-derived from a verified
+credential, never client-asserted. One server (one AuthProvider/backend) can
+serve many principals, each with their own issued token
+(``kb.issue_token(principal_id, author=admin_id)`` via SDK/CLI — requires the
+issuing author to hold `admin` capability). Read tools require no further
+capability check beyond a resolved principal: capability is a total order
+(SPEC §8.3, ``read < propose < write < review < admin``), so any successfully
+authenticated principal already clears the "read" floor.
 
 Usage:
     from ontolith.identity.token_auth import TokenAuthProvider
@@ -60,16 +62,25 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     # ------------------------------------------------------------------
 
     @mcp.tool(name="ontolith.schema")
-    def schema_tool(namespace: str = "default") -> dict[str, Any]:
+    def schema_tool(token: str, namespace: str = "default") -> dict[str, Any]:
         """Return the schema (concepts and their properties) for a namespace.
 
         Args:
+            token: Bearer token identifying the calling principal (ADR-0014)
             namespace: Namespace to inspect (default: "default")
 
         Returns:
             Dict with "concepts" key listing concept names and their
-            property definitions from the active schema version.
+            property definitions from the active schema version, or "error"
+            if the token does not resolve to a valid principal.
         """
+        from ontolith.core.errors import AuthError
+
+        try:
+            auth_provider.resolve(token)
+        except AuthError as exc:
+            return {"error": str(exc), "code": "auth_error"}
+
         ir = kb.backend.get_schema(namespace)
         if ir is None:
             return {"concepts": []}
@@ -96,15 +107,24 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     # ------------------------------------------------------------------
 
     @mcp.tool(name="ontolith.get")
-    def get_tool(entity_id: str) -> dict[str, Any]:
+    def get_tool(entity_id: str, token: str) -> dict[str, Any]:
         """Fetch an entity and its currently active assertions.
 
         Args:
             entity_id: Entity ID to retrieve
+            token: Bearer token identifying the calling principal (ADR-0014)
 
         Returns:
-            Dict with "entity" and "assertions" keys, or "error" if not found.
+            Dict with "entity" and "assertions" keys, or "error" if not found
+            or the token does not resolve to a valid principal.
         """
+        from ontolith.core.errors import AuthError
+
+        try:
+            auth_provider.resolve(token)
+        except AuthError as exc:
+            return {"error": str(exc), "code": "auth_error"}
+
         entity = kb.backend.get_entity(entity_id)
         if entity is None:
             return {"error": f"Entity {entity_id!r} not found"}
@@ -140,6 +160,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     @mcp.tool(name="ontolith.query")
     def query_tool(
         concept: str,
+        token: str,
         filters: dict[str, str] | None = None,
         namespace: str = "default",
     ) -> dict[str, Any]:
@@ -147,12 +168,21 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         Args:
             concept: Concept name to query (e.g. "Person")
+            token: Bearer token identifying the calling principal (ADR-0014)
             filters: Optional dict of property_name → value (e.g. {"name": "Ada"})
             namespace: Namespace to query (default: "default")
 
         Returns:
-            Dict with "entities" list and "count".
+            Dict with "entities" list and "count", or "error" if the token
+            does not resolve to a valid principal.
         """
+        from ontolith.core.errors import AuthError
+
+        try:
+            auth_provider.resolve(token)
+        except AuthError as exc:
+            return {"error": str(exc), "code": "auth_error"}
+
         builder = kb.query(concept)
         if filters:
             builder = builder.where(**filters)
@@ -176,16 +206,25 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     # ------------------------------------------------------------------
 
     @mcp.tool(name="ontolith.provenance")
-    def provenance_tool(assertion_id: str) -> dict[str, Any]:
+    def provenance_tool(assertion_id: str, token: str) -> dict[str, Any]:
         """Return the full provenance record for a single assertion.
 
         Args:
             assertion_id: Assertion ID to inspect
+            token: Bearer token identifying the calling principal (ADR-0014)
 
         Returns:
             Dict with assertion details including author, confidence, source,
-            rationale, proposal link, and temporal fields.
+            rationale, proposal link, and temporal fields, or "error" if not
+            found or the token does not resolve to a valid principal.
         """
+        from ontolith.core.errors import AuthError
+
+        try:
+            auth_provider.resolve(token)
+        except AuthError as exc:
+            return {"error": str(exc), "code": "auth_error"}
+
         match = kb.backend.get_assertion(assertion_id)
         if match is None:
             return {"error": f"Assertion {assertion_id!r} not found"}

@@ -29,13 +29,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - REST interface, read + propose slice (SPEC §14.3, ADR-0021, partially closes KI-022):
   `create_rest_app(kb, auth_provider)` (`interfaces/rest.py`) exposing `GET /schema`,
   `GET /entities/{id}`, `POST /query`, `GET /provenance/{id}`, `POST /proposals`,
-  `GET /proposals` — every route, reads included, requires an ADR-0014 bearer token (a
-  deliberate divergence from MCP's current unauthenticated read tools, tracked as
-  KI-021). One `OntolithError` → HTTP status handler (SPEC §16) replaces per-route error
-  handling. Direct write, proposal review actions, contradiction resolution, and
-  principal/token admin remain deferred.
+  `GET /proposals` — every route, reads included, requires an ADR-0014 bearer token (at
+  the time, a deliberate divergence from MCP's then-unauthenticated read tools, tracked
+  as KI-021 and since resolved — see below). One `OntolithError` → HTTP status handler
+  (SPEC §16) replaces per-route error handling. Direct write, proposal review actions,
+  contradiction resolution, and principal/token admin remain deferred.
 
 #### Fixed
+- **MCP read tools now require authentication (closes KI-021):** `ontolith.schema`,
+  `ontolith.get`, `ontolith.query`, and `ontolith.provenance` previously took no `token`
+  parameter and resolved no principal at all, contradicting SPEC §8.3 ("`read`/`query`:
+  required for any retrieval") — any MCP client could call them with zero credentials.
+  All four now take `token: str`, resolved via the same `AuthProvider` `propose`/
+  `flag_contradiction` already use, returning the same `auth_error` shape on failure.
+  Read-only, information-disclosure severity; no write/capability-escalation impact.
+  Documented as an update to ADR-0014.
 - SQLite backend now opens its connection with `check_same_thread=False` — an ASGI
   server (the new REST interface) dispatches requests on a different OS thread than the
   one that constructs the backend, which stock `sqlite3` blocks regardless of whether
