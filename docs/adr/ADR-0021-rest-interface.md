@@ -186,9 +186,9 @@ OpenAPI docs from typed responses.
 **Negative / follow-ups:** KI-021 (MCP read tools remained unauthenticated,
 a gap this ADR surfaced but did not itself close) was resolved separately,
 2026-07-22 — see ADR-0014's update note. `/query` has no pagination beyond
-`.limit()` (KI-022). The read+propose slice is not a usable admin surface —
-principal/token management and write actions remain CLI/SDK-only until
-KI-022's follow-up PR.
+`.limit()` (KI-022). Direct write, proposal review, contradiction handling,
+and principal/token admin were CLI/SDK-only until KI-022's follow-up PR,
+which shipped the same day — see ADR-0022.
 
 ## References
 

@@ -32,10 +32,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GET /proposals` — every route, reads included, requires an ADR-0014 bearer token (at
   the time, a deliberate divergence from MCP's then-unauthenticated read tools, tracked
   as KI-021 and since resolved — see below). One `OntolithError` → HTTP status handler
-  (SPEC §16) replaces per-route error handling. Direct write, proposal review actions,
-  contradiction resolution, and principal/token admin remain deferred.
+  (SPEC §16) replaces per-route error handling.
+- REST interface, write/review/admin slice (SPEC §14.3, ADR-0022, further closes
+  KI-022): `POST /assertions` (direct write via `assert_literal`/`assert_ref`),
+  `POST /proposals/{id}/accept|reject`, `GET /contradictions`,
+  `POST /contradictions/flag`, `POST /contradictions/{id}/resolve`, `POST /principals`,
+  and `/principals/{id}/tokens` (`POST` issue, `GET` list, `DELETE` revoke) — reusing
+  ADR-0021's auth and error-mapping unchanged. Nine of ten routes need no new
+  capability-check code (the wrapped `Ontology` methods already gate themselves);
+  `POST /principals` calls `Ontology.require_admin()` explicitly, since
+  `create_principal` has no built-in gate of its own. `GET /principals` (list),
+  `GET /namespaces`, and `/proposals/{id}/review` remain deferred — no backing SDK
+  method exists for any of the three (confirmed by an explicit audit, not an oversight).
 
 #### Fixed
+- **`Ontology.create_principal(kind="ai", owner=None)` now raises the documented
+  `ontolith.core.errors.ValidationError`** instead of a raw pydantic `ValidationError`
+  leaking out of `Principal`'s own model validator. Found while wiring `POST /principals`
+  (ADR-0022): REST's error mapping only handles `OntolithError` subtypes, so this would
+  have surfaced as an unhandled 500 with no SPEC §16 envelope. The CLI's blanket
+  `except Exception` had masked the same gap. `conformance/test_accountable_owner.py`'s
+  matching vector tightened from `(ValueError, StorageError)` to `ValidationError`
+  specifically, now that every backend gets one consistent exception type here.
 - **MCP read tools now require authentication (closes KI-021):** `ontolith.schema`,
   `ontolith.get`, `ontolith.query`, and `ontolith.provenance` previously took no `token`
   parameter and resolved no principal at all, contradicting SPEC §8.3 ("`read`/`query`:
