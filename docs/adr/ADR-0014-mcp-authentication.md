@@ -46,6 +46,21 @@ allow-list.
   it names who the *resolved* principal wants to act as, still authorization-checked against
   `principal.owner` inside `Ontology.propose`/`retract`, and now capped by
   `min(capability(author), capability(acting_as))` (see the companion delegation fix).
+
+**Update (2026-07-22, closes KI-021):** the four read tools (`ontolith.schema`,
+`ontolith.get`, `ontolith.query`, `ontolith.provenance`) shipped in the original
+implementation of this ADR with no `token` parameter at all — a gap distinct from the
+spoofing vulnerability above, since there was no capability to spoof, only a missing
+`AuthProvider.resolve()` call. It went unnoticed until the REST interface (ADR-0021)
+was scoped and, per SPEC §8.3 ("`read`/`query`: required for any retrieval"), required
+auth on its own read routes — making MCP's gap visible by direct comparison. All four
+read tools now take `token: str`, resolve it via the same `AuthProvider.resolve()`, and
+return `{"error": ..., "code": "auth_error"}` on failure — identical shape to
+`ontolith.propose`'s existing auth-failure path. No new capability-tier logic was
+needed: capability is a total order (`read < propose < write < review < admin`, SPEC
+§8.3), so any principal a token resolves to already clears the "read" floor —
+authentication *is* the capability check for these four tools, same reasoning ADR-0021
+applied to REST's read routes.
 - One server process (one `AuthProvider`/backend pair) can serve many principals, each
   authenticated by their own token — this was the explicit reason per-principal tokens were chosen
   over a single server-bound identity.
