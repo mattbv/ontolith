@@ -17,7 +17,7 @@ import pytest
 from conformance.conftest import KbFactory
 from ontolith import Ontology, SequentialIdProvider
 from ontolith.core import FixedClock
-from ontolith.core.errors import StorageError, ValidationError
+from ontolith.core.errors import ValidationError
 from ontolith.identity import Principal
 
 T0 = "2025-01-01T00:00:00+00:00"
@@ -44,9 +44,16 @@ def test_ai_principal_with_owner_is_accepted(make_kb: KbFactory) -> None:
 
 
 def test_ai_principal_without_owner_raises_at_application_layer(make_kb: KbFactory) -> None:
-    """AI principal without owner is rejected before reaching the DB (SPEC §8)."""
+    """AI principal without owner is rejected before reaching the DB (SPEC §8).
+
+    Ontology.create_principal() checks this itself and raises ontolith's own
+    ValidationError, rather than relying solely on the Principal model's
+    validator (which raises pydantic's own ValidationError instead) — every
+    caller of the application layer, REST's error mapping included, needs
+    one consistent domain exception type here.
+    """
     kb = _kb(make_kb)
-    with pytest.raises((ValueError, StorageError)):
+    with pytest.raises(ValidationError):
         kb.create_principal("bot-no-owner", kind="ai", auth_method="workload")
     kb.close()
 

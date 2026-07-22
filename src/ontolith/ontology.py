@@ -193,11 +193,19 @@ class Ontology:
             Created principal
 
         Raises:
-            ValidationError: kind is "ai" and owner doesn't name an existing
-                human/service principal (SPEC §8.1: AI principals must
-                declare a *resolvable* accountable owner, not just a
-                non-null string)
+            ValidationError: kind is "ai" and owner is missing, or doesn't
+                name an existing human/service principal (SPEC §8.1: AI
+                principals must declare a *resolvable* accountable owner,
+                not just a non-null string)
         """
+        if kind == "ai" and owner is None:
+            # Principal's own model_validator also enforces this, but
+            # raises pydantic's ValidationError, not this method's
+            # documented ontolith ValidationError - checked explicitly
+            # here so every caller (including REST, which maps error
+            # *types* to HTTP statuses) sees one consistent exception.
+            raise ValidationError("AI principals must have an owner (SPEC §8.1)")
+
         principal = Principal(
             id=principal_id,
             kind=kind,  # type: ignore
