@@ -10,7 +10,18 @@ Authentication (ADR-0014, reused unchanged): every route requires an
 injected AuthProvider — never a caller-asserted principal ID. This includes
 read routes, a deliberate divergence from the *shipped* MCP server's
 unauthenticated read tools (KI-021 tracks closing that gap on the MCP
-side).
+side). Per ADR-0021 §2, authentication *is* the read-capability check —
+any successfully-authenticated principal can read any entity, assertion,
+provenance record, or proposal (including other principals' `source`/
+`rationale` via ``GET /proposals``) in this namespace; there is no
+per-principal or per-namespace read scoping in this slice.
+
+FastAPI serves interactive docs (``/docs``, ``/redoc``, ``/openapi.json``)
+unauthenticated by default, exposing the API's shape (not its data) to
+anonymous callers. Pass ``docs_url=None, redoc_url=None,
+openapi_url=None`` to disable them for a given deployment — this factory
+forwards those three straight to ``FastAPI(...)``, defaulting to
+FastAPI's own (docs-enabled) behavior when omitted.
 
 Usage:
     from ontolith.identity.token_auth import TokenAuthProvider
@@ -21,6 +32,7 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, Request
@@ -46,6 +58,8 @@ if TYPE_CHECKING:
     from ontolith.identity.ports import AuthProvider
     from ontolith.ontology import Ontology
 
+_logger = logging.getLogger(__name__)
+
 _STATUS_BY_ERROR_TYPE: dict[type[OntolithError], int] = {
     ValidationError: 400,
     SchemaError: 400,
@@ -57,6 +71,13 @@ _STATUS_BY_ERROR_TYPE: dict[type[OntolithError], int] = {
     StorageError: 500,
     PluginError: 500,
 }
+
+# 5xx error messages (StorageError/PluginError) interpolate raw internal
+# exception text (e.g. sqlite3 constraint/transaction-state messages) — not
+# secrets, but more internal detail than a caller needs. Redacted in the
+# response; the real message is logged server-side instead (SPEC §16 still
+# gets a stable `code`, just not the raw text).
+_GENERIC_SERVER_ERROR_MESSAGE = "An internal error occurred"
 
 
 # ---------------------------------------------------------------------------
@@ -234,7 +255,15 @@ class ProposeOut(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def create_rest_app(kb: Ontology, auth_provider: AuthProvider, name: str = "ontolith") -> FastAPI:
+def create_rest_app(
+    kb: Ontology,
+    auth_provider: AuthProvider,
+    name: str = "ontolith",
+    *,
+    docs_url: str | None = "/docs",
+    redoc_url: str | None = "/redoc",
+    openapi_url: str | None = "/openapi.json",
+) -> FastAPI:
     """Build and return a FastAPI app bound to the given knowledge base.
 
     Args:
@@ -242,12 +271,17 @@ def create_rest_app(kb: Ontology, auth_provider: AuthProvider, name: str = "onto
         auth_provider: Resolves caller-supplied bearer tokens to Principals
             (ADR-0014) — e.g. ``TokenAuthProvider(kb.backend)``
         name: API title advertised in the OpenAPI schema
+        docs_url: Swagger UI path, or None to disable it. Unauthenticated
+            like the rest of FastAPI's docs surface (module docstring).
+        redoc_url: ReDoc path, or None to disable it.
+        openapi_url: OpenAPI schema JSON path, or None to disable it (also
+            disables docs_url/redoc_url, which depend on it).
 
     Returns:
         Configured FastAPI app with the read + propose route slice
         (ADR-0021)
     """
-    app = FastAPI(title=name)
+    app = FastAPI(title=name, docs_url=docs_url, redoc_url=redoc_url, openapi_url=openapi_url)
 
     def _resolve_principal(
         authorization: Annotated[str | None, Header()] = None,
@@ -264,9 +298,20 @@ def create_rest_app(kb: Ontology, auth_provider: AuthProvider, name: str = "onto
 
     @app.exception_handler(OntolithError)
     def _handle_ontolith_error(_request: Request, exc: OntolithError) -> JSONResponse:
-        """Map every OntolithError subtype to its HTTP status (SPEC §16)."""
+        """Map every OntolithError subtype to its HTTP status (SPEC §16).
+
+        5xx errors (StorageError/PluginError) log the real message
+        server-side but never return it — those messages interpolate raw
+        internal exception text (e.g. sqlite3 constraint/transaction-state
+        details) that a caller has no use for and shouldn't see.
+        """
         status = _STATUS_BY_ERROR_TYPE.get(type(exc), 500)
-        body = ErrorOut(code=exc.code, message=exc.message, detail=exc.detail)
+        if status >= 500:
+            _logger.error("%s: %s", exc.code, exc.message)
+            message = _GENERIC_SERVER_ERROR_MESSAGE
+        else:
+            message = exc.message
+        body = ErrorOut(code=exc.code, message=message, detail=exc.detail)
         return JSONResponse(status_code=status, content=body.model_dump())
 
     @app.exception_handler(RequestValidationError)

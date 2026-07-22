@@ -62,6 +62,22 @@ no extra gate either: `Ontology.propose()`/`propose_ref()` already perform
 their own capability check via policy evaluation and raise
 `CapabilityError`/`PolicyDenied` on failure, exactly as MCP relies on today.
 
+This means there is no per-principal or per-namespace read scoping in this
+slice: any authenticated principal can read any entity, assertion,
+provenance record, or proposal in the namespace, including other
+principals' `source`/`rationale` text via `GET /proposals` — surfaced by
+`security-reviewer`'s pass on this ADR's first implementation. This is the
+direct consequence of SPEC §8.3's global `read` capability, not an
+oversight, but `GET /proposals` is worth naming explicitly since it has no
+MCP-tool precedent to inherit the same posture implicitly from.
+
+`create_rest_app` also forwards `docs_url`/`redoc_url`/`openapi_url` to
+`FastAPI(...)` (defaulting to FastAPI's own docs-enabled behavior).
+FastAPI serves `/docs`/`/redoc`/`/openapi.json` unauthenticated by
+default, exposing the API's shape (not its data); a deployment that wants
+those closed passes `docs_url=None, redoc_url=None, openapi_url=None`
+rather than this factory deciding unilaterally.
+
 **3. Error handling: one mapping, not per-route try/except.** A single
 `_STATUS_BY_ERROR_TYPE: dict[type[OntolithError], int]` registered via
 `@app.exception_handler(OntolithError)` maps every error subtype to an HTTP

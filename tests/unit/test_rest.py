@@ -10,10 +10,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
+from ontolith.core.errors import StorageError
 from ontolith.identity.token_auth import TokenAuthProvider
 from ontolith.interfaces.rest import create_rest_app
 from ontolith.schema.ir import ConceptDef, PropertyDef, SchemaIR
@@ -46,6 +48,28 @@ def _client(kb: Ontology) -> tuple[TestClient, TokenAuthProvider]:
 
 def _auth(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+# ---------------------------------------------------------------------------
+# create_rest_app(docs_url=..., redoc_url=..., openapi_url=...)
+# ---------------------------------------------------------------------------
+
+
+class TestDocsUrls:
+    def test_docs_enabled_by_default(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        assert client.get("/docs").status_code == 200
+        assert client.get("/openapi.json").status_code == 200
+
+    def test_docs_can_be_disabled(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        auth_provider = TokenAuthProvider(kb.backend)
+        app = create_rest_app(kb, auth_provider, docs_url=None, redoc_url=None, openapi_url=None)
+        client = TestClient(app)
+        assert client.get("/docs").status_code == 404
+        assert client.get("/redoc").status_code == 404
+        assert client.get("/openapi.json").status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -686,3 +710,24 @@ class TestErrorMapping:
         assert body["code"] == "VALIDATION_ERROR"
         assert "message" in body
         assert "detail" in body
+
+    def test_storage_error_redacts_internal_detail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+
+        def _raise_storage_error(*args: object, **kwargs: object) -> None:
+            raise StorageError("sqlite3.OperationalError: table assertion has no column baz")
+
+        monkeypatch.setattr(kb.backend, "get_schema", _raise_storage_error)
+
+        response = client.get("/schema", headers=_auth(token))
+
+        assert response.status_code == 500
+        body = response.json()
+        assert body["code"] == "STORAGE_ERROR"
+        assert body["message"] == "An internal error occurred"
+        assert "sqlite3" not in body["message"]
+        assert "baz" not in str(body)
