@@ -38,8 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Fixed
 - SQLite backend now opens its connection with `check_same_thread=False` — an ASGI
   server (the new REST interface) dispatches requests on a different OS thread than the
-  one that constructs the backend; access stays sequential through the single connection
-  either way, so this only removes a same-thread check with no bearing on correctness
+  one that constructs the backend, which stock `sqlite3` blocks regardless of whether
+  the access is ever actually concurrent. This flag only lifts that check; it does
+  **not** serialize access — the connection is not yet safe under genuinely concurrent
+  writes from multiple threads, tracked as KI-023
 - **HIGH:** `as_of(t)` excluded flagged assertions by current status instead of
   status-at-t; since flagging never sets `valid_to`, once any contradiction had ever
   touched a `(subject, predicate)`, `as_of(t)` returned nothing for it at any t, including
