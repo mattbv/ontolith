@@ -731,3 +731,574 @@ class TestErrorMapping:
         assert body["message"] == "An internal error occurred"
         assert "sqlite3" not in body["message"]
         assert "baz" not in str(body)
+
+
+# ---------------------------------------------------------------------------
+# POST /assertions
+# ---------------------------------------------------------------------------
+
+
+class TestWriteAssertionRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        client, _ = _client(kb)
+        response = client.post(
+            "/assertions",
+            json={
+                "subject": entity.id,
+                "predicate": "Person.name",
+                "value": "Ada",
+                "value_type": "Text",
+            },
+        )
+        assert response.status_code == 401
+
+    def test_literal_write(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write capability
+        response = client.post(
+            "/assertions",
+            json={
+                "subject": entity.id,
+                "predicate": "Person.name",
+                "value": "Ada",
+                "value_type": "Text",
+                "confidence": 0.9,
+            },
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["subject"] == entity.id
+        assert body["value"] == "Ada"
+        assert body["status"] == "active"
+        assert body["author"] == HUMAN
+        assert body["confidence"] == 0.9
+
+    def test_ref_write(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        person = kb.create_entity("Person", author=HUMAN)
+        org = kb.create_entity("Organization", author=HUMAN)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/assertions",
+            json={"subject": person.id, "predicate": "Person.employer", "target": org.id},
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 201
+        assert response.json()["value"] == org.id
+
+    def test_both_value_and_target_returns_400(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        person = kb.create_entity("Person", author=HUMAN)
+        org = kb.create_entity("Organization", author=HUMAN)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/assertions",
+            json={
+                "subject": person.id,
+                "predicate": "Person.employer",
+                "value": "Acme",
+                "value_type": "Text",
+                "target": org.id,
+            },
+            headers=_auth(token),
+        )
+        assert response.status_code == 400
+        assert response.json()["code"] == "VALIDATION_ERROR"
+
+    def test_neither_value_nor_target_returns_400(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/assertions",
+            json={"subject": entity.id, "predicate": "Person.name"},
+            headers=_auth(token),
+        )
+        assert response.status_code == 400
+        assert response.json()["code"] == "VALIDATION_ERROR"
+
+    def test_ai_principal_forbidden(self, tmp_path: Path) -> None:
+        """AI principals are categorically barred from direct writes (ADR-0003)."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        client, _ = _client(kb)
+        token = kb.issue_token(AI, author=ADMIN)
+        response = client.post(
+            "/assertions",
+            json={
+                "subject": entity.id,
+                "predicate": "Person.name",
+                "value": "Ada",
+                "value_type": "Text",
+            },
+            headers=_auth(token),
+        )
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
+    def test_read_capability_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "readonly@example.com", kind="human", auth_method="oidc", default_capability="read"
+        )
+        entity = kb.create_entity("Person", author=HUMAN)
+        client, _ = _client(kb)
+        token = kb.issue_token("readonly@example.com", author=ADMIN)
+        response = client.post(
+            "/assertions",
+            json={
+                "subject": entity.id,
+                "predicate": "Person.name",
+                "value": "Ada",
+                "value_type": "Text",
+            },
+            headers=_auth(token),
+        )
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# POST /proposals/{proposal_id}/accept
+# ---------------------------------------------------------------------------
+
+
+class TestAcceptProposalRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        response = client.post(f"/proposals/{proposal.id}/accept")
+        assert response.status_code == 401
+
+    def test_reviewer_accepts(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        token = kb.issue_token(REVIEWER, author=ADMIN)
+        response = client.post(f"/proposals/{proposal.id}/accept", headers=_auth(token))
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["state"] == "accepted"
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        assert len(active) == 1
+
+    def test_not_found_returns_404(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(REVIEWER, author=ADMIN)
+        response = client.post("/proposals/nonexistent/accept", headers=_auth(token))
+        assert response.status_code == 404
+        assert response.json()["code"] == "NOT_FOUND"
+
+    def test_self_review_forbidden(self, tmp_path: Path) -> None:
+        """A review-capable delegate can't accept a proposal delegated to
+        them (ADR-0003 self-review guard). Uses an AI author + acting_as
+        rather than a review-capable human author directly, since
+        ThresholdPolicy auto-accepts any human/service with review
+        capability — an AI author is the only way to deterministically
+        land in require_review while proposal.acting_as == the reviewer.
+        """
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "helper-bot",
+            kind="ai",
+            owner=REVIEWER,
+            auth_method="workload",
+            default_capability="propose",
+        )
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", "helper-bot", acting_as=REVIEWER, model="m1"
+        )
+        assert proposal.state == "require_review"
+
+        client, _ = _client(kb)
+        token = kb.issue_token(REVIEWER, author=ADMIN)
+        response = client.post(f"/proposals/{proposal.id}/accept", headers=_auth(token))
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# POST /proposals/{proposal_id}/reject
+# ---------------------------------------------------------------------------
+
+
+class TestRejectProposalRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        response = client.post(f"/proposals/{proposal.id}/reject", json={})
+        assert response.status_code == 401
+
+    def test_reviewer_rejects(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        token = kb.issue_token(REVIEWER, author=ADMIN)
+        response = client.post(
+            f"/proposals/{proposal.id}/reject",
+            json={"reason": "insufficient source"},
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["state"] == "rejected"
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        assert active == []
+
+    def test_reject_without_body_defaults_to_empty_reason(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        token = kb.issue_token(REVIEWER, author=ADMIN)
+        response = client.post(f"/proposals/{proposal.id}/reject", json={}, headers=_auth(token))
+        assert response.status_code == 200
+        assert response.json()["state"] == "rejected"
+
+    def test_not_found_returns_404(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(REVIEWER, author=ADMIN)
+        response = client.post("/proposals/nonexistent/reject", json={}, headers=_auth(token))
+        assert response.status_code == 404
+        assert response.json()["code"] == "NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# GET /contradictions
+# ---------------------------------------------------------------------------
+
+
+def _make_contradiction(kb: Ontology) -> tuple:
+    """Create an entity with two conflicting static assertions, returning
+    (entity, contradiction_id)."""
+    entity = kb.create_entity("Person", author=HUMAN)
+    kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+    kb.propose(entity.id, "Person.name", "Ava", "Text", HUMAN)
+    contradiction = kb.backend.get_open_contradiction("default", entity.id, "Person.name")
+    assert contradiction is not None
+    return entity, contradiction.id
+
+
+class TestListContradictionsRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        response = client.get("/contradictions")
+        assert response.status_code == 401
+
+    def test_defaults_to_open(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        _make_contradiction(kb)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get("/contradictions", headers=_auth(token))
+
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["state"] == "open"
+
+    def test_state_filter(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        _make_contradiction(kb)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get("/contradictions", params={"state": "resolved"}, headers=_auth(token))
+        assert response.status_code == 200
+        assert response.json() == []
+
+    def test_all_states_via_sentinel(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        _make_contradiction(kb)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get("/contradictions", params={"state": "all"}, headers=_auth(token))
+        assert response.status_code == 200
+        assert len(response.json()) == 1
+
+
+# ---------------------------------------------------------------------------
+# POST /contradictions/flag
+# ---------------------------------------------------------------------------
+
+
+class TestFlagContradictionRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        response = client.post(
+            "/contradictions/flag", json={"assertion_id_a": "a1", "assertion_id_b": "a2"}
+        )
+        assert response.status_code == 401
+
+    def test_flag_creates_contradiction(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        from ontolith.core import Assertion
+
+        a2 = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity.id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada Lovelace",
+            author=HUMAN,
+            asserted_at=T0,
+            status="active",
+        )
+        kb.backend.put_assertion(a2)
+
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/contradictions/flag",
+            json={"assertion_id_a": assertions[0].id, "assertion_id_b": a2.id},
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["action"] == "created"
+        assert set(body["contradiction"]["member_ids"]) == {assertions[0].id, a2.id}
+
+    def test_read_capability_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "readonly@example.com", kind="human", auth_method="oidc", default_capability="read"
+        )
+        client, _ = _client(kb)
+        token = kb.issue_token("readonly@example.com", author=ADMIN)
+        response = client.post(
+            "/contradictions/flag",
+            json={"assertion_id_a": "a1", "assertion_id_b": "a2"},
+            headers=_auth(token),
+        )
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
+    def test_assertion_not_found_returns_404(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/contradictions/flag",
+            json={"assertion_id_a": "nonexistent", "assertion_id_b": "also-nonexistent"},
+            headers=_auth(token),
+        )
+        assert response.status_code == 404
+        assert response.json()["code"] == "NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# POST /contradictions/{contradiction_id}/resolve
+# ---------------------------------------------------------------------------
+
+
+class TestResolveContradictionRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        response = client.post(
+            "/contradictions/nonexistent/resolve", json={"winner_assertion_id": "a1"}
+        )
+        assert response.status_code == 401
+
+    def test_reviewer_resolves(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity, contradiction_id = _make_contradiction(kb)
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        assert len(flagged) == 2
+
+        client, _ = _client(kb)
+        token = kb.issue_token(REVIEWER, author=ADMIN)
+        response = client.post(
+            f"/contradictions/{contradiction_id}/resolve",
+            json={"winner_assertion_id": flagged[0].id},
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["state"] == "resolved"
+        assert body["resolved_by"] == REVIEWER
+
+    def test_not_found_returns_404(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(REVIEWER, author=ADMIN)
+        response = client.post(
+            "/contradictions/nonexistent/resolve",
+            json={"winner_assertion_id": "a1"},
+            headers=_auth(token),
+        )
+        assert response.status_code == 404
+        assert response.json()["code"] == "NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# POST /principals
+# ---------------------------------------------------------------------------
+
+
+class TestCreatePrincipalRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        response = client.post(
+            "/principals",
+            json={"principal_id": "dave@example.com", "kind": "human"},
+        )
+        assert response.status_code == 401
+
+    def test_admin_creates_principal(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(ADMIN, author=ADMIN)
+        response = client.post(
+            "/principals",
+            json={
+                "principal_id": "dave@example.com",
+                "kind": "human",
+                "default_capability": "write",
+                "trust_level": 3,
+            },
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["id"] == "dave@example.com"
+        assert body["default_capability"] == "write"
+        assert body["trust_level"] == 3
+        assert kb.get_principal("dave@example.com") is not None
+
+    def test_non_admin_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not admin
+        response = client.post(
+            "/principals",
+            json={"principal_id": "dave@example.com", "kind": "human"},
+            headers=_auth(token),
+        )
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
+    def test_ai_without_owner_returns_400(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(ADMIN, author=ADMIN)
+        response = client.post(
+            "/principals",
+            json={"principal_id": "new-agent", "kind": "ai", "auth_method": "apikey"},
+            headers=_auth(token),
+        )
+        assert response.status_code == 400
+        assert response.json()["code"] == "VALIDATION_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# /principals/{principal_id}/tokens
+# ---------------------------------------------------------------------------
+
+
+class TestTokenRoutes:
+    def test_issue_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        response = client.post(f"/principals/{HUMAN}/tokens")
+        assert response.status_code == 401
+
+    def test_admin_issues_token(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(ADMIN, author=ADMIN)
+        response = client.post(f"/principals/{HUMAN}/tokens", headers=_auth(token))
+
+        assert response.status_code == 201
+        body = response.json()
+        assert "token" in body
+        assert "credential_id" in body
+
+    def test_non_admin_forbidden_issue(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(f"/principals/{HUMAN}/tokens", headers=_auth(token))
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
+    def test_list_tokens(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.issue_token(HUMAN, author=ADMIN)
+        client, _ = _client(kb)
+        token = kb.issue_token(ADMIN, author=ADMIN)
+        response = client.get(f"/principals/{HUMAN}/tokens", headers=_auth(token))
+
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert "token" not in body[0]
+        assert "id" in body[0]
+
+    def test_list_tokens_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        response = client.get(f"/principals/{HUMAN}/tokens")
+        assert response.status_code == 401
+
+    def test_revoke_token(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        admin_token = kb.issue_token(ADMIN, author=ADMIN)
+        issue_response = client.post(f"/principals/{HUMAN}/tokens", headers=_auth(admin_token))
+        credential_id = issue_response.json()["credential_id"]
+        issued_token = issue_response.json()["token"]
+
+        response = client.delete(
+            f"/principals/{HUMAN}/tokens/{credential_id}", headers=_auth(admin_token)
+        )
+        assert response.status_code == 204
+
+        # The revoked token no longer authenticates.
+        follow_up = client.get("/schema", headers=_auth(issued_token))
+        assert follow_up.status_code == 401
+
+    def test_revoke_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        response = client.delete(f"/principals/{HUMAN}/tokens/some-credential-id")
+        assert response.status_code == 401
+
+    def test_revoke_nonexistent_credential_returns_404(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(ADMIN, author=ADMIN)
+        response = client.delete(f"/principals/{HUMAN}/tokens/nonexistent", headers=_auth(token))
+        assert response.status_code == 404
+        assert response.json()["code"] == "NOT_FOUND"

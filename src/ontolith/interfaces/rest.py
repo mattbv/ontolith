@@ -1,9 +1,10 @@
 """REST interface for Ontolith (SPEC §14.3, ADR-0021).
 
-Exposes a read + propose slice over HTTP: schema, entity retrieval, query,
-provenance, and proposal creation/listing. Direct write, proposal
-accept/reject/review, contradiction resolution, and principal/token admin
-are deferred to a follow-up PR (KI-022).
+Exposes read, propose, direct write, proposal review (accept/reject),
+contradiction listing/flagging/resolution, and principal/token admin over
+HTTP. ``/proposals/{id}/review`` (a third SPEC-named action alongside
+accept/reject) and listing endpoints for ``/principals``/``/namespaces``
+have no backing SDK method yet and remain deferred (KI-022).
 
 Authentication (ADR-0014, reused unchanged): every route requires an
 ``Authorization: Bearer <token>`` header, resolved server-side via the
@@ -33,6 +34,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import TYPE_CHECKING, Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, Request
@@ -248,6 +250,138 @@ class ProposeOut(BaseModel):
 
     proposal: ProposalOut
     decision: str
+
+
+class WriteAssertionIn(BaseModel):
+    """Request body for POST /assertions (direct write, bypassing the
+    proposal/policy pipeline).
+
+    Exactly one of (``value`` and ``value_type``) or ``target`` must be
+    set. Requires write or admin capability and a non-AI principal —
+    enforced by ``Ontology.assert_literal``/``assert_ref``, not this
+    schema. Unlike ``ProposeIn``, ``target`` writes accept no
+    ``rationale`` (``assert_ref`` doesn't take one — an existing SDK-level
+    asymmetry with ``assert_literal``, not a REST omission).
+    """
+
+    subject: str
+    predicate: str
+    value: str | None = None
+    value_type: str | None = None
+    target: str | None = None
+    confidence: float | None = None
+    source: str | None = None
+    rationale: str | None = None
+    acting_as: str | None = None
+    model: str | None = None
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+
+
+class AssertionDetailOut(BaseModel):
+    """Response body for POST /assertions."""
+
+    id: str
+    subject: str
+    predicate: str
+    value: str
+    value_type: str | None
+    status: str
+    author: str
+    confidence: float | None
+    source: str | None
+    rationale: str | None
+    model: str | None
+    asserted_at: str
+    valid_from: str | None
+    valid_to: str | None
+    supersedes: str | None
+
+
+class RejectIn(BaseModel):
+    """Request body for POST /proposals/{proposal_id}/reject."""
+
+    reason: str = ""
+
+
+class ContradictionOut(BaseModel):
+    """A contradiction's fields, returned by every contradiction route."""
+
+    id: str
+    namespace: str
+    subject: str
+    predicate: str
+    state: str
+    member_ids: list[str]
+    created_at: str
+    raised_by: str | None
+    resolved_by: str | None
+    resolved_at: str | None
+
+
+class ResolveContradictionIn(BaseModel):
+    """Request body for POST /contradictions/{contradiction_id}/resolve."""
+
+    winner_assertion_id: str
+
+
+class FlagContradictionIn(BaseModel):
+    """Request body for POST /contradictions/flag."""
+
+    assertion_id_a: str
+    assertion_id_b: str
+    rationale: str | None = None
+
+
+class FlagContradictionOut(BaseModel):
+    """Response body for POST /contradictions/flag."""
+
+    contradiction: ContradictionOut
+    action: str
+
+
+class CreatePrincipalIn(BaseModel):
+    """Request body for POST /principals. Requires admin capability."""
+
+    principal_id: str
+    kind: str
+    auth_method: str = "oidc"
+    owner: str | None = None
+    default_capability: str = "propose"
+    trust_level: int = 0
+    metadata: dict[str, Any] | None = None
+
+
+class PrincipalOut(BaseModel):
+    """A principal's fields, returned by principal routes."""
+
+    id: str
+    kind: str
+    owner: str | None
+    auth_method: str
+    default_capability: str
+    trust_level: int
+    created_at: str
+
+
+class TokenIssuedOut(BaseModel):
+    """Response body for POST /principals/{principal_id}/tokens.
+
+    The raw token is returned exactly once, here, and cannot be recovered
+    afterward — only its SHA-256 hash is persisted.
+    """
+
+    token: str
+    credential_id: str
+
+
+class CredentialOut(BaseModel):
+    """A single issued credential's metadata. Never the raw token or hash."""
+
+    id: str
+    principal_id: str
+    created_at: str
+    revoked_at: str | None
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +703,317 @@ def create_rest_app(
             )
             for p in results
         ]
+
+    # ------------------------------------------------------------------
+    # POST /assertions
+    # ------------------------------------------------------------------
+
+    @app.post("/assertions", status_code=201)
+    def write_assertion_route(
+        body: WriteAssertionIn,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> AssertionDetailOut:
+        """Directly write an assertion, bypassing the proposal/policy pipeline.
+
+        Requires write or admin capability and a non-AI principal
+        (Ontology.assert_literal/assert_ref enforce both) — SPEC §10
+        conflict routing still applies; this is a governed direct-write
+        path, not a way around review for AI principals.
+        """
+        has_literal = body.value is not None and body.value_type is not None
+        has_ref = body.target is not None
+        if has_literal == has_ref:
+            raise ValidationError("Provide exactly one of (value and value_type) or target")
+
+        if has_ref:
+            assert body.target is not None
+            assertion = kb.assert_ref(
+                subject=body.subject,
+                predicate=body.predicate,
+                target=body.target,
+                author=principal.id,
+                confidence=body.confidence,
+                source=body.source,
+                acting_as=body.acting_as,
+                model=body.model,
+                valid_from=body.valid_from,
+                valid_to=body.valid_to,
+            )
+        else:
+            assert body.value is not None and body.value_type is not None
+            assertion = kb.assert_literal(
+                subject=body.subject,
+                predicate=body.predicate,
+                value=body.value,
+                value_type=body.value_type,
+                author=principal.id,
+                confidence=body.confidence,
+                source=body.source,
+                rationale=body.rationale,
+                acting_as=body.acting_as,
+                model=body.model,
+                valid_from=body.valid_from,
+                valid_to=body.valid_to,
+            )
+
+        return AssertionDetailOut(
+            id=assertion.id,
+            subject=assertion.subject,
+            predicate=assertion.predicate,
+            value=assertion.value,
+            value_type=assertion.value_type,
+            status=assertion.status,
+            author=assertion.author,
+            confidence=assertion.confidence,
+            source=assertion.source,
+            rationale=assertion.rationale,
+            model=assertion.model,
+            asserted_at=assertion.asserted_at.isoformat(),
+            valid_from=assertion.valid_from.isoformat() if assertion.valid_from else None,
+            valid_to=assertion.valid_to.isoformat() if assertion.valid_to else None,
+            supersedes=assertion.supersedes,
+        )
+
+    # ------------------------------------------------------------------
+    # POST /proposals/{proposal_id}/accept
+    # ------------------------------------------------------------------
+
+    @app.post("/proposals/{proposal_id}/accept")
+    def accept_proposal_route(
+        proposal_id: str,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> ProposalOut:
+        """Accept a pending proposal, replaying its operations. Requires
+        review or admin capability; the reviewer must not be the
+        proposal's own author or delegate (self-review is blocked)."""
+        proposal = kb.accept_proposal(proposal_id, principal.id)
+        return ProposalOut(
+            id=proposal.id,
+            namespace=proposal.namespace,
+            author=proposal.author,
+            acting_as=proposal.acting_as,
+            state=proposal.state,
+            created_at=proposal.created_at.isoformat(),
+            decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
+            policy_reason=proposal.policy_reason,
+        )
+
+    # ------------------------------------------------------------------
+    # POST /proposals/{proposal_id}/reject
+    # ------------------------------------------------------------------
+
+    @app.post("/proposals/{proposal_id}/reject")
+    def reject_proposal_route(
+        proposal_id: str,
+        body: RejectIn,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> ProposalOut:
+        """Reject a pending proposal. Requires review or admin capability;
+        same self-review guard as accept."""
+        proposal = kb.reject_proposal(proposal_id, principal.id, reason=body.reason)
+        return ProposalOut(
+            id=proposal.id,
+            namespace=proposal.namespace,
+            author=proposal.author,
+            acting_as=proposal.acting_as,
+            state=proposal.state,
+            created_at=proposal.created_at.isoformat(),
+            decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
+            policy_reason=proposal.policy_reason,
+        )
+
+    # ------------------------------------------------------------------
+    # GET /contradictions
+    # ------------------------------------------------------------------
+
+    @app.get("/contradictions")
+    def list_contradictions_route(
+        state: str | None = "open",
+        _principal: Principal = Depends(_resolve_principal),
+    ) -> list[ContradictionOut]:
+        """List contradictions, defaulting to open ones.
+
+        Pass ``state=all`` to list contradictions in every state (mirrors
+        GET /proposals's ``all`` sentinel — see that route for why).
+        """
+        effective_state = None if state == "all" else state
+        results = kb.contradictions(state=effective_state)
+        return [
+            ContradictionOut(
+                id=c.id,
+                namespace=c.namespace,
+                subject=c.subject,
+                predicate=c.predicate,
+                state=c.state,
+                member_ids=c.member_ids,
+                created_at=c.created_at.isoformat(),
+                raised_by=c.raised_by,
+                resolved_by=c.resolved_by,
+                resolved_at=c.resolved_at.isoformat() if c.resolved_at else None,
+            )
+            for c in results
+        ]
+
+    # ------------------------------------------------------------------
+    # POST /contradictions/flag
+    # ------------------------------------------------------------------
+
+    @app.post("/contradictions/flag", status_code=201)
+    def flag_contradiction_route(
+        body: FlagContradictionIn,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> FlagContradictionOut:
+        """Flag two assertions as contradictory, opening or extending a
+        contradiction. Requires propose capability or higher (ADR-0008)."""
+        contradiction, action = kb.flag_contradiction(
+            body.assertion_id_a,
+            body.assertion_id_b,
+            principal.id,
+            rationale=body.rationale,
+        )
+        return FlagContradictionOut(
+            contradiction=ContradictionOut(
+                id=contradiction.id,
+                namespace=contradiction.namespace,
+                subject=contradiction.subject,
+                predicate=contradiction.predicate,
+                state=contradiction.state,
+                member_ids=contradiction.member_ids,
+                created_at=contradiction.created_at.isoformat(),
+                raised_by=contradiction.raised_by,
+                resolved_by=contradiction.resolved_by,
+                resolved_at=(
+                    contradiction.resolved_at.isoformat() if contradiction.resolved_at else None
+                ),
+            ),
+            action=action,
+        )
+
+    # ------------------------------------------------------------------
+    # POST /contradictions/{contradiction_id}/resolve
+    # ------------------------------------------------------------------
+
+    @app.post("/contradictions/{contradiction_id}/resolve")
+    def resolve_contradiction_route(
+        contradiction_id: str,
+        body: ResolveContradictionIn,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> ContradictionOut:
+        """Resolve an open contradiction by selecting a winning assertion.
+        Requires review or admin capability."""
+        contradiction = kb.resolve_contradiction(
+            contradiction_id, body.winner_assertion_id, principal.id
+        )
+        return ContradictionOut(
+            id=contradiction.id,
+            namespace=contradiction.namespace,
+            subject=contradiction.subject,
+            predicate=contradiction.predicate,
+            state=contradiction.state,
+            member_ids=contradiction.member_ids,
+            created_at=contradiction.created_at.isoformat(),
+            raised_by=contradiction.raised_by,
+            resolved_by=contradiction.resolved_by,
+            resolved_at=(
+                contradiction.resolved_at.isoformat() if contradiction.resolved_at else None
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # POST /principals
+    # ------------------------------------------------------------------
+
+    @app.post("/principals", status_code=201)
+    def create_principal_route(
+        body: CreatePrincipalIn,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> PrincipalOut:
+        """Create a new principal. Requires admin capability.
+
+        Unlike every other write route here, Ontology.create_principal()
+        has no built-in capability gate of its own — this route calls
+        Ontology.require_admin() explicitly first, the same gate
+        issue_token/revoke_token/list_tokens already use internally.
+        """
+        kb.require_admin(principal.id)
+        created = kb.create_principal(
+            body.principal_id,
+            kind=body.kind,
+            auth_method=body.auth_method,
+            owner=body.owner,
+            default_capability=body.default_capability,
+            trust_level=body.trust_level,
+            metadata=body.metadata,
+        )
+        return PrincipalOut(
+            id=created.id,
+            kind=created.kind,
+            owner=created.owner,
+            auth_method=created.auth_method,
+            default_capability=created.default_capability,
+            trust_level=created.trust_level,
+            created_at=created.created_at.isoformat(),
+        )
+
+    # ------------------------------------------------------------------
+    # POST /principals/{principal_id}/tokens
+    # ------------------------------------------------------------------
+
+    @app.post("/principals/{principal_id}/tokens", status_code=201)
+    def issue_token_route(
+        principal_id: str,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> TokenIssuedOut:
+        """Issue a new bearer token for a principal. Requires admin capability.
+
+        The raw token is returned exactly once, here, and cannot be
+        recovered afterward — store it immediately.
+        """
+        token = kb.issue_token(principal_id, author=principal.id)
+        credential_id = kb.list_tokens(principal_id, author=principal.id)[0].id
+        return TokenIssuedOut(token=token, credential_id=credential_id)
+
+    # ------------------------------------------------------------------
+    # GET /principals/{principal_id}/tokens
+    # ------------------------------------------------------------------
+
+    @app.get("/principals/{principal_id}/tokens")
+    def list_tokens_route(
+        principal_id: str,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> list[CredentialOut]:
+        """List credentials issued to a principal. Requires admin
+        capability. Never returns the raw token or its hash."""
+        credentials = kb.list_tokens(principal_id, author=principal.id)
+        return [
+            CredentialOut(
+                id=c.id,
+                principal_id=c.principal_id,
+                created_at=c.created_at.isoformat(),
+                revoked_at=c.revoked_at.isoformat() if c.revoked_at else None,
+            )
+            for c in credentials
+        ]
+
+    # ------------------------------------------------------------------
+    # DELETE /principals/{principal_id}/tokens/{credential_id}
+    # ------------------------------------------------------------------
+
+    @app.delete("/principals/{principal_id}/tokens/{credential_id}", status_code=204)
+    def revoke_token_route(
+        principal_id: str,
+        credential_id: str,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> None:
+        """Revoke a previously issued token by its credential ID. Requires
+        admin capability.
+
+        ``principal_id`` in the path is for REST resource nesting only:
+        Ontology.revoke_token() identifies the credential solely by
+        ``credential_id`` and does not itself verify it belongs to
+        ``principal_id``.
+        """
+        kb.revoke_token(credential_id, author=principal.id)
 
     return app
 
