@@ -26,8 +26,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (via native `list_distance`); `QueryBuilder.semantic(text)`, `.min_confidence(t)`,
   `.trust_at_least(l)`, `.limit(n)`; `Ontology.reindex(concept=)` to explicitly (re-)embed
   entities into the vector index; CLI `ontolith reindex [--concept]`
+- REST interface, read + propose slice (SPEC §14.3, ADR-0021, partially closes KI-022):
+  `create_rest_app(kb, auth_provider)` (`interfaces/rest.py`) exposing `GET /schema`,
+  `GET /entities/{id}`, `POST /query`, `GET /provenance/{id}`, `POST /proposals`,
+  `GET /proposals` — every route, reads included, requires an ADR-0014 bearer token (a
+  deliberate divergence from MCP's current unauthenticated read tools, tracked as
+  KI-021). One `OntolithError` → HTTP status handler (SPEC §16) replaces per-route error
+  handling. Direct write, proposal review actions, contradiction resolution, and
+  principal/token admin remain deferred.
 
 #### Fixed
+- SQLite backend now opens its connection with `check_same_thread=False` — an ASGI
+  server (the new REST interface) dispatches requests on a different OS thread than the
+  one that constructs the backend, which stock `sqlite3` blocks regardless of whether
+  the access is ever actually concurrent. This flag only lifts that check; it does
+  **not** serialize access — the connection is not yet safe under genuinely concurrent
+  writes from multiple threads, tracked as KI-023
 - **HIGH:** `as_of(t)` excluded flagged assertions by current status instead of
   status-at-t; since flagging never sets `valid_to`, once any contradiction had ever
   touched a `(subject, predicate)`, `as_of(t)` returned nothing for it at any t, including

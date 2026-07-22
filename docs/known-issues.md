@@ -388,6 +388,72 @@ When the `security.yml` CI-hardening pass is built: add `griffecli` (or whatever
 
 ---
 
+## KI-021 — MCP read tools accept unauthenticated calls, contradicting SPEC §8.3
+
+**Severity:** Architecture gap — SPEC compliance gap in a shipped interface, not yet exploitable beyond information disclosure (read-only)
+**Milestone target:** Backlog (resolve alongside the REST interface work, KI-022, so both interfaces converge on one auth posture instead of being fixed twice)
+**SPEC reference:** SPEC §8.3 ("`read`/`query`: required for any retrieval"), §17 ("every operation MUST be capability-checked ... against the resolved principal")
+
+### Description
+
+`src/ontolith/interfaces/mcp.py`'s `schema_tool`, `get_tool`, `query_tool`, and `provenance_tool` take no `token` parameter and call straight into `kb.backend`/`kb.query()` with no principal resolution at all — any MCP client can call them with zero credentials. Only `propose_tool` and `flag_contradiction_tool` require a bearer `token` (ADR-0014). SPEC §8.3 states plainly that `read`/`query` "required for any retrieval," and §17 states every operation MUST be capability-checked against a resolved principal — the four read tools currently satisfy neither.
+
+Surfaced while scoping the REST interface (KI-022): REST's read routes are being designed to require auth from the start (matching SPEC §14.3's "auth required" language for REST resources), which would leave MCP and REST diverging on an identical class of operation for no principled reason — REST enforcing something SPEC already required of MCP too, and MCP simply never got it.
+
+In practice this is a lower-severity gap than the CRITICAL/HIGH findings closed in the 2026-07-06/07 security remediation arc (see project memory) — it grants unauthenticated *reads*, not writes, capability escalation, or governance bypass. But it is a genuine, currently-live SPEC violation, not a documentation gap.
+
+### Fix
+
+Add a `token: str` parameter to `schema_tool`/`get_tool`/`query_tool`/`provenance_tool`, resolve it via the same `AuthProvider` already injected into `create_mcp_server`, and raise/return the same `auth_error` shape `propose_tool`/`flag_contradiction_tool` already use on failure. Since every capability level is `>= read` in the SPEC §8.3 ordering, this is purely "must resolve to *some* valid principal" — no new capability-tier logic needed, mirroring the read-auth design settled for REST in KI-022. Do this in the same pass as (or immediately after) the REST read-auth work so both interfaces are fixed from one shared understanding instead of two separate patches.
+
+---
+
+## KI-022 — REST interface (SPEC §14.3) — PARTIALLY RESOLVED (M3)
+
+**Severity:** Architecture gap — named M3 scope item with zero implementation
+**Milestone target:** M3 (first slice); full SPEC §14.3 parity is Backlog
+**SPEC reference:** SPEC §14.3 (REST + GraphQL), §16 (error model), §17 (security model)
+
+### Description
+
+SPEC §14.3 defines a REST resource set — `/namespaces`, `/entities`, `/assertions`, `/proposals` (create + `/{id}/accept|reject|review`), `/contradictions/{id}/resolve`, `/principals`, `/query`, `/provenance/{assertion_id}` — spanning every capability tier (read, propose, write, review, admin). None of it exists: `src/ontolith/interfaces/` contains only `cli.py` and `mcp.py`. `pyproject.toml` already carries an unused `rest = ["fastapi>=0.110", "uvicorn>=0.27"]` optional-dependency group reserved for exactly this, dating back to M0's repo skeleton.
+
+Scoped (design approved 2026-07-21) as two PRs rather than one, given the full resource set's span across capability tiers is a materially bigger surface than MCP's deliberately narrow read/propose-only tool set (ADR-0008):
+
+- **First PR (planned next):** read + propose slice mirroring MCP's proven 6-tool surface — `GET /schema`, `GET /entities/{id}`, `POST /query`, `GET /provenance/{assertion_id}`, `POST /proposals`, `GET /proposals` — reusing ADR-0014's bearer-token `AuthProvider` unchanged, with auth required on every route including reads (see KI-021 for why that's the deliberate choice, and the resulting MCP inconsistency it surfaces). A new ADR records the auth-on-reads decision, the `OntolithError`→HTTP status mapping (SPEC §16), and the endpoint-to-MCP-tool mapping when this lands.
+- **Deferred to a follow-up PR:** direct write (`/assertions` POST/PUT via `assert_literal`/`assert_ref`), `/proposals/{id}/accept|reject|review`, `/contradictions` (list + resolve) and `flag_contradiction`, `/principals` (create/list, token issue/revoke/list), `/namespaces`.
+- **Deferred, separate concern:** offset/cursor-based pagination on `/query` — `QueryBuilder` itself only supports `.limit()` today, no `.offset()`; extending it is a `query/`+`store/` change, not an `interfaces/` one, and is out of scope for "expose the existing SDK over HTTP."
+
+GraphQL (SPEC §14.3's other named half) is untouched by this KI and remains fully unscoped.
+
+### Fix
+
+**Read + propose slice: resolved.** `src/ontolith/interfaces/rest.py` (`create_rest_app`, ADR-0021) implements `GET /schema`, `GET /entities/{id}`, `POST /query`, `GET /provenance/{id}`, `POST /proposals`, `GET /proposals` — all requiring an ADR-0014 bearer token, all errors mapped through one `OntolithError -> HTTP status` handler per SPEC §16.
+
+**Still open:** `/assertions` direct write, `/proposals/{id}/accept|reject|review`, `/contradictions` (list + resolve) and `flag_contradiction`, `/principals` (create/list, token issue/revoke/list), `/namespaces`, and `/query` offset pagination — see this entry's original scope list above for the full breakdown. GraphQL remains fully unscoped.
+
+---
+
+## KI-023 — SQLite backend's single connection is not safe under concurrent writes from an ASGI server
+
+**Severity:** Architecture gap — data-integrity risk under real concurrent traffic, not yet triggered by any test (single-threaded today)
+**Milestone target:** Backlog (address before REST, KI-022, is exposed to concurrent traffic; today's slice is expected to run single-worker)
+**SPEC reference:** SPEC §12.1 (SQLite default backend, WAL mode), CLAUDE.md "One transaction per proposal acceptance"
+
+### Description
+
+`SQLiteBackend.__init__` (`src/ontolith/store/sqlite/backend.py`) opens its connection with `check_same_thread=False`, added when the REST interface (KI-022) was built: an ASGI server dispatches sync route handlers onto a worker threadpool, a different OS thread than the one that constructed the backend, which stock `sqlite3` blocks regardless of whether the cross-thread access is ever actually concurrent.
+
+That flag only lifts the same-thread check — it does not serialize access. The connection's transaction state (`self._in_transaction`, `transaction()`'s `BEGIN`/`COMMIT` in `backend.py`) is shared, mutable, unguarded state. Two genuinely concurrent requests that both write (e.g. two overlapping `POST /proposals` that auto-accept) can interleave on the same connection: a second `BEGIN` while the first transaction is still open raises a raw `sqlite3.OperationalError` — `begin()` has no try/except around it, so this is not an `OntolithError` and is not caught by the REST error mapping (SPEC §16); it surfaces as FastAPI's generic, unmapped 500 — or worse, non-transactional autocommit statements from one request can interleave with another's open transaction, violating "one transaction per proposal acceptance" (CLAUDE.md) without necessarily raising anything.
+
+Found during `ontolith-reviewer`'s pass on the REST interface's first PR (KI-022) — flagged MEDIUM there ("would elevate to HIGH if this REST surface is intended to serve concurrent traffic"). Not yet triggered: all existing tests exercise the backend from a single thread at a time (either directly, or serially through `TestClient`), and `uvicorn`'s default deployment for this project has not yet been decided (single-worker sequential dispatch would not trigger this at all).
+
+### Fix
+
+Before deploying the REST interface behind a concurrent-capable ASGI worker configuration: either (a) serialize access with a lock around `transaction()` and every direct read/write method — the correct general fix, but touches most of `SQLiteBackend`'s surface and needs its own dedicated concurrency test coverage (not a bolt-on to an unrelated PR), or (b) constrain deployment to single-worker/sequential request handling (e.g. `uvicorn --workers 1` with no threadpool concurrency for sync routes — would need routes converted to `async def` too, since FastAPI threadpools sync handlers regardless of worker count) and document that constraint where the REST server is actually stood up. A per-request connection (connection pool) is a third option worth evaluating against WAL mode's own concurrent-reader support.
+
+---
+
 ## Format
 
 Each entry follows this structure:

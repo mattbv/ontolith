@@ -51,7 +51,15 @@ class SQLiteBackend:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # isolation_level=None: autocommit mode (ADR-0010).
         # Each write auto-commits unless _in_transaction is True.
-        self.conn = sqlite3.connect(str(self.path), isolation_level=None)
+        # check_same_thread=False: an ASGI server (REST, interfaces/rest.py)
+        # dispatches sync route handlers onto a worker threadpool, which is
+        # a different OS thread than the one that constructed this backend
+        # — stock sqlite3 blocks that regardless of whether the access is
+        # ever actually concurrent. This flag only lifts that same-thread
+        # check; it does NOT serialize concurrent access. This connection
+        # and its transaction() state (_in_transaction) are not safe under
+        # truly concurrent writes from multiple threads — tracked as KI-023.
+        self.conn = sqlite3.connect(str(self.path), isolation_level=None, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         # SPEC §12.1 MUST: default backend uses WAL mode — readers don't
