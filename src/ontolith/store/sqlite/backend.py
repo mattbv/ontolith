@@ -9,10 +9,13 @@ Default storage adapter for Ontolith. Provides:
 
 import sqlite3
 import struct
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
+from typing import Concatenate, ParamSpec, TypeVar, cast
 
 import sqlite_vec
 
@@ -24,10 +27,33 @@ from ontolith.identity import Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
 from ontolith.store.base import VECTOR_SCOPES
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
 
 def _pack_vector(vec: list[float]) -> bytes:
     """Serialize a vector for sqlite-vec's vec0 FLOAT[N] column format."""
     return struct.pack(f"{len(vec)}f", *vec)
+
+
+def _synchronized(
+    method: Callable[Concatenate["SQLiteBackend", _P], _R],
+) -> Callable[Concatenate["SQLiteBackend", _P], _R]:
+    """Serialize a method's connection access across threads (KI-023).
+
+    Reentrant on the calling thread: a method called from inside an active
+    ``transaction()`` block (which already holds the lock via ``begin()``)
+    re-acquires without blocking. A different thread blocks until the lock
+    is free, so the single shared connection is never touched concurrently.
+    """
+
+    @wraps(method)
+    def wrapper(self: "SQLiteBackend", *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        """Acquire self._lock, call the wrapped method, then release it."""
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return cast(Callable[Concatenate["SQLiteBackend", _P], _R], wrapper)
 
 
 class SQLiteBackend:
@@ -56,9 +82,8 @@ class SQLiteBackend:
         # a different OS thread than the one that constructed this backend
         # — stock sqlite3 blocks that regardless of whether the access is
         # ever actually concurrent. This flag only lifts that same-thread
-        # check; it does NOT serialize concurrent access. This connection
-        # and its transaction() state (_in_transaction) are not safe under
-        # truly concurrent writes from multiple threads — tracked as KI-023.
+        # check; it does not by itself serialize concurrent access — that is
+        # what self._lock (below) does (KI-023).
         self.conn = sqlite3.connect(str(self.path), isolation_level=None, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
@@ -71,6 +96,13 @@ class SQLiteBackend:
         sqlite_vec.load(self.conn)
         self.conn.enable_load_extension(False)
         self._in_transaction: bool = False
+        # Serializes all access to self.conn across threads (KI-023): the
+        # connection and _in_transaction are shared mutable state that stock
+        # sqlite3 does not protect once check_same_thread=False lifts the
+        # same-thread check. RLock (not Lock): begin() holds it across
+        # multiple public-method calls inside a transaction() block, each of
+        # which re-acquires it via the @_synchronized decorator.
+        self._lock = threading.RLock()
         self._clock: Clock = clock or SystemClock()
         self._create_schema()
 
@@ -325,25 +357,57 @@ class SQLiteBackend:
         self.conn.commit()
 
     def begin(self) -> None:
-        """Begin an explicit transaction (ADR-0010)."""
-        self.conn.execute("BEGIN")
+        """Begin an explicit transaction (ADR-0010).
+
+        Acquires self._lock (KI-023) — held across every subsequent
+        @_synchronized call until commit()/rollback() releases it, so no
+        other thread's operation can interleave with this transaction.
+        """
+        self._lock.acquire()
+        try:
+            self.conn.execute("BEGIN")
+        except sqlite3.Error as e:
+            self._lock.release()
+            raise StorageError(f"Failed to begin transaction: {e}") from e
         self._in_transaction = True
 
     def commit(self) -> None:
-        """Commit the current explicit transaction."""
+        """Commit the current explicit transaction.
+
+        Releases self._lock only on success. A failed commit leaves the
+        transaction (and the lock) open: transaction()'s except block calls
+        rollback() next, which is then the sole path that releases the
+        lock — releasing here too on failure would double-release it (the
+        lock is not reentrant-safe against being released twice), raising a
+        RuntimeError that masks the real StorageError and leaves
+        _in_transaction stuck True.
+        """
         try:
             self.conn.commit()
         except sqlite3.Error as e:
             raise StorageError(f"Failed to commit transaction: {e}") from e
         self._in_transaction = False
+        self._lock.release()
 
     def rollback(self) -> None:
-        """Rollback the current explicit transaction."""
+        """Rollback the current explicit transaction. Always releases self._lock.
+
+        Unlike commit(), this always resolves the transaction (successful
+        or not) — it's the terminal cleanup path, including when called
+        after a failed commit() (which deliberately did not release the
+        lock itself, see commit()'s docstring). _in_transaction is reset
+        unconditionally too, even if the underlying rollback itself fails:
+        leaving it True after the lock is released would let a future
+        caller believe it must skip autocommit for a transaction no one
+        will ever commit or roll back again.
+        """
         try:
             self.conn.rollback()
         except sqlite3.Error as e:
             raise StorageError(f"Failed to rollback transaction: {e}") from e
-        self._in_transaction = False
+        finally:
+            self._in_transaction = False
+            self._lock.release()
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -362,6 +426,7 @@ class SQLiteBackend:
             self.rollback()
             raise
 
+    @_synchronized
     def put_principal(self, principal: Principal) -> None:
         """Persist a principal.
 
@@ -398,6 +463,7 @@ class SQLiteBackend:
         except sqlite3.Error as e:
             raise StorageError(f"Failed to persist principal (id={principal.id}): {e}") from e
 
+    @_synchronized
     def get_principal(self, principal_id: str) -> Principal | None:
         """Retrieve a principal by ID.
 
@@ -433,6 +499,7 @@ class SQLiteBackend:
             metadata=json.loads(row["metadata"]),
         )
 
+    @_synchronized
     def put_credential(self, credential: PrincipalCredential) -> None:
         """Persist a principal credential (hashed API-key token).
 
@@ -466,6 +533,7 @@ class SQLiteBackend:
         except sqlite3.Error as e:
             raise StorageError(f"Failed to persist credential (id={credential.id}): {e}") from e
 
+    @_synchronized
     def get_principal_by_token_hash(self, token_hash: str) -> Principal | None:
         """Resolve a principal via a credential's token hash.
 
@@ -494,6 +562,7 @@ class SQLiteBackend:
             return None
         return self._row_to_principal(row)
 
+    @_synchronized
     def get_credential(self, credential_id: str) -> PrincipalCredential | None:
         """Retrieve a credential by ID (never exposes the raw token or hash to callers).
 
@@ -513,6 +582,7 @@ class SQLiteBackend:
             return None
         return self._row_to_credential(row)
 
+    @_synchronized
     def get_credentials_for_principal(self, principal_id: str) -> list[PrincipalCredential]:
         """List all credentials (active and revoked) issued to a principal.
 
@@ -540,6 +610,7 @@ class SQLiteBackend:
             revoked_at=datetime.fromisoformat(row["revoked_at"]) if row["revoked_at"] else None,
         )
 
+    @_synchronized
     def revoke_credential(self, credential_id: str, revoked_at: datetime) -> None:
         """Mark a credential as revoked. Idempotent-safe: re-revoking is a no-op update.
 
@@ -560,6 +631,7 @@ class SQLiteBackend:
         if not self._in_transaction:
             self.conn.commit()
 
+    @_synchronized
     def put_entity(self, entity: Entity) -> None:
         """Persist an entity.
 
@@ -592,6 +664,7 @@ class SQLiteBackend:
         except sqlite3.Error as e:
             raise StorageError(f"Failed to persist entity: {e}") from e
 
+    @_synchronized
     def put_assertion(self, assertion: Assertion) -> None:
         """Persist an assertion.
 
@@ -652,6 +725,7 @@ class SQLiteBackend:
         except sqlite3.Error as e:
             raise StorageError(f"Failed to persist assertion (id={assertion.id}): {e}") from e
 
+    @_synchronized
     def get_entity(self, entity_id: str) -> Entity | None:
         """Retrieve an entity by ID.
 
@@ -679,6 +753,7 @@ class SQLiteBackend:
             created_by=row["created_by"],
         )
 
+    @_synchronized
     def assertions(
         self,
         subject: str | None = None,
@@ -787,6 +862,7 @@ class SQLiteBackend:
             metadata=json.loads(row["metadata"]),
         )
 
+    @_synchronized
     def get_assertion(self, assertion_id: str) -> Assertion | None:
         """Retrieve a single assertion by ID, regardless of status.
 
@@ -801,6 +877,7 @@ class SQLiteBackend:
         row = cursor.fetchone()
         return self._row_to_assertion(row) if row else None
 
+    @_synchronized
     def set_assertion_status(
         self,
         assertion_id: str,
@@ -839,6 +916,7 @@ class SQLiteBackend:
         except sqlite3.Error as e:
             raise StorageError(f"Failed to update assertion status (id={assertion_id}): {e}") from e
 
+    @_synchronized
     def put_schema(self, schema: SchemaIR) -> None:
         """Persist a schema version.
 
@@ -875,6 +953,7 @@ class SQLiteBackend:
                 f"Failed to persist schema (namespace={schema.namespace}): {e}"
             ) from e
 
+    @_synchronized
     def get_schema(self, namespace: str, version: int | None = None) -> SchemaIR | None:
         """Retrieve a schema version.
 
@@ -917,6 +996,7 @@ class SQLiteBackend:
         definition = json.loads(row["definition"])
         return SchemaIR.from_json(definition)
 
+    @_synchronized
     def entities(
         self,
         namespace: str | None = None,
@@ -966,6 +1046,7 @@ class SQLiteBackend:
 
         return results
 
+    @_synchronized
     def put_proposal(self, proposal: Proposal) -> None:
         """Persist a proposal."""
         import json
@@ -998,6 +1079,7 @@ class SQLiteBackend:
         except sqlite3.Error as e:
             raise StorageError(f"Failed to persist proposal (id={proposal.id}): {e}") from e
 
+    @_synchronized
     def get_proposal(self, proposal_id: str) -> Proposal | None:
         """Retrieve a proposal by ID."""
         cursor = self.conn.cursor()
@@ -1022,6 +1104,7 @@ class SQLiteBackend:
             metadata=json.loads(row["metadata"]),
         )
 
+    @_synchronized
     def proposals(self, state: str | None = None) -> list[Proposal]:
         """Query proposals, optionally filtered by state (SPEC §14.1)."""
         cursor = self.conn.cursor()
@@ -1034,6 +1117,7 @@ class SQLiteBackend:
             cursor.execute("SELECT * FROM proposal ORDER BY created_at DESC, id DESC")
         return [self._row_to_proposal(row) for row in cursor.fetchall()]
 
+    @_synchronized
     def update_proposal_state(
         self,
         proposal_id: str,
@@ -1060,6 +1144,7 @@ class SQLiteBackend:
         except sqlite3.Error as e:
             raise StorageError(f"Failed to update proposal (id={proposal_id}): {e}") from e
 
+    @_synchronized
     def put_proposal_event(self, event: ProposalEvent) -> None:
         """Persist a structured review-action event (SPEC §9.4)."""
         try:
@@ -1085,6 +1170,7 @@ class SQLiteBackend:
         except sqlite3.Error as e:
             raise StorageError(f"Failed to persist proposal event (id={event.id}): {e}") from e
 
+    @_synchronized
     def get_proposal_events(self, proposal_id: str) -> list[ProposalEvent]:
         """Retrieve all review events for a proposal, oldest first."""
         cursor = self.conn.cursor()
@@ -1104,6 +1190,7 @@ class SQLiteBackend:
             for row in cursor.fetchall()
         ]
 
+    @_synchronized
     def put_assertion_event(self, event: AssertionEvent) -> None:
         """Persist an append-only assertion status-mutation event."""
         try:
@@ -1128,6 +1215,7 @@ class SQLiteBackend:
         except sqlite3.Error as e:
             raise StorageError(f"Failed to persist assertion event (id={event.id}): {e}") from e
 
+    @_synchronized
     def get_assertion_events(self, assertion_id: str) -> list[AssertionEvent]:
         """Retrieve all status-mutation events for an assertion, oldest first."""
         cursor = self.conn.cursor()
@@ -1146,6 +1234,7 @@ class SQLiteBackend:
             for row in cursor.fetchall()
         ]
 
+    @_synchronized
     def put_contradiction(self, contradiction: Contradiction) -> None:
         """Persist a new contradiction."""
         import json
@@ -1200,6 +1289,7 @@ class SQLiteBackend:
             metadata=json.loads(row["metadata"]),
         )
 
+    @_synchronized
     def get_open_contradiction(
         self, namespace: str, subject: str, predicate: str
     ) -> Contradiction | None:
@@ -1216,6 +1306,7 @@ class SQLiteBackend:
         row = cursor.fetchone()
         return self._row_to_contradiction(row) if row else None
 
+    @_synchronized
     def update_contradiction_members(
         self,
         contradiction_id: str,
@@ -1239,6 +1330,7 @@ class SQLiteBackend:
                 f"Failed to update contradiction (id={contradiction_id}): {e}"
             ) from e
 
+    @_synchronized
     def get_contradiction(self, contradiction_id: str) -> Contradiction | None:
         """Retrieve a contradiction by ID, regardless of state."""
         cursor = self.conn.cursor()
@@ -1246,6 +1338,7 @@ class SQLiteBackend:
         row = cursor.fetchone()
         return self._row_to_contradiction(row) if row else None
 
+    @_synchronized
     def contradictions(self, state: str | None = None) -> list[Contradiction]:
         """Query contradictions, optionally filtered by state (SPEC §14.1)."""
         cursor = self.conn.cursor()
@@ -1258,6 +1351,7 @@ class SQLiteBackend:
             cursor.execute("SELECT * FROM contradiction ORDER BY created_at DESC, id DESC")
         return [self._row_to_contradiction(row) for row in cursor.fetchall()]
 
+    @_synchronized
     def resolve_contradiction(
         self,
         contradiction_id: str,
@@ -1284,6 +1378,7 @@ class SQLiteBackend:
                 f"Failed to resolve contradiction (id={contradiction_id}): {e}"
             ) from e
 
+    @_synchronized
     def entities_where(
         self,
         namespace: str,
@@ -1394,6 +1489,7 @@ class SQLiteBackend:
                 f"but this scope is established at dimension {row['dim']}"
             )
 
+    @_synchronized
     def vector_upsert(self, scope: str, id: str, vec: list[float]) -> None:
         """Insert or replace the embedding vector for (scope, id).
 
@@ -1434,6 +1530,7 @@ class SQLiteBackend:
                 self.rollback()
             raise StorageError(f"Failed to upsert vector (scope={scope}, id={id}): {e}") from e
 
+    @_synchronized
     def vector_search(self, scope: str, vec: list[float], k: int) -> list[tuple[str, float]]:
         """Return the k nearest ids to vec within scope, ascending distance.
 
@@ -1479,6 +1576,7 @@ class SQLiteBackend:
 
         return [(id_by_rowid[r["rowid"]], r["distance"]) for r in rows]
 
+    @_synchronized
     def close(self) -> None:
         """Close the database connection."""
         self.conn.close()
