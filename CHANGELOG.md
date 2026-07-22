@@ -47,9 +47,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - SQLite backend now opens its connection with `check_same_thread=False` — an ASGI
   server (the new REST interface) dispatches requests on a different OS thread than the
   one that constructs the backend, which stock `sqlite3` blocks regardless of whether
-  the access is ever actually concurrent. This flag only lifts that check; it does
-  **not** serialize access — the connection is not yet safe under genuinely concurrent
-  writes from multiple threads, tracked as KI-023
+  the access is ever actually concurrent. This flag only lifts that check; concurrent
+  access is now serialized separately (see KI-023 below), not by this flag
+- **SQLite backend is now thread-safe under genuinely concurrent access (closes KI-023):**
+  a `threading.RLock` now guards every `SQLiteBackend` method — `begin()` holds it for
+  the full span of an explicit transaction; every other public method acquires it for
+  its own call, reentrant on the same thread so calls made from inside a
+  `transaction()` block don't self-deadlock. Previously, two genuinely concurrent
+  requests (the exact shape an ASGI worker threadpool produces) could interleave
+  `BEGIN` calls, raising a raw, unmapped `sqlite3.OperationalError` instead of the
+  SPEC §16 error envelope. `commit()`/`rollback()` release the lock asymmetrically
+  (commit only on success, rollback always) — an `ontolith-reviewer` pass on the first
+  version of this fix caught that releasing unconditionally in both double-released the
+  lock on a commit failure, masking the real `StorageError` behind a `RuntimeError` and
+  leaving `_in_transaction` stuck; both the fix and a dedicated regression test for that
+  failure mode are documented as an update to ADR-0010. New `ThreadPoolExecutor`-based
+  regression coverage in `test_sqlite_backend.py` confirmed reproducing both failures
+  against the respective pre-fix code before verifying each fix
 - **HIGH:** `as_of(t)` excluded flagged assertions by current status instead of
   status-at-t; since flagging never sets `valid_to`, once any contradiction had ever
   touched a `(subject, predicate)`, `as_of(t)` returned nothing for it at any t, including
