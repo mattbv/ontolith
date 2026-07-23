@@ -593,8 +593,15 @@ class SQLiteBackend:
             Credentials for this principal, most recently issued first
         """
         cursor = self.conn.cursor()
+        # id DESC tiebreaks two credentials issued at the same timestamp
+        # (coarse/injected Clock) deterministically — callers that issue a
+        # token and immediately re-read it (e.g. REST's issue_token_route,
+        # to recover the new credential's id) rely on [0] genuinely being
+        # the credential just created, not an arbitrary same-`created_at`
+        # sibling.
         cursor.execute(
-            "SELECT * FROM principal_credential WHERE principal_id = ? ORDER BY created_at DESC",
+            "SELECT * FROM principal_credential WHERE principal_id = ? "
+            "ORDER BY created_at DESC, id DESC",
             (principal_id,),
         )
         return [self._row_to_credential(row) for row in cursor.fetchall()]

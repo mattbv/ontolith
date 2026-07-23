@@ -932,6 +932,19 @@ class TestAcceptProposalRoute:
         assert response.status_code == 403
         assert response.json()["code"] == "CAPABILITY_ERROR"
 
+    def test_reviewer_lacking_capability_forbidden(self, tmp_path: Path) -> None:
+        """A principal without review/admin capability cannot accept, even
+        with write capability (HUMAN here) — the accept-side capability
+        gate, distinct from the self-review guard above."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not review
+        response = client.post(f"/proposals/{proposal.id}/accept", headers=_auth(token))
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
 
 # ---------------------------------------------------------------------------
 # POST /proposals/{proposal_id}/reject
@@ -981,6 +994,16 @@ class TestRejectProposalRoute:
         response = client.post("/proposals/nonexistent/reject", json={}, headers=_auth(token))
         assert response.status_code == 404
         assert response.json()["code"] == "NOT_FOUND"
+
+    def test_reviewer_lacking_capability_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not review
+        response = client.post(f"/proposals/{proposal.id}/reject", json={}, headers=_auth(token))
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
 
 
 # ---------------------------------------------------------------------------
@@ -1159,6 +1182,20 @@ class TestResolveContradictionRoute:
         assert response.status_code == 404
         assert response.json()["code"] == "NOT_FOUND"
 
+    def test_resolver_lacking_capability_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity, contradiction_id = _make_contradiction(kb)
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not review
+        response = client.post(
+            f"/contradictions/{contradiction_id}/resolve",
+            json={"winner_assertion_id": flagged[0].id},
+            headers=_auth(token),
+        )
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
 
 # ---------------------------------------------------------------------------
 # POST /principals
@@ -1221,6 +1258,36 @@ class TestCreatePrincipalRoute:
         assert response.status_code == 400
         assert response.json()["code"] == "VALIDATION_ERROR"
 
+    def test_invalid_kind_returns_400_not_500(self, tmp_path: Path) -> None:
+        """kind/auth_method/default_capability/trust_level are typed to
+        match Principal's own Literal/bounded constraints (not plain
+        str/int) so Pydantic rejects an invalid value into the SPEC §16
+        envelope, instead of it reaching Ontology.create_principal and
+        raising a raw, unmapped pydantic error from constructing Principal
+        internally."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(ADMIN, author=ADMIN)
+        response = client.post(
+            "/principals",
+            json={"principal_id": "dave@example.com", "kind": "wizard"},
+            headers=_auth(token),
+        )
+        assert response.status_code == 400
+        assert response.json()["code"] == "VALIDATION_ERROR"
+
+    def test_trust_level_out_of_range_returns_400_not_500(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(ADMIN, author=ADMIN)
+        response = client.post(
+            "/principals",
+            json={"principal_id": "dave@example.com", "kind": "human", "trust_level": 99},
+            headers=_auth(token),
+        )
+        assert response.status_code == 400
+        assert response.json()["code"] == "VALIDATION_ERROR"
+
 
 # ---------------------------------------------------------------------------
 # /principals/{principal_id}/tokens
@@ -1272,6 +1339,14 @@ class TestTokenRoutes:
         response = client.get(f"/principals/{HUMAN}/tokens")
         assert response.status_code == 401
 
+    def test_list_tokens_non_admin_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN itself: write, not admin
+        response = client.get(f"/principals/{HUMAN}/tokens", headers=_auth(token))
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
     def test_revoke_token(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
@@ -1302,3 +1377,40 @@ class TestTokenRoutes:
         response = client.delete(f"/principals/{HUMAN}/tokens/nonexistent", headers=_auth(token))
         assert response.status_code == 404
         assert response.json()["code"] == "NOT_FOUND"
+
+    def test_revoke_non_admin_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        admin_token = kb.issue_token(ADMIN, author=ADMIN)
+        issue_response = client.post(f"/principals/{HUMAN}/tokens", headers=_auth(admin_token))
+        credential_id = issue_response.json()["credential_id"]
+
+        non_admin_token = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.delete(
+            f"/principals/{HUMAN}/tokens/{credential_id}", headers=_auth(non_admin_token)
+        )
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
+    def test_revoke_credential_belonging_to_different_principal_returns_404(
+        self, tmp_path: Path
+    ) -> None:
+        """The credential_id path segment must actually belong to
+        principal_id — regression test for a REST-layer footgun (an admin
+        could otherwise revoke a different principal's token while the URL
+        implied it was scoped to principal_id)."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        admin_token = kb.issue_token(ADMIN, author=ADMIN)
+        issue_response = client.post(f"/principals/{HUMAN}/tokens", headers=_auth(admin_token))
+        human_credential_id = issue_response.json()["credential_id"]
+
+        # Path says REVIEWER, but the credential actually belongs to HUMAN.
+        response = client.delete(
+            f"/principals/{REVIEWER}/tokens/{human_credential_id}", headers=_auth(admin_token)
+        )
+        assert response.status_code == 404
+        assert response.json()["code"] == "NOT_FOUND"
+
+        # The credential is untouched - still resolves.
+        assert kb.list_tokens(HUMAN, author=ADMIN)[0].revoked_at is None

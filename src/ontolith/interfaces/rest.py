@@ -35,12 +35,12 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ontolith.core.errors import (
     AuthError,
@@ -341,14 +341,25 @@ class FlagContradictionOut(BaseModel):
 
 
 class CreatePrincipalIn(BaseModel):
-    """Request body for POST /principals. Requires admin capability."""
+    """Request body for POST /principals. Requires admin capability.
+
+    ``kind``/``auth_method``/``default_capability``/``trust_level`` mirror
+    ``Principal``'s own ``Literal``/bounded types exactly (not plain
+    ``str``/``int``) so an invalid value is rejected by Pydantic — mapped
+    to the SPEC §16 envelope by the existing ``RequestValidationError``
+    handler — instead of reaching ``Ontology.create_principal`` and
+    raising a raw, unmapped pydantic error from constructing ``Principal``
+    internally (the exact failure mode the ai/no-owner fix in this same
+    slice closed for one field; every field needs the same protection,
+    not just ``owner``).
+    """
 
     principal_id: str
-    kind: str
-    auth_method: str = "oidc"
+    kind: Literal["human", "ai", "service"]
+    auth_method: Literal["oidc", "workload", "apikey"] = "oidc"
     owner: str | None = None
-    default_capability: str = "propose"
-    trust_level: int = 0
+    default_capability: Literal["read", "propose", "write", "review", "admin"] = "propose"
+    trust_level: int = Field(default=0, ge=0, le=10)
     metadata: dict[str, Any] | None = None
 
 
@@ -1008,11 +1019,17 @@ def create_rest_app(
         """Revoke a previously issued token by its credential ID. Requires
         admin capability.
 
-        ``principal_id`` in the path is for REST resource nesting only:
-        Ontology.revoke_token() identifies the credential solely by
-        ``credential_id`` and does not itself verify it belongs to
-        ``principal_id``.
+        Unlike Ontology.revoke_token() itself (which identifies the
+        credential solely by credential_id), this route verifies the
+        credential actually belongs to ``principal_id`` before revoking —
+        otherwise a caller could revoke a different principal's token
+        while believing, from the URL alone, that they'd scoped the
+        action to ``principal_id``.
         """
+        kb.require_admin(principal.id)
+        credential = kb.backend.get_credential(credential_id)
+        if credential is None or credential.principal_id != principal_id:
+            raise NotFoundError(f"Credential {credential_id!r} not found for {principal_id!r}")
         kb.revoke_token(credential_id, author=principal.id)
 
     return app

@@ -524,8 +524,11 @@ class DuckDBBackend:
         Returns:
             Credentials for this principal, most recently issued first
         """
+        # id DESC tiebreaks two credentials issued at the same timestamp —
+        # see SQLiteBackend's identical fix for why callers rely on this.
         cursor = self.conn.execute(
-            "SELECT * FROM principal_credential WHERE principal_id = ? ORDER BY created_at DESC",
+            "SELECT * FROM principal_credential WHERE principal_id = ? "
+            "ORDER BY created_at DESC, id DESC",
             [principal_id],
         )
         return [
