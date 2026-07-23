@@ -74,14 +74,17 @@ them but ADR-0021's `ProposeIn` schema never added them; left as a pre-
 existing, separate omission on the already-shipped route rather than
 expanded here.
 
-**2. No new REST-layer capability logic for nine of the ten routes** — every
-wrapped method already enforces its own gate, and the same total-capability-
-order reasoning ADR-0021 used for reads applies again: `assert_literal`/
-`assert_ref` require `write`/`admin` and hard-block AI-kind principals
-(ADR-0003) regardless of misconfigured capability; `accept_proposal`/
-`reject_proposal`/`resolve_contradiction` require `review`/`admin`, block
-AI-kind reviewers, and reject a reviewer who is the proposal's own author or
-delegate (self-review guard, closed as a HIGH finding in the 2026-07-06/07
+**2. No new REST-layer capability logic for eight of the ten routes** — the
+wrapped method already enforces its own gate for eight of them (the ninth,
+`GET /contradictions`, needs none either, but because it's a read covered by
+ADR-0021's existing "authentication is the read-capability check" reasoning,
+not because `Ontology.contradictions()` self-gates — it doesn't, matching
+`Ontology.proposals()`). The eight: `assert_literal`/`assert_ref` require
+`write`/`admin` and hard-block AI-kind principals (ADR-0003) regardless of
+misconfigured capability; `accept_proposal`/`reject_proposal`/
+`resolve_contradiction` require `review`/`admin`, block AI-kind reviewers,
+and reject a reviewer who is the proposal's own author or delegate
+(self-review guard, closed as a HIGH finding in the 2026-07-06/07
 remediation arc — see project memory); `flag_contradiction` requires
 `propose`+; `issue_token`/`revoke_token`/`list_tokens` each call
 `Ontology.require_admin()` internally. The route handlers just resolve the
@@ -142,9 +145,10 @@ implying a check that isn't performed.
 
 **Why one PR for all ten routes, not split further:** KI-022's original
 scoping already named this "a follow-up PR" (singular) for the full
-deferred list; nine of the ten routes are thin wrappers around
-already-capability-gated SDK methods with no new design surface between
-them, so splitting further would fragment closely related, mechanically
+deferred list; the ten routes are thin wrappers around already-gated (or,
+for the one pure read, deliberately ungated per ADR-0021) SDK methods with
+no new design surface between them, so splitting further would fragment
+closely related, mechanically
 similar work without a real risk-isolation benefit (unlike ADR-0021's
 read/propose-vs-write/admin split, which *did* isolate the FastAPI/auth
 wiring risk from higher-stakes write paths — that risk is already retired).
@@ -189,6 +193,55 @@ extended to principal management), not just REST.
 any of the three (KI-022, updated). `POST /proposals` still has no
 `valid_from`/`valid_to` fields despite the underlying SDK method accepting
 them (pre-existing, not introduced here).
+
+## Update (2026-07-22): review-driven fixes
+
+Review of this slice before merge found four real issues, all fixed in the
+same PR:
+
+- **`CreatePrincipalIn`'s `kind`/`auth_method`/`default_capability`/
+  `trust_level` were plain `str`/`int`,** not typed to `Principal`'s own
+  `Literal`/bounded constraints. An invalid value (e.g. `kind="wizard"`,
+  `trust_level=99`) skipped Pydantic's own validation and reached
+  `Ontology.create_principal`'s `Principal(...)` construction, raising the
+  same *class* of raw, unmapped pydantic error the `owner=None` fix (Decision
+  §4) was supposed to close for this route generally — closed for `owner`
+  only, not for its sibling fields. Fixed by typing all four fields to match
+  `Principal` exactly, so Pydantic itself rejects an invalid value into the
+  existing `RequestValidationError` → SPEC §16 envelope path, no
+  `Ontology`-layer change needed this time.
+- **`issue_token_route` recovers the newly-issued credential's id via
+  `list_tokens(...)[0]`, ordered by `created_at DESC` with no tiebreak** —
+  two credentials issued in the same timestamp tick (coarse/injected
+  `Clock`) could return the wrong `credential_id` alongside the right raw
+  token, so a later `DELETE .../tokens/{credential_id}` would revoke the
+  wrong credential. Fixed by adding `id DESC` as a secondary sort key to
+  `StorageBackend.get_credentials_for_principal` (both SQLite and DuckDB) —
+  closes the same-timestamp case deterministically. A second, narrower race
+  (a *different* admin issuing another token for the same principal in the
+  gap between this route's `issue_token()` and `list_tokens()` calls, which
+  aren't wrapped in one transaction) is not closed by this fix and is
+  tracked as KI-024, since properly closing it means changing
+  `Ontology.issue_token`'s return contract to hand back the credential id
+  directly — a larger API change than warranted as a review-response patch.
+- **`DELETE /principals/{id}/tokens/{credential_id}` didn't verify the
+  credential actually belonged to `principal_id`** (Decision §6 originally
+  treated this as harmless-by-design). Reviewed again and judged worth
+  closing: the route now calls `Ontology.require_admin()` explicitly, then
+  `StorageBackend.get_credential(credential_id)` to check
+  `credential.principal_id == principal_id`, raising `NotFoundError` on any
+  mismatch (hiding existence rather than returning 403, consistent with
+  other id-lookup routes in this file). Still admin-only and still not a
+  privilege boundary — an admin retains full revoke authority via SDK/CLI
+  regardless — but the URL now means what its shape implies.
+- **Test coverage gap:** `rest.py` showed 100% line+branch coverage despite
+  five routes (`reject`, `resolve`, `list tokens`, `revoke`, and `accept`'s
+  non-self-review 403 path) never being exercised with a capability-denied
+  principal — the gates live inside the wrapped `Ontology` methods, so
+  100% coverage was reachable on happy paths alone. A regression that
+  dropped one of these gates would not have been caught. Closed with one
+  denial-path test per gap, plus two new tests for the `CreatePrincipalIn`
+  typing fix and one for the credential-ownership fix.
 
 ## References
 
