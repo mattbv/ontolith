@@ -414,6 +414,30 @@ class TestOntology:
         assert principal.owner == "alice@example.com"
         assert principal.metadata["model"] == "claude-sonnet-4"
 
+    def test_create_ai_principal_without_owner_raises_validation_error(self, kb: Ontology) -> None:
+        """An AI principal with no owner at all raises ontolith's own
+        ValidationError, not a raw pydantic one — callers (REST's error
+        mapping in particular) only handle OntolithError subtypes."""
+        with pytest.raises(ValidationError, match="AI principals must have an owner"):
+            kb.create_principal("research-bot", kind="ai", auth_method="workload")
+
+    def test_create_ai_principal_with_unresolvable_owner_raises_validation_error(
+        self, kb: Ontology
+    ) -> None:
+        with pytest.raises(ValidationError, match="owner not found"):
+            kb.create_principal(
+                "research-bot", kind="ai", owner="nobody@example.com", auth_method="workload"
+            )
+
+    def test_create_ai_principal_with_ai_owner_raises_validation_error(self, kb: Ontology) -> None:
+        kb.create_principal(
+            "other-bot", kind="ai", owner="alice@example.com", auth_method="workload"
+        )
+        with pytest.raises(ValidationError, match="must be human or service"):
+            kb.create_principal(
+                "research-bot", kind="ai", owner="other-bot", auth_method="workload"
+            )
+
 
 class TestModelCapture:
     """model is required for ai-kind authors on the governed proposal path

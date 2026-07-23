@@ -32,10 +32,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GET /proposals` — every route, reads included, requires an ADR-0014 bearer token (at
   the time, a deliberate divergence from MCP's then-unauthenticated read tools, tracked
   as KI-021 and since resolved — see below). One `OntolithError` → HTTP status handler
-  (SPEC §16) replaces per-route error handling. Direct write, proposal review actions,
-  contradiction resolution, and principal/token admin remain deferred.
+  (SPEC §16) replaces per-route error handling.
+- REST interface, write/review/admin slice (SPEC §14.3, ADR-0022, further closes
+  KI-022): `POST /assertions` (direct write via `assert_literal`/`assert_ref`),
+  `POST /proposals/{id}/accept|reject`, `GET /contradictions`,
+  `POST /contradictions/flag`, `POST /contradictions/{id}/resolve`, `POST /principals`,
+  and `/principals/{id}/tokens` (`POST` issue, `GET` list, `DELETE` revoke) — reusing
+  ADR-0021's auth and error-mapping unchanged. Eight of ten routes need no new
+  capability-check code (the wrapped `Ontology` methods already gate themselves); the
+  ninth, `GET /contradictions`, needs none either but only because it's a read;
+  `POST /principals` calls `Ontology.require_admin()` explicitly, since
+  `create_principal` has no built-in gate of its own. `GET /principals` (list),
+  `GET /namespaces`, and `/proposals/{id}/review` remain deferred — no backing SDK
+  method exists for any of the three (confirmed by an explicit audit, not an oversight).
+  `DELETE /principals/{id}/tokens/{credential_id}` verifies the credential actually
+  belongs to `principal_id` before revoking, raising `NotFoundError` on mismatch.
 
 #### Fixed
+- **`Ontology.create_principal(kind="ai", owner=None)` now raises the documented
+  `ontolith.core.errors.ValidationError`** instead of a raw pydantic `ValidationError`
+  leaking out of `Principal`'s own model validator. Found while wiring `POST /principals`
+  (ADR-0022): REST's error mapping only handles `OntolithError` subtypes, so this would
+  have surfaced as an unhandled 500 with no SPEC §16 envelope. The CLI's blanket
+  `except Exception` had masked the same gap. `conformance/test_accountable_owner.py`'s
+  matching vector tightened from `(ValueError, StorageError)` to `ValidationError`
+  specifically, now that every backend gets one consistent exception type here.
+- **`POST /principals`'s `kind`/`auth_method`/`default_capability`/`trust_level` fields
+  are now typed to match `Principal`'s own `Literal`/bounded constraints** instead of
+  plain `str`/`int` — an invalid value (e.g. `kind="wizard"`, `trust_level=99`) previously
+  skipped Pydantic's own validation and hit the same unmapped-pydantic-error class the
+  `create_principal` fix above closed for `owner`, just via a sibling field instead.
+  Found in review; closed without any `Ontology`-layer change.
+- **`StorageBackend.get_credentials_for_principal` (SQLite + DuckDB) now tiebreaks on
+  `id DESC` in addition to `created_at DESC`** — two credentials issued in the same
+  timestamp tick previously had no deterministic order, so `POST /principals/{id}/tokens`
+  recovering the just-issued credential's id via `list_tokens(...)[0]` could return the
+  wrong one. A narrower residual race under genuinely concurrent issuance (not just a
+  coarse timestamp) is tracked as KI-024.
 - **MCP read tools now require authentication (closes KI-021):** `ontolith.schema`,
   `ontolith.get`, `ontolith.query`, and `ontolith.provenance` previously took no `token`
   parameter and resolved no principal at all, contradicting SPEC §8.3 ("`read`/`query`:
