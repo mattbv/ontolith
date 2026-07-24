@@ -97,8 +97,7 @@ def principal_issue_token(
     """
     kb = _kb()
     try:
-        token = kb.issue_token(principal_id, author=author)
-        credential_id = kb.list_tokens(principal_id, author=author)[0].id
+        token, credential_id = kb.issue_token(principal_id, author=author)
         typer.echo(f"Token for {principal_id}: {token}")
         typer.echo(f"Credential ID (for revocation): {credential_id}")
         typer.echo("Store this token now — it will not be shown again.")

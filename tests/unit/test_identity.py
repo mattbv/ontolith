@@ -37,7 +37,7 @@ class TestHashToken:
 
 class TestTokenAuthProvider:
     def test_resolve_returns_correct_principal(self, kb: Ontology) -> None:
-        token = kb.issue_token("alice@example.com", author=ADMIN)
+        token, _ = kb.issue_token("alice@example.com", author=ADMIN)
         provider = TokenAuthProvider(kb.backend)
 
         principal = provider.resolve(token)
@@ -50,8 +50,7 @@ class TestTokenAuthProvider:
             provider.resolve("garbage-token")
 
     def test_resolve_revoked_token_raises_auth_error(self, kb: Ontology) -> None:
-        token = kb.issue_token("alice@example.com", author=ADMIN)
-        credential_id = kb.list_tokens("alice@example.com", author=ADMIN)[0].id
+        token, credential_id = kb.issue_token("alice@example.com", author=ADMIN)
         kb.revoke_token(credential_id, author=ADMIN)
 
         provider = TokenAuthProvider(kb.backend)
@@ -59,16 +58,16 @@ class TestTokenAuthProvider:
             provider.resolve(token)
 
     def test_two_tokens_both_resolve_independently(self, kb: Ontology) -> None:
-        token_a = kb.issue_token("alice@example.com", author=ADMIN)
-        token_b = kb.issue_token("alice@example.com", author=ADMIN)
+        token_a, _ = kb.issue_token("alice@example.com", author=ADMIN)
+        token_b, _ = kb.issue_token("alice@example.com", author=ADMIN)
         provider = TokenAuthProvider(kb.backend)
 
         assert provider.resolve(token_a).id == "alice@example.com"
         assert provider.resolve(token_b).id == "alice@example.com"
 
     def test_revoking_one_token_does_not_invalidate_the_other(self, kb: Ontology) -> None:
-        token_a = kb.issue_token("alice@example.com", author=ADMIN)
-        token_b = kb.issue_token("alice@example.com", author=ADMIN)
+        token_a, _ = kb.issue_token("alice@example.com", author=ADMIN)
+        token_b, _ = kb.issue_token("alice@example.com", author=ADMIN)
         credentials = kb.list_tokens("alice@example.com", author=ADMIN)
         # Revoke whichever credential corresponds to token_a
         provider = TokenAuthProvider(kb.backend)
@@ -82,16 +81,23 @@ class TestTokenAuthProvider:
 
 class TestOntologyTokenIssuance:
     def test_issue_token_raw_value_not_the_stored_hash(self, kb: Ontology) -> None:
-        token = kb.issue_token("alice@example.com", author=ADMIN)
+        token, _ = kb.issue_token("alice@example.com", author=ADMIN)
         credential = kb.list_tokens("alice@example.com", author=ADMIN)[0]
         assert token != credential.token_hash
+
+    def test_issue_token_returns_the_credential_id_it_just_created(self, kb: Ontology) -> None:
+        """KI-024: the returned credential_id must be issue_token's own new
+        credential, not re-derived via a second, racy list_tokens() lookup."""
+        _, credential_id = kb.issue_token("alice@example.com", author=ADMIN)
+        credential = kb.list_tokens("alice@example.com", author=ADMIN)[0]
+        assert credential_id == credential.id
 
     def test_issue_token_unknown_principal_raises_auth_error(self, kb: Ontology) -> None:
         with pytest.raises(AuthError, match="Principal not found"):
             kb.issue_token("nobody@example.com", author=ADMIN)
 
     def test_issue_token_round_trips_through_auth_provider(self, kb: Ontology) -> None:
-        token = kb.issue_token("alice@example.com", author=ADMIN)
+        token, _ = kb.issue_token("alice@example.com", author=ADMIN)
         principal = TokenAuthProvider(kb.backend).resolve(token)
         assert principal.id == "alice@example.com"
 
@@ -131,8 +137,7 @@ class TestTokenIssuanceRequiresAdmin:
             kb.issue_token("alice@example.com", author="nobody@example.com")
 
     def test_revoke_token_rejects_non_admin_author(self, kb: Ontology) -> None:
-        kb.issue_token("alice@example.com", author=ADMIN)
-        credential_id = kb.list_tokens("alice@example.com", author=ADMIN)[0].id
+        _, credential_id = kb.issue_token("alice@example.com", author=ADMIN)
         with pytest.raises(CapabilityError, match="lacks admin capability"):
             kb.revoke_token(credential_id, author="alice@example.com")
 

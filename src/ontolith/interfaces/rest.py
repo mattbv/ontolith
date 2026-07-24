@@ -992,8 +992,7 @@ def create_rest_app(
         The raw token is returned exactly once, here, and cannot be
         recovered afterward — store it immediately.
         """
-        token = kb.issue_token(principal_id, author=principal.id)
-        credential_id = kb.list_tokens(principal_id, author=principal.id)[0].id
+        token, credential_id = kb.issue_token(principal_id, author=principal.id)
         return TokenIssuedOut(token=token, credential_id=credential_id)
 
     # ------------------------------------------------------------------

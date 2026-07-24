@@ -53,7 +53,7 @@ class TestSchemaTool:
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.schema").fn(
-            token=kb.issue_token(HUMAN, author=ADMIN)
+            token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
         assert result == {"concepts": []}
 
@@ -85,7 +85,7 @@ class TestSchemaTool:
 
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.schema").fn(
-            token=kb.issue_token(HUMAN, author=ADMIN)
+            token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
 
         assert result["namespace"] == "default"
@@ -102,7 +102,7 @@ class TestSchemaTool:
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.schema").fn(
-            token=kb.issue_token(HUMAN, author=ADMIN), namespace="other"
+            token=kb.issue_token(HUMAN, author=ADMIN)[0], namespace="other"
         )
         assert result == {"concepts": []}
 
@@ -120,7 +120,7 @@ class TestGetTool:
 
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.get").fn(
-            entity_id=entity.id, token=kb.issue_token(HUMAN, author=ADMIN)
+            entity_id=entity.id, token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
 
         assert result["entity"]["id"] == entity.id
@@ -132,7 +132,7 @@ class TestGetTool:
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.get").fn(
-            entity_id="does-not-exist", token=kb.issue_token(HUMAN, author=ADMIN)
+            entity_id="does-not-exist", token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
         assert "error" in result
 
@@ -155,7 +155,7 @@ class TestGetTool:
 
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.get").fn(
-            entity_id=entity.id, token=kb.issue_token(HUMAN, author=ADMIN)
+            entity_id=entity.id, token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
         assert result["assertions"] == []
 
@@ -174,7 +174,7 @@ class TestQueryTool:
 
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.query").fn(
-            concept="Person", token=kb.issue_token(HUMAN, author=ADMIN)
+            concept="Person", token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
         assert result["count"] == 2
         assert len(result["entities"]) == 2
@@ -189,7 +189,7 @@ class TestQueryTool:
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.query").fn(
             concept="Person",
-            token=kb.issue_token(HUMAN, author=ADMIN),
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
             filters={"name": "Ada"},
         )
         assert result["count"] == 1
@@ -199,7 +199,7 @@ class TestQueryTool:
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.query").fn(
-            concept="Organization", token=kb.issue_token(HUMAN, author=ADMIN)
+            concept="Organization", token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
         assert result["count"] == 0
         assert result["entities"] == []
@@ -228,7 +228,7 @@ class TestProvenanceTool:
 
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
-            assertion_id=assertions[0].id, token=kb.issue_token(HUMAN, author=ADMIN)
+            assertion_id=assertions[0].id, token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
 
         assert result["id"] == assertions[0].id
@@ -251,7 +251,7 @@ class TestProvenanceTool:
 
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
-            assertion_id=assertions[0].id, token=kb.issue_token(HUMAN, author=ADMIN)
+            assertion_id=assertions[0].id, token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
 
         assert result["model"] == "claude-sonnet-4"
@@ -270,7 +270,7 @@ class TestProvenanceTool:
 
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
-            assertion_id=assertions[0].id, token=kb.issue_token(HUMAN, author=ADMIN)
+            assertion_id=assertions[0].id, token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
 
         assert len(result["review_events"]) == 1
@@ -286,7 +286,7 @@ class TestProvenanceTool:
 
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
-            assertion_id=assertion.id, token=kb.issue_token(HUMAN, author=ADMIN)
+            assertion_id=assertion.id, token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
 
         assert result["proposal_id"] is None
@@ -296,7 +296,7 @@ class TestProvenanceTool:
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
-            assertion_id="nonexistent", token=kb.issue_token(HUMAN, author=ADMIN)
+            assertion_id="nonexistent", token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
         assert "error" in result
 
@@ -322,7 +322,7 @@ class TestProvenanceTool:
 
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
-            assertion_id=active[0].id, token=kb.issue_token(HUMAN, author=ADMIN)
+            assertion_id=active[0].id, token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
         assert result["id"] == active[0].id
         assert result["status"] == "retracted"
@@ -386,7 +386,7 @@ class TestProvenanceTool:
 
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
-            assertion_id=active[0].id, token=kb.issue_token(HUMAN, author=ADMIN)
+            assertion_id=active[0].id, token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
         assert result["supersedes"] in {a1.id, a2.id}
         assert set(result["superseded_ids"]) == {a1.id, a2.id}
@@ -408,7 +408,7 @@ class TestProposeTool:
             predicate="Person.name",
             value="Ada",
             value_type="Text",
-            token=kb.issue_token(HUMAN, author=ADMIN),
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
         )
 
         assert result["proposal"]["state"] == "auto_accepted"
@@ -426,7 +426,7 @@ class TestProposeTool:
             predicate="Person.name",
             value="Ada",
             value_type="Text",
-            token=kb.issue_token(AI, author=ADMIN),
+            token=kb.issue_token(AI, author=ADMIN)[0],
         )
         assert "error" in result
         assert result["code"] == "validation_error"
@@ -441,7 +441,7 @@ class TestProposeTool:
             predicate="Person.name",
             value="Ada",
             value_type="Text",
-            token=kb.issue_token(AI, author=ADMIN),
+            token=kb.issue_token(AI, author=ADMIN)[0],
             model="test-model-v1",
         )
 
@@ -468,8 +468,7 @@ class TestProposeTool:
     def test_propose_revoked_token_returns_auth_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
-        token = kb.issue_token(HUMAN, author=ADMIN)
-        credential_id = kb.list_tokens(HUMAN, author=ADMIN)[0].id
+        token, credential_id = kb.issue_token(HUMAN, author=ADMIN)
         kb.revoke_token(credential_id, author=ADMIN)
 
         mcp, _ = _server(kb)
@@ -497,7 +496,7 @@ class TestProposeTool:
             predicate="Person.name",
             value="Ada",
             value_type="Text",
-            token=kb.issue_token(AI, author=ADMIN),  # owner=alice
+            token=kb.issue_token(AI, author=ADMIN)[0],  # owner=alice
             acting_as="carol@example.com",  # not AI's owner
             model="test-model-v1",
         )
@@ -515,7 +514,7 @@ class TestProposeTool:
             predicate="Person.name",
             value="Ada",
             value_type="Text",
-            token=kb.issue_token(AI, author=ADMIN),
+            token=kb.issue_token(AI, author=ADMIN)[0],
             model="test-model-v1",
         )
 
@@ -533,7 +532,7 @@ class TestProposeTool:
             subject=person.id,
             predicate="Person.employer",
             target=org.id,
-            token=kb.issue_token(HUMAN, author=ADMIN),
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
         )
 
         assert result["proposal"]["state"] == "auto_accepted"
@@ -552,7 +551,7 @@ class TestProposeTool:
         result = mcp._tool_manager.get_tool("ontolith.propose").fn(
             subject=entity.id,
             predicate="Person.name",
-            token=kb.issue_token(HUMAN, author=ADMIN),
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
         )
 
         assert "error" in result
@@ -570,7 +569,7 @@ class TestProposeTool:
             value="Acme",
             value_type="Text",
             target=org.id,
-            token=kb.issue_token(HUMAN, author=ADMIN),
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
         )
 
         assert "error" in result
@@ -633,7 +632,7 @@ class TestFlagContradictionTool:
         result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
             assertion_id_a=assertions[0].id,
             assertion_id_b=a2.id,
-            token=kb.issue_token(HUMAN, author=ADMIN),
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
         )
 
         assert "contradiction_id" in result
@@ -655,7 +654,7 @@ class TestFlagContradictionTool:
         result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
             assertion_id_a=name_a.id,
             assertion_id_b=born_a.id,
-            token=kb.issue_token(HUMAN, author=ADMIN),
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
         )
         assert "error" in result
 
@@ -702,7 +701,7 @@ class TestFlagContradictionTool:
         result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
             assertion_id_a=assertions[0].id,
             assertion_id_b=a2.id,
-            token=kb.issue_token("readonly@example.com", author=ADMIN),
+            token=kb.issue_token("readonly@example.com", author=ADMIN)[0],
         )
         assert "error" in result
         assert result["code"] == "capability_error"
@@ -717,7 +716,7 @@ class TestFlagContradictionTool:
         result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
             assertion_id_a="nonexistent",
             assertion_id_b=assertions[0].id,
-            token=kb.issue_token(HUMAN, author=ADMIN),
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
         )
         assert "error" in result
         assert result["code"] == "not_found"
@@ -732,7 +731,7 @@ class TestFlagContradictionTool:
         result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
             assertion_id_a=assertions[0].id,
             assertion_id_b="nonexistent",
-            token=kb.issue_token(HUMAN, author=ADMIN),
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
         )
         assert "error" in result
         assert result["code"] == "not_found"
@@ -769,7 +768,7 @@ class TestFlagContradictionTool:
         result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
             assertion_id_a=flagged[0].id,
             assertion_id_b=a3.id,
-            token=kb.issue_token(HUMAN, author=ADMIN),
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
         )
 
         assert result["action"] == "extended"

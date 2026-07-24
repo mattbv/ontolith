@@ -601,11 +601,10 @@ class SQLiteBackend:
         """
         cursor = self.conn.cursor()
         # id DESC tiebreaks two credentials issued at the same timestamp
-        # (coarse/injected Clock) deterministically — callers that issue a
-        # token and immediately re-read it (e.g. REST's issue_token_route,
-        # to recover the new credential's id) rely on [0] genuinely being
-        # the credential just created, not an arbitrary same-`created_at`
-        # sibling.
+        # (coarse/injected Clock) deterministically, so this listing has a
+        # stable, reproducible order (ids are monotonically assigned).
+        # issue_token() itself returns its new credential's id directly
+        # (KI-024) rather than relying on this ordering to recover it.
         cursor.execute(
             "SELECT * FROM principal_credential WHERE principal_id = ? "
             "ORDER BY created_at DESC, id DESC",
