@@ -211,14 +211,21 @@ class SQLiteBackend:
                 actor TEXT NOT NULL,
                 action TEXT NOT NULL CHECK(action IN ('superseded', 'flagged', 'retracted', 'reactivated')),
                 at TEXT NOT NULL,
+                successor_id TEXT,
                 FOREIGN KEY(assertion_id) REFERENCES assertion(id),
-                FOREIGN KEY(actor) REFERENCES principal(id)
+                FOREIGN KEY(actor) REFERENCES principal(id),
+                FOREIGN KEY(successor_id) REFERENCES assertion(id)
             )
         """)
 
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_assertion_event_assertion
             ON assertion_event(assertion_id)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_assertion_event_successor
+            ON assertion_event(successor_id)
         """)
 
         # Proposal table (SPEC §9.1)
@@ -1204,8 +1211,8 @@ class SQLiteBackend:
             cursor = self.conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO assertion_event (id, assertion_id, actor, action, at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO assertion_event (id, assertion_id, actor, action, at, successor_id)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.id,
@@ -1213,6 +1220,7 @@ class SQLiteBackend:
                     event.actor,
                     event.action,
                     event.at.isoformat(),
+                    event.successor_id,
                 ),
             )
             if not self._in_transaction:
@@ -1230,16 +1238,28 @@ class SQLiteBackend:
             "SELECT * FROM assertion_event WHERE assertion_id = ? ORDER BY at ASC",
             (assertion_id,),
         )
-        return [
-            AssertionEvent(
-                id=row["id"],
-                assertion_id=row["assertion_id"],
-                actor=row["actor"],
-                action=row["action"],
-                at=datetime.fromisoformat(row["at"]),
-            )
-            for row in cursor.fetchall()
-        ]
+        return [self._row_to_assertion_event(row) for row in cursor.fetchall()]
+
+    @_synchronized
+    def get_assertion_events_by_successor(self, successor_id: str) -> list[AssertionEvent]:
+        """Retrieve all 'superseded' events caused by a given successor assertion."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM assertion_event WHERE successor_id = ? ORDER BY at ASC, id ASC",
+            (successor_id,),
+        )
+        return [self._row_to_assertion_event(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _row_to_assertion_event(row: sqlite3.Row) -> AssertionEvent:
+        return AssertionEvent(
+            id=row["id"],
+            assertion_id=row["assertion_id"],
+            actor=row["actor"],
+            action=row["action"],
+            at=datetime.fromisoformat(row["at"]),
+            successor_id=row["successor_id"],
+        )
 
     @_synchronized
     def put_contradiction(self, contradiction: Contradiction) -> None:

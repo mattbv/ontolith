@@ -111,6 +111,12 @@ class AssertionEvent(BaseModel):
             resolved it
         action: Which status transition this event records
         at: When the transition occurred
+        successor_id: For action="superseded", the id of the assertion that
+            caused this supersession. Assertion.supersedes only records the
+            first predecessor when one incoming assertion supersedes several
+            concurrently-overlapping ones (KI-008) — querying events by
+            successor_id recovers the full predecessor set. None for other
+            actions.
     """
 
     id: str
@@ -118,6 +124,7 @@ class AssertionEvent(BaseModel):
     actor: str
     action: Literal["superseded", "flagged", "retracted", "reactivated"]
     at: datetime
+    successor_id: str | None = None
 
     model_config = ConfigDict(frozen=True)
 
