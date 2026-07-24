@@ -95,7 +95,7 @@ class TestSchemaRoute:
     def test_returns_empty_when_no_schema_stored(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get("/schema", headers=_auth(token))
         assert response.status_code == 200
         assert response.json() == {"namespace": None, "version": None, "concepts": []}
@@ -120,7 +120,7 @@ class TestSchemaRoute:
         kb.backend.put_schema(schema)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get("/schema", headers=_auth(token))
 
         body = response.json()
@@ -137,7 +137,7 @@ class TestSchemaRoute:
     def test_respects_namespace_argument(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get("/schema", params={"namespace": "other"}, headers=_auth(token))
         assert response.status_code == 200
         assert response.json() == {"namespace": None, "version": None, "concepts": []}
@@ -162,7 +162,7 @@ class TestEntityRoute:
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get(f"/entities/{entity.id}", headers=_auth(token))
 
         assert response.status_code == 200
@@ -175,7 +175,7 @@ class TestEntityRoute:
     def test_unknown_entity_returns_404(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get("/entities/does-not-exist", headers=_auth(token))
         assert response.status_code == 404
         assert response.json()["code"] == "NOT_FOUND"
@@ -188,7 +188,7 @@ class TestEntityRoute:
         kb.retract(active[0].id, HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get(f"/entities/{entity.id}", headers=_auth(token))
         assert response.json()["assertions"] == []
 
@@ -212,7 +212,7 @@ class TestQueryRoute:
         kb.create_entity("Organization", author=HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post("/query", json={"concept": "Person"}, headers=_auth(token))
 
         assert response.status_code == 200
@@ -228,7 +228,7 @@ class TestQueryRoute:
         kb.propose(e2.id, "Person.name", "Grace", "Text", HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/query",
             json={"concept": "Person", "filters": {"name": "Ada"}},
@@ -246,7 +246,7 @@ class TestQueryRoute:
             kb.create_entity("Person", author=HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/query", json={"concept": "Person", "limit": 2}, headers=_auth(token)
         )
@@ -257,7 +257,7 @@ class TestQueryRoute:
     def test_empty_concept_returns_empty(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post("/query", json={"concept": "Organization"}, headers=_auth(token))
         assert response.status_code == 200
         body = response.json()
@@ -271,7 +271,7 @@ class TestQueryRoute:
         kb.reindex()
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/query",
             json={"concept": "Person", "semantic": "Ada Lovelace"},
@@ -291,7 +291,7 @@ class TestQueryRoute:
         kb.propose(unsure.id, "Person.name", "Bob", "Text", HUMAN, confidence=0.1)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/query",
             json={"concept": "Person", "min_confidence": 0.5},
@@ -318,7 +318,7 @@ class TestQueryRoute:
         kb.propose(untrusted_entity.id, "Person.name", "Bob", "Text", HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/query",
             json={"concept": "Person", "trust_at_least": 5},
@@ -352,7 +352,7 @@ class TestProvenanceRoute:
         assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get(f"/provenance/{assertions[0].id}", headers=_auth(token))
 
         assert response.status_code == 200
@@ -373,7 +373,7 @@ class TestProvenanceRoute:
         assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get(f"/provenance/{assertions[0].id}", headers=_auth(token))
 
         body = response.json()
@@ -387,7 +387,7 @@ class TestProvenanceRoute:
         assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get(f"/provenance/{assertion.id}", headers=_auth(token))
 
         body = response.json()
@@ -397,7 +397,7 @@ class TestProvenanceRoute:
     def test_unknown_assertion_returns_404(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get("/provenance/nonexistent", headers=_auth(token))
         assert response.status_code == 404
         assert response.json()["code"] == "NOT_FOUND"
@@ -410,7 +410,7 @@ class TestProvenanceRoute:
         kb.retract(active[0].id, HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get(f"/provenance/{active[0].id}", headers=_auth(token))
 
         assert response.status_code == 200
@@ -474,7 +474,7 @@ class TestProvenanceRoute:
         active = kb.assertions(subject=entity.id, predicate="Person.employer", status="active")
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get(f"/provenance/{active[0].id}", headers=_auth(token))
 
         assert response.status_code == 200
@@ -509,7 +509,7 @@ class TestCreateProposalRoute:
         entity = kb.create_entity("Person", author=HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/proposals",
             json={
@@ -531,7 +531,7 @@ class TestCreateProposalRoute:
         entity = kb.create_entity("Person", author=HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(AI, author=ADMIN)
+        token, _ = kb.issue_token(AI, author=ADMIN)
         response = client.post(
             "/proposals",
             json={
@@ -551,7 +551,7 @@ class TestCreateProposalRoute:
         entity = kb.create_entity("Person", author=HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(AI, author=ADMIN)
+        token, _ = kb.issue_token(AI, author=ADMIN)
         response = client.post(
             "/proposals",
             json={
@@ -575,7 +575,7 @@ class TestCreateProposalRoute:
         other = kb.create_entity("Person", author=HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/proposals",
             json={
@@ -596,7 +596,7 @@ class TestCreateProposalRoute:
         entity = kb.create_entity("Person", author=HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/proposals",
             json={"subject": entity.id, "predicate": "Person.name"},
@@ -612,7 +612,7 @@ class TestCreateProposalRoute:
         org = kb.create_entity("Organization", author=HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/proposals",
             json={"subject": person.id, "predicate": "Person.employer", "target": org.id},
@@ -644,7 +644,7 @@ class TestListProposalsRoute:
         )  # require_review
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get("/proposals", headers=_auth(token))
 
         assert response.status_code == 200
@@ -659,7 +659,7 @@ class TestListProposalsRoute:
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get("/proposals", params={"state": "auto_accepted"}, headers=_auth(token))
 
         assert response.status_code == 200
@@ -674,7 +674,7 @@ class TestListProposalsRoute:
         kb.propose(entity.id, "Person.name", "Grace", "Text", AI, model="test-model")
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get("/proposals", params={"state": "all"}, headers=_auth(token))
 
         assert response.status_code == 200
@@ -683,7 +683,7 @@ class TestListProposalsRoute:
     def test_no_matches_returns_empty_list(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get("/proposals", headers=_auth(token))
         assert response.status_code == 200
         assert response.json() == []
@@ -712,7 +712,7 @@ class TestErrorMapping:
     def test_not_found_error_maps_to_404(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get("/entities/nope", headers=_auth(token))
         assert response.status_code == 404
         assert response.json()["code"] == "NOT_FOUND"
@@ -721,7 +721,7 @@ class TestErrorMapping:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/proposals",
             json={"subject": entity.id, "predicate": "Person.name"},
@@ -740,7 +740,7 @@ class TestErrorMapping:
         )
         entity = kb.create_entity("Person", author=HUMAN)
         client, _ = _client(kb)
-        token = kb.issue_token("readonly@example.com", author=ADMIN)
+        token, _ = kb.issue_token("readonly@example.com", author=ADMIN)
         response = client.post(
             "/proposals",
             json={
@@ -764,7 +764,7 @@ class TestErrorMapping:
     ) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         # Missing required "concept" field — a FastAPI/Pydantic-level
         # RequestValidationError, not an OntolithError raised by a route
         # body. Must still come back in the SPEC §16 envelope.
@@ -780,7 +780,7 @@ class TestErrorMapping:
     ) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
 
         def _raise_storage_error(*args: object, **kwargs: object) -> None:
             raise StorageError("sqlite3.OperationalError: table assertion has no column baz")
@@ -822,7 +822,7 @@ class TestWriteAssertionRoute:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write capability
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write capability
         response = client.post(
             "/assertions",
             json={
@@ -848,7 +848,7 @@ class TestWriteAssertionRoute:
         person = kb.create_entity("Person", author=HUMAN)
         org = kb.create_entity("Organization", author=HUMAN)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/assertions",
             json={"subject": person.id, "predicate": "Person.employer", "target": org.id},
@@ -863,7 +863,7 @@ class TestWriteAssertionRoute:
         person = kb.create_entity("Person", author=HUMAN)
         org = kb.create_entity("Organization", author=HUMAN)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/assertions",
             json={
@@ -882,7 +882,7 @@ class TestWriteAssertionRoute:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/assertions",
             json={"subject": entity.id, "predicate": "Person.name"},
@@ -896,7 +896,7 @@ class TestWriteAssertionRoute:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
         client, _ = _client(kb)
-        token = kb.issue_token(AI, author=ADMIN)
+        token, _ = kb.issue_token(AI, author=ADMIN)
         response = client.post(
             "/assertions",
             json={
@@ -917,7 +917,7 @@ class TestWriteAssertionRoute:
         )
         entity = kb.create_entity("Person", author=HUMAN)
         client, _ = _client(kb)
-        token = kb.issue_token("readonly@example.com", author=ADMIN)
+        token, _ = kb.issue_token("readonly@example.com", author=ADMIN)
         response = client.post(
             "/assertions",
             json={
@@ -951,7 +951,7 @@ class TestAcceptProposalRoute:
         entity = kb.create_entity("Person", author=HUMAN)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
         client, _ = _client(kb)
-        token = kb.issue_token(REVIEWER, author=ADMIN)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
         response = client.post(f"/proposals/{proposal.id}/accept", headers=_auth(token))
 
         assert response.status_code == 200
@@ -963,7 +963,7 @@ class TestAcceptProposalRoute:
     def test_not_found_returns_404(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(REVIEWER, author=ADMIN)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
         response = client.post("/proposals/nonexistent/accept", headers=_auth(token))
         assert response.status_code == 404
         assert response.json()["code"] == "NOT_FOUND"
@@ -991,7 +991,7 @@ class TestAcceptProposalRoute:
         assert proposal.state == "require_review"
 
         client, _ = _client(kb)
-        token = kb.issue_token(REVIEWER, author=ADMIN)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
         response = client.post(f"/proposals/{proposal.id}/accept", headers=_auth(token))
         assert response.status_code == 403
         assert response.json()["code"] == "CAPABILITY_ERROR"
@@ -1004,7 +1004,7 @@ class TestAcceptProposalRoute:
         entity = kb.create_entity("Person", author=HUMAN)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not review
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not review
         response = client.post(f"/proposals/{proposal.id}/accept", headers=_auth(token))
         assert response.status_code == 403
         assert response.json()["code"] == "CAPABILITY_ERROR"
@@ -1029,7 +1029,7 @@ class TestRejectProposalRoute:
         entity = kb.create_entity("Person", author=HUMAN)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
         client, _ = _client(kb)
-        token = kb.issue_token(REVIEWER, author=ADMIN)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
         response = client.post(
             f"/proposals/{proposal.id}/reject",
             json={"reason": "insufficient source"},
@@ -1046,7 +1046,7 @@ class TestRejectProposalRoute:
         entity = kb.create_entity("Person", author=HUMAN)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
         client, _ = _client(kb)
-        token = kb.issue_token(REVIEWER, author=ADMIN)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
         response = client.post(f"/proposals/{proposal.id}/reject", json={}, headers=_auth(token))
         assert response.status_code == 200
         assert response.json()["state"] == "rejected"
@@ -1054,7 +1054,7 @@ class TestRejectProposalRoute:
     def test_not_found_returns_404(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(REVIEWER, author=ADMIN)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
         response = client.post("/proposals/nonexistent/reject", json={}, headers=_auth(token))
         assert response.status_code == 404
         assert response.json()["code"] == "NOT_FOUND"
@@ -1064,7 +1064,7 @@ class TestRejectProposalRoute:
         entity = kb.create_entity("Person", author=HUMAN)
         proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not review
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not review
         response = client.post(f"/proposals/{proposal.id}/reject", json={}, headers=_auth(token))
         assert response.status_code == 403
         assert response.json()["code"] == "CAPABILITY_ERROR"
@@ -1097,7 +1097,7 @@ class TestListContradictionsRoute:
         kb = _kb(tmp_path)
         _make_contradiction(kb)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get("/contradictions", headers=_auth(token))
 
         assert response.status_code == 200
@@ -1109,7 +1109,7 @@ class TestListContradictionsRoute:
         kb = _kb(tmp_path)
         _make_contradiction(kb)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get("/contradictions", params={"state": "resolved"}, headers=_auth(token))
         assert response.status_code == 200
         assert response.json() == []
@@ -1118,7 +1118,7 @@ class TestListContradictionsRoute:
         kb = _kb(tmp_path)
         _make_contradiction(kb)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.get("/contradictions", params={"state": "all"}, headers=_auth(token))
         assert response.status_code == 200
         assert len(response.json()) == 1
@@ -1161,7 +1161,7 @@ class TestFlagContradictionRoute:
         kb.backend.put_assertion(a2)
 
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/contradictions/flag",
             json={"assertion_id_a": assertions[0].id, "assertion_id_b": a2.id},
@@ -1179,7 +1179,7 @@ class TestFlagContradictionRoute:
             "readonly@example.com", kind="human", auth_method="oidc", default_capability="read"
         )
         client, _ = _client(kb)
-        token = kb.issue_token("readonly@example.com", author=ADMIN)
+        token, _ = kb.issue_token("readonly@example.com", author=ADMIN)
         response = client.post(
             "/contradictions/flag",
             json={"assertion_id_a": "a1", "assertion_id_b": "a2"},
@@ -1191,7 +1191,7 @@ class TestFlagContradictionRoute:
     def test_assertion_not_found_returns_404(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(
             "/contradictions/flag",
             json={"assertion_id_a": "nonexistent", "assertion_id_b": "also-nonexistent"},
@@ -1222,7 +1222,7 @@ class TestResolveContradictionRoute:
         assert len(flagged) == 2
 
         client, _ = _client(kb)
-        token = kb.issue_token(REVIEWER, author=ADMIN)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
         response = client.post(
             f"/contradictions/{contradiction_id}/resolve",
             json={"winner_assertion_id": flagged[0].id},
@@ -1237,7 +1237,7 @@ class TestResolveContradictionRoute:
     def test_not_found_returns_404(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(REVIEWER, author=ADMIN)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
         response = client.post(
             "/contradictions/nonexistent/resolve",
             json={"winner_assertion_id": "a1"},
@@ -1251,7 +1251,7 @@ class TestResolveContradictionRoute:
         entity, contradiction_id = _make_contradiction(kb)
         flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not review
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not review
         response = client.post(
             f"/contradictions/{contradiction_id}/resolve",
             json={"winner_assertion_id": flagged[0].id},
@@ -1279,7 +1279,7 @@ class TestCreatePrincipalRoute:
     def test_admin_creates_principal(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(ADMIN, author=ADMIN)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
         response = client.post(
             "/principals",
             json={
@@ -1301,7 +1301,7 @@ class TestCreatePrincipalRoute:
     def test_non_admin_forbidden(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not admin
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not admin
         response = client.post(
             "/principals",
             json={"principal_id": "dave@example.com", "kind": "human"},
@@ -1313,7 +1313,7 @@ class TestCreatePrincipalRoute:
     def test_ai_without_owner_returns_400(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(ADMIN, author=ADMIN)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
         response = client.post(
             "/principals",
             json={"principal_id": "new-agent", "kind": "ai", "auth_method": "apikey"},
@@ -1331,7 +1331,7 @@ class TestCreatePrincipalRoute:
         internally."""
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(ADMIN, author=ADMIN)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
         response = client.post(
             "/principals",
             json={"principal_id": "dave@example.com", "kind": "wizard"},
@@ -1343,7 +1343,7 @@ class TestCreatePrincipalRoute:
     def test_trust_level_out_of_range_returns_400_not_500(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(ADMIN, author=ADMIN)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
         response = client.post(
             "/principals",
             json={"principal_id": "dave@example.com", "kind": "human", "trust_level": 99},
@@ -1368,7 +1368,7 @@ class TestTokenRoutes:
     def test_admin_issues_token(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(ADMIN, author=ADMIN)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
         response = client.post(f"/principals/{HUMAN}/tokens", headers=_auth(token))
 
         assert response.status_code == 201
@@ -1379,7 +1379,7 @@ class TestTokenRoutes:
     def test_non_admin_forbidden_issue(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.post(f"/principals/{HUMAN}/tokens", headers=_auth(token))
         assert response.status_code == 403
         assert response.json()["code"] == "CAPABILITY_ERROR"
@@ -1388,7 +1388,7 @@ class TestTokenRoutes:
         kb = _kb(tmp_path)
         kb.issue_token(HUMAN, author=ADMIN)
         client, _ = _client(kb)
-        token = kb.issue_token(ADMIN, author=ADMIN)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
         response = client.get(f"/principals/{HUMAN}/tokens", headers=_auth(token))
 
         assert response.status_code == 200
@@ -1406,7 +1406,7 @@ class TestTokenRoutes:
     def test_list_tokens_non_admin_forbidden(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN itself: write, not admin
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN itself: write, not admin
         response = client.get(f"/principals/{HUMAN}/tokens", headers=_auth(token))
         assert response.status_code == 403
         assert response.json()["code"] == "CAPABILITY_ERROR"
@@ -1414,7 +1414,7 @@ class TestTokenRoutes:
     def test_revoke_token(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        admin_token = kb.issue_token(ADMIN, author=ADMIN)
+        admin_token, _ = kb.issue_token(ADMIN, author=ADMIN)
         issue_response = client.post(f"/principals/{HUMAN}/tokens", headers=_auth(admin_token))
         credential_id = issue_response.json()["credential_id"]
         issued_token = issue_response.json()["token"]
@@ -1437,7 +1437,7 @@ class TestTokenRoutes:
     def test_revoke_nonexistent_credential_returns_404(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        token = kb.issue_token(ADMIN, author=ADMIN)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
         response = client.delete(f"/principals/{HUMAN}/tokens/nonexistent", headers=_auth(token))
         assert response.status_code == 404
         assert response.json()["code"] == "NOT_FOUND"
@@ -1445,11 +1445,11 @@ class TestTokenRoutes:
     def test_revoke_non_admin_forbidden(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        admin_token = kb.issue_token(ADMIN, author=ADMIN)
+        admin_token, _ = kb.issue_token(ADMIN, author=ADMIN)
         issue_response = client.post(f"/principals/{HUMAN}/tokens", headers=_auth(admin_token))
         credential_id = issue_response.json()["credential_id"]
 
-        non_admin_token = kb.issue_token(HUMAN, author=ADMIN)
+        non_admin_token, _ = kb.issue_token(HUMAN, author=ADMIN)
         response = client.delete(
             f"/principals/{HUMAN}/tokens/{credential_id}", headers=_auth(non_admin_token)
         )
@@ -1465,7 +1465,7 @@ class TestTokenRoutes:
         implied it was scoped to principal_id)."""
         kb = _kb(tmp_path)
         client, _ = _client(kb)
-        admin_token = kb.issue_token(ADMIN, author=ADMIN)
+        admin_token, _ = kb.issue_token(ADMIN, author=ADMIN)
         issue_response = client.post(f"/principals/{HUMAN}/tokens", headers=_auth(admin_token))
         human_credential_id = issue_response.json()["credential_id"]
 

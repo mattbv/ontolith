@@ -1486,7 +1486,7 @@ class Ontology:
             raise CapabilityError(f"Principal {author} lacks admin capability")
         return principal
 
-    def issue_token(self, principal_id: str, author: str) -> str:
+    def issue_token(self, principal_id: str, author: str) -> tuple[str, str]:
         """Issue a new API-key token for a principal (ADR-0014).
 
         Returns the raw secret ONCE — only its SHA-256 hash is persisted, and
@@ -1509,7 +1509,12 @@ class Ontology:
                 capability level)
 
         Returns:
-            The raw token (not persisted anywhere — save it now)
+            A ``(token, credential_id)`` tuple. ``token`` is the raw secret
+            (not persisted anywhere — save it now). ``credential_id`` is
+            returned directly rather than needing to be re-derived via
+            ``list_tokens(...)[0]`` (KI-024) — that second, non-transactional
+            lookup could race a concurrent issuance for the same principal
+            and return a different credential's id.
 
         Raises:
             AuthError: author or principal_id does not name an existing principal
@@ -1532,7 +1537,7 @@ class Ontology:
             created_at=self.clock.now(),
         )
         self.backend.put_credential(credential)
-        return raw_token
+        return raw_token, credential.id
 
     def revoke_token(self, credential_id: str, author: str) -> None:
         """Revoke a previously issued token by its credential ID (ADR-0014).

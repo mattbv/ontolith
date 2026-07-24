@@ -146,8 +146,7 @@ class TestPrincipalTokens:
         kb = Ontology.connect(temp_db)
         kb.create_principal("alice@example.com", kind="human", default_capability="write")
         kb.create_principal("admin@example.com", kind="human", default_capability="admin")
-        raw_token = kb.issue_token("alice@example.com", author="admin@example.com")
-        credential_id = kb.list_tokens("alice@example.com", author="admin@example.com")[0].id
+        raw_token, credential_id = kb.issue_token("alice@example.com", author="admin@example.com")
         kb.close()
 
         result = runner.invoke(
@@ -196,8 +195,7 @@ class TestPrincipalTokens:
         kb = Ontology.connect(temp_db)
         kb.create_principal("alice@example.com", kind="human", default_capability="write")
         kb.create_principal("admin@example.com", kind="human", default_capability="admin")
-        raw_token = kb.issue_token("alice@example.com", author="admin@example.com")
-        credential_id = kb.list_tokens("alice@example.com", author="admin@example.com")[0].id
+        raw_token, credential_id = kb.issue_token("alice@example.com", author="admin@example.com")
         kb.close()
 
         result = runner.invoke(
