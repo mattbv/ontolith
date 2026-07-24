@@ -419,12 +419,19 @@ class Ontology:
         actor: str,
         action: Literal["superseded", "flagged", "retracted", "reactivated"],
         at: datetime,
+        successor_id: str | None = None,
     ) -> None:
         """Append an audit event for an assertion status mutation.
 
         Must run inside the same transaction as the corresponding
         set_assertion_status call (append-only invariant: the event log and
         the status it describes must never diverge).
+
+        Args:
+            successor_id: For action="superseded", the id of the assertion
+                that caused it — recovers the full predecessor set when one
+                incoming assertion supersedes several at once (KI-008),
+                since Assertion.supersedes only records the first.
         """
         self.backend.put_assertion_event(
             AssertionEvent(
@@ -433,6 +440,7 @@ class Ontology:
                 actor=actor,
                 action=action,
                 at=at,
+                successor_id=successor_id,
             )
         )
 
@@ -1025,14 +1033,21 @@ class Ontology:
             # Close prior window at the incoming assertion's valid_from (SPEC §10.2).
             # valid_from is guaranteed non-None after Assertion validation.
             close_at = (assertion.valid_from or assertion.asserted_at).isoformat()
+            supersedes_id = result.targets[0] if result.targets else None
+            final = assertion.model_copy(update={"supersedes": supersedes_id})
+            # Persisted before the loop below: each superseded-event row's
+            # successor_id FK (SQLite) references this row, so it must exist
+            # first. Safe — both inserts share this method's transaction.
+            self.backend.put_assertion(final)
             for target_id in result.targets:
                 self.backend.set_assertion_status(target_id, "superseded", valid_to=close_at)
                 self._record_assertion_event(
-                    target_id, assertion.author, "superseded", assertion.asserted_at
+                    target_id,
+                    assertion.author,
+                    "superseded",
+                    assertion.asserted_at,
+                    successor_id=final.id,
                 )
-            supersedes_id = result.targets[0] if result.targets else None
-            final = assertion.model_copy(update={"supersedes": supersedes_id})
-            self.backend.put_assertion(final)
             return final
 
         elif isinstance(result, Contradict):

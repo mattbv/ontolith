@@ -47,6 +47,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   method exists for any of the three (confirmed by an explicit audit, not an oversight).
   `DELETE /principals/{id}/tokens/{credential_id}` verifies the credential actually
   belongs to `principal_id` before revoking, raising `NotFoundError` on mismatch.
+- Full predecessor recovery for multi-target supersession (SPEC §10.2, ADR-0023, closes
+  KI-008): `AssertionEvent.successor_id: str | None` records which successor caused a
+  `"superseded"` event. `Assertion.supersedes` itself is unchanged (still scalar, still
+  names only the first predecessor per SPEC §12.2's normative schema) — the full set of
+  predecessors superseded by one incoming assertion is now recoverable via
+  `{e.assertion_id for e in kb.backend.get_assertion_events_by_successor(successor_id)}`,
+  surfaced as `ProvenanceOut.superseded_ids` (REST `GET /provenance/{id}`) and a matching
+  `superseded_ids` key on the MCP `ontolith.provenance` tool.
+- **Breaking:** `StorageBackend` gained a new required Protocol method,
+  `get_assertion_events_by_successor(successor_id) -> list[AssertionEvent]` (ADR-0023,
+  closes KI-008) — any third-party `StorageBackend` implementation must add it.
 
 #### Fixed
 - **`Ontology.create_principal(kind="ai", owner=None)` now raises the documented

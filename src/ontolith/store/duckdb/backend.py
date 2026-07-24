@@ -195,6 +195,15 @@ class DuckDBBackend:
         # instead (Ontology only ever calls put_assertion_event with a real,
         # just-persisted assertion id) — SQLiteBackend keeps the FK since
         # sqlite3 doesn't have this limitation.
+        #
+        # successor_id (KI-008) has no FOREIGN KEY(successor_id) REFERENCES
+        # assertion(id) either, for the same reason: _apply_with_conflict_
+        # routing persists the successor assertion first and then updates
+        # each predecessor's status in the same transaction as these event
+        # inserts, which is exactly the mutate-after-referenced sequence
+        # above — an FK here would risk the identical spurious violation.
+        # Referential integrity is enforced at the application layer, same
+        # as assertion_id. SQLiteBackend keeps the FK for this column too.
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS assertion_event (
                 id TEXT PRIMARY KEY,
@@ -202,6 +211,7 @@ class DuckDBBackend:
                 actor TEXT NOT NULL,
                 action TEXT NOT NULL CHECK(action IN ('superseded', 'flagged', 'retracted', 'reactivated')),
                 "at" TEXT NOT NULL,
+                successor_id TEXT,
                 FOREIGN KEY(actor) REFERENCES principal(id)
             )
         """)
@@ -209,6 +219,11 @@ class DuckDBBackend:
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_assertion_event_assertion
             ON assertion_event(assertion_id)
+        """)
+
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_assertion_event_successor
+            ON assertion_event(successor_id)
         """)
 
         # Proposal table (SPEC §9.1)
@@ -1090,8 +1105,8 @@ class DuckDBBackend:
         try:
             self.conn.execute(
                 """
-                INSERT INTO assertion_event (id, assertion_id, actor, action, "at")
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO assertion_event (id, assertion_id, actor, action, "at", successor_id)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 [
                     event.id,
@@ -1099,6 +1114,7 @@ class DuckDBBackend:
                     event.actor,
                     event.action,
                     event.at.isoformat(),
+                    event.successor_id,
                 ],
             )
         except duckdb.IntegrityError as e:
@@ -1114,15 +1130,32 @@ class DuckDBBackend:
         )
         rows = cursor.fetchall()
         return [
-            AssertionEvent(
-                id=d["id"],
-                assertion_id=d["assertion_id"],
-                actor=d["actor"],
-                action=d["action"],
-                at=datetime.fromisoformat(d["at"]),
-            )
+            self._row_to_assertion_event(d)
             for d in (self._row_to_dict(cursor, row) for row in rows)
         ]
+
+    def get_assertion_events_by_successor(self, successor_id: str) -> list[AssertionEvent]:
+        """Retrieve all 'superseded' events caused by a given successor assertion."""
+        cursor = self.conn.execute(
+            'SELECT * FROM assertion_event WHERE successor_id = ? ORDER BY "at" ASC, id ASC',
+            [successor_id],
+        )
+        rows = cursor.fetchall()
+        return [
+            self._row_to_assertion_event(d)
+            for d in (self._row_to_dict(cursor, row) for row in rows)
+        ]
+
+    @staticmethod
+    def _row_to_assertion_event(d: dict[str, Any]) -> AssertionEvent:
+        return AssertionEvent(
+            id=d["id"],
+            assertion_id=d["assertion_id"],
+            actor=d["actor"],
+            action=d["action"],
+            at=datetime.fromisoformat(d["at"]),
+            successor_id=d["successor_id"],
+        )
 
     def put_contradiction(self, contradiction: Contradiction) -> None:
         """Persist a new contradiction."""

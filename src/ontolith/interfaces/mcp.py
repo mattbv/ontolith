@@ -215,7 +215,9 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         Returns:
             Dict with assertion details including author, confidence, source,
-            rationale, proposal link, and temporal fields, or "error" if not
+            rationale, proposal link, temporal fields, and superseded_ids
+            (the full predecessor set this assertion superseded — supersedes
+            alone only records the first, see KI-008), or "error" if not
             found or the token does not resolve to a valid principal.
         """
         from ontolith.core.errors import AuthError
@@ -243,6 +245,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             else []
         )
 
+        superseded_ids = [
+            e.assertion_id for e in kb.backend.get_assertion_events_by_successor(match.id)
+        ]
+
         return {
             "id": match.id,
             "subject": match.subject,
@@ -260,6 +266,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             "valid_to": match.valid_to.isoformat() if match.valid_to else None,
             "proposal_id": match.proposal_id,
             "supersedes": match.supersedes,
+            "superseded_ids": superseded_ids,
             "review_events": review_events,
         }
 

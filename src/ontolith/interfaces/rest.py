@@ -210,6 +210,7 @@ class ProvenanceOut(BaseModel):
     valid_to: str | None
     proposal_id: str | None
     supersedes: str | None
+    superseded_ids: list[str]
     review_events: list[ReviewEventOut]
 
 
@@ -586,7 +587,13 @@ def create_rest_app(
         assertion_id: str,
         _principal: Principal = Depends(_resolve_principal),
     ) -> ProvenanceOut:
-        """Return the full provenance record for a single assertion."""
+        """Return the full provenance record for a single assertion.
+
+        ``superseded_ids`` carries the full predecessor set this assertion
+        superseded — ``supersedes`` alone only records the first predecessor
+        when one incoming assertion supersedes several concurrently-
+        overlapping ones (KI-008).
+        """
         match = kb.backend.get_assertion(assertion_id)
         if match is None:
             raise NotFoundError(f"Assertion {assertion_id!r} not found")
@@ -599,6 +606,10 @@ def create_rest_app(
             if match.proposal_id
             else []
         )
+
+        superseded_ids = [
+            e.assertion_id for e in kb.backend.get_assertion_events_by_successor(match.id)
+        ]
 
         return ProvenanceOut(
             id=match.id,
@@ -617,6 +628,7 @@ def create_rest_app(
             valid_to=match.valid_to.isoformat() if match.valid_to else None,
             proposal_id=match.proposal_id,
             supersedes=match.supersedes,
+            superseded_ids=superseded_ids,
             review_events=review_events,
         )
 

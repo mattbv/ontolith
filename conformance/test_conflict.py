@@ -323,6 +323,72 @@ class TestTemporalSupersession:
         active = kb.assertions(subject=entity.id, predicate="Person.employer", status="active")
         assert len(active) == 2
 
+    def test_multi_target_supersession_full_predecessor_set_recoverable(
+        self, make_kb: KbFactory
+    ) -> None:
+        """KI-008: Assertion.supersedes only records the first predecessor when
+        one incoming assertion supersedes several concurrently-overlapping ones
+        (e.g. a data-entry race left two employers active at once) — the full
+        set must still be recoverable via the assertion_event audit log.
+        """
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+
+        # Two concurrent, overlapping "active" windows — a data-entry race, not
+        # reachable through normal propose() calls (which supersede one at a
+        # time), so seeded directly into storage.
+        a1 = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity.id,
+            predicate="Person.employer",
+            value_kind="literal",
+            value_type="Text",
+            value="Acme Corp",
+            author=AUTHOR,
+            asserted_at=T0,
+            valid_from=T0,
+        )
+        kb.backend.put_assertion(a1)
+
+        a2 = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity.id,
+            predicate="Person.employer",
+            value_kind="literal",
+            value_type="Text",
+            value="Beta Inc",
+            author=AUTHOR,
+            asserted_at=T0,
+            valid_from=T0,
+        )
+        kb.backend.put_assertion(a2)
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=180)
+
+        kb.propose(entity.id, "Person.employer", "Gamma Ltd", "Text", AUTHOR)
+        active = kb.assertions(subject=entity.id, predicate="Person.employer", status="active")
+        assert len(active) == 1
+        successor = active[0]
+
+        # Assertion.supersedes still records only one predecessor (unchanged,
+        # documented v1 shape) ...
+        assert successor.supersedes in {a1.id, a2.id}
+
+        # ... but the full predecessor set is recoverable from the event log.
+        events = kb.backend.get_assertion_events_by_successor(successor.id)
+        assert {e.assertion_id for e in events} == {a1.id, a2.id}
+        assert all(e.action == "superseded" for e in events)
+        assert all(e.successor_id == successor.id for e in events)
+
+        superseded = kb.assertions(
+            subject=entity.id, predicate="Person.employer", status="superseded"
+        )
+        assert {a.id for a in superseded} == {a1.id, a2.id}
+
     def test_supersession_no_contradiction_object_created(self, make_kb: KbFactory) -> None:
         """time_varying supersession must NOT create a contradiction."""
         kb = _kb(make_kb)

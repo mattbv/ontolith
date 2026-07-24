@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ontolith import Ontology
-from ontolith.core import FixedClock, FixedIdProvider
+from ontolith.core import Assertion, FixedClock, FixedIdProvider
 from ontolith.identity.token_auth import TokenAuthProvider
 from ontolith.interfaces.mcp import create_mcp_server
 from ontolith.schema.ir import ConceptDef, PropertyDef, SchemaIR
@@ -326,6 +326,70 @@ class TestProvenanceTool:
         )
         assert result["id"] == active[0].id
         assert result["status"] == "retracted"
+
+    def test_provenance_superseded_ids_include_all_concurrent_predecessors(
+        self, tmp_path: Path
+    ) -> None:
+        """KI-008: supersedes alone only records the first predecessor when one
+        incoming assertion supersedes several concurrently-overlapping ones."""
+        kb = _kb(tmp_path)
+        kb.backend.put_schema(
+            SchemaIR(
+                namespace="default",
+                version=1,
+                concepts={
+                    "Person": ConceptDef(
+                        name="Person",
+                        properties={
+                            "employer": PropertyDef(
+                                name="employer", value_type="Text", temporality="time_varying"
+                            ),
+                        },
+                    ),
+                },
+            )
+        )
+        entity = kb.create_entity("Person", author=HUMAN)
+
+        a1 = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity.id,
+            predicate="Person.employer",
+            value_kind="literal",
+            value_type="Text",
+            value="Acme Corp",
+            author=HUMAN,
+            asserted_at=T0,
+            valid_from=T0,
+        )
+        kb.backend.put_assertion(a1)
+        a2 = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity.id,
+            predicate="Person.employer",
+            value_kind="literal",
+            value_type="Text",
+            value="Beta Inc",
+            author=HUMAN,
+            asserted_at=T0,
+            valid_from=T0,
+        )
+        kb.backend.put_assertion(a2)
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=180)
+        kb.propose(entity.id, "Person.employer", "Gamma Ltd", "Text", HUMAN)
+        active = kb.assertions(subject=entity.id, predicate="Person.employer", status="active")
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.provenance").fn(
+            assertion_id=active[0].id, token=kb.issue_token(HUMAN, author=ADMIN)
+        )
+        assert result["supersedes"] in {a1.id, a2.id}
+        assert set(result["superseded_ids"]) == {a1.id, a2.id}
 
 
 # ---------------------------------------------------------------------------

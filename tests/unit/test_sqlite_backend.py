@@ -457,6 +457,62 @@ class TestSQLiteBackend:
         with pytest.raises(StorageError, match="not found"):
             backend.set_assertion_status("nonexistent", "retracted")
 
+    def test_assertion_events_by_successor_recovers_full_predecessor_set(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """KI-008: querying by successor_id recovers every predecessor a single
+        assertion superseded, not just the one recorded in Assertion.supersedes."""
+        from ontolith.core import AssertionEvent
+
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(entity)
+        for aid in ("assertion-001", "assertion-002", "assertion-successor"):
+            backend.put_assertion(
+                Assertion(
+                    id=aid,
+                    namespace="test-ns",
+                    subject="entity-001",
+                    predicate="Person.employer",
+                    value_kind="literal",
+                    value_type="Text",
+                    value=aid,
+                    author="alice@test.com",
+                    asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+                )
+            )
+
+        backend.put_assertion_event(
+            AssertionEvent(
+                id="event-1",
+                assertion_id="assertion-001",
+                actor="alice@test.com",
+                action="superseded",
+                at=datetime(2025, 1, 2, tzinfo=UTC),
+                successor_id="assertion-successor",
+            )
+        )
+        backend.put_assertion_event(
+            AssertionEvent(
+                id="event-2",
+                assertion_id="assertion-002",
+                actor="alice@test.com",
+                action="superseded",
+                at=datetime(2025, 1, 2, tzinfo=UTC),
+                successor_id="assertion-successor",
+            )
+        )
+
+        events = backend.get_assertion_events_by_successor("assertion-successor")
+        assert {e.assertion_id for e in events} == {"assertion-001", "assertion-002"}
+        assert all(e.successor_id == "assertion-successor" for e in events)
+        assert backend.get_assertion_events_by_successor("nonexistent") == []
+
     def test_duplicate_natural_key_raises(self, backend: SQLiteBackend) -> None:
         """Inserting entity with duplicate natural_key raises StorageError."""
         from ontolith.core.errors import StorageError

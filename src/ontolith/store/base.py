@@ -258,6 +258,23 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def get_assertion_events_by_successor(self, successor_id: str) -> list[AssertionEvent]:
+        """Retrieve all 'superseded' events caused by a given successor assertion.
+
+        Recovers the full predecessor set for a supersession (KI-008):
+        Assertion.supersedes only records the first predecessor when one
+        incoming assertion supersedes several concurrently-overlapping ones,
+        but every superseded predecessor gets its own event row here.
+
+        Args:
+            successor_id: Assertion ID that caused the supersession(s)
+
+        Returns:
+            Events with this successor_id, ordered by occurrence. Each
+            event's assertion_id is one predecessor that was superseded.
+        """
+        ...
+
     def put_schema(self, schema: SchemaIR) -> None:
         """Persist a schema version.
 
