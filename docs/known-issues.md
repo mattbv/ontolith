@@ -140,11 +140,11 @@ Add `Ontology.accept_proposal(proposal_id, reviewer)` and `Ontology.reject_propo
 
 ---
 
-## KI-008 — Multi-target supersession links only the first superseded assertion
+## KI-008 — Multi-target supersession links only the first superseded assertion ✓ RESOLVED (M3)
 
-**Severity:** Informational — intentional v1 limitation  
-**Milestone target:** Backlog  
-**SPEC reference:** SPEC §10.2 (supersession chain)
+**Severity:** Informational — intentional v1 limitation, now closed  
+**Milestone target:** M3 — resolved via ADR-0023  
+**SPEC reference:** SPEC §10.2 (supersession chain), §12.2 (normative SQLite schema)
 
 ### Description
 
@@ -156,7 +156,7 @@ In practice this is rare because `time_varying` with truly concurrent open windo
 
 ### Fix
 
-In a future milestone, change `Assertion.supersedes` to `list[str]` (or add a separate `supersession_link` table) to support many-to-one successor relationships. Any schema migration must preserve existing single-link records.
+`Assertion.supersedes` stays a scalar `str | None`, unchanged — SPEC §12.2's normative schema models it as scalar `TEXT`, and widening it would break the public `Assertion` model (ADR-0019) to fix a rare-path fidelity gap. Instead, the full predecessor set is recovered through the existing `assertion_event` audit log, which already writes one row per superseded predecessor at exactly the right point in `_apply_with_conflict_routing`: `AssertionEvent` gained a `successor_id: str | None` field (populated only on `"superseded"` events), and `StorageBackend` gained `get_assertion_events_by_successor(successor_id) -> list[AssertionEvent]`. The full predecessor set for any successor is `{e.assertion_id for e in kb.backend.get_assertion_events_by_successor(successor_id)}`. Surfaced via `ProvenanceOut.superseded_ids` (REST) and the `superseded_ids` key on the MCP `ontolith.provenance` tool. See ADR-0023 for the full design, including why a new `supersession_link` table was rejected in favor of extending the audit log.
 
 ---
 
