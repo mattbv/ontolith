@@ -128,10 +128,38 @@ attributable, individually revocable per-principal tokens.
 **Leave `author` caller-supplied, add a warning in docs:**
 Rejected outright — this is the vulnerability being fixed, not a documentation gap.
 
+## Update (2026-07-24): `issue_token` returns `(token, credential_id)` (closes KI-024)
+
+`Ontology.issue_token(principal_id, author) -> str` returned only the raw token. Both of its
+callers (REST's `issue_token_route`, the CLI's `principal issue-token`) then made a second,
+non-transactional call — `list_tokens(principal_id, author)[0].id` — to recover the new
+credential's id, relying on `get_credentials_for_principal`'s "most recent first" ordering. If a
+second admin issued another token for the *same* `principal_id` in the gap between those two
+calls, `[0]` could return that unrelated, newer credential instead of the one whose raw token was
+just handed back — pairing the correct raw token with the wrong `credential_id` in the response. A
+caller storing `(token, credential_id)` together and later revoking by `credential_id` would then
+revoke the wrong credential, silently leaving the intended one active. (A narrower, same-timestamp
+variant of this ordering ambiguity was already closed by the `id DESC` tiebreak recorded as an
+update to ADR-0010/ADR-0022; that fix doesn't touch this cross-request race, which needs genuine
+concurrent issuance, not just a coarse clock.)
+
+Fixed by changing `issue_token`'s return type to `tuple[str, str]` — `(token, credential_id)` —
+since the credential's id is already known at the point `issue_token` persists it; no second
+lookup is needed. Both callers were updated to unpack the tuple directly instead of calling
+`list_tokens()` afterward. This is a breaking change to `Ontology`'s public API (ADR-0019) — every
+existing caller of `issue_token()` expecting a bare string breaks, including third-party code — but
+was judged proportionate: the race it closes is a real, if narrow, credential-misattribution bug in
+a security-sensitive path (token issuance), and no non-breaking shape existed that also removed the
+redundant lookup (a two-item result object would still change every callers' unpacking pattern; a
+new `issue_token_v2` method would leave the racy path reachable indefinitely).
+
 ## References
 
 - ADR-0008 (MCP surface — this ADR implements its "server stamps `author`" provenance claim,
   which the original implementation didn't honor)
 - ADR-0003 (Agent identity, delegation)
+- ADR-0019 (public API stability policy — governs the breaking-change marker for the `issue_token`
+  return-type change above)
 - SPEC §8.2 (Authentication), §14.4 (MCP server)
 - `identity/ports.py` (`AuthProvider`, stubbed since M0)
+- `docs/known-issues.md` KI-024 (now resolved)

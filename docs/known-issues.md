@@ -460,10 +460,10 @@ Regression coverage: `tests/unit/test_sqlite_backend.py::TestConcurrency` uses a
 
 ---
 
-## KI-024 — `POST /principals/{id}/tokens` can return a mismatched `credential_id` under concurrent issuance
+## KI-024 — `POST /principals/{id}/tokens` can return a mismatched `credential_id` under concurrent issuance ✓ RESOLVED
 
 **Severity:** Architecture gap — narrow race, requires two admins issuing tokens for the same principal within the same request gap; not yet observed, no test reproduces it (the deterministic same-timestamp case it's adjacent to is fixed, see below)
-**Milestone target:** Backlog
+**Milestone target:** Resolved via an update to ADR-0014
 **SPEC reference:** ADR-0014 (credential lifecycle — each issued credential must be individually attributable and revocable)
 
 ### Description
@@ -476,7 +476,7 @@ A narrower, more likely variant — two credentials for the same principal shari
 
 ### Fix
 
-`Ontology.issue_token` should return the credential id alongside (or instead of exposing separately from) the raw token — e.g. return a small `(token, credential_id)` tuple or a result object — so `issue_token_route` never needs to re-derive it via a second, racy lookup. This changes `issue_token`'s public return contract (`-> str` today), which ripples to its only other caller, the CLI's `principal issue-token` command (`interfaces/cli.py`), and to every existing test asserting `issue_token(...)` returns a bare string. Not done as part of the REST write/admin slice since it's a real SDK API change, not an interfaces-layer fix — deserves its own PR rather than being decided as a side effect of closing a REST review finding.
+`Ontology.issue_token(principal_id, author) -> tuple[str, str]` now returns `(token, credential_id)` directly — the credential's id is already known at the point it's persisted, so neither caller needs a second, racy `list_tokens()[0]` lookup. Both `interfaces/rest.py`'s `issue_token_route` and the CLI's `principal issue-token` command were updated to unpack the tuple. Breaking change to `Ontology`'s public API (ADR-0019); recorded as an update to ADR-0014.
 
 ---
 

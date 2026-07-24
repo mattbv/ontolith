@@ -60,6 +60,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   closes KI-008) — any third-party `StorageBackend` implementation must add it.
 
 #### Fixed
+- **Breaking:** `Ontology.issue_token(principal_id, author)` now returns
+  `tuple[str, str]` (`(token, credential_id)`) instead of a bare `str` (closes KI-024,
+  update to ADR-0014). `issue_token_route` (REST) and `principal issue-token` (CLI)
+  previously recovered the newly-issued credential's id via a second,
+  non-transactional `list_tokens(...)[0]` call — a concurrent token issuance for the
+  same principal in that gap could return a mismatched `credential_id` alongside the
+  correct raw token. The credential's id is already known when `issue_token` persists
+  it, so both callers now get it directly with no second lookup.
 - **`Ontology.create_principal(kind="ai", owner=None)` now raises the documented
   `ontolith.core.errors.ValidationError`** instead of a raw pydantic `ValidationError`
   leaking out of `Principal`'s own model validator. Found while wiring `POST /principals`
