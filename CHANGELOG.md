@@ -58,6 +58,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `StorageBackend` gained a new required Protocol method,
   `get_assertion_events_by_successor(successor_id) -> list[AssertionEvent]` (ADR-0023,
   closes KI-008) — any third-party `StorageBackend` implementation must add it.
+- **Breaking:** `StorageBackend` gained a new required Protocol method,
+  `get_schema_at(namespace, at) -> SchemaIR | None` (SPEC §11.4, ADR-0024, closes
+  KI-019) — any third-party `StorageBackend` implementation must add it. New
+  `AsOfView.schema()` resolves the schema version effective at that view's `as_of`
+  time (via `applied_at`, already recorded deterministically by every `put_schema`
+  call) rather than always the latest version — `kb.as_of(t).schema()` now correctly
+  differs across a schema migration boundary. `SchemaIR` and `put_schema` are
+  unchanged.
 
 #### Fixed
 - **Breaking:** `Ontology.issue_token(principal_id, author)` now returns
