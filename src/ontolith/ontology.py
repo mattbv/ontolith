@@ -87,6 +87,20 @@ class AsOfView:
             embedder=self._embedder,
         )
 
+    def schema(self) -> SchemaIR | None:
+        """The schema version effective at the as_of timestamp (KI-019).
+
+        Resolves via `StorageBackend.get_schema_at`, not `get_schema` (which
+        always returns the latest version) — reconstructing what a
+        property's temporality/cardinality meant at this point in time
+        requires the schema that was actually in force then, not today's.
+
+        Returns:
+            Schema effective at this view's as_of time, or None if no
+            version of this namespace's schema had been applied yet.
+        """
+        return self._backend.get_schema_at(self._namespace, self._as_of)
+
 
 class Ontology:
     """Main knowledge base interface.

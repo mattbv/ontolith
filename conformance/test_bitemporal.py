@@ -541,6 +541,112 @@ class TestAsOfQuery:
 
 
 # ===========================================================================
+# Schema resolution at a point in time (KI-019)
+# ===========================================================================
+
+
+class TestAsOfSchema:
+    """kb.as_of(t).schema() resolves the schema version effective at t, not
+    always the latest — required for as_of() to correctly interpret a
+    property's temporality/cardinality as of a point in time before a
+    later schema migration changed them (SPEC §19, .claude/rules/
+    bitemporal.md: "Schema is resolved to the schema_version effective
+    at t")."""
+
+    ADMIN = "admin@example.com"
+
+    def _admin_kb(self, make_kb: KbFactory) -> Ontology:
+        kb = _kb(make_kb)
+        kb.create_principal(self.ADMIN, kind="human", default_capability="admin")
+        return kb
+
+    def test_schema_none_before_any_version_applied(self, make_kb: KbFactory) -> None:
+        kb = self._admin_kb(make_kb)
+        assert kb.as_of(T0).schema() is None
+
+    def test_schema_none_before_first_version_effective(self, make_kb: KbFactory) -> None:
+        kb = self._admin_kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)  # schema applied at T0 + 1 day
+        kb.apply_schema(SchemaIR(namespace="default", version=1), self.ADMIN)
+
+        assert kb.as_of(T0).schema() is None
+
+    def test_schema_resolves_version_effective_at_t(self, make_kb: KbFactory) -> None:
+        kb = self._admin_kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+
+        kb.apply_schema(SchemaIR(namespace="default", version=1), self.ADMIN)
+        clock.set(T1)
+        kb.apply_schema(SchemaIR(namespace="default", version=2), self.ADMIN)
+
+        assert kb.as_of(T0).schema().version == 1  # type: ignore[union-attr]
+        assert kb.as_of(T1).schema().version == 2  # type: ignore[union-attr]
+
+    def test_schema_effective_exactly_at_applied_at_is_inclusive(self, make_kb: KbFactory) -> None:
+        """Boundary matches the rest of the bitemporal model's t <= applied_at
+        convention (e.g. valid_from <= t) rather than a strict '<'."""
+        kb = self._admin_kb(make_kb)
+        kb.apply_schema(SchemaIR(namespace="default", version=1), self.ADMIN)
+
+        assert kb.as_of(T0).schema().version == 1  # type: ignore[union-attr]
+
+    def test_schema_migration_changes_reconstructed_temporality(self, make_kb: KbFactory) -> None:
+        """SPEC §19's own suggested vector: a property's temporality as
+        reconstructed by as_of() must reflect what the schema said at that
+        point in time, not what it says today."""
+        kb = self._admin_kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+
+        v1 = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "employer": PropertyDef(
+                            name="employer", value_type="Text", temporality="static"
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(v1, self.ADMIN)
+        clock.set(T1)  # migrate employer to time_varying
+
+        v2 = SchemaIR(
+            namespace="default",
+            version=2,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "employer": PropertyDef(
+                            name="employer", value_type="Text", temporality="time_varying"
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(v2, self.ADMIN)
+
+        pre_migration = kb.as_of(T0).schema()
+        post_migration = kb.as_of(T1).schema()
+        assert pre_migration is not None
+        assert post_migration is not None
+        assert pre_migration.temporality_of("Person.employer") == "static"
+        assert post_migration.temporality_of("Person.employer") == "time_varying"
+
+        # get_schema() (no time argument) always reflects latest, unaffected
+        # by which point in time as_of() is reconstructing.
+        assert kb.backend.get_schema("default").version == 2  # type: ignore[union-attr]
+
+
+# ===========================================================================
 # Property-based test — reconstruction invariant
 # ===========================================================================
 

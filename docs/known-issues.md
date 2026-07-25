@@ -352,21 +352,23 @@ Implemented across two sequential PRs, per ADR-0020 (amended for the query-layer
 
 ---
 
-## KI-019 — `as_of(t)` does not resolve the schema version effective at `t`
+## KI-019 — `as_of(t)` does not resolve the schema version effective at `t` ✓ RESOLVED (M3)
 
-**Severity:** Correctness gap — bitemporal reconstruction is schema-version-blind
-**Milestone target:** Backlog
-**SPEC reference:** SPEC §19 (informative SHOULD-vector: "`as_of` reconstruction across a schema migration"), `.claude/rules/bitemporal.md` ("Schema is resolved to the `schema_version` effective at `t`")
+**Severity:** Correctness gap — bitemporal reconstruction was schema-version-blind, now closed
+**Milestone target:** M3 — resolved via ADR-0024
+**SPEC reference:** SPEC §11.4 ("Schema is resolved to the `schema_version` effective at `t`"), §19 (informative SHOULD-vector: "`as_of` reconstruction across a schema migration")
 
 ### Description
 
-Bitemporal reconstruction is documented (and, per SPEC §19, expected to be tested) to resolve the schema that was active at time `t`, not the current schema — otherwise `as_of()` can misreport a property's `temporality`/`cardinality` for a point in time before a schema migration changed them. In practice, every schema-consulting call in `Ontology` (`_resolve_temporality`, `_resolve_cardinality`, `_require_known_predicate`, and `AsOfView` itself) calls `self.backend.get_schema(self.namespace)` with no version argument, which always returns the latest schema version regardless of the `as_of` timestamp in play. `StorageBackend.get_schema()` does accept an explicit `version: int | None` and schema versions are never deleted (`put_schema`'s docstring: "required for time-travel"), so the storage layer already retains what's needed — but nothing resolves *which* version was effective at a given `t`, because `SchemaIR` itself carries no timestamp (no `created_at`/`effective_at` field, and the schema table persists none either). This is a real gap, not yet exercised by any conformance vector, and only observable once a namespace has more than one schema version and an `as_of()` call spans the migration boundary.
+Bitemporal reconstruction is documented (and, per SPEC §19, expected to be tested) to resolve the schema that was active at time `t`, not the current schema — otherwise `as_of()` can misreport a property's `temporality`/`cardinality` for a point in time before a schema migration changed them. `StorageBackend.get_schema()` only ever returned the latest schema version, with no way to ask for the version effective at a given `t`.
 
 Surfaced during a whole-project docs/known-issues refresh (2026-07-14).
 
 ### Fix
 
-Add an effective-timestamp to schema persistence (either a new `SchemaIR` field populated via the injected `Clock` at `apply_schema()` time, or a separate table column not exposed on the IR itself), then add a `get_schema_at(namespace, t)` (or equivalent) resolution path that `AsOfView` and the temporality/cardinality/predicate-validation helpers use when operating under `as_of()`, instead of always resolving latest. Needs a conformance vector matching SPEC §19's own suggested case: a schema migration that changes a property's `temporality` or `cardinality`, with `as_of()` calls on both sides of the migration boundary asserting the pre-migration semantics still apply to pre-migration reconstruction.
+Investigation while resolving this (see ADR-0024's Context) found the KI's original description overstated where the gap actually lived: `Ontology._resolve_temporality`/`_resolve_cardinality`/`_require_known_predicate` are write-time-only helpers (always correctly resolving the current schema, since writes happen "now"), and `AsOfView`/`QueryBuilder` never consulted schema at all — so there was no misreported data from any existing read path, only a missing capability. Also found that `schema_version.applied_at` already existed in both backends' storage, populated deterministically via each backend's injected `Clock` on every `put_schema` call — just never read back.
+
+Closed additively: new `StorageBackend.get_schema_at(namespace, at) -> SchemaIR | None` port method resolves the highest version whose `applied_at <= at`, and new `AsOfView.schema()` calls it with the view's own `as_of` time. `SchemaIR` and `put_schema` are both unchanged — no breaking change. Conformance vectors in `conformance/test_bitemporal.py::TestAsOfSchema` cover the SPEC §19 suggested case (a property's temporality reconstructed differently on either side of a schema migration) on both backends.
 
 ---
 
