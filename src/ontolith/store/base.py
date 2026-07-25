@@ -301,6 +301,27 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def get_schema_at(self, namespace: str, at: datetime) -> SchemaIR | None:
+        """Retrieve the schema version effective at a point in time (KI-019).
+
+        Resolves the highest version whose `applied_at <= at` — i.e. the
+        schema that was current at time `at`, for bitemporal reconstruction
+        (`.claude/rules/bitemporal.md`: "Schema is resolved to the
+        schema_version effective at t"). `put_schema` already records
+        `applied_at` via the backend's injected Clock; this method is the
+        first reader of that column.
+
+        Args:
+            namespace: Namespace to query
+            at: Point in time to resolve the effective schema for
+
+        Returns:
+            Schema effective at `at`, or None if no version had been applied
+            by that time (including when the namespace has no schema at all,
+            or its first version postdates `at`)
+        """
+        ...
+
     def entities(
         self,
         namespace: str | None = None,

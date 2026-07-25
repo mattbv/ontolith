@@ -1010,6 +1010,35 @@ class SQLiteBackend:
         return SchemaIR.from_json(definition)
 
     @_synchronized
+    def get_schema_at(self, namespace: str, at: datetime) -> SchemaIR | None:
+        """Retrieve the schema version effective at a point in time (KI-019).
+
+        Orders by applied_at (the actual "effective at" moment), with
+        version as a tiebreak for same-timestamp rows under a coarse or
+        injected Clock — not by version alone, so this stays correct even
+        if a future write path ever persisted schema rows out of temporal
+        order relative to their version numbers.
+        """
+        import json
+
+        cursor = self.conn.cursor()
+        cursor.execute(
+            """
+            SELECT definition FROM schema_version
+            WHERE namespace = ? AND applied_at <= ?
+            ORDER BY applied_at DESC, version DESC
+            LIMIT 1
+            """,
+            (namespace, at.isoformat()),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        definition = json.loads(row["definition"])
+        return SchemaIR.from_json(definition)
+
+    @_synchronized
     def entities(
         self,
         namespace: str | None = None,

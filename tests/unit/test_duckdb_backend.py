@@ -7,7 +7,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from ontolith.core import Assertion, Entity
+from ontolith.core import Assertion, Entity, FixedClock
 from ontolith.core.errors import StorageError
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential
@@ -794,6 +794,27 @@ class TestDuckDBBackend:
     def test_get_nonexistent_schema_returns_none(self, backend: DuckDBBackend) -> None:
         """Getting a nonexistent schema returns None."""
         assert backend.get_schema("nonexistent") is None
+
+    def test_get_schema_at_resolves_effective_version(self, temp_db: Path) -> None:
+        """KI-019: get_schema_at resolves the version effective at a point in
+        time (via the applied_at each put_schema already records), not
+        always the latest version."""
+        clock = FixedClock(datetime(2025, 1, 1, tzinfo=UTC))
+        backend = DuckDBBackend(temp_db, clock=clock)
+        backend.put_schema(SchemaIR(namespace="test-ns", version=1))
+
+        clock.set(datetime(2025, 6, 1, tzinfo=UTC))
+        backend.put_schema(SchemaIR(namespace="test-ns", version=2))
+
+        early = backend.get_schema_at("test-ns", datetime(2025, 1, 1, tzinfo=UTC))
+        assert early is not None
+        assert early.version == 1
+
+        late = backend.get_schema_at("test-ns", datetime(2025, 6, 1, tzinfo=UTC))
+        assert late is not None
+        assert late.version == 2
+
+        assert backend.get_schema_at("test-ns", datetime(2024, 12, 31, tzinfo=UTC)) is None
 
     def test_ai_principal_without_owner_rejected_by_db(self, backend: DuckDBBackend) -> None:
         """AI principal without owner is rejected by DB CHECK constraint (defense-in-depth)."""
