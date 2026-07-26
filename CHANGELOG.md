@@ -47,6 +47,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   method exists for any of the three (confirmed by an explicit audit, not an oversight).
   `DELETE /principals/{id}/tokens/{credential_id}` verifies the credential actually
   belongs to `principal_id` before revoking, raising `NotFoundError` on mismatch.
+- `GET /principals` (SPEC §14.3, ADR-0022 update, further closes KI-022): new
+  `Ontology.list_principals(author)`, gated the same way as `issue_token`/
+  `revoke_token`/`list_tokens` (`require_admin`); REST route requires admin
+  capability; CLI `ontolith principal list`. No pagination, matching `list_tokens`'s
+  existing precedent.
+- **Breaking:** `StorageBackend` gained a new required Protocol method,
+  `list_principals() -> list[Principal]` (ADR-0022 update, closes KI-022's
+  `GET /principals` gap) — any third-party `StorageBackend` implementation must add
+  it.
 - Full predecessor recovery for multi-target supersession (SPEC §10.2, ADR-0023, closes
   KI-008): `AssertionEvent.successor_id: str | None` records which successor caused a
   `"superseded"` event. `Assertion.supersedes` itself is unchanged (still scalar, still

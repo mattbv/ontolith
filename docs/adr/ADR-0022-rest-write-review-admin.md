@@ -243,6 +243,32 @@ same PR:
   denial-path test per gap, plus two new tests for the `CreatePrincipalIn`
   typing fix and one for the credential-ownership fix.
 
+## Update (2026-07-26): `list_principals()` closes the `/principals` gap
+
+This ADR's Decision/Rationale (above) deliberately deferred `GET /principals`
+because no `list_principals()` existed anywhere, and raised one open design
+question before building it: **should it paginate?**
+
+Resolved: no. `Ontology.list_tokens()` (credential listing, the closest
+existing precedent — same admin-tier sensitivity class) doesn't paginate
+either, and REST's own `/query` route already has a separate, tracked,
+unimplemented pagination gap (KI-022's remaining-scope list) rather than
+each list-shaped route inventing its own scheme. `list_principals()` returns
+every principal, most recently created first — consistent with
+`list_tokens`'s ordering — and pagination remains a single future addition
+applied uniformly across all list routes, not decided per-route.
+
+Added: `StorageBackend.list_principals() -> list[Principal]` (new required
+Protocol method — breaking for third-party backends, see CHANGELOG),
+`Ontology.list_principals(author)` (gated via the same `require_admin` used
+by `issue_token`/`revoke_token`/`list_tokens`), `GET /principals` (REST,
+admin-only), and `ontolith principal list` (CLI).
+
+The namespace registry and `/proposals/{id}/review` state machine are
+unaffected by this update — both remain deferred for the reasons already
+stated in this ADR's Decision section (real design questions, not just a
+missing accessor method).
+
 ## References
 
 - SPEC §14.3 (REST + GraphQL), §16 (error model), §8.3 (capabilities), §8.1

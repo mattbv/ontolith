@@ -81,6 +81,26 @@ def principal_create(
         kb.close()
 
 
+@principal_app.command("list")
+def principal_list(
+    author: Annotated[
+        str, typer.Option("--author", help="Admin-capability principal performing the lookup.")
+    ],
+) -> None:
+    """List all principals (KI-022). Requires the `--author` principal to hold `admin` capability."""
+    kb = _kb()
+    try:
+        # No empty-list case to handle: require_admin(author) guarantees at
+        # least `author` itself exists as a principal.
+        for p in kb.list_principals(author=author):
+            typer.echo(f"{p.id}  kind={p.kind}  capability={p.default_capability}")
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
 @principal_app.command("issue-token")
 def principal_issue_token(
     principal_id: Annotated[str, typer.Argument(help="Principal ID to issue a token for.")],

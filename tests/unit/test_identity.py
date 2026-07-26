@@ -123,6 +123,22 @@ class TestOntologyTokenIssuance:
         assert kb.list_tokens("alice@example.com", author=ADMIN) == []
 
 
+class TestOntologyListPrincipals:
+    """KI-022: Ontology.list_principals(), the SDK method REST's GET /principals wraps."""
+
+    def test_list_principals_includes_seeded_and_created(self, kb: Ontology) -> None:
+        ids = {p.id for p in kb.list_principals(author=ADMIN)}
+        assert ids == {"alice@example.com", ADMIN}
+
+    def test_list_principals_rejects_non_admin_author(self, kb: Ontology) -> None:
+        with pytest.raises(CapabilityError, match="lacks admin capability"):
+            kb.list_principals(author="alice@example.com")
+
+    def test_list_principals_rejects_unknown_author(self, kb: Ontology) -> None:
+        with pytest.raises(AuthError, match="Principal not found"):
+            kb.list_principals(author="nobody@example.com")
+
+
 class TestTokenIssuanceRequiresAdmin:
     """Issuing/revoking/listing credentials converts local access into a
     remote, network-reachable bearer token — a higher-stakes action than

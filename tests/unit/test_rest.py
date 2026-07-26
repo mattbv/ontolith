@@ -1353,6 +1353,44 @@ class TestCreatePrincipalRoute:
         assert response.json()["code"] == "VALIDATION_ERROR"
 
 
+class TestListPrincipalsRoute:
+    """KI-022: GET /principals."""
+
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        response = client.get("/principals")
+        assert response.status_code == 401
+
+    def test_admin_lists_principals(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
+        response = client.get("/principals", headers=_auth(token))
+
+        assert response.status_code == 200
+        body = response.json()
+        ids = {p["id"] for p in body}
+        assert ids == {HUMAN, REVIEWER, AI, ADMIN}
+
+        # Full field-by-field check on the AI principal (kind/owner/auth_method
+        # all differ from the human principals) guards against a transposed
+        # PrincipalOut(...) field mapping in the route.
+        ai_out = next(p for p in body if p["id"] == AI)
+        assert ai_out["kind"] == "ai"
+        assert ai_out["owner"] == AI_OWNER
+        assert ai_out["auth_method"] == "apikey"
+        assert ai_out["default_capability"] == "propose"
+
+    def test_non_admin_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not admin
+        response = client.get("/principals", headers=_auth(token))
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
+
 # ---------------------------------------------------------------------------
 # /principals/{principal_id}/tokens
 # ---------------------------------------------------------------------------
