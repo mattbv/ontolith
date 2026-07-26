@@ -306,10 +306,9 @@ class StorageBackend(Protocol):
 
         Resolves the highest version whose `applied_at <= at` — i.e. the
         schema that was current at time `at`, for bitemporal reconstruction
-        (`.claude/rules/bitemporal.md`: "Schema is resolved to the
-        schema_version effective at t"). `put_schema` already records
-        `applied_at` via the backend's injected Clock; this method is the
-        first reader of that column.
+        (SPEC §11.4: "Schema is resolved to the schema_version effective at
+        t"). `put_schema` already records `applied_at` via the backend's
+        injected Clock; this method is the first reader of that column.
 
         Args:
             namespace: Namespace to query
