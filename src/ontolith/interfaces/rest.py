@@ -979,6 +979,29 @@ def create_rest_app(
         )
 
     # ------------------------------------------------------------------
+    # GET /principals
+    # ------------------------------------------------------------------
+
+    @app.get("/principals")
+    def list_principals_route(
+        principal: Principal = Depends(_resolve_principal),
+    ) -> list[PrincipalOut]:
+        """List all principals. Requires admin capability (KI-022)."""
+        principals = kb.list_principals(author=principal.id)
+        return [
+            PrincipalOut(
+                id=p.id,
+                kind=p.kind,
+                owner=p.owner,
+                auth_method=p.auth_method,
+                default_capability=p.default_capability,
+                trust_level=p.trust_level,
+                created_at=p.created_at.isoformat(),
+            )
+            for p in principals
+        ]
+
+    # ------------------------------------------------------------------
     # POST /principals/{principal_id}/tokens
     # ------------------------------------------------------------------
 

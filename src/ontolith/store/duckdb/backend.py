@@ -442,6 +442,19 @@ class DuckDBBackend:
             return None
         return self._row_to_principal(self._row_to_dict(cursor, row))
 
+    def list_principals(self) -> list[Principal]:
+        """List all principals (KI-022).
+
+        Returns:
+            All principals, most recently created first
+        """
+        # id DESC is a deterministic lexical tiebreak, not a recency proxy —
+        # see SQLiteBackend's identical method for why that distinction
+        # matters here (principal ids are user-supplied, unlike credential
+        # ids' ULID-based get_credentials_for_principal tiebreak).
+        cursor = self.conn.execute("SELECT * FROM principal ORDER BY created_at DESC, id DESC")
+        return [self._row_to_principal(self._row_to_dict(cursor, row)) for row in cursor.fetchall()]
+
     @staticmethod
     def _row_to_principal(row: dict[str, Any]) -> Principal:
         """Deserialize a `principal` table row into a Principal."""

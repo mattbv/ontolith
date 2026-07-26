@@ -1500,6 +1500,25 @@ class Ontology:
             raise CapabilityError(f"Principal {author} lacks admin capability")
         return principal
 
+    def list_principals(self, author: str) -> list[Principal]:
+        """List all principals (KI-022).
+
+        Args:
+            author: Principal ID performing the lookup — must hold `admin`
+                capability (principal metadata, including `owner` and
+                `trust_level`, is admin-tier information, same sensitivity
+                class as credential listing)
+
+        Returns:
+            All principals, most recently created first
+
+        Raises:
+            AuthError: author does not name an existing principal
+            CapabilityError: author lacks admin capability
+        """
+        self.require_admin(author)
+        return self.backend.list_principals()
+
     def issue_token(self, principal_id: str, author: str) -> tuple[str, str]:
         """Issue a new API-key token for a principal (ADR-0014).
 

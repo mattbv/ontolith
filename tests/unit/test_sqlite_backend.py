@@ -582,6 +582,48 @@ class TestSQLiteBackend:
         """Getting a nonexistent principal returns None."""
         assert backend.get_principal("nonexistent") is None
 
+    def test_list_principals_returns_all_most_recent_first(self, backend: SQLiteBackend) -> None:
+        """list_principals (KI-022) returns every principal, newest created_at first."""
+        backend.put_principal(
+            Principal(
+                id="bob@test.com",
+                kind="human",
+                auth_method="oidc",
+                created_at=datetime(2025, 1, 2, tzinfo=UTC),
+            )
+        )
+        backend.put_principal(
+            Principal(
+                id="carol@test.com",
+                kind="human",
+                auth_method="oidc",
+                created_at=datetime(2025, 1, 3, tzinfo=UTC),
+            )
+        )
+
+        principals = backend.list_principals()
+
+        # backend fixture seeds alice@test.com at 2025-01-01
+        assert [p.id for p in principals] == ["carol@test.com", "bob@test.com", "alice@test.com"]
+
+    def test_list_principals_same_created_at_tiebreaks_by_id_desc(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """Two principals sharing a created_at (coarse/injected Clock) still
+        sort deterministically, via a lexical id DESC tiebreak."""
+        same_time = datetime(2025, 1, 5, tzinfo=UTC)
+        backend.put_principal(
+            Principal(id="aaa@test.com", kind="human", auth_method="oidc", created_at=same_time)
+        )
+        backend.put_principal(
+            Principal(id="zzz@test.com", kind="human", auth_method="oidc", created_at=same_time)
+        )
+
+        principals = backend.list_principals()
+
+        tied = [p.id for p in principals if p.id in ("aaa@test.com", "zzz@test.com")]
+        assert tied == ["zzz@test.com", "aaa@test.com"]
+
     def test_principal_metadata_roundtrip(self, backend: SQLiteBackend) -> None:
         """Principal metadata is preserved through storage."""
         metadata = {"team": "engineering", "region": "us-west"}

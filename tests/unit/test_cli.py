@@ -80,6 +80,35 @@ class TestPrincipalCreate:
         assert "capability=write" in result.output
 
 
+class TestPrincipalList:
+    """KI-022: `ontolith principal list`."""
+
+    def test_lists_all_principals(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "principal", "list", "--author", "admin@example.com"],
+        )
+        assert result.exit_code == 0
+        assert "alice@example.com" in result.output
+        assert "admin@example.com" in result.output
+
+    def test_non_admin_author_exits_nonzero(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "principal", "list", "--author", "alice@example.com"],
+        )
+        assert result.exit_code == 1
+
+
 class TestPrincipalTokens:
     def test_issue_token_prints_token_and_credential_id(self, temp_db: Path) -> None:
         kb = Ontology.connect(temp_db)

@@ -490,6 +490,23 @@ class SQLiteBackend:
             return None
         return self._row_to_principal(row)
 
+    @_synchronized
+    def list_principals(self) -> list[Principal]:
+        """List all principals (KI-022).
+
+        Returns:
+            All principals, most recently created first
+        """
+        cursor = self.conn.cursor()
+        # created_at DESC for most-recent-first, same as
+        # get_credentials_for_principal. The id DESC tiebreak means
+        # something different here, though: credential ids are ULIDs
+        # (id DESC ~= recency), but principal ids are user-supplied
+        # emails/slugs — id DESC is just a deterministic lexical tiebreak
+        # for same-timestamp rows, not a recency proxy.
+        cursor.execute("SELECT * FROM principal ORDER BY created_at DESC, id DESC")
+        return [self._row_to_principal(row) for row in cursor.fetchall()]
+
     @staticmethod
     def _row_to_principal(row: sqlite3.Row) -> Principal:
         """Deserialize a `principal` table row into a Principal."""

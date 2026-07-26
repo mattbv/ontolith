@@ -120,6 +120,14 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def list_principals(self) -> list[Principal]:
+        """List all principals (KI-022).
+
+        Returns:
+            All principals, most recently created first
+        """
+        ...
+
     def get_credentials_for_principal(self, principal_id: str) -> list[PrincipalCredential]:
         """List all credentials (active and revoked) issued to a principal.
 
