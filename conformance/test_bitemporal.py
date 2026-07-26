@@ -549,9 +549,8 @@ class TestAsOfSchema:
     """kb.as_of(t).schema() resolves the schema version effective at t, not
     always the latest — required for as_of() to correctly interpret a
     property's temporality/cardinality as of a point in time before a
-    later schema migration changed them (SPEC §19, .claude/rules/
-    bitemporal.md: "Schema is resolved to the schema_version effective
-    at t")."""
+    later schema migration changed them (SPEC §11.4: "Schema is resolved
+    to the schema_version effective at t"; SPEC §19)."""
 
     ADMIN = "admin@example.com"
 
