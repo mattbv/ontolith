@@ -35,6 +35,13 @@ def _duckdb_factory(path: Path, clock: Clock | None) -> StorageBackend:
     return DuckDBBackend(path, clock=clock)
 
 
+# The -> StorageBackend / : StorageBackend annotations on the two factories
+# above and this dict are load-bearing, not decorative: this is the only
+# place DuckDBBackend is ever assigned to a StorageBackend-typed slot
+# outside src/, so it's what makes `mypy --strict conformance/conftest.py`
+# (run in CI alongside `src`) actually catch a Protocol-conformance
+# regression on DuckDBBackend — SQLiteBackend gets the same check only as a
+# side effect of Ontology.connect() in src/ontolith/ontology.py (KI-025).
 _BACKEND_FACTORIES: dict[str, Callable[[Path, Clock | None], StorageBackend]] = {
     "sqlite": _sqlite_factory,
     "duckdb": _duckdb_factory,

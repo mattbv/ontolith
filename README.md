@@ -30,7 +30,7 @@ uv run pytest
 
 # Run quality checks
 uv run ruff check
-uv run mypy --strict src
+uv run mypy --strict src conformance/conftest.py
 ```
 
 ## Development Status

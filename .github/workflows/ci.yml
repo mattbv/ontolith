@@ -35,7 +35,7 @@ jobs:
         run: uv run ruff check
 
       - name: Type check
-        run: uv run mypy --strict src
+        run: uv run mypy --strict src conformance/conftest.py
 
       - name: Dependency rule check
         run: uv run lint-imports
