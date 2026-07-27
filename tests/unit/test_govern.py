@@ -5,7 +5,14 @@ from datetime import UTC, datetime
 import pytest
 
 from ontolith.core import Assertion
-from ontolith.govern import AutoAccept, Proposal, RequireReview, SourceQuorum, ThresholdPolicy
+from ontolith.govern import (
+    AutoAccept,
+    Proposal,
+    Reject,
+    RequireReview,
+    SourceQuorum,
+    ThresholdPolicy,
+)
 from ontolith.identity import Principal
 
 
@@ -407,3 +414,77 @@ class TestSourceQuorum:
         decision = policy.evaluate(self._proposal([op]), self.PRINCIPAL, kb)
 
         assert isinstance(decision, AutoAccept)
+
+    def test_read_capability_principal_rejected(self) -> None:
+        """Read-capability principals are rejected outright, before any
+        source-counting - mirrors ThresholdPolicy's own read-only rejection,
+        since propose()/propose_ref()/retract() have no capability pre-check
+        of their own (KI-015 update, ADR-0025)."""
+        policy = SourceQuorum(threshold=1)
+        reader = Principal(
+            id="reader",
+            kind="human",
+            auth_method="oidc",
+            default_capability="read",
+            created_at=self.T0,
+        )
+        kb = _FakeKbView([self._assertion(source="source-a")])
+
+        decision = policy.evaluate(
+            self._proposal([self._assert_literal_op(source="source-b")]), reader, kb
+        )
+
+        assert isinstance(decision, Reject)
+
+    def test_delegated_read_capability_capped_and_rejected(self) -> None:
+        """min(capability) applies to SourceQuorum's own floor too, same as
+        ThresholdPolicy: delegating to a write-capability principal doesn't
+        lift a read-capability author above the floor."""
+        policy = SourceQuorum(threshold=1)
+        reader = Principal(
+            id="reader",
+            kind="human",
+            auth_method="oidc",
+            default_capability="read",
+            created_at=self.T0,
+        )
+        delegate = Principal(
+            id="delegate",
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            created_at=self.T0,
+        )
+        kb = _FakeKbView([])
+
+        decision = policy.evaluate(
+            self._proposal([self._assert_literal_op(source="source-a")]),
+            reader,
+            kb,
+            acting_as=delegate,
+        )
+
+        assert isinstance(decision, Reject)
+
+    def test_empty_operations_requires_review(self) -> None:
+        """An empty operations list requires review rather than raising
+        IndexError - defensive handling for a payload shape no current
+        caller produces but that Proposal's typing (dict[str, Any]) permits."""
+        policy = SourceQuorum(threshold=1)
+        kb = _FakeKbView([])
+
+        decision = policy.evaluate(self._proposal([]), self.PRINCIPAL, kb)
+
+        assert isinstance(decision, RequireReview)
+
+    def test_unknown_operation_kind_requires_review(self) -> None:
+        """An unrecognized op kind requires review rather than raising
+        KeyError on a missing `value`/`target` - defensive handling, since
+        Proposal.payload isn't a closed, validated shape at this layer."""
+        policy = SourceQuorum(threshold=1)
+        kb = _FakeKbView([])
+        op = {"kind": "create_entity", "subject": "e-1"}
+
+        decision = policy.evaluate(self._proposal([op]), self.PRINCIPAL, kb)
+
+        assert isinstance(decision, RequireReview)

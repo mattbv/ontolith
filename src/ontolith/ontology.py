@@ -811,9 +811,11 @@ class Ontology:
         # SPEC §8.4: effective capability is min(author, acting_as) when
         # delegating, not a wholesale substitution (ADR-0003).
         # kb pinned at `now` (== proposal.created_at): nothing from this
-        # proposal is persisted yet, so it can't see its own operation, and
-        # re-running as_of(proposal.created_at) later reproduces the same
-        # read — this is what makes evaluate() replayable (KI-017, ADR-0025).
+        # proposal is persisted yet, so at evaluation time it can't see its
+        # own operation (KI-017, ADR-0025). Replaying as_of(proposal.
+        # created_at) later reproduces this same read only if nothing else
+        # was committed at exactly that timestamp afterward — asserted_at <=
+        # t is inclusive of t, so a same-tick write IS visible on replay.
         kb_view = self.as_of(now)
         decision = self.policy.evaluate(proposal, principal, kb_view, acting_as=delegating)
         finalized = self._finalize_non_accepted_decision(proposal, decision, now)
@@ -931,8 +933,7 @@ class Ontology:
         # SPEC §8.4: effective capability is min(author, acting_as) when
         # delegating, not a wholesale substitution (ADR-0003).
         # kb pinned at `now` (== proposal.created_at) — see propose()'s
-        # identical comment for why this makes evaluate() replayable
-        # (KI-017, ADR-0025).
+        # comment for the replay caveat (KI-017, ADR-0025).
         kb_view = self.as_of(now)
         decision = self.policy.evaluate(proposal, principal, kb_view, acting_as=delegating)
         finalized = self._finalize_non_accepted_decision(proposal, decision, now)
@@ -999,8 +1000,7 @@ class Ontology:
         # SPEC §8.4: effective capability is min(author, acting_as) when
         # delegating, not a wholesale substitution (ADR-0003).
         # kb pinned at `now` (== proposal.created_at) — see propose()'s
-        # identical comment for why this makes evaluate() replayable
-        # (KI-017, ADR-0025).
+        # comment for the replay caveat (KI-017, ADR-0025).
         kb_view = self.as_of(now)
         decision = self.policy.evaluate(proposal, principal, kb_view, acting_as=delegating)
         finalized = self._finalize_non_accepted_decision(proposal, decision, now)

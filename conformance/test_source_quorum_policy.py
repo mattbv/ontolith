@@ -19,7 +19,7 @@ from datetime import UTC, datetime
 from conformance.conftest import KbFactory
 from ontolith import Entity, Ontology
 from ontolith.core import FixedClock, FixedIdProvider
-from ontolith.govern.policy import AutoAccept, RequireReview, SourceQuorum
+from ontolith.govern.policy import AutoAccept, Reject, RequireReview, SourceQuorum
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 AUTHOR = "alice@example.com"
@@ -40,7 +40,7 @@ def _seeded_kb(make_kb: KbFactory, id_tail: list[str]) -> tuple[Ontology, Entity
 
 def test_quorum_reached_via_seeded_corroboration_auto_accepts(make_kb: KbFactory) -> None:
     """A second distinct source pushes a matching-value proposal over threshold=2."""
-    kb, entity = _seeded_kb(make_kb, ["a-seed", "a-1", "prop-1"])
+    kb, entity = _seeded_kb(make_kb, ["a-seed", "prop-1", "a-new"])
     kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR, source="source-a")
 
     proposal, decision = kb.propose(
@@ -50,8 +50,11 @@ def test_quorum_reached_via_seeded_corroboration_auto_accepts(make_kb: KbFactory
     assert isinstance(decision, AutoAccept)
     assert "2/2" in decision.reason
     assert proposal.state == "auto_accepted"
-    values = {a.value for a in kb.assertions(subject=entity.id, predicate="Person.name")}
-    assert values == {"Ada"}
+    # Corroborating assertions are kept separate, never merged (SPEC §10.1) —
+    # a set-equality check on `.value` alone would also pass with just 1.
+    active = kb.assertions(subject=entity.id, predicate="Person.name")
+    assert len(active) == 2
+    assert {a.source for a in active} == {"source-a", "source-b"}
 
 
 def test_quorum_not_met_requires_review(make_kb: KbFactory) -> None:
@@ -135,7 +138,7 @@ def test_propose_ref_target_based_corroboration(make_kb: KbFactory) -> None:
     """SourceQuorum reads `target` (not `value`) for assert_ref-shaped operations."""
     kb = make_kb(
         FixedClock(T0),
-        FixedIdProvider(["e-1", "e-2", "a-seed", "a-1", "prop-1"]),
+        FixedIdProvider(["e-1", "e-2", "a-seed", "prop-1", "a-new"]),
         policy=SourceQuorum(threshold=2),
     )
     kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
@@ -151,9 +154,125 @@ def test_propose_ref_target_based_corroboration(make_kb: KbFactory) -> None:
     assert proposal.state == "auto_accepted"
 
 
+def test_read_capability_principal_rejected(make_kb: KbFactory) -> None:
+    """SourceQuorum rejects read-capability principals itself (KI-015 update,
+    ADR-0025) - propose()/propose_ref()/retract() have no capability
+    pre-check of their own, so this floor is only as strong as the
+    installed policy; previously only ThresholdPolicy enforced it."""
+    kb = make_kb(
+        FixedClock(T0),
+        FixedIdProvider(["e-1", "a-seed", "prop-1"]),
+        policy=SourceQuorum(threshold=1),
+    )
+    kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+    entity = kb.create_entity("Person", author=AUTHOR)
+    kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR, source="source-a")
+    reader = "reader@example.com"
+    kb.create_principal(reader, kind="human", auth_method="oidc", default_capability="read")
+
+    proposal, decision = kb.propose(
+        entity.id, "Person.name", "Ada", "Text", reader, source="source-b"
+    )
+
+    assert isinstance(decision, Reject)
+    assert proposal.state == "rejected"
+    [active] = kb.assertions(subject=entity.id, predicate="Person.name")
+    assert active.source == "source-a"
+
+
+def test_ai_authored_proposal_can_auto_accept(make_kb: KbFactory) -> None:
+    """SourceQuorum does not special-case AI authorship - ADR-0003's "AI
+    always requires review" is ThresholdPolicy's own rule, not reimplemented
+    here. Pinned explicitly (ADR-0025 §5) so a future change to this is a
+    deliberate decision, not an accidental regression."""
+    kb = make_kb(
+        FixedClock(T0),
+        FixedIdProvider(["e-1", "a-seed", "prop-1", "a-new"]),
+        policy=SourceQuorum(threshold=2),
+    )
+    kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+    entity = kb.create_entity("Person", author=AUTHOR)
+    kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR, source="source-a")
+    bot = "bot@example.com"
+    kb.create_principal(
+        bot, kind="ai", auth_method="apikey", owner=AUTHOR, default_capability="propose"
+    )
+
+    proposal, decision = kb.propose(
+        entity.id, "Person.name", "Ada", "Text", bot, source="source-b", model="test-model-v1"
+    )
+
+    assert isinstance(decision, AutoAccept)
+    assert proposal.state == "auto_accepted"
+
+
+def test_different_subject_does_not_corroborate(make_kb: KbFactory) -> None:
+    """A matching predicate/value/source on a *different* subject never
+    counts toward quorum - proves the kb.assertions() lookup is scoped by
+    subject, not just predicate+value (a mutation test with an unscoped
+    lookup would otherwise pass every other vector in this file)."""
+    kb = make_kb(
+        FixedClock(T0),
+        FixedIdProvider(["e-1", "e-2", "a-seed", "prop-1"]),
+        policy=SourceQuorum(threshold=2),
+    )
+    kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+    entity_1 = kb.create_entity("Person", author=AUTHOR)
+    entity_2 = kb.create_entity("Person", author=AUTHOR)
+    kb.assert_literal(entity_1.id, "Person.name", "Ada", "Text", AUTHOR, source="source-a")
+
+    proposal, decision = kb.propose(
+        entity_2.id, "Person.name", "Ada", "Text", AUTHOR, source="source-b"
+    )
+
+    assert isinstance(decision, RequireReview)
+    assert "1/2" in decision.reason
+
+
+def test_retracted_assertion_does_not_corroborate(make_kb: KbFactory) -> None:
+    """A retracted assertion's validity window closes at the retraction
+    time, so it's excluded from the AsOfView snapshot SourceQuorum reads -
+    it never counts toward quorum. Uses the default ThresholdPolicy to
+    perform the retraction (SourceQuorum always requires review on
+    retractions, so it can never itself accept one), then swaps to
+    SourceQuorum for the corroboration check."""
+    kb = make_kb(FixedClock(T0), FixedIdProvider(["e-1", "a-seed", "retract-prop", "prop-1"]))
+    kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+    entity = kb.create_entity("Person", author=AUTHOR)
+    seed = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR, source="source-a")
+    _, retract_decision = kb.retract(seed.id, AUTHOR)
+    assert isinstance(retract_decision, AutoAccept)
+
+    kb.policy = SourceQuorum(threshold=2)
+    proposal, decision = kb.propose(
+        entity.id, "Person.name", "Ada", "Text", AUTHOR, source="source-b"
+    )
+
+    assert isinstance(decision, RequireReview)
+    assert "1/2" in decision.reason
+
+
+def test_as_of_replay_at_created_at_sees_same_instant_writes(make_kb: KbFactory) -> None:
+    """Corrects an overclaim from an earlier ADR-0025 draft: replaying
+    as_of(proposal.created_at) does NOT reproduce the exact evaluation-time
+    read if anything else was committed at that same instant afterward -
+    `asserted_at <= t` is inclusive of `t`. A same-instant write (trivial
+    under FixedClock, as here) IS visible on replay."""
+    kb = make_kb(FixedClock(T0), FixedIdProvider(["e-1", "a-1"]))
+    kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+    entity = kb.create_entity("Person", author=AUTHOR)
+    assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR, source="s")
+
+    replay = kb.as_of(T0).assertions(subject=entity.id, predicate="Person.name")
+
+    assert any(a.id == assertion.id for a in replay)
+
+
 def test_delegated_proposal_still_evaluates_quorum(make_kb: KbFactory) -> None:
-    """acting_as delegation doesn't bypass or break the kb-inspecting quorum check."""
-    kb, entity = _seeded_kb(make_kb, ["a-seed", "a-1", "prop-1"])
+    """A delegated (acting_as) proposal still goes through the same kb-inspecting
+    quorum check as a non-delegated one - SourceQuorum doesn't read acting_as at
+    all, so this only proves the delegation plumbing doesn't interfere."""
+    kb, entity = _seeded_kb(make_kb, ["a-seed", "prop-1", "a-new"])
     kb.create_principal(
         DELEGATE,
         kind="human",

@@ -26,11 +26,19 @@ Two facts, verified directly against the code rather than assumed, shape the des
 `proposal.created_at` and the timestamp any resulting `Assertion` would carry; `evaluate()` runs
 immediately after, entirely in memory; only if the decision is `AutoAccept` does
 `self.backend.transaction()` persist anything. So a KB view pinned at `proposal.created_at`
-naturally can't see the in-flight proposal's own operation (nothing is written yet), and
-re-running `Ontology.as_of(proposal.created_at)` later reproduces the exact same read — this is a
-concrete answer to "replayable against what state." `Ontology.as_of()` already exists and returns
-`AsOfView`, which does no I/O at construction (only `.assertions()`/`.query()` touch the backend),
-so passing one into every `evaluate()` call costs nothing when a strategy doesn't use it.
+naturally can't see the in-flight proposal's own operation *at evaluation time* — nothing is
+written yet. This is a concrete, verified answer to "what state is `kb` pinned against."
+
+Replay is weaker than that, and it's important to be precise about the limit: the bitemporal
+filter is `asserted_at <= t` (inclusive of `t`), and a resulting `AutoAccept`ed assertion carries
+`asserted_at == proposal.created_at`. So re-running `as_of(proposal.created_at)` *after* that
+assertion (or anything else) is committed at the exact same timestamp WILL see it — replay only
+reproduces the original evaluation-time read if nothing else was committed at that same instant
+afterward. Under a real clock this is a narrow, practically-negligible window; under a `FixedClock`
+in tests it's trivially reproducible and worth being honest about rather than claiming exact
+replayability unconditionally. `Ontology.as_of()` already exists and returns `AsOfView`, which does
+no I/O at construction (only `.assertions()`/`.query()` touch the backend), so passing one into
+every `evaluate()` call costs nothing when a strategy doesn't use it.
 
 **SPEC's literal `kb: ReadOnlyView` type is the wrong type for this purpose, independent of any
 import concern.** `ontolith.plugins.views.ReadOnlyView` wraps a *live* `Ontology`
@@ -82,16 +90,26 @@ real `Ontology` call sites do, always passing a real view).
 **4. `Ontology.propose`/`propose_ref`/`retract` each construct `kb_view = self.as_of(now)`**
 (reusing the already-computed `now`) and pass it positionally into `evaluate()`.
 
-**5. New `SourceQuorum` strategy**, SPEC §9.2's KB-inspecting example: auto-accepts once
-`threshold` distinct sources corroborate the same `(subject, predicate, value)`. Counts the
-proposal's own source together with `kb`-visible assertions on the same triple that carry a
-non-`None` source — a fact with no recorded source can't establish independent corroboration, so
-it's excluded. Retractions and sourceless proposals always require review (a retraction isn't a
-corroborable fact; a quorum can't be established without a proposing source). Deliberately does
-**not** special-case AI-authored proposals: `ThresholdPolicy`'s "AI always requires review" rule
-(ADR-0003) is that strategy's own design choice, not a cross-cutting invariant every
-`PolicyStrategy` must reimplement — combining a source-quorum rule with an AI-review rule is what
-SPEC §9.2's `Composite` strategy is for, not built here (still unbuilt — out of scope for KI-017).
+**5. New `SourceQuorum` strategy**, SPEC §9.2's KB-inspecting example: rejects principals below
+`propose` capability first (see below), then auto-accepts once `threshold` distinct sources
+corroborate the same `(subject, predicate, value)`. Counts the proposal's own source together with
+`kb`-visible assertions on the same triple that carry a non-`None` source — a fact with no recorded
+source can't establish independent corroboration, so it's excluded. Retractions and sourceless
+proposals always require review (a retraction isn't a corroborable fact; a quorum can't be
+established without a proposing source). Deliberately does **not** special-case AI-authored
+proposals: `ThresholdPolicy`'s "AI always requires review" rule (ADR-0003) is that strategy's own
+design choice, not a cross-cutting invariant every `PolicyStrategy` must reimplement — an
+AI-authored proposal auto-accepts here once quorum is reached, pinned by a conformance vector so
+the behavior stays deliberate. Combining a source-quorum rule with an AI-review rule is what SPEC
+§9.2's `Composite` strategy is for, not built here (still unbuilt — out of scope for KI-017).
+
+**6. `SourceQuorum` rejects principals below `propose` capability, mirroring `ThresholdPolicy`'s
+read-only rejection.** `Ontology.propose`/`propose_ref`/`retract` have no capability pre-check of
+their own — KI-016's resolution (`docs/known-issues.md`) explicitly relies on `ThresholdPolicy`
+being the thing that rejects `read`-capability principals on those paths. Since `PolicyStrategy` is
+now genuinely swappable, that safety net is only as good as whichever strategy is installed;
+without this check `SourceQuorum` alone would let a `read`-capability principal's proposal
+auto-accept once sourced correctly. Found in review before merge, not after.
 
 ## Rationale
 
@@ -143,7 +161,8 @@ duplicates logic `Composite` (SPEC §9.2) already exists to combine; not needed 
 **Positive:** `PolicyStrategy.evaluate()` now matches SPEC §9.2's parameter list exactly (modulo
 the already-documented `acting_as` addition). `SourceQuorum` is fully usable via
 `Ontology(policy=SourceQuorum(threshold=N))`. The replayability question ADR-0018 left open has a
-concrete, tested answer for future KB-inspecting strategies (`ConfidenceThreshold`, `TrustLevel`,
+concrete answer — pinned at `created_at`, exact on replay only absent a same-instant write
+afterward (see Context) — for future KB-inspecting strategies (`ConfidenceThreshold`, `TrustLevel`,
 `SourceRequired`, `RequireReviewByRole`, `Composite` — still unbuilt, but now unblocked by this same
 `kb`/`KbView` machinery).
 

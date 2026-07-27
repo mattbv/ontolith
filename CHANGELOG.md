@@ -81,7 +81,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reviewers=)` auto-accepts once `threshold` distinct sources corroborate the same
   `(subject, predicate, value)`, counting the proposal's own source together with
   matching, sourced, `kb`-visible assertions; retractions and sourceless proposals
-  always require review.
+  always require review; principals below `propose` capability are rejected (KI-015
+  update). Does **not** reimplement `ThresholdPolicy`'s "AI proposals always require
+  review" rule (ADR-0003) — an AI-authored proposal auto-accepts under `SourceQuorum`
+  once quorum is reached; combining that guarantee with source-quorum is `Composite`'s
+  job (still unbuilt).
 - **Breaking:** `PolicyStrategy.evaluate()` gained a required `kb: KbView` parameter
   (SPEC §9.2, ADR-0025, closes KI-017), inserted between `principal` and `acting_as` —
   any third-party `PolicyStrategy` implementation must add it. `KbView` (new,
