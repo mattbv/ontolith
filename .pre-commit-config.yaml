@@ -21,4 +21,4 @@ repos:
       - id: mypy
         args: [--strict, --ignore-missing-imports]
         additional_dependencies: [pydantic>=2.0, python-ulid>=2.0]
-        files: ^src/
+        files: ^(src/|conformance/conftest\.py$)

@@ -487,8 +487,8 @@ A narrower, more likely variant — two credentials for the same principal shari
 
 ## KI-025 — CI's `mypy --strict` never type-checks `DuckDBBackend` against `StorageBackend` ✓ RESOLVED (M3)
 
-**Severity:** Test gap — a future `StorageBackend` port addition could land SQLite-only and still pass every CI gate
-**Milestone target:** Backlog
+**Severity:** Test gap — a future `StorageBackend` port addition could have landed SQLite-only and still passed every CI gate; now closed
+**Milestone target:** M3 — resolved in `ci(quality): type-check conformance/conftest.py, resolve KI-025`
 **SPEC reference:** Implementation Plan §2/§7.1 (dependency rule, quality gates), ADR-0016 (DuckDB backend)
 
 ### Description

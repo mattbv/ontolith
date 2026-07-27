@@ -51,7 +51,7 @@ uv run ruff format
 uv run ruff check
 
 # Type check
-uv run mypy --strict src
+uv run mypy --strict src conformance/conftest.py
 
 # Run all tests
 uv run pytest
@@ -60,7 +60,7 @@ uv run pytest
 uv run pytest conformance/
 
 # Full quality gate (run before committing)
-uv run pytest && ruff check && mypy --strict src
+uv run pytest && ruff check && mypy --strict src conformance/conftest.py
 ```
 
 ## Development Workflow
@@ -189,7 +189,7 @@ All code must pass these gates before merge:
 |-------|------|-------------|
 | Format | `ruff format --check` | Clean |
 | Lint | `ruff check` | Zero errors |
-| Types | `mypy --strict` | Zero errors on `src/` |
+| Types | `mypy --strict` | Zero errors on `src/` and `conformance/conftest.py` |
 | Tests | `pytest` | All pass |
 | Coverage | `pytest-cov` | Meets thresholds |
 | Conformance | `pytest conformance/` | All vectors pass |
