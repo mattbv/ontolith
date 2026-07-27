@@ -75,6 +75,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   call) rather than always the latest version — `kb.as_of(t).schema()` now correctly
   differs across a schema migration boundary. `SchemaIR` and `put_schema` are
   unchanged.
+- `SourceQuorum` policy strategy (SPEC §9.2, ADR-0025, closes KI-017):
+  `PolicyStrategy.evaluate()` now sees KB state via a new `kb` parameter, pinned to a
+  bitemporal `AsOfView` snapshot at the proposal's creation time. `SourceQuorum(threshold,
+  reviewers=)` auto-accepts once `threshold` distinct sources corroborate the same
+  `(subject, predicate, value)`, counting the proposal's own source together with
+  matching, sourced, `kb`-visible assertions; retractions and sourceless proposals
+  always require review.
+- **Breaking:** `PolicyStrategy.evaluate()` gained a required `kb: KbView` parameter
+  (SPEC §9.2, ADR-0025, closes KI-017), inserted between `principal` and `acting_as` —
+  any third-party `PolicyStrategy` implementation must add it. `KbView` (new,
+  `ontolith.govern.policy`) is a minimal structural Protocol (`assertions(subject=,
+  predicate=) -> list[Assertion]`), not SPEC's literal `ReadOnlyView` — see ADR-0025 for
+  why. `ThresholdPolicy` is unaffected at call sites: its own concrete signature keeps
+  `kb` optional (unused), so existing callers that don't pass one are unchanged.
 
 #### Fixed
 - **Breaking:** `Ontology.issue_token(principal_id, author)` now returns

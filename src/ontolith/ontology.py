@@ -810,7 +810,12 @@ class Ontology:
 
         # SPEC §8.4: effective capability is min(author, acting_as) when
         # delegating, not a wholesale substitution (ADR-0003).
-        decision = self.policy.evaluate(proposal, principal, acting_as=delegating)
+        # kb pinned at `now` (== proposal.created_at): nothing from this
+        # proposal is persisted yet, so it can't see its own operation, and
+        # re-running as_of(proposal.created_at) later reproduces the same
+        # read — this is what makes evaluate() replayable (KI-017, ADR-0025).
+        kb_view = self.as_of(now)
+        decision = self.policy.evaluate(proposal, principal, kb_view, acting_as=delegating)
         finalized = self._finalize_non_accepted_decision(proposal, decision, now)
         if finalized is not None:
             return finalized
@@ -925,7 +930,11 @@ class Ontology:
 
         # SPEC §8.4: effective capability is min(author, acting_as) when
         # delegating, not a wholesale substitution (ADR-0003).
-        decision = self.policy.evaluate(proposal, principal, acting_as=delegating)
+        # kb pinned at `now` (== proposal.created_at) — see propose()'s
+        # identical comment for why this makes evaluate() replayable
+        # (KI-017, ADR-0025).
+        kb_view = self.as_of(now)
+        decision = self.policy.evaluate(proposal, principal, kb_view, acting_as=delegating)
         finalized = self._finalize_non_accepted_decision(proposal, decision, now)
         if finalized is not None:
             return finalized
@@ -989,7 +998,11 @@ class Ontology:
 
         # SPEC §8.4: effective capability is min(author, acting_as) when
         # delegating, not a wholesale substitution (ADR-0003).
-        decision = self.policy.evaluate(proposal, principal, acting_as=delegating)
+        # kb pinned at `now` (== proposal.created_at) — see propose()'s
+        # identical comment for why this makes evaluate() replayable
+        # (KI-017, ADR-0025).
+        kb_view = self.as_of(now)
+        decision = self.policy.evaluate(proposal, principal, kb_view, acting_as=delegating)
         finalized = self._finalize_non_accepted_decision(proposal, decision, now)
         if finalized is not None:
             return finalized

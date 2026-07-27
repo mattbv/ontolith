@@ -308,25 +308,25 @@ Implemented `DuckDBBackend` (`src/ontolith/store/duckdb/`), recorded in ADR-0016
 
 ---
 
-## KI-017 — `PolicyStrategy.evaluate()` has no `kb: ReadOnlyView` parameter
+## KI-017 — `PolicyStrategy.evaluate()` has no `kb: ReadOnlyView` parameter ✓ RESOLVED (M3)
 
-**Severity:** Architecture gap — blocks one class of policy strategy, not a defect in what exists
-**Milestone target:** Backlog (design work needed before this can be scheduled)
+**Severity:** Architecture gap — blocked one class of policy strategy; now closed
+**Milestone target:** M3 — resolved via ADR-0025
 **SPEC reference:** SPEC §9.2 (Policy engine contract — `evaluate` signature, purity requirement), §14 (Plugin protocols)
 
 ### Description
 
-SPEC §9.2/§14 specify `PolicyStrategy.evaluate(self, proposal, principal, kb: ReadOnlyView) -> Decision`. The actual `PolicyStrategy` Protocol (`src/ontolith/govern/policy.py`) has `evaluate(self, proposal, principal, acting_as=None)` — no `kb` parameter, plus an `acting_as` parameter (needed for SPEC §8.4 delegation) the SPEC signature doesn't name. Without `kb`, a policy strategy cannot inspect KB state — `SourceQuorum` (one of SPEC §9.2's four SHOULD-have built-in strategies, which needs to count corroborating sources) cannot be implemented.
+SPEC §9.2/§14 specify `PolicyStrategy.evaluate(self, proposal, principal, kb: ReadOnlyView) -> Decision`. The actual `PolicyStrategy` Protocol (`src/ontolith/govern/policy.py`) had `evaluate(self, proposal, principal, acting_as=None)` — no `kb` parameter, plus an `acting_as` parameter (needed for SPEC §8.4 delegation) the SPEC signature doesn't name. Without `kb`, a policy strategy could not inspect KB state — `SourceQuorum` (one of SPEC §9.2's SHOULD-have built-in strategies, which needs to count corroborating sources) could not be implemented.
 
 Recorded during a whole-project audit (2026-07-14) alongside ADR-0018, which made `PolicyStrategy` actually injectable (`Ontology(backend, policy=...)`) — closing the "not pluggable at all" half of the gap while deliberately deferring this half.
 
-### Why not fixed now
+### Why not fixed then
 
-Adding `kb: ReadOnlyView` isn't blocked by the SPEC's purity requirement ("no writes, deterministic given inputs" permits reads), but SPEC §9.2 also requires evaluation to be "testable and replayable" — a live `ReadOnlyView` over an open, potentially-concurrently-mutated connection has no fixed state to be reproducible against. Resolving this needs a snapshot/consistency contract (e.g., an `as_of`-pinned view at proposal-creation time) that doesn't exist yet, and design work against a real `SourceQuorum`-shaped consumer rather than speculatively. See ADR-0018's Rationale and Alternatives Considered for the full analysis.
+Adding `kb: ReadOnlyView` wasn't blocked by the SPEC's purity requirement ("no writes, deterministic given inputs" permits reads), but SPEC §9.2 also requires evaluation to be "testable and replayable" — a live `ReadOnlyView` over an open, potentially-concurrently-mutated connection has no fixed state to be reproducible against. Resolving this needed a snapshot/consistency contract that didn't exist yet, and design work against a real `SourceQuorum`-shaped consumer rather than speculatively. See ADR-0018's Rationale and Alternatives Considered for the original analysis.
 
-### Suggested fix
+### Fix
 
-When a concrete KB-inspecting policy strategy is actually being built: design the snapshot contract `evaluate()`'s `kb` parameter needs to satisfy "replayable," add it to the `PolicyStrategy` Protocol, and update the three `self.policy.evaluate(...)` call sites in `src/ontolith/ontology.py` to pass it.
+`PolicyStrategy.evaluate()` gained a required `kb: KbView` parameter (inserted between `principal` and `acting_as`, matching SPEC's ordering). `KbView` is a minimal structural Protocol declared locally in `govern/policy.py` (`assertions(subject=, predicate=) -> list[Assertion]`) rather than the SPEC-named `ReadOnlyView` — `ReadOnlyView` wraps a *live* `Ontology` and isn't the pinned type "testable and replayable" needs, and importing either concrete view class into `govern/policy.py` would also be circular. `Ontology.propose`/`propose_ref`/`retract` each pass `self.as_of(now)` (an `AsOfView` pinned at the proposal's own `created_at`) — since nothing is persisted until after the decision, this snapshot can't see the in-flight proposal's own operation and is trivially reproducible later by re-running `as_of(proposal.created_at)`, which is the "replayable" answer this KI was blocked on. `ThresholdPolicy`'s own concrete `evaluate()` gives `kb` a default (`KbView | None = None`, unused) so none of the ~25 pre-existing pure `ThresholdPolicy` tests needed changes. `SourceQuorum` was implemented as the first KB-inspecting strategy, with conformance vectors in `conformance/test_source_quorum_policy.py` proving it reads real committed data through both backends. Full design in ADR-0025.
 
 ---
 

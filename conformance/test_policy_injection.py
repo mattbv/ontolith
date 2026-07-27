@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 
 from conformance.conftest import KbFactory
 from ontolith.core import FixedClock, FixedIdProvider
-from ontolith.govern.policy import AutoAccept, Decision, Reject
+from ontolith.govern.policy import AutoAccept, Decision, KbView, Reject
 from ontolith.identity import Principal
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
@@ -29,6 +29,7 @@ class _AlwaysReject:
         self,
         proposal: object,
         principal: Principal,
+        kb: KbView,
         acting_as: Principal | None = None,
     ) -> Decision:
         return Reject(reason="custom policy: always reject")
@@ -43,6 +44,7 @@ class _AlwaysAutoAccept:
         self,
         proposal: object,
         principal: Principal,
+        kb: KbView,
         acting_as: Principal | None = None,
     ) -> Decision:
         return AutoAccept(reason="custom policy: always accept")
