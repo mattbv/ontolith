@@ -485,6 +485,28 @@ A narrower, more likely variant — two credentials for the same principal shari
 
 ---
 
+## KI-025 — CI's `mypy --strict` never type-checks `DuckDBBackend` against `StorageBackend`
+
+**Severity:** Test gap — a future `StorageBackend` port addition could land SQLite-only and still pass every CI gate
+**Milestone target:** Backlog
+**SPEC reference:** Implementation Plan §2/§7.1 (dependency rule, quality gates), ADR-0016 (DuckDB backend)
+
+### Description
+
+CI's type-checking step is `uv run mypy --strict src` (`.github/workflows/ci.yml`) — `src/` only. `SQLiteBackend` gets checked structurally against the `StorageBackend` Protocol as a side effect: `Ontology.connect()` (`src/ontolith/ontology.py`) constructs one and passes it into `Ontology(backend: StorageBackend, ...)`, so a missing/mistyped Protocol method on `SQLiteBackend` would fail `mypy --strict src`.
+
+`DuckDBBackend` has no equivalent path. The only place it's ever assigned to a `StorageBackend`-annotated slot is `conformance/conftest.py`'s `_duckdb_factory(...) -> StorageBackend` — and `conformance/` is never passed to `mypy` in CI. `uv run mypy --strict conformance/conftest.py` does pass today in isolation (confirmed), so the two backends currently agree — but nothing *guarantees* that going forward.
+
+Surfaced during review of KI-022's `list_principals()` slice (PR #42): this is the second port-method addition in a row where both backends happened to get the method, checked only by discipline, not by CI. A future addition landing on `SQLiteBackend` alone (e.g. missed in a rushed PR, or added to `StorageBackend` and only one backend updated before the diff was reviewed) would still pass `ruff`, `mypy --strict src`, and the full test suite, since nothing structurally checks `DuckDBBackend`'s conformance to the Protocol in CI.
+
+Widening CI's mypy invocation to the *whole* `conformance/` tree is not the cheap fix it first looks like: `uv run mypy --strict src conformance` (confirmed, run directly) currently fails with 28 pre-existing errors across `test_conflict.py`, `test_bitemporal.py`, `test_basic_assertion.py`, and `test_append_only_properties.py` — untyped/loosely-typed test fixtures and a couple of stale `# type: ignore` comments, unrelated to this KI. Only `conftest.py` alone is currently strict-clean.
+
+### Fix
+
+Either (a) add just `conformance/conftest.py` to CI's mypy invocation (`uv run mypy --strict src conformance/conftest.py`, confirmed to pass today — the narrowly-scoped version of the earlier idea, not the whole directory), or (b) add an explicit protocol-satisfaction check to the conformance kit itself (e.g. a vector that asserts `isinstance`/structural compatibility, or a trivial `_: StorageBackend = DuckDBBackend(...)` assignment inside a mypy-checked test file) so backend self-certification includes typing, not just runtime behavior. Cleaning up the other 28 errors so the whole `conformance/` tree can go under `mypy --strict` is a separate, larger undertaking and not a prerequisite for closing this KI.
+
+---
+
 ## Format
 
 Each entry follows this structure:
