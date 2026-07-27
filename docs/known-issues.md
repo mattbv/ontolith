@@ -485,7 +485,7 @@ A narrower, more likely variant — two credentials for the same principal shari
 
 ---
 
-## KI-025 — CI's `mypy --strict` never type-checks `DuckDBBackend` against `StorageBackend`
+## KI-025 — CI's `mypy --strict` never type-checks `DuckDBBackend` against `StorageBackend` ✓ RESOLVED (M3)
 
 **Severity:** Test gap — a future `StorageBackend` port addition could land SQLite-only and still pass every CI gate
 **Milestone target:** Backlog
@@ -503,7 +503,9 @@ Widening CI's mypy invocation to the *whole* `conformance/` tree is not the chea
 
 ### Fix
 
-Either (a) add just `conformance/conftest.py` to CI's mypy invocation (`uv run mypy --strict src conformance/conftest.py`, confirmed to pass today — the narrowly-scoped version of the earlier idea, not the whole directory), or (b) add an explicit protocol-satisfaction check to the conformance kit itself (e.g. a vector that asserts `isinstance`/structural compatibility, or a trivial `_: StorageBackend = DuckDBBackend(...)` assignment inside a mypy-checked test file) so backend self-certification includes typing, not just runtime behavior. Cleaning up the other 28 errors so the whole `conformance/` tree can go under `mypy --strict` is a separate, larger undertaking and not a prerequisite for closing this KI.
+`.github/workflows/ci.yml`'s Type check step now runs `uv run mypy --strict src conformance/conftest.py` (was `src` only) — option (a) from the two considered. `DuckDBBackend`'s assignment to `_duckdb_factory(...) -> StorageBackend` is now structurally checked on every CI run, the same way `SQLiteBackend` already was via `Ontology.connect()`. A future port method missed on one backend now fails CI instead of passing silently.
+
+The other 28 pre-existing mypy errors elsewhere in `conformance/` (untyped test fixtures, stale `# type: ignore` comments) are unrelated to this KI and remain out of scope — `conftest.py` was the only file that actually needed checking here, since it's the sole place a backend is assigned to a `StorageBackend`-typed slot outside `src/`.
 
 ---
 
