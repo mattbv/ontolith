@@ -30,11 +30,12 @@ We use the [MADR](https://adr.github.io/madr/) (Markdown Any Decision Records) f
 - [ADR-0015](ADR-0015-plugin-capability-isolation.md) — **Plugin Capability Isolation** (Service-principal-scoped views, storage capability enforced)
 - [ADR-0016](ADR-0016-duckdb-second-backend.md) — **DuckDB Second Backend** (M3 conformance-kit second backend adapter, DuckPGQ/traversal deferred)
 - [ADR-0017](ADR-0017-cardinality-conflict-semantics.md) — **Cardinality-Aware Conflict Routing** (many-cardinality static properties coexist instead of contradicting)
-- [ADR-0018](ADR-0018-policy-strategy-injection.md) — **PolicyStrategy Injection** (Ontology accepts a custom policy; SPEC's kb parameter deferred pending a replay/snapshot design)
+- [ADR-0018](ADR-0018-policy-strategy-injection.md) — **PolicyStrategy Injection** (Ontology accepts a custom policy; SPEC's kb parameter deferred pending a replay/snapshot design — resolved by ADR-0025)
 - [ADR-0019](ADR-0019-public-api-stability-policy.md) — **Public API Stability Policy** (`__all__`-defined surface, pinned-export regression test, `griffe` CI gate deferred)
 - [ADR-0020](ADR-0020-hybrid-retrieval-storage-layer.md) — **Hybrid Retrieval** (`Embedder` port in `core/`, per-scope lazy vector tables, `sqlite-vec` required, `.semantic()` vector-search-first ranking, `Ontology.reindex()`)
 - [ADR-0021](ADR-0021-rest-interface.md) — **REST Interface — Read + Propose Slice** (`create_rest_app()` factory, bearer-token auth on all routes, 6 MCP-mirrored endpoints + `GET /proposals`, centralized error mapping, typed Pydantic responses)
 - [ADR-0022](ADR-0022-rest-write-review-admin.md) — **REST Interface — Write, Review, and Admin Slice** (direct write, proposal accept/reject, contradiction list/flag/resolve, principal creation + token admin; `Ontology.create_principal` AI-owner bug fixed; `/principals` list, `/namespaces`, `/proposals/{id}/review` deferred — no backing SDK method)
+- [ADR-0025](ADR-0025-policy-kb-parameter-and-source-quorum.md) — **PolicyStrategy `kb` Parameter and `SourceQuorum`** (`evaluate()` gains a required `kb: KbView` structural-Protocol parameter pinned to an `AsOfView` snapshot at proposal creation time; `SourceQuorum` built as the first KB-inspecting strategy)
 
 ## Decision Process
 

@@ -4,7 +4,15 @@ from datetime import UTC, datetime
 
 import pytest
 
-from ontolith.govern import AutoAccept, Proposal, RequireReview, ThresholdPolicy
+from ontolith.core import Assertion
+from ontolith.govern import (
+    AutoAccept,
+    Proposal,
+    Reject,
+    RequireReview,
+    SourceQuorum,
+    ThresholdPolicy,
+)
 from ontolith.identity import Principal
 
 
@@ -230,3 +238,253 @@ class TestThresholdPolicyDelegation:
 
         assert isinstance(with_none, AutoAccept)
         assert isinstance(without_arg, AutoAccept)
+
+
+class _FakeKbView:
+    """Pure test double for KbView - no backend, just an in-memory list."""
+
+    def __init__(self, assertions: list[Assertion]) -> None:
+        self._assertions = assertions
+
+    def assertions(
+        self, subject: str | None = None, predicate: str | None = None
+    ) -> list[Assertion]:
+        return [
+            a
+            for a in self._assertions
+            if (subject is None or a.subject == subject)
+            and (predicate is None or a.predicate == predicate)
+        ]
+
+
+class TestSourceQuorum:
+    """SourceQuorum (KI-017, ADR-0025): auto-accepts once `threshold` distinct
+    sources corroborate the same (subject, predicate, value)."""
+
+    T0 = datetime(2025, 1, 1, tzinfo=UTC)
+    # SourceQuorum never reads `principal` - a dummy suffices for every test.
+    PRINCIPAL = Principal(id="author", kind="human", auth_method="oidc", created_at=T0)
+
+    def _assertion(
+        self,
+        subject: str = "e-1",
+        predicate: str = "Person.name",
+        value: str = "Ada",
+        source: str | None = "existing-source",
+        value_kind: str = "literal",
+    ) -> Assertion:
+        return Assertion(
+            id="a-existing",
+            namespace="test",
+            subject=subject,
+            predicate=predicate,
+            value_kind=value_kind,  # type: ignore[arg-type]
+            value_type="Text" if value_kind == "literal" else None,
+            value=value,
+            author="author",
+            source=source,
+            asserted_at=self.T0,
+        )
+
+    def _proposal(self, operations: list[dict[str, object]]) -> Proposal:
+        return Proposal(
+            id="prop-001",
+            namespace="test",
+            author="author",
+            created_at=self.T0,
+            payload={"operations": operations},
+        )
+
+    def _assert_literal_op(
+        self,
+        subject: str = "e-1",
+        predicate: str = "Person.name",
+        value: str = "Ada",
+        source: str | None = "new-source",
+    ) -> dict[str, object]:
+        return {
+            "kind": "assert_literal",
+            "subject": subject,
+            "predicate": predicate,
+            "value": value,
+            "value_type": "Text",
+            "source": source,
+        }
+
+    def test_constructor_rejects_threshold_below_one(self) -> None:
+        with pytest.raises(ValueError, match="threshold"):
+            SourceQuorum(threshold=0)
+
+    def test_quorum_reached_auto_accepts(self) -> None:
+        """1 existing corroborating source + the proposal's own = threshold 2."""
+        policy = SourceQuorum(threshold=2)
+        kb = _FakeKbView([self._assertion(source="source-a")])
+
+        decision = policy.evaluate(
+            self._proposal([self._assert_literal_op(source="source-b")]), self.PRINCIPAL, kb
+        )
+
+        assert isinstance(decision, AutoAccept)
+        assert "2/2" in decision.reason
+
+    def test_quorum_not_met_requires_review(self) -> None:
+        """Only the proposal's own source (no existing corroboration) - below threshold 2."""
+        policy = SourceQuorum(threshold=2, reviewers=["reviewer@example.com"])
+        kb = _FakeKbView([])
+
+        decision = policy.evaluate(
+            self._proposal([self._assert_literal_op(source="source-b")]), self.PRINCIPAL, kb
+        )
+
+        assert isinstance(decision, RequireReview)
+        assert decision.reviewers == ["reviewer@example.com"]
+        assert "1/2" in decision.reason
+
+    def test_retraction_always_requires_review(self) -> None:
+        """Retractions never auto-accept, even at threshold=1."""
+        policy = SourceQuorum(threshold=1)
+        kb = _FakeKbView([])
+
+        decision = policy.evaluate(
+            self._proposal([{"kind": "retract", "assertion_id": "a-1"}]), self.PRINCIPAL, kb
+        )
+
+        assert isinstance(decision, RequireReview)
+        assert "retract" in decision.reason.lower()
+
+    def test_sourceless_proposal_requires_review(self) -> None:
+        """A proposal with no source can't establish a quorum, regardless of corroboration."""
+        policy = SourceQuorum(threshold=1)
+        kb = _FakeKbView([self._assertion(source="source-a")])
+
+        decision = policy.evaluate(
+            self._proposal([self._assert_literal_op(source=None)]), self.PRINCIPAL, kb
+        )
+
+        assert isinstance(decision, RequireReview)
+        assert "no source" in decision.reason.lower()
+
+    def test_mismatched_value_does_not_corroborate(self) -> None:
+        """An existing assertion with a different value doesn't count toward quorum."""
+        policy = SourceQuorum(threshold=2)
+        kb = _FakeKbView([self._assertion(value="Ada", source="source-a")])
+
+        decision = policy.evaluate(
+            self._proposal([self._assert_literal_op(value="Adaeze", source="source-b")]),
+            self.PRINCIPAL,
+            kb,
+        )
+
+        assert isinstance(decision, RequireReview)
+        assert "1/2" in decision.reason
+
+    def test_existing_assertion_without_source_does_not_corroborate(self) -> None:
+        """An existing assertion with source=None can't establish corroboration."""
+        policy = SourceQuorum(threshold=2)
+        kb = _FakeKbView([self._assertion(source=None)])
+
+        decision = policy.evaluate(
+            self._proposal([self._assert_literal_op(source="source-b")]), self.PRINCIPAL, kb
+        )
+
+        assert isinstance(decision, RequireReview)
+        assert "1/2" in decision.reason
+
+    def test_assert_ref_uses_target_not_value(self) -> None:
+        """assert_ref operations are keyed on `target`, not `value` (which they lack)."""
+        policy = SourceQuorum(threshold=2)
+        kb = _FakeKbView(
+            [
+                self._assertion(
+                    predicate="Person.employer",
+                    value="org-1",
+                    source="source-a",
+                    value_kind="ref",
+                )
+            ]
+        )
+        op = {
+            "kind": "assert_ref",
+            "subject": "e-1",
+            "predicate": "Person.employer",
+            "target": "org-1",
+            "source": "source-b",
+        }
+
+        decision = policy.evaluate(self._proposal([op]), self.PRINCIPAL, kb)
+
+        assert isinstance(decision, AutoAccept)
+
+    def test_read_capability_principal_rejected(self) -> None:
+        """Read-capability principals are rejected outright, before any
+        source-counting - mirrors ThresholdPolicy's own read-only rejection,
+        since propose()/propose_ref()/retract() have no capability pre-check
+        of their own (KI-015 update, ADR-0025)."""
+        policy = SourceQuorum(threshold=1)
+        reader = Principal(
+            id="reader",
+            kind="human",
+            auth_method="oidc",
+            default_capability="read",
+            created_at=self.T0,
+        )
+        kb = _FakeKbView([self._assertion(source="source-a")])
+
+        decision = policy.evaluate(
+            self._proposal([self._assert_literal_op(source="source-b")]), reader, kb
+        )
+
+        assert isinstance(decision, Reject)
+
+    def test_delegated_read_capability_capped_and_rejected(self) -> None:
+        """min(capability) applies to SourceQuorum's own floor too, same as
+        ThresholdPolicy: delegating to a write-capability principal doesn't
+        lift a read-capability author above the floor."""
+        policy = SourceQuorum(threshold=1)
+        reader = Principal(
+            id="reader",
+            kind="human",
+            auth_method="oidc",
+            default_capability="read",
+            created_at=self.T0,
+        )
+        delegate = Principal(
+            id="delegate",
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            created_at=self.T0,
+        )
+        kb = _FakeKbView([])
+
+        decision = policy.evaluate(
+            self._proposal([self._assert_literal_op(source="source-a")]),
+            reader,
+            kb,
+            acting_as=delegate,
+        )
+
+        assert isinstance(decision, Reject)
+
+    def test_empty_operations_requires_review(self) -> None:
+        """An empty operations list requires review rather than raising
+        IndexError - defensive handling for a payload shape no current
+        caller produces but that Proposal's typing (dict[str, Any]) permits."""
+        policy = SourceQuorum(threshold=1)
+        kb = _FakeKbView([])
+
+        decision = policy.evaluate(self._proposal([]), self.PRINCIPAL, kb)
+
+        assert isinstance(decision, RequireReview)
+
+    def test_unknown_operation_kind_requires_review(self) -> None:
+        """An unrecognized op kind requires review rather than raising
+        KeyError on a missing `value`/`target` - defensive handling, since
+        Proposal.payload isn't a closed, validated shape at this layer."""
+        policy = SourceQuorum(threshold=1)
+        kb = _FakeKbView([])
+        op = {"kind": "create_entity", "subject": "e-1"}
+
+        decision = policy.evaluate(self._proposal([op]), self.PRINCIPAL, kb)
+
+        assert isinstance(decision, RequireReview)

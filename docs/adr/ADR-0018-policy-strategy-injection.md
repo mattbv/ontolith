@@ -60,3 +60,12 @@ Split this into two decisions, resolved differently:
 - ADR-0006 (Licensing & Business — plugin extension points)
 - SPEC §9.2 (Policy engine — purity requirement, `evaluate` signature), §14 (Plugin protocols — `PolicyStrategy`)
 - `src/ontolith/govern/policy.py` (`PolicyStrategy`, `ThresholdPolicy`)
+
+## Update (2026-07-27): `kb` parameter resolved
+
+The deferred `kb: ReadOnlyView` question (Consequences → Negative/follow-ups, above) is resolved by
+ADR-0025: `PolicyStrategy.evaluate()` gains a required `kb: KbView` parameter, pinned to a
+bitemporal `AsOfView` snapshot at the proposal's creation time (the "testable and replayable"
+answer this ADR was missing), and `SourceQuorum` is implemented as the first KB-inspecting
+strategy. See ADR-0025 for the full design and rationale. KI-017 (`docs/known-issues.md`), which
+tracked this gap, is now resolved.
