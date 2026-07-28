@@ -16,6 +16,7 @@ from ontolith.core import (
     Entity,
     HashingEmbedder,
     IdProvider,
+    Namespace,
     SystemClock,
     UlidProvider,
 )
@@ -34,7 +35,7 @@ from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential, min_capability
 from ontolith.query import QueryBuilder
 from ontolith.schema import SchemaIR
-from ontolith.store.base import StorageBackend
+from ontolith.store.base import DEFAULT_NAMESPACE, StorageBackend
 
 
 class AsOfView:
@@ -144,7 +145,7 @@ class Ontology:
         self.id_provider = id_provider or UlidProvider()
         self.policy = policy or ThresholdPolicy()
         self.embedder = embedder or HashingEmbedder()
-        self.namespace = "default"  # For M1, single namespace
+        self.namespace = DEFAULT_NAMESPACE  # For M1, single namespace
 
     @classmethod
     def connect(
@@ -1385,6 +1386,21 @@ class Ontology:
             Matching contradictions, most recently created first
         """
         return self.backend.contradictions(state=state)
+
+    def list_namespaces(self) -> list[Namespace]:
+        """List all registered namespaces (SPEC §12.2, KI-022).
+
+        Ungated, like `proposals()`/`contradictions()` — namespace metadata
+        (id, creation time) carries no sensitive content comparable to
+        `list_principals()`'s `owner`/`trust_level` fields. This project is
+        still single-namespace throughout (ADR-0015): today this always
+        returns exactly one entry, `DEFAULT_NAMESPACE`, seeded by every
+        backend at schema-creation time.
+
+        Returns:
+            All namespaces, most recently created first
+        """
+        return self.backend.list_namespaces()
 
     def resolve_contradiction(
         self,

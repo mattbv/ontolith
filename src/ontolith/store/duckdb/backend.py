@@ -47,13 +47,13 @@ from typing import Any
 
 import duckdb
 
-from ontolith.core import Assertion, AssertionEvent, Clock, Entity, SystemClock
+from ontolith.core import Assertion, AssertionEvent, Clock, Entity, Namespace, SystemClock
 from ontolith.core.errors import StorageError, ValidationError
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
-from ontolith.store.base import VECTOR_SCOPES
+from ontolith.store.base import DEFAULT_NAMESPACE, VECTOR_SCOPES
 
 
 class DuckDBBackend:
@@ -116,6 +116,24 @@ class DuckDBBackend:
             CREATE INDEX IF NOT EXISTS idx_principal_credential_principal
             ON principal_credential(principal_id)
         """)
+
+        # Namespace registry table (SPEC §12.2, KI-022) — tracks namespaces
+        # that have a schema applied or are the seeded default; NOT a
+        # complete registry of every namespace string ever written to an
+        # entity/assertion row (those remain free-text, unvalidated against
+        # this table — see ADR-0022's Update section for the deliberate
+        # scope boundary). `metadata TEXT NOT NULL DEFAULT '{}'` deviates
+        # from SPEC §12.2's literal nullable `metadata TEXT` — matches this
+        # project's `principal` table convention and guarantees
+        # `_row_to_namespace`'s `json.loads` never sees NULL.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS namespace (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            )
+        """)
+        self._ensure_namespace_registered(DEFAULT_NAMESPACE)
 
         # Schema version table (SPEC §12.2, §6.4)
         self.conn.execute("""
@@ -474,6 +492,46 @@ class DuckDBBackend:
             trust_level=row["trust_level"],
             created_at=datetime.fromisoformat(row["created_at"]),
             metadata=json.loads(row["metadata"]),
+        )
+
+    def list_namespaces(self) -> list[Namespace]:
+        """List all registered namespaces (SPEC §12.2, KI-022).
+
+        Returns:
+            All namespaces, most recently created first
+        """
+        # id DESC tiebreak is purely lexical (namespace ids are slugs, not
+        # ULIDs) — same convention as list_principals, not a recency proxy.
+        cursor = self.conn.execute("SELECT * FROM namespace ORDER BY created_at DESC, id DESC")
+        return [self._row_to_namespace(self._row_to_dict(cursor, row)) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _row_to_namespace(row: dict[str, Any]) -> Namespace:
+        """Deserialize a `namespace` table row into a Namespace."""
+        return Namespace(
+            id=row["id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            metadata=json.loads(row["metadata"]),
+        )
+
+    def _ensure_namespace_registered(self, namespace: str) -> None:
+        """Idempotently register a namespace in the registry, if not already present.
+
+        Read-then-maybe-write rather than an unconditional insert: an
+        unconditional insert attempt takes a write lock even when the row
+        already exists, which would turn every read-only backend
+        construction (e.g. reconnecting just to list namespaces) into a
+        blocking write. `ON CONFLICT DO NOTHING` is kept for the write path
+        itself, to stay safe against a genuine race between the check and
+        the insert.
+        """
+        existing = self.conn.execute("SELECT 1 FROM namespace WHERE id = ?", [namespace]).fetchone()
+        if existing is not None:
+            return
+        self.conn.execute(
+            "INSERT INTO namespace (id, created_at, metadata) VALUES (?, ?, ?) "
+            "ON CONFLICT DO NOTHING",
+            [namespace, self._clock.now().isoformat(), "{}"],
         )
 
     def put_credential(self, credential: PrincipalCredential) -> None:
@@ -872,6 +930,11 @@ class DuckDBBackend:
     def put_schema(self, schema: SchemaIR) -> None:
         """Persist a schema version.
 
+        Also registers ``schema.namespace`` in the namespace registry if
+        not already present (KI-022) — a namespace that only ever has a
+        schema applied, never an entity, is still discoverable via
+        `list_namespaces()`.
+
         Args:
             schema: Schema to persist
 
@@ -879,6 +942,7 @@ class DuckDBBackend:
             StorageError: If persistence fails
         """
         try:
+            self._ensure_namespace_registered(schema.namespace)
             self.conn.execute(
                 """
                 INSERT INTO schema_version (namespace, version, definition, applied_at)

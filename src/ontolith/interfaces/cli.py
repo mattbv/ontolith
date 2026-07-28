@@ -18,10 +18,12 @@ principal_app = typer.Typer(help="Manage principals.", no_args_is_help=True)
 entity_app = typer.Typer(help="Manage entities.", no_args_is_help=True)
 proposal_app = typer.Typer(help="Inspect proposals.", no_args_is_help=True)
 contradiction_app = typer.Typer(help="Inspect contradictions.", no_args_is_help=True)
+namespace_app = typer.Typer(help="Inspect namespaces.", no_args_is_help=True)
 app.add_typer(principal_app, name="principal")
 app.add_typer(entity_app, name="entity")
 app.add_typer(proposal_app, name="proposal")
 app.add_typer(contradiction_app, name="contradiction")
+app.add_typer(namespace_app, name="namespace")
 
 # Module-level DB path, set by the root callback before any command runs.
 _db_path: Path = Path("ontolith.db")
@@ -399,6 +401,27 @@ def list_contradictions(
                 f"{c.id}  state={c.state}  subject={c.subject}  "
                 f"predicate={c.predicate}  members={len(c.member_ids)}"
             )
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
+# ─── namespace ────────────────────────────────────────────────────────────────
+
+
+@namespace_app.command("list")
+def list_namespaces() -> None:
+    """List all registered namespaces (SPEC §12.2, KI-022).
+
+    This project is still single-namespace throughout (ADR-0015) — today
+    this always prints exactly one entry, the seeded default namespace.
+    """
+    kb = _kb()
+    try:
+        for n in kb.list_namespaces():
+            typer.echo(f"{n.id}  created={n.created_at}")
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None

@@ -30,6 +30,7 @@ from ontolith.core.ids import (
     SequentialIdProvider,
     UlidProvider,
 )
+from ontolith.core.namespace import Namespace
 
 __all__ = [
     # Clock
@@ -49,6 +50,7 @@ __all__ = [
     "Entity",
     "Assertion",
     "AssertionEvent",
+    "Namespace",
     # Errors
     "OntolithError",
     "SchemaError",

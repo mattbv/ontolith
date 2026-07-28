@@ -1576,3 +1576,50 @@ class TestTokenRoutes:
 
         # The credential is untouched - still resolves.
         assert kb.list_tokens(HUMAN, author=ADMIN)[0].revoked_at is None
+
+
+# ---------------------------------------------------------------------------
+# GET /namespaces
+# ---------------------------------------------------------------------------
+
+
+class TestListNamespacesRoute:
+    """KI-022: GET /namespaces."""
+
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        response = client.get("/namespaces")
+        assert response.status_code == 401
+
+    def test_non_admin_lists_namespaces(self, tmp_path: Path) -> None:
+        """Ungated beyond authentication, unlike GET /principals - any
+        authenticated principal can list namespaces, not just admin."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not admin
+        response = client.get("/namespaces", headers=_auth(token))
+
+        assert response.status_code == 200
+        body = response.json()
+        assert [n["id"] for n in body] == ["default"]
+        assert "created_at" in body[0]
+        assert body[0]["metadata"] == {}
+
+    def test_namespace_metadata_round_trips(self, tmp_path: Path) -> None:
+        """A non-empty metadata blob round-trips through the REST route -
+        inserted directly since there's no public write path for it yet."""
+        kb = _kb(tmp_path)
+        kb.backend.conn.execute(
+            "INSERT INTO namespace (id, created_at, metadata) VALUES (?, ?, ?)",
+            ("acme-research", "2030-01-01T00:00:00+00:00", '{"team": "research"}'),
+        )
+        kb.backend.conn.commit()
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+
+        response = client.get("/namespaces", headers=_auth(token))
+
+        body = response.json()
+        acme = next(n for n in body if n["id"] == "acme-research")
+        assert acme["metadata"] == {"team": "research"}

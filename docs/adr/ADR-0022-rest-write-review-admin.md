@@ -347,11 +347,87 @@ explicit, not silently assumed away):
   a new `Proposal` field (an assignee) or a comment thread, not just a state
   transition, so they're a bigger change than this slice's scope.
 
+## Update (2026-07-28): namespace registry closes the `GET /namespaces` gap, KI-022 fully resolved
+
+This ADR's original Context (§2 of the audit) raised an explicit open question: *"does a
+namespace registry need its own table, or is `SELECT DISTINCT namespace` sufficient despite
+missing namespaces with a schema but zero entities?"* Resolved in favor of a dedicated table,
+modeled closely on SPEC §12.2's own normative DDL:
+```sql
+CREATE TABLE namespace (
+  id TEXT PRIMARY KEY, created_at TEXT NOT NULL, metadata TEXT
+);
+```
+Both backends deviate from this in one respect, deliberately: `metadata TEXT NOT NULL DEFAULT
+'{}'` rather than SPEC's literal nullable `metadata TEXT` — matches the existing `principal` table
+convention and guarantees deserialization never has to handle a NULL `metadata` column. This is
+the same class of pragmatic, documented deviation this project already makes elsewhere (e.g.
+`KbView` vs. SPEC's literal `ReadOnlyView`, ADR-0025) — noted here because an earlier draft of this
+section overstated it as "SPEC-literal."
+
+New `Namespace` model (`ontolith.core.namespace`, alongside `Entity` — SPEC §5's meta-model lists
+Namespace as a first-class concept). New `StorageBackend.list_namespaces() -> list[Namespace]`
+port method, implemented identically on both backends. `Ontology.list_namespaces()` is ungated,
+matching `proposals()`/`contradictions()` rather than `list_principals()`'s admin gate — namespace
+metadata (id, creation time) carries nothing as sensitive as `list_principals()`'s `owner`/
+`trust_level` fields. `GET /namespaces` (REST) and `ontolith namespace list` (CLI) follow the same
+gating/shape precedent as their `GET /proposals`/`proposal list` counterparts.
+
+**What actually gets registered, and when:** this project is still single-namespace throughout
+(ADR-0015's own words), and this slice doesn't change that — `Ontology.namespace` is still
+hardcoded, still not a constructor parameter, and there is still no explicit `put_namespace`/
+create-namespace API. But two write paths *do* register a namespace as a side effect, both
+idempotent: (1) both backends register `DEFAULT_NAMESPACE` at schema-creation time — the KB always
+operates in exactly that namespace from the moment a backend exists; (2) `put_schema()` registers
+`schema.namespace` before persisting the schema version, since `SchemaIR.namespace` is a
+caller-chosen string independent of `Ontology.namespace` (`apply_schema()` doesn't cross-check it
+against `self.namespace`) — without this, the registry would have the exact blind spot rejected
+above, just relocated: a schema applied under a namespace nothing else ever touches would be
+invisible to `list_namespaces()`, the same failure mode `SELECT DISTINCT namespace FROM entity`
+was rejected for. Entity/assertion writes still do **not** register anything — a namespace that
+only ever receives entities (no schema applied) stays invisible to the registry; extending
+registration to every write path that carries a `namespace` field would start to look like the
+namespace-creation API this update explicitly declines to build.
+
+The idempotent-insert path in both cases is a read-then-maybe-write (`SELECT ... WHERE id = ?`,
+insert only if absent), not an unconditional `INSERT OR IGNORE`/`ON CONFLICT DO NOTHING` on every
+call. Found in review: an unconditional insert attempt takes SQLite's write lock even when the row
+already exists, which turned every backend construction — including a purely read-only reconnect,
+e.g. `ontolith namespace list` — into a blocking write. Against a database file another connection
+held open for writing, that surfaced as a raw, unmapped `sqlite3.OperationalError` after SQLite's
+default busy-timeout, bypassing the SPEC §16 error taxonomy entirely; a read-only database file
+could no longer be opened at all. The read-then-maybe-write path keeps the common case (row
+already present) genuinely read-only; `INSERT OR IGNORE`/`ON CONFLICT DO NOTHING` is kept on the
+write path itself as the safety net against a genuine race between the check and the insert.
+
+**Deliberately out of scope** (so this isn't mistaken for "Ontolith is now multi-tenant"):
+namespace *creation* as a public API — no `put_namespace` on the port, no
+`Ontology.connect(namespace=...)` parameter, despite SPEC §14.1 naming the latter as the normative
+constructor signature (registration as a side effect of an existing write, per above, is not the
+same thing); SPEC §12.2's `principal_trust` table (per-namespace trust/capability overrides) —
+also normatively defined, also never implemented; per-namespace plugin enable/disable (SPEC §13.1
+MUST, already flagged unimplemented in ADR-0015); per-principal/per-namespace REST or MCP read
+scoping (`rest.py`'s module docstring already states outright there is none in this slice);
+namespace-*existence* validation — `GET /schema`/the `ontolith.schema` MCP tool still return an
+empty/`200` result for a namespace no one ever wrote anything to, rather than SPEC §16's `NotFound`
+("entity/assertion/namespace missing"), even though the registry could now back that check. Each
+is a materially larger
+body of work than "the registry exists and is listable," and none is needed to close the literal
+`GET /namespaces` gap this update resolves.
+
+**KI-022 is now fully resolved.** All three pieces originally deferred for lack of a backing SDK
+method — `list_principals`, `request_changes`, and now `list_namespaces` — are closed. The two
+remaining named gaps (`/query` offset pagination, GraphQL) were always tracked as separate
+concerns, not blocked on "no backing method."
+
 ## References
 
 - SPEC §14.3 (REST + GraphQL), §16 (error model), §8.3 (capabilities), §8.1
-  (accountable owner), §9 (proposal workflow), §10.3 (contradictions)
+  (accountable owner), §9 (proposal workflow), §10.3 (contradictions), §5
+  (meta-model — Namespace), §12.2 (normative `namespace`/`principal_trust`
+  DDL)
 - ADR-0021 (REST read + propose slice — this ADR's auth/error-handling
   foundation), ADR-0014 (MCP bearer-token authentication), ADR-0003 (agent
-  identity, delegation, self-review guard)
-- `docs/known-issues.md` KI-022
+  identity, delegation, self-review guard), ADR-0015 (plugin capability
+  isolation — states the project is still single-namespace throughout)
+- `docs/known-issues.md` KI-022 (now fully resolved)
