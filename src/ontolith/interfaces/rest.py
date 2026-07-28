@@ -305,6 +305,12 @@ class RejectIn(BaseModel):
     reason: str = ""
 
 
+class ReviewIn(BaseModel):
+    """Request body for POST /proposals/{proposal_id}/review."""
+
+    reason: str = ""
+
+
 class ContradictionOut(BaseModel):
     """A contradiction's fields, returned by every contradiction route."""
 
@@ -834,6 +840,31 @@ def create_rest_app(
         """Reject a pending proposal. Requires review or admin capability;
         same self-review guard as accept."""
         proposal = kb.reject_proposal(proposal_id, principal.id, reason=body.reason)
+        return ProposalOut(
+            id=proposal.id,
+            namespace=proposal.namespace,
+            author=proposal.author,
+            acting_as=proposal.acting_as,
+            state=proposal.state,
+            created_at=proposal.created_at.isoformat(),
+            decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
+            policy_reason=proposal.policy_reason,
+        )
+
+    # ------------------------------------------------------------------
+    # POST /proposals/{proposal_id}/review
+    # ------------------------------------------------------------------
+
+    @app.post("/proposals/{proposal_id}/review")
+    def review_proposal_route(
+        proposal_id: str,
+        body: ReviewIn,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> ProposalOut:
+        """Request changes on a pending proposal (SPEC §9.1/§9.4's third
+        under_review outcome, alongside accept/reject). Requires review or
+        admin capability; same self-review guard as accept/reject."""
+        proposal = kb.request_changes(proposal_id, principal.id, reason=body.reason)
         return ProposalOut(
             id=proposal.id,
             namespace=proposal.namespace,

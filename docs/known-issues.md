@@ -439,7 +439,9 @@ GraphQL (SPEC §14.3's other named half) is untouched by this KI and remains ful
 
 **`GET /principals` (list): resolved (2026-07-26, ADR-0022 update).** New `StorageBackend.list_principals()` port method (both backends), `Ontology.list_principals(author)` (gated via the same `require_admin` used by `issue_token`/`revoke_token`/`list_tokens`), `GET /principals` (REST, admin-only), and `ontolith principal list` (CLI). No pagination, matching `list_tokens`'s existing precedent — see ADR-0022's Update section for why.
 
-**Still open — no backing SDK/StorageBackend method to wrap (see ADR-0022's Context for the audit):** `GET /namespaces` (no namespace registry — `Ontology.namespace` is hardcoded `"default"`), `/proposals/{id}/review` (no method transitions a proposal into `under_review`/`changes_requested`). And still separately: `/query` offset pagination. GraphQL remains fully unscoped.
+**`/proposals/{id}/review` (request_changes): resolved (2026-07-28, ADR-0022 update).** New `Ontology.request_changes(proposal_id, reviewer, reason="")` — SPEC §9.1's third `under_review` outcome (`changes_requested`), alongside the two `accept_proposal`/`reject_proposal` already implement. Reviewer-eligibility/proposal-state checks (previously duplicated between `accept_proposal`/`reject_proposal`) factored into a shared `Ontology._require_reviewer` helper. `ProposalEvent.type` widened to admit `"request_changes"` (additive). `POST /proposals/{proposal_id}/review` (REST) mirrors `/reject`'s shape exactly. The `require_review`/`under_review` state-naming conflation and resubmission (`changes_requested` → `submitted`) remain deliberately unaddressed — see ADR-0022's Update section for why.
+
+**Still open — no backing SDK/StorageBackend method to wrap (see ADR-0022's Context for the audit):** `GET /namespaces` (no namespace registry — `Ontology.namespace` is hardcoded `"default"`). And still separately: `/query` offset pagination. GraphQL remains fully unscoped.
 
 ---
 

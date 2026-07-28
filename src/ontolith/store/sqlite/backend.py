@@ -250,15 +250,15 @@ class SQLiteBackend:
         """)
 
         # Proposal event table (SPEC §9.4) — structured review actions.
-        # Scoped to accept/reject, the two review actions that exist as
-        # Ontology methods; assign/comment/request_changes are not
-        # implemented yet (see ProposalEvent docstring).
+        # Scoped to accept/reject/request_changes, the three review actions
+        # that exist as Ontology methods; assign/comment are not implemented
+        # yet (see ProposalEvent docstring).
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS proposal_event (
                 id TEXT PRIMARY KEY,
                 proposal_id TEXT NOT NULL,
                 actor TEXT NOT NULL,
-                type TEXT NOT NULL CHECK(type IN ('accept', 'reject')),
+                type TEXT NOT NULL CHECK(type IN ('accept', 'reject', 'request_changes')),
                 detail TEXT,
                 at TEXT NOT NULL,
                 FOREIGN KEY(proposal_id) REFERENCES proposal(id),

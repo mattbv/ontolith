@@ -269,6 +269,50 @@ unaffected by this update — both remain deferred for the reasons already
 stated in this ADR's Decision section (real design questions, not just a
 missing accessor method).
 
+## Update (2026-07-28): `request_changes()` closes the `/proposals/{id}/review` gap
+
+The previous update's closing note called `/proposals/{id}/review` a "real
+design question, not just a missing accessor method." Resolved narrowly:
+SPEC §9.1's `under_review ──review──▶ { ACCEPTED | REJECTED |
+changes_requested }` already names `changes_requested` as the third outcome
+alongside the two `accept`/`reject` already implement — so the design
+question was smaller than it looked. No new state, no new resource concept,
+just the missing third leg of an existing triad.
+
+New `Ontology.request_changes(proposal_id, reviewer, reason="")`: same
+reviewer-eligibility and proposal-state preconditions as `accept_proposal`/
+`reject_proposal` (existence, `review`/`admin` capability, not AI-kind, not
+self-review, proposal in `require_review`/`under_review`), now factored into
+one shared `Ontology._require_reviewer` helper (previously duplicated
+verbatim across the two existing methods — a third near-identical copy was
+the signal to extract it; pure refactor, no behavior change, existing tests
+unchanged). No operations are applied; the proposal moves to
+`changes_requested`, and a `ProposalEvent(type="request_changes")` is
+recorded — `ProposalEvent.type`'s `Literal` widened to admit it (additive,
+not breaking). `POST /proposals/{proposal_id}/review` (`ReviewIn{reason}` →
+`ProposalOut`, mirroring `RejectIn`/`/reject` exactly) wraps it, reusing this
+ADR's existing auth/error-mapping machinery unchanged.
+
+**Deliberately not addressed by this change** (both noted here so they stay
+explicit, not silently assumed away):
+
+- **The `require_review`/`under_review` conflation.** SPEC's diagram reads
+  `require_review` as the policy *decision* label and `under_review` as the
+  resulting persisted state; the codebase persists `require_review` itself
+  and never produces `under_review` at all (`accept`/`reject`/
+  `request_changes` all pragmatically accept either as a valid pre-state).
+  Fixing this is a materially bigger change — the CLI's `proposal list`
+  defaults to `--state require_review`, so changing what gets persisted
+  would silently break that default too — and isn't required to close the
+  `/review` route gap.
+- **Resubmission** (`changes_requested ──resubmit──▶ submitted`, SPEC §9.1).
+  `changes_requested` is currently a dead end — nothing transitions a
+  proposal back out of it. A future, separate slice.
+- **`assign`/`comment`** (the other two of SPEC §9.4's five named review
+  actions) still have no backing method or `ProposalEvent` type — they need
+  a new `Proposal` field (an assignee) or a comment thread, not just a state
+  transition, so they're a bigger change than this slice's scope.
+
 ## References
 
 - SPEC §14.3 (REST + GraphQL), §16 (error model), §8.3 (capabilities), §8.1

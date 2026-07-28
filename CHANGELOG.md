@@ -93,6 +93,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   predicate=) -> list[Assertion]`), not SPEC's literal `ReadOnlyView` — see ADR-0025 for
   why. `ThresholdPolicy` is unaffected at call sites: its own concrete signature keeps
   `kb` optional (unused), so existing callers that don't pass one are unchanged.
+- `/proposals/{id}/review` (SPEC §9.1/§9.4, ADR-0022 update, further closes KI-022):
+  new `Ontology.request_changes(proposal_id, reviewer, reason="")` — the third
+  `under_review` outcome (`changes_requested`) alongside `accept_proposal`/
+  `reject_proposal`. Same reviewer-eligibility/proposal-state checks as its siblings,
+  now factored into a shared `Ontology._require_reviewer` helper (pure refactor, no
+  behavior change). `ProposalEvent.type` widened to admit `"request_changes"`.
+  `POST /proposals/{proposal_id}/review` (REST) mirrors `/reject`'s shape exactly.
+  `GET /namespaces` remains deferred — no namespace registry exists yet.
 
 #### Fixed
 - **Breaking:** `Ontology.issue_token(principal_id, author)` now returns
