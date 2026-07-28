@@ -1,8 +1,8 @@
 """Conformance vectors for SPEC §9 review workflow.
 
-Tests accept_proposal() and reject_proposal() — the human-review path for
-proposals that ThresholdPolicy routes to require_review (e.g. AI principals).
-All tests use injected clocks and IDs.
+Tests accept_proposal()/reject_proposal()/request_changes() — the human-review
+path for proposals that ThresholdPolicy routes to require_review (e.g. AI
+principals). All tests use injected clocks and IDs.
 """
 
 from __future__ import annotations
@@ -262,6 +262,81 @@ class TestRejectProposal:
 
 
 # ===========================================================================
+# Request-changes path
+# ===========================================================================
+
+
+class TestRequestChanges:
+    """Reviewer requests changes on a pending proposal — SPEC §9.1's third
+    under_review outcome, alongside accept/reject."""
+
+    def test_changes_requested_proposal_state(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        updated = kb.request_changes(proposal.id, REVIEWER)
+        assert updated.state == "changes_requested"
+
+    def test_changes_requested_proposal_has_decided_at(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        updated = kb.request_changes(proposal.id, REVIEWER)
+        assert updated.decided_at is not None
+
+    def test_no_assertion_written_after_request_changes(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        kb.request_changes(proposal.id, REVIEWER, reason="needs a source")
+        assert kb.assertions(subject=entity.id, predicate="Person.name") == []
+
+    def test_reason_recorded_as_proposal_event(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        original_policy_reason = proposal.policy_reason
+
+        updated = kb.request_changes(proposal.id, REVIEWER, reason="needs a source")
+        assert updated.policy_reason == original_policy_reason
+
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert len(events) == 1
+        assert events[0].type == "request_changes"
+        assert events[0].actor == REVIEWER
+        assert events[0].detail == "needs a source"
+
+    def test_changes_requested_is_a_dead_end_for_further_review(self, make_kb: KbFactory) -> None:
+        """changes_requested is not "pending review" — accept/reject/
+        request_changes again must all raise, since nothing resubmits a
+        changes_requested proposal back to submitted yet (KI-022)."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        kb.request_changes(proposal.id, REVIEWER)
+
+        with pytest.raises(ValidationError, match="not pending review"):
+            kb.accept_proposal(proposal.id, REVIEWER)
+        with pytest.raises(ValidationError, match="not pending review"):
+            kb.reject_proposal(proposal.id, REVIEWER)
+        with pytest.raises(ValidationError, match="not pending review"):
+            kb.request_changes(proposal.id, REVIEWER)
+
+
+# ===========================================================================
 # Guard rails
 # ===========================================================================
 
@@ -341,6 +416,19 @@ class TestReviewGuards:
         with pytest.raises(ValidationError, match="not pending review"):
             kb.reject_proposal(proposal.id, REVIEWER)
 
+    def test_already_rejected_proposal_cannot_have_changes_requested(
+        self, make_kb: KbFactory
+    ) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        kb.reject_proposal(proposal.id, REVIEWER)
+
+        with pytest.raises(ValidationError, match="not pending review"):
+            kb.request_changes(proposal.id, REVIEWER)
+
     def test_auto_accepted_proposal_cannot_be_reviewed(self, make_kb: KbFactory) -> None:
         """auto_accepted proposals are already decided — review is not applicable."""
         kb = _kb(make_kb)
@@ -388,6 +476,57 @@ class TestReviewGuards:
         with pytest.raises(CapabilityError, match="AI principal and cannot review"):
             kb.reject_proposal(proposal.id, "misconfigured-ai-reviewer")
 
+    def test_write_only_principal_cannot_request_changes(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        with pytest.raises(CapabilityError, match="lacks review capability"):
+            kb.request_changes(proposal.id, HUMAN_AUTHOR)
+
+    def test_unknown_reviewer_raises_on_request_changes(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        with pytest.raises(AuthError, match="Principal not found"):
+            kb.request_changes(proposal.id, "nobody@example.com")
+
+    def test_unknown_proposal_raises_on_request_changes(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        with pytest.raises(NotFoundError, match="Proposal not found"):
+            kb.request_changes("nonexistent-id", REVIEWER)
+
+    def test_auto_accepted_proposal_cannot_have_changes_requested(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
+        assert proposal.state == "auto_accepted"
+
+        with pytest.raises(ValidationError, match="not pending review"):
+            kb.request_changes(proposal.id, REVIEWER)
+
+    def test_ai_reviewer_cannot_request_changes(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "misconfigured-ai-reviewer",
+            kind="ai",
+            auth_method="apikey",
+            owner=HUMAN_AUTHOR,
+            default_capability="review",
+        )
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        with pytest.raises(CapabilityError, match="AI principal and cannot review"):
+            kb.request_changes(proposal.id, "misconfigured-ai-reviewer")
+
     def test_delegating_principal_cannot_review_its_own_delegated_proposal(
         self, make_kb: KbFactory
     ) -> None:
@@ -421,6 +560,8 @@ class TestReviewGuards:
 
         with pytest.raises(CapabilityError, match="cannot review their own proposal"):
             kb.accept_proposal(proposal.id, "carol@example.com")
+        with pytest.raises(CapabilityError, match="cannot review their own proposal"):
+            kb.request_changes(proposal.id, "carol@example.com")
 
 
 class TestProposalAndContradictionListing:

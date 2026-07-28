@@ -1071,6 +1071,66 @@ class TestRejectProposalRoute:
 
 
 # ---------------------------------------------------------------------------
+# POST /proposals/{proposal_id}/review
+# ---------------------------------------------------------------------------
+
+
+class TestReviewProposalRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        response = client.post(f"/proposals/{proposal.id}/review", json={})
+        assert response.status_code == 401
+
+    def test_reviewer_requests_changes(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+        response = client.post(
+            f"/proposals/{proposal.id}/review",
+            json={"reason": "needs a source"},
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["state"] == "changes_requested"
+        active = kb.assertions(subject=entity.id, predicate="Person.name")
+        assert active == []
+
+    def test_review_without_body_defaults_to_empty_reason(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+        response = client.post(f"/proposals/{proposal.id}/review", json={}, headers=_auth(token))
+        assert response.status_code == 200
+        assert response.json()["state"] == "changes_requested"
+
+    def test_not_found_returns_404(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+        response = client.post("/proposals/nonexistent/review", json={}, headers=_auth(token))
+        assert response.status_code == 404
+        assert response.json()["code"] == "NOT_FOUND"
+
+    def test_reviewer_lacking_capability_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not review
+        response = client.post(f"/proposals/{proposal.id}/review", json={}, headers=_auth(token))
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
+
+# ---------------------------------------------------------------------------
 # GET /contradictions
 # ---------------------------------------------------------------------------
 

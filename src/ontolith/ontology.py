@@ -1121,8 +1121,8 @@ class Ontology:
             self.backend.put_assertion(assertion)
             return assertion
 
-    def accept_proposal(self, proposal_id: str, reviewer: str) -> Proposal:
-        """Accept a pending proposal, replaying its operations (SPEC §9).
+    def _require_reviewer(self, proposal_id: str, reviewer: str) -> Proposal:
+        """Shared eligibility gate for accept_proposal/reject_proposal/request_changes (SPEC §9.4).
 
         The reviewer must have `review` or `admin` capability, must not be
         an AI principal (ThresholdPolicy always routes AI proposals to
@@ -1130,16 +1130,22 @@ class Ontology:
         must not be the proposal's own author or delegating principal
         (self-review would let a misconfigured AI principal with `review`
         capability, or a delegate reviewing their own delegated proposal,
-        approve its own work).
-        Only proposals in `require_review` or `under_review` state can be accepted.
-        Operations are replayed through SPEC §10 conflict routing inside a single transaction.
+        approve its own work). The proposal must exist and be in
+        `require_review` or `under_review` state.
 
         Args:
-            proposal_id: ID of the proposal to accept
+            proposal_id: ID of the proposal being reviewed
             reviewer: Principal ID of the reviewer
 
         Returns:
-            Updated Proposal with state `accepted`
+            The proposal being reviewed
+
+        Raises:
+            AuthError: reviewer is not a known principal
+            NotFoundError: proposal_id does not name an existing proposal
+            CapabilityError: reviewer lacks review/admin capability, is
+                AI-kind, or is the proposal's own author/delegate
+            ValidationError: proposal is not pending review
         """
         reviewer_principal = self.backend.get_principal(reviewer)
         if reviewer_principal is None:
@@ -1158,6 +1164,31 @@ class Ontology:
             raise ValidationError(
                 f"Proposal {proposal_id} is not pending review (state: {proposal.state})"
             )
+        return proposal
+
+    def accept_proposal(self, proposal_id: str, reviewer: str) -> Proposal:
+        """Accept a pending proposal, replaying its operations (SPEC §9).
+
+        See `_require_reviewer` for the reviewer-eligibility and
+        proposal-state checks shared with `reject_proposal`/
+        `request_changes`. Operations are replayed through SPEC §10
+        conflict routing inside a single transaction.
+
+        Args:
+            proposal_id: ID of the proposal to accept
+            reviewer: Principal ID of the reviewer
+
+        Returns:
+            Updated Proposal with state `accepted`
+
+        Raises:
+            AuthError: reviewer is not a known principal
+            NotFoundError: proposal_id does not name an existing proposal
+            CapabilityError: reviewer lacks review/admin capability, is
+                AI-kind, or is the proposal's own author/delegate
+            ValidationError: proposal is not pending review
+        """
+        proposal = self._require_reviewer(proposal_id, reviewer)
 
         now = self.clock.now()
 
@@ -1240,11 +1271,10 @@ class Ontology:
     def reject_proposal(self, proposal_id: str, reviewer: str, reason: str = "") -> Proposal:
         """Reject a pending proposal (SPEC §9).
 
-        The reviewer must have `review` or `admin` capability, must not be
-        an AI principal, and must not be the proposal's own author or
-        delegating principal — same guard rails as accept_proposal, for
-        symmetry (see its docstring for the rationale).
-        No operations are applied; the proposal is marked rejected.
+        See `_require_reviewer` for the reviewer-eligibility and
+        proposal-state checks shared with `accept_proposal`/
+        `request_changes`. No operations are applied; the proposal is
+        marked rejected.
 
         Args:
             proposal_id: ID of the proposal to reject
@@ -1253,24 +1283,15 @@ class Ontology:
 
         Returns:
             Updated Proposal with state `rejected`
-        """
-        reviewer_principal = self.backend.get_principal(reviewer)
-        if reviewer_principal is None:
-            raise AuthError(f"Principal not found: {reviewer}")
-        if reviewer_principal.default_capability not in ("review", "admin"):
-            raise CapabilityError(f"Principal {reviewer} lacks review capability")
-        if reviewer_principal.kind == "ai":
-            raise CapabilityError(f"Principal {reviewer!r} is an AI principal and cannot review")
 
-        proposal = self.backend.get_proposal(proposal_id)
-        if proposal is None:
-            raise NotFoundError(f"Proposal not found: {proposal_id}")
-        if reviewer in (proposal.author, proposal.acting_as):
-            raise CapabilityError(f"Principal {reviewer!r} cannot review their own proposal")
-        if proposal.state not in ("require_review", "under_review"):
-            raise ValidationError(
-                f"Proposal {proposal_id} is not pending review (state: {proposal.state})"
-            )
+        Raises:
+            AuthError: reviewer is not a known principal
+            NotFoundError: proposal_id does not name an existing proposal
+            CapabilityError: reviewer lacks review/admin capability, is
+                AI-kind, or is the proposal's own author/delegate
+            ValidationError: proposal is not pending review
+        """
+        self._require_reviewer(proposal_id, reviewer)
 
         now = self.clock.now()
         with self.backend.transaction():
@@ -1289,6 +1310,54 @@ class Ontology:
         rejected = self.backend.get_proposal(proposal_id)
         assert rejected is not None
         return rejected
+
+    def request_changes(self, proposal_id: str, reviewer: str, reason: str = "") -> Proposal:
+        """Request changes on a pending proposal (SPEC §9.1/§9.4).
+
+        See `_require_reviewer` for the reviewer-eligibility and
+        proposal-state checks shared with `accept_proposal`/
+        `reject_proposal`. No operations are applied; the proposal moves to
+        `changes_requested` — SPEC §9.1's third `under_review` outcome,
+        alongside `accepted`/`rejected`.
+
+        Resubmission (`changes_requested` back to `submitted`) has no
+        supporting method yet — a `changes_requested` proposal is currently
+        a dead end, tracked separately from this method (KI-022).
+
+        Args:
+            proposal_id: ID of the proposal
+            reviewer: Principal ID of the reviewer
+            reason: Optional explanation of what needs to change
+
+        Returns:
+            Updated Proposal with state `changes_requested`
+
+        Raises:
+            AuthError: reviewer is not a known principal
+            NotFoundError: proposal_id does not name an existing proposal
+            CapabilityError: reviewer lacks review/admin capability, is
+                AI-kind, or is the proposal's own author/delegate
+            ValidationError: proposal is not pending review
+        """
+        self._require_reviewer(proposal_id, reviewer)
+
+        now = self.clock.now()
+        with self.backend.transaction():
+            self.backend.update_proposal_state(proposal_id, "changes_requested", now.isoformat())
+            self.backend.put_proposal_event(
+                ProposalEvent(
+                    id=self.id_provider.next(),
+                    proposal_id=proposal_id,
+                    actor=reviewer,
+                    type="request_changes",
+                    detail=reason or None,
+                    at=now,
+                )
+            )
+
+        updated = self.backend.get_proposal(proposal_id)
+        assert updated is not None
+        return updated
 
     def proposals(self, state: str | None = "require_review") -> list[Proposal]:
         """List proposals, defaulting to those pending review (SPEC §14.1).

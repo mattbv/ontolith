@@ -1,10 +1,9 @@
 """REST interface for Ontolith (SPEC §14.3, ADR-0021).
 
-Exposes read, propose, direct write, proposal review (accept/reject),
-contradiction listing/flagging/resolution, and principal/token admin over
-HTTP. ``/proposals/{id}/review`` (a third SPEC-named action alongside
-accept/reject) and listing endpoints for ``/principals``/``/namespaces``
-have no backing SDK method yet and remain deferred (KI-022).
+Exposes read, propose, direct write, proposal review (accept/reject/
+request_changes), contradiction listing/flagging/resolution, and
+principal/token admin over HTTP. ``GET /namespaces`` has no backing SDK
+method yet (no namespace registry exists) and remains deferred (KI-022).
 
 Authentication (ADR-0014, reused unchanged): every route requires an
 ``Authorization: Bearer <token>`` header, resolved server-side via the
@@ -301,6 +300,12 @@ class AssertionDetailOut(BaseModel):
 
 class RejectIn(BaseModel):
     """Request body for POST /proposals/{proposal_id}/reject."""
+
+    reason: str = ""
+
+
+class ReviewIn(BaseModel):
+    """Request body for POST /proposals/{proposal_id}/review."""
 
     reason: str = ""
 
@@ -834,6 +839,31 @@ def create_rest_app(
         """Reject a pending proposal. Requires review or admin capability;
         same self-review guard as accept."""
         proposal = kb.reject_proposal(proposal_id, principal.id, reason=body.reason)
+        return ProposalOut(
+            id=proposal.id,
+            namespace=proposal.namespace,
+            author=proposal.author,
+            acting_as=proposal.acting_as,
+            state=proposal.state,
+            created_at=proposal.created_at.isoformat(),
+            decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
+            policy_reason=proposal.policy_reason,
+        )
+
+    # ------------------------------------------------------------------
+    # POST /proposals/{proposal_id}/review
+    # ------------------------------------------------------------------
+
+    @app.post("/proposals/{proposal_id}/review")
+    def review_proposal_route(
+        proposal_id: str,
+        body: ReviewIn,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> ProposalOut:
+        """Request changes on a pending proposal (SPEC §9.1/§9.4's third
+        under_review outcome, alongside accept/reject). Requires review or
+        admin capability; same self-review guard as accept/reject."""
+        proposal = kb.request_changes(proposal_id, principal.id, reason=body.reason)
         return ProposalOut(
             id=proposal.id,
             namespace=proposal.namespace,

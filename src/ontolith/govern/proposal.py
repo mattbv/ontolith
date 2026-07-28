@@ -61,10 +61,11 @@ class Proposal(BaseModel):
 class ProposalEvent(BaseModel):
     """A structured review action recorded against a proposal (SPEC §9.4).
 
-    Currently covers the two review actions that exist as Ontology methods:
-    accept and reject. assign/comment/request_changes are not implemented as
-    methods yet, so no event type exists for them — this is a scoped subset
-    of SPEC §9.4's full action vocabulary, not the complete review workflow.
+    Currently covers the three review actions that exist as Ontology methods:
+    accept, reject, and request_changes. assign/comment are not implemented
+    as methods yet, so no event type exists for them — this is a scoped
+    subset of SPEC §9.4's full action vocabulary, not the complete review
+    workflow.
 
     Attributes:
         id: Unique event ID (ULID)
@@ -78,7 +79,7 @@ class ProposalEvent(BaseModel):
     id: str
     proposal_id: str
     actor: str
-    type: Literal["accept", "reject"]
+    type: Literal["accept", "reject", "request_changes"]
     detail: str | None = None
     at: datetime
 
