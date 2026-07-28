@@ -288,12 +288,46 @@ verbatim across the two existing methods — a third near-identical copy was
 the signal to extract it; pure refactor, no behavior change, existing tests
 unchanged). No operations are applied; the proposal moves to
 `changes_requested`, and a `ProposalEvent(type="request_changes")` is
-recorded — `ProposalEvent.type`'s `Literal` widened to admit it (additive,
-not breaking). `POST /proposals/{proposal_id}/review` (`ReviewIn{reason}` →
+recorded. `POST /proposals/{proposal_id}/review` (`ReviewIn{reason}` →
 `ProposalOut`, mirroring `RejectIn`/`/reject` exactly) wraps it, reusing this
 ADR's existing auth/error-mapping machinery unchanged.
 
-**Deliberately not addressed by this change** (both noted here so they stay
+**Why the same heavy reviewer gate (no AI, no self-review) as accept, not a
+lighter one:** `changes_requested` applies no operations, so it might look
+less consequential than accept — but it's arguably worse if under-gated.
+Nothing resubmits a `changes_requested` proposal back to `submitted` yet
+(see below), so it's currently a dead end. An AI principal with `review`
+capability let loose on this action could drive every pending proposal into
+that unrecoverable state — a governance denial-of-service that's harder to
+notice and reverse than a bad accept (which is at least visible and
+retractable via a subsequent proposal). `reject` is an honest terminal
+state; `changes_requested` implies "fix and resubmit" while nothing can
+resubmit — so if anything this action deserves the strict gate more than
+accept does, not less.
+
+`ProposalEvent.type`'s `Literal` widened to admit `"request_changes"`. This
+is additive for *producers* (constructing a `ProposalEvent`) but narrows the
+guarantee for *consumers* that exhaustively match on `.type` — existing
+in-repo code doesn't do this, so nothing broke here, but a third-party
+consumer performing an exhaustive match would need updating. Also required
+widening — and, better, **removing** — the `type` `CHECK` constraint on
+both backends' `proposal_event` tables (added for `accept`/`reject` only,
+before this ADR; SPEC §12.2's own `proposal_event` DDL has no such
+constraint). The `CHECK` was pure redundancy with the `Literal` validation
+Pydantic already performs at construction time (this project's "validate at
+edges, trust within" boundary), and it was a recurring migration hazard on
+top of that: `CREATE TABLE IF NOT EXISTS` never widens an already-created
+table's constraint, so this widening — like the next one `assign`/`comment`
+would eventually force — silently breaks `request_changes()` on any
+database file created before this change (`StorageError` → REST 500, with a
+misleading "CHECK constraint failed" message). Removing the `CHECK`
+entirely closes this class of hazard for good, but does **not** retroactively
+fix already-created database files with the old 2-value constraint baked
+in — this project has no DDL migration mechanism yet, and is still
+pre-1.0/pre-alpha, so the accepted resolution is: recreate the database
+file. A real migration mechanism is out of scope for this slice.
+
+**Deliberately not addressed by this change** (all noted here so they stay
 explicit, not silently assumed away):
 
 - **The `require_review`/`under_review` conflation.** SPEC's diagram reads

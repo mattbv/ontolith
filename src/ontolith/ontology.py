@@ -1121,7 +1121,7 @@ class Ontology:
             self.backend.put_assertion(assertion)
             return assertion
 
-    def _require_reviewer(self, proposal_id: str, reviewer: str) -> tuple[Principal, Proposal]:
+    def _require_reviewer(self, proposal_id: str, reviewer: str) -> Proposal:
         """Shared eligibility gate for accept_proposal/reject_proposal/request_changes (SPEC §9.4).
 
         The reviewer must have `review` or `admin` capability, must not be
@@ -1138,7 +1138,7 @@ class Ontology:
             reviewer: Principal ID of the reviewer
 
         Returns:
-            (reviewer_principal, proposal)
+            The proposal being reviewed
 
         Raises:
             AuthError: reviewer is not a known principal
@@ -1164,7 +1164,7 @@ class Ontology:
             raise ValidationError(
                 f"Proposal {proposal_id} is not pending review (state: {proposal.state})"
             )
-        return reviewer_principal, proposal
+        return proposal
 
     def accept_proposal(self, proposal_id: str, reviewer: str) -> Proposal:
         """Accept a pending proposal, replaying its operations (SPEC §9).
@@ -1188,7 +1188,7 @@ class Ontology:
                 AI-kind, or is the proposal's own author/delegate
             ValidationError: proposal is not pending review
         """
-        _, proposal = self._require_reviewer(proposal_id, reviewer)
+        proposal = self._require_reviewer(proposal_id, reviewer)
 
         now = self.clock.now()
 

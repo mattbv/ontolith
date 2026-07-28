@@ -331,6 +331,8 @@ class TestRequestChanges:
         with pytest.raises(ValidationError, match="not pending review"):
             kb.accept_proposal(proposal.id, REVIEWER)
         with pytest.raises(ValidationError, match="not pending review"):
+            kb.reject_proposal(proposal.id, REVIEWER)
+        with pytest.raises(ValidationError, match="not pending review"):
             kb.request_changes(proposal.id, REVIEWER)
 
 
@@ -413,6 +415,19 @@ class TestReviewGuards:
 
         with pytest.raises(ValidationError, match="not pending review"):
             kb.reject_proposal(proposal.id, REVIEWER)
+
+    def test_already_rejected_proposal_cannot_have_changes_requested(
+        self, make_kb: KbFactory
+    ) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        kb.reject_proposal(proposal.id, REVIEWER)
+
+        with pytest.raises(ValidationError, match="not pending review"):
+            kb.request_changes(proposal.id, REVIEWER)
 
     def test_auto_accepted_proposal_cannot_be_reviewed(self, make_kb: KbFactory) -> None:
         """auto_accepted proposals are already decided — review is not applicable."""

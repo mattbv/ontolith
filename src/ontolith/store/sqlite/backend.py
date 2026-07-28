@@ -253,12 +253,22 @@ class SQLiteBackend:
         # Scoped to accept/reject/request_changes, the three review actions
         # that exist as Ontology methods; assign/comment are not implemented
         # yet (see ProposalEvent docstring).
+        #
+        # No CHECK on `type` — matches SPEC §12.2's own DDL (`type TEXT NOT
+        # NULL`, no constraint) and this project's "validate at edges, trust
+        # within" boundary (Pydantic's `ProposalEvent.type` Literal already
+        # enforces the vocabulary at construction time). A CHECK here would
+        # also be a recurring migration hazard: `CREATE TABLE IF NOT EXISTS`
+        # never widens an already-created table's constraint, so adding one
+        # more accepted value (as `request_changes` needed to) would have
+        # silently broken every pre-existing database file rather than the
+        # new database this comment is protecting.
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS proposal_event (
                 id TEXT PRIMARY KEY,
                 proposal_id TEXT NOT NULL,
                 actor TEXT NOT NULL,
-                type TEXT NOT NULL CHECK(type IN ('accept', 'reject', 'request_changes')),
+                type TEXT NOT NULL,
                 detail TEXT,
                 at TEXT NOT NULL,
                 FOREIGN KEY(proposal_id) REFERENCES proposal(id),

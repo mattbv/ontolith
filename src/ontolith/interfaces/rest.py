@@ -1,10 +1,9 @@
 """REST interface for Ontolith (SPEC §14.3, ADR-0021).
 
-Exposes read, propose, direct write, proposal review (accept/reject),
-contradiction listing/flagging/resolution, and principal/token admin over
-HTTP. ``/proposals/{id}/review`` (a third SPEC-named action alongside
-accept/reject) and listing endpoints for ``/principals``/``/namespaces``
-have no backing SDK method yet and remain deferred (KI-022).
+Exposes read, propose, direct write, proposal review (accept/reject/
+request_changes), contradiction listing/flagging/resolution, and
+principal/token admin over HTTP. ``GET /namespaces`` has no backing SDK
+method yet (no namespace registry exists) and remains deferred (KI-022).
 
 Authentication (ADR-0014, reused unchanged): every route requires an
 ``Authorization: Bearer <token>`` header, resolved server-side via the
