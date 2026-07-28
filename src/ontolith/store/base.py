@@ -34,9 +34,11 @@ DEFAULT_NAMESPACE = "default"
 
 Ontolith is still single-namespace throughout (ADR-0015) — `Ontology`
 always writes to this namespace, and both backends seed a matching
-`namespace` registry row for it at schema-creation time. A single named
-constant, rather than the literal string repeated in `Ontology` and each
-backend, keeps those three in sync by construction.
+`namespace` registry row for it at schema-creation time. Shared by
+`Ontology` and both backends so that specific trio stays in sync by
+construction; a handful of other unrelated `"default"` literals elsewhere
+(e.g. REST/MCP route defaults, example scripts) are independent naming
+choices, not instances of this constant, and aren't required to match it.
 """
 
 

@@ -636,9 +636,11 @@ class TestSQLiteBackend:
         re-timestamp the seeded default namespace row."""
         first = SQLiteBackend(temp_db)
         [before] = first.list_namespaces()
+        first.close()
 
         second = SQLiteBackend(temp_db)
         [after] = second.list_namespaces()
+        second.close()
 
         assert after.id == before.id
         assert after.created_at == before.created_at
@@ -932,6 +934,17 @@ class TestSQLiteBackend:
         assert retrieved.namespace == schema.namespace
         assert retrieved.version == schema.version
         assert "Person" in retrieved.concepts
+
+    def test_put_schema_registers_its_namespace(self, backend: SQLiteBackend) -> None:
+        """A namespace that only ever has a schema applied - never an
+        entity - is still discoverable via list_namespaces() (KI-022):
+        the exact blind spot a SELECT DISTINCT-over-entity approach would
+        have had."""
+        schema = SchemaIR(namespace="acme-research", version=1, concepts={})
+
+        backend.put_schema(schema)
+
+        assert {n.id for n in backend.list_namespaces()} == {"default", "acme-research"}
 
     def test_get_latest_schema_version(self, backend: SQLiteBackend) -> None:
         """Getting schema without version returns latest."""

@@ -1605,3 +1605,21 @@ class TestListNamespacesRoute:
         assert [n["id"] for n in body] == ["default"]
         assert "created_at" in body[0]
         assert body[0]["metadata"] == {}
+
+    def test_namespace_metadata_round_trips(self, tmp_path: Path) -> None:
+        """A non-empty metadata blob round-trips through the REST route -
+        inserted directly since there's no public write path for it yet."""
+        kb = _kb(tmp_path)
+        kb.backend.conn.execute(
+            "INSERT INTO namespace (id, created_at, metadata) VALUES (?, ?, ?)",
+            ("acme-research", "2030-01-01T00:00:00+00:00", '{"team": "research"}'),
+        )
+        kb.backend.conn.commit()
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+
+        response = client.get("/namespaces", headers=_auth(token))
+
+        body = response.json()
+        acme = next(n for n in body if n["id"] == "acme-research")
+        assert acme["metadata"] == {"team": "research"}

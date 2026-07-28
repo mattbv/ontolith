@@ -146,12 +146,15 @@ class SQLiteBackend:
             ON principal_credential(principal_id)
         """)
 
-        # Namespace registry table (SPEC §12.2, KI-022) — tracks the set of
-        # namespaces that exist, independent of whether any entity/schema
-        # has been written to one. Seeded with DEFAULT_NAMESPACE below since
-        # this project is still single-namespace throughout (ADR-0015) — the
-        # KB always operates in exactly that namespace from the moment this
-        # backend exists.
+        # Namespace registry table (SPEC §12.2, KI-022) — tracks namespaces
+        # that have a schema applied or are the seeded default; NOT a
+        # complete registry of every namespace string ever written to an
+        # entity/assertion row (those remain free-text, unvalidated against
+        # this table — see ADR-0022's Update section for the deliberate
+        # scope boundary). `metadata TEXT NOT NULL DEFAULT '{}'` deviates
+        # from SPEC §12.2's literal nullable `metadata TEXT` — matches this
+        # project's `principal` table convention and guarantees
+        # `_row_to_namespace`'s `json.loads` never sees NULL.
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS namespace (
                 id TEXT PRIMARY KEY,
@@ -159,10 +162,7 @@ class SQLiteBackend:
                 metadata TEXT NOT NULL DEFAULT '{}'
             )
         """)
-        cursor.execute(
-            "INSERT OR IGNORE INTO namespace (id, created_at, metadata) VALUES (?, ?, ?)",
-            (DEFAULT_NAMESPACE, self._clock.now().isoformat(), "{}"),
-        )
+        self._ensure_namespace_registered(cursor, DEFAULT_NAMESPACE)
 
         # Schema version table (SPEC §12.2, §6.4)
         cursor.execute("""
@@ -557,6 +557,29 @@ class SQLiteBackend:
             id=row["id"],
             created_at=datetime.fromisoformat(row["created_at"]),
             metadata=json.loads(row["metadata"]),
+        )
+
+    def _ensure_namespace_registered(self, cursor: sqlite3.Cursor, namespace: str) -> None:
+        """Idempotently register a namespace in the registry, if not already present.
+
+        Read-then-maybe-write rather than an unconditional `INSERT OR
+        IGNORE`: an unconditional insert attempt takes SQLite's write lock
+        even when the row already exists, which would turn every read-only
+        backend construction (e.g. reconnecting just to list namespaces)
+        into a blocking write — able to raise a raw, unmapped
+        `sqlite3.OperationalError` against a database another connection
+        is mid-write on, instead of needing no write at all. `INSERT OR
+        IGNORE` is kept for the write path itself, to stay safe against a
+        genuine race between the SELECT and the INSERT.
+
+        Does not commit — caller controls transaction/commit timing.
+        """
+        cursor.execute("SELECT 1 FROM namespace WHERE id = ?", (namespace,))
+        if cursor.fetchone() is not None:
+            return
+        cursor.execute(
+            "INSERT OR IGNORE INTO namespace (id, created_at, metadata) VALUES (?, ?, ?)",
+            (namespace, self._clock.now().isoformat(), "{}"),
         )
 
     @staticmethod
@@ -1002,6 +1025,11 @@ class SQLiteBackend:
     def put_schema(self, schema: SchemaIR) -> None:
         """Persist a schema version.
 
+        Also registers ``schema.namespace`` in the namespace registry if
+        not already present (KI-022) — a namespace that only ever has a
+        schema applied, never an entity, is still discoverable via
+        `list_namespaces()`.
+
         Args:
             schema: Schema to persist
 
@@ -1012,6 +1040,7 @@ class SQLiteBackend:
 
         try:
             cursor = self.conn.cursor()
+            self._ensure_namespace_registered(cursor, schema.namespace)
             cursor.execute(
                 """
                 INSERT INTO schema_version (namespace, version, definition, applied_at)

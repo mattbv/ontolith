@@ -552,12 +552,17 @@ class TestDuckDBBackend:
 
     def test_default_namespace_not_reseeded_on_reconnect(self, temp_db: Path) -> None:
         """Reconnecting to an existing database file doesn't duplicate or
-        re-timestamp the seeded default namespace row."""
+        re-timestamp the seeded default namespace row. `first` is closed
+        before `second` opens - DuckDB's in-process instance cache means a
+        second connection to the same path while the first is still open
+        wouldn't exercise a genuine disk reopen."""
         first = DuckDBBackend(temp_db)
         [before] = first.list_namespaces()
+        first.close()
 
         second = DuckDBBackend(temp_db)
         [after] = second.list_namespaces()
+        second.close()
 
         assert after.id == before.id
         assert after.created_at == before.created_at
@@ -853,6 +858,17 @@ class TestDuckDBBackend:
         assert retrieved.namespace == schema.namespace
         assert retrieved.version == schema.version
         assert "Person" in retrieved.concepts
+
+    def test_put_schema_registers_its_namespace(self, backend: DuckDBBackend) -> None:
+        """A namespace that only ever has a schema applied - never an
+        entity - is still discoverable via list_namespaces() (KI-022):
+        the exact blind spot a SELECT DISTINCT-over-entity approach would
+        have had."""
+        schema = SchemaIR(namespace="acme-research", version=1, concepts={})
+
+        backend.put_schema(schema)
+
+        assert {n.id for n in backend.list_namespaces()} == {"default", "acme-research"}
 
     def test_get_latest_schema_version(self, backend: DuckDBBackend) -> None:
         """Getting schema without version returns latest."""
