@@ -1,9 +1,9 @@
 """REST interface for Ontolith (SPEC §14.3, ADR-0021).
 
 Exposes read, propose, direct write, proposal review (accept/reject/
-request_changes), contradiction listing/flagging/resolution, and
-principal/token admin over HTTP. ``GET /namespaces`` has no backing SDK
-method yet (no namespace registry exists) and remains deferred (KI-022).
+request_changes), contradiction listing/flagging/resolution, namespace
+listing, and principal/token admin over HTTP. Full SPEC §14.3 resource
+parity (``/query`` offset pagination, GraphQL) is out of scope (KI-022).
 
 Authentication (ADR-0014, reused unchanged): every route requires an
 ``Authorization: Bearer <token>`` header, resolved server-side via the
@@ -399,6 +399,14 @@ class CredentialOut(BaseModel):
     principal_id: str
     created_at: str
     revoked_at: str | None
+
+
+class NamespaceOut(BaseModel):
+    """A registered namespace's fields, returned by GET /namespaces."""
+
+    id: str
+    created_at: str
+    metadata: dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
@@ -1095,6 +1103,25 @@ def create_rest_app(
         if credential is None or credential.principal_id != principal_id:
             raise NotFoundError(f"Credential {credential_id!r} not found for {principal_id!r}")
         kb.revoke_token(credential_id, author=principal.id)
+
+    # ------------------------------------------------------------------
+    # GET /namespaces
+    # ------------------------------------------------------------------
+
+    @app.get("/namespaces")
+    def list_namespaces_route(
+        _principal: Principal = Depends(_resolve_principal),
+    ) -> list[NamespaceOut]:
+        """List all registered namespaces (SPEC §12.2, KI-022).
+
+        Ungated beyond authentication, same as GET /proposals — namespace
+        metadata carries nothing as sensitive as GET /principals's
+        owner/trust_level fields.
+        """
+        return [
+            NamespaceOut(id=n.id, created_at=n.created_at.isoformat(), metadata=n.metadata)
+            for n in kb.list_namespaces()
+        ]
 
     return app
 

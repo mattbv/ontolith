@@ -804,3 +804,15 @@ class TestReindex:
         results = kb.backend.vector_search("entity", vec, k=10)
         assert results[0][0] == entity.id
         assert results[0][1] == pytest.approx(0.0, abs=1e-6)
+
+
+class TestListNamespaces:
+    """Ontology.list_namespaces() (SPEC §12.2, KI-022)."""
+
+    def test_returns_seeded_default_namespace(self, kb: Ontology) -> None:
+        """Delegates to backend.list_namespaces() - proves the wrapper is
+        wired correctly, not just that the backend method works in
+        isolation (already covered per-backend in test_sqlite_backend.py/
+        test_duckdb_backend.py)."""
+        namespaces = kb.list_namespaces()
+        assert [n.id for n in namespaces] == ["default"]

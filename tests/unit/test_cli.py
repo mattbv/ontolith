@@ -653,3 +653,15 @@ class TestContradictionList:
 
         all_result = runner.invoke(app, ["--db", str(db), "contradiction", "list", "--all"])
         assert "state=resolved" in all_result.output
+
+
+class TestNamespaceList:
+    """KI-022: `ontolith namespace list`."""
+
+    def test_lists_default_namespace(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.close()
+
+        result = runner.invoke(app, ["--db", str(temp_db), "namespace", "list"])
+        assert result.exit_code == 0
+        assert "default" in result.output

@@ -103,13 +103,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ProposalEvent.type` widened to admit `"request_changes"` — third-party
   `StorageBackend`/consumer code that exhaustively matches on `.type` needs updating.
   `POST /proposals/{proposal_id}/review` (REST) mirrors `/reject`'s shape exactly.
-  `GET /namespaces` remains deferred — no namespace registry exists yet.
 - **Note:** both backends' `proposal_event.type` `CHECK` constraint was removed
   (previously `CHECK(type IN ('accept', 'reject'))`) rather than widened again —
   `CREATE TABLE IF NOT EXISTS` never updates an existing table's constraint, so
   widening it a second time would silently break `request_changes()` on any database
   file created before this release. Databases created before this change need to be
   recreated; there is no DDL migration mechanism yet (pre-1.0/pre-alpha).
+- `GET /namespaces` (SPEC §5/§12.2, ADR-0022 update, closes KI-022): new `Namespace`
+  model (`ontolith.core.namespace`), `Ontology.list_namespaces()` (ungated, like
+  `proposals()`/`contradictions()`), `GET /namespaces` (REST), and
+  `ontolith namespace list` (CLI). Backed by SPEC §12.2's own normative `namespace`
+  registry table (`id`, `created_at`, `metadata`) on both backends, seeded
+  idempotently with the one namespace this project operates in today
+  (`DEFAULT_NAMESPACE = "default"`) — this project remains single-namespace
+  throughout (ADR-0015); no namespace-creation path was added. KI-022 is now fully
+  resolved.
+- **Breaking:** `StorageBackend` gained a new required Protocol method,
+  `list_namespaces() -> list[Namespace]` (SPEC §12.2, ADR-0022 update, closes
+  KI-022) — any third-party `StorageBackend` implementation must add it.
 
 #### Fixed
 - **Breaking:** `Ontology.issue_token(principal_id, author)` now returns

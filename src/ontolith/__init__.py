@@ -3,7 +3,7 @@
 Where humans and AI agents are co-equal authors of a shared, governed ontology.
 """
 
-from ontolith.core import Assertion, Entity, FixedClock, SequentialIdProvider
+from ontolith.core import Assertion, Entity, FixedClock, Namespace, SequentialIdProvider
 from ontolith.identity import Principal
 from ontolith.ontology import Ontology
 from ontolith.schema import (
@@ -27,6 +27,7 @@ __all__ = [
     "Ontology",
     "Entity",
     "Assertion",
+    "Namespace",
     "Principal",
     "FixedClock",
     "SequentialIdProvider",

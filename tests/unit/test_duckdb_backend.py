@@ -543,6 +543,39 @@ class TestDuckDBBackend:
         tied = [p.id for p in principals if p.id in ("aaa@test.com", "zzz@test.com")]
         assert tied == ["zzz@test.com", "aaa@test.com"]
 
+    def test_default_namespace_seeded_on_fresh_backend(self, backend: DuckDBBackend) -> None:
+        """list_namespaces() (KI-022) returns the seeded default namespace
+        even with zero entities/schema written - proves this isn't a
+        SELECT DISTINCT over some other table (ADR-0022's open question)."""
+        namespaces = backend.list_namespaces()
+        assert [n.id for n in namespaces] == ["default"]
+
+    def test_default_namespace_not_reseeded_on_reconnect(self, temp_db: Path) -> None:
+        """Reconnecting to an existing database file doesn't duplicate or
+        re-timestamp the seeded default namespace row."""
+        first = DuckDBBackend(temp_db)
+        [before] = first.list_namespaces()
+
+        second = DuckDBBackend(temp_db)
+        [after] = second.list_namespaces()
+
+        assert after.id == before.id
+        assert after.created_at == before.created_at
+
+    def test_list_namespaces_ordering(self, backend: DuckDBBackend) -> None:
+        """Most-recently-created namespace first, same convention as
+        list_principals - inserted directly since there's no put_namespace
+        on the port (namespace creation is out of scope for KI-022)."""
+        backend.conn.execute(
+            "INSERT INTO namespace (id, created_at, metadata) VALUES (?, ?, ?)",
+            ["acme-research", "2030-01-01T00:00:00+00:00", '{"team": "research"}'],
+        )
+
+        namespaces = backend.list_namespaces()
+
+        assert [n.id for n in namespaces] == ["acme-research", "default"]
+        assert namespaces[0].metadata == {"team": "research"}
+
     def test_principal_metadata_roundtrip(self, backend: DuckDBBackend) -> None:
         """Principal metadata is preserved through storage."""
         metadata = {"team": "engineering", "region": "us-west"}

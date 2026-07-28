@@ -347,11 +347,62 @@ explicit, not silently assumed away):
   a new `Proposal` field (an assignee) or a comment thread, not just a state
   transition, so they're a bigger change than this slice's scope.
 
+## Update (2026-07-28): namespace registry closes the `GET /namespaces` gap, KI-022 fully resolved
+
+This ADR's original Context (§2 of the audit) raised an explicit open question: *"does a
+namespace registry need its own table, or is `SELECT DISTINCT namespace` sufficient despite
+missing namespaces with a schema but zero entities?"* Resolved by SPEC itself: §12.2's normative
+DDL already defines the exact table this needs —
+```sql
+CREATE TABLE namespace (
+  id TEXT PRIMARY KEY, created_at TEXT NOT NULL, metadata TEXT
+);
+```
+— a dedicated table, not a `DISTINCT` query, settling the question in the direction the `DISTINCT`
+alternative couldn't reach (a namespace with an applied schema but zero entities would be
+invisible to it).
+
+New `Namespace` model (`ontolith.core.namespace`, alongside `Entity` — SPEC §5's meta-model lists
+Namespace as a first-class concept). New `StorageBackend.list_namespaces() -> list[Namespace]`
+port method, implemented identically on both backends via the SPEC-literal `namespace` table.
+`Ontology.list_namespaces()` is ungated, matching `proposals()`/`contradictions()` rather than
+`list_principals()`'s admin gate — namespace metadata (id, creation time) carries nothing as
+sensitive as `list_principals()`'s `owner`/`trust_level` fields. `GET /namespaces` (REST) and
+`ontolith namespace list` (CLI) follow the same gating/shape precedent as their `GET /proposals`/
+`proposal list` counterparts.
+
+**Why the registry is seeded, not created via any new API:** this project is still
+single-namespace throughout (ADR-0015's own words), and this slice doesn't change that —
+`Ontology.namespace` is still hardcoded, still not a constructor parameter. Since the KB always
+operates in exactly `DEFAULT_NAMESPACE` (`store/base.py`, `= "default"`) from the moment a backend
+exists, both backends seed that one registry row unconditionally at schema-creation time
+(idempotent insert, so reconnecting to an existing database file doesn't duplicate or
+re-timestamp it) rather than exposing any `put_namespace`/create-namespace path. `list_namespaces()`
+today always returns exactly one entry.
+
+**Deliberately out of scope** (so this isn't mistaken for "Ontolith is now multi-tenant"):
+namespace *creation* — no `put_namespace` on the port, no `Ontology.connect(namespace=...)`
+parameter, despite SPEC §14.1 naming the latter as the normative constructor signature; SPEC
+§12.2's `principal_trust` table (per-namespace trust/capability overrides) — also normatively
+defined, also never implemented; per-namespace plugin enable/disable (SPEC §13.1 MUST, already
+flagged unimplemented in ADR-0015); per-principal/per-namespace REST or MCP read scoping (`rest.py`'s
+module docstring already states outright there is none in this slice). Each is a materially larger
+body of work than "the registry exists and is listable," and none is needed to close the literal
+`GET /namespaces` gap this update resolves.
+
+**KI-022 is now fully resolved.** All three pieces originally deferred for lack of a backing SDK
+method — `list_principals`, `request_changes`, and now `list_namespaces` — are closed. The two
+remaining named gaps (`/query` offset pagination, GraphQL) were always tracked as separate
+concerns, not blocked on "no backing method."
+
 ## References
 
 - SPEC §14.3 (REST + GraphQL), §16 (error model), §8.3 (capabilities), §8.1
-  (accountable owner), §9 (proposal workflow), §10.3 (contradictions)
+  (accountable owner), §9 (proposal workflow), §10.3 (contradictions), §5
+  (meta-model — Namespace), §12.2 (normative `namespace`/`principal_trust`
+  DDL)
 - ADR-0021 (REST read + propose slice — this ADR's auth/error-handling
   foundation), ADR-0014 (MCP bearer-token authentication), ADR-0003 (agent
-  identity, delegation, self-review guard)
-- `docs/known-issues.md` KI-022
+  identity, delegation, self-review guard), ADR-0015 (plugin capability
+  isolation — states the project is still single-namespace throughout)
+- `docs/known-issues.md` KI-022 (now fully resolved)

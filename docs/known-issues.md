@@ -412,10 +412,10 @@ Added a `token: str` parameter to `schema_tool`/`get_tool`/`query_tool`/`provena
 
 ---
 
-## KI-022 — REST interface (SPEC §14.3) — PARTIALLY RESOLVED (M3)
+## KI-022 — REST interface (SPEC §14.3) ✓ RESOLVED (M3)
 
-**Severity:** Architecture gap — named M3 scope item with zero implementation
-**Milestone target:** M3 (first slice); full SPEC §14.3 parity is Backlog
+**Severity:** Architecture gap — named M3 scope item with zero implementation; all originally-deferred pieces now closed
+**Milestone target:** M3 — full SPEC §14.3 parity (`/query` offset pagination, GraphQL) remains Backlog, tracked as separate concerns, not blocked on this KI
 **SPEC reference:** SPEC §14.3 (REST + GraphQL), §16 (error model), §17 (security model)
 
 ### Description
@@ -441,7 +441,9 @@ GraphQL (SPEC §14.3's other named half) is untouched by this KI and remains ful
 
 **`/proposals/{id}/review` (request_changes): resolved (2026-07-28, ADR-0022 update).** New `Ontology.request_changes(proposal_id, reviewer, reason="")` — SPEC §9.1's third `under_review` outcome (`changes_requested`), alongside the two `accept_proposal`/`reject_proposal` already implement. Reviewer-eligibility/proposal-state checks (previously duplicated between `accept_proposal`/`reject_proposal`) factored into a shared `Ontology._require_reviewer` helper. `ProposalEvent.type` widened to admit `"request_changes"`; the redundant DB `CHECK` constraint on both backends' `proposal_event.type` column was removed entirely rather than widened again (SPEC's own DDL has none, and widening it silently breaks the feature on any pre-existing database file — see ADR-0022's Update section for the full reasoning, including why this specific action keeps the same strict no-AI/no-self-review gate as accept rather than a lighter one). `POST /proposals/{proposal_id}/review` (REST) mirrors `/reject`'s shape exactly. The `require_review`/`under_review` state-naming conflation and resubmission (`changes_requested` → `submitted`) remain deliberately unaddressed.
 
-**Still open — no backing SDK/StorageBackend method to wrap (see ADR-0022's Context for the audit):** `GET /namespaces` (no namespace registry — `Ontology.namespace` is hardcoded `"default"`). And still separately: `/query` offset pagination. GraphQL remains fully unscoped.
+**`GET /namespaces` (namespace registry): resolved (2026-07-28, ADR-0022 update).** New `Namespace` model (`ontolith.core.namespace`), `StorageBackend.list_namespaces()` port method (both backends, backed by SPEC §12.2's own normative `namespace` table — resolving ADR-0022's own open question of table-vs-`DISTINCT` in the table's favor), `Ontology.list_namespaces()` (ungated, like `proposals()`/`contradictions()`), `GET /namespaces` (REST), and `ontolith namespace list` (CLI). Both backends seed the `DEFAULT_NAMESPACE` (`"default"`) registry row idempotently at schema-creation time — no namespace-creation path was added; this project remains single-namespace throughout (ADR-0015), so `list_namespaces()` today always returns exactly one entry. See ADR-0022's Update section for the full list of what's deliberately still out of scope (namespace creation, `Ontology.connect(namespace=...)`, per-namespace `principal_trust`/plugin isolation/read scoping).
+
+**Still open, tracked as separate concerns (not blocked on "no backing method"):** `/query` offset pagination — `QueryBuilder` only supports `.limit()`, no `.offset()`; extending it is a `query/`+`store/` change, out of scope for "expose the existing SDK over HTTP." GraphQL (SPEC §14.3's other named half) remains fully unscoped.
 
 ---
 

@@ -19,13 +19,13 @@ from typing import Concatenate, ParamSpec, TypeVar, cast
 
 import sqlite_vec
 
-from ontolith.core import Assertion, AssertionEvent, Clock, Entity, SystemClock
+from ontolith.core import Assertion, AssertionEvent, Clock, Entity, Namespace, SystemClock
 from ontolith.core.errors import StorageError, ValidationError
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
-from ontolith.store.base import VECTOR_SCOPES
+from ontolith.store.base import DEFAULT_NAMESPACE, VECTOR_SCOPES
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -145,6 +145,24 @@ class SQLiteBackend:
             CREATE INDEX IF NOT EXISTS idx_principal_credential_principal
             ON principal_credential(principal_id)
         """)
+
+        # Namespace registry table (SPEC §12.2, KI-022) — tracks the set of
+        # namespaces that exist, independent of whether any entity/schema
+        # has been written to one. Seeded with DEFAULT_NAMESPACE below since
+        # this project is still single-namespace throughout (ADR-0015) — the
+        # KB always operates in exactly that namespace from the moment this
+        # backend exists.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS namespace (
+                id TEXT PRIMARY KEY,
+                created_at TEXT NOT NULL,
+                metadata TEXT NOT NULL DEFAULT '{}'
+            )
+        """)
+        cursor.execute(
+            "INSERT OR IGNORE INTO namespace (id, created_at, metadata) VALUES (?, ?, ?)",
+            (DEFAULT_NAMESPACE, self._clock.now().isoformat(), "{}"),
+        )
 
         # Schema version table (SPEC §12.2, §6.4)
         cursor.execute("""
@@ -516,6 +534,30 @@ class SQLiteBackend:
         # for same-timestamp rows, not a recency proxy.
         cursor.execute("SELECT * FROM principal ORDER BY created_at DESC, id DESC")
         return [self._row_to_principal(row) for row in cursor.fetchall()]
+
+    @_synchronized
+    def list_namespaces(self) -> list[Namespace]:
+        """List all registered namespaces (SPEC §12.2, KI-022).
+
+        Returns:
+            All namespaces, most recently created first
+        """
+        cursor = self.conn.cursor()
+        # id DESC tiebreak is purely lexical (namespace ids are slugs, not
+        # ULIDs) — same convention as list_principals, not a recency proxy.
+        cursor.execute("SELECT * FROM namespace ORDER BY created_at DESC, id DESC")
+        return [self._row_to_namespace(row) for row in cursor.fetchall()]
+
+    @staticmethod
+    def _row_to_namespace(row: sqlite3.Row) -> Namespace:
+        """Deserialize a `namespace` table row into a Namespace."""
+        import json
+
+        return Namespace(
+            id=row["id"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            metadata=json.loads(row["metadata"]),
+        )
 
     @staticmethod
     def _row_to_principal(row: sqlite3.Row) -> Principal:

@@ -13,7 +13,7 @@ from contextlib import AbstractContextManager
 from datetime import datetime
 from typing import Protocol
 
-from ontolith.core import Assertion, AssertionEvent, Entity
+from ontolith.core import Assertion, AssertionEvent, Entity, Namespace
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential
@@ -27,6 +27,16 @@ Deliberately not an arbitrary caller-supplied string — both backends use
 DuckDB: a plain table per scope), so an open string would mean dynamic DDL
 driven by caller input. vector_upsert/vector_search MUST reject any scope
 outside this set with ValidationError.
+"""
+
+DEFAULT_NAMESPACE = "default"
+"""The one namespace this project operates in today (KI-022).
+
+Ontolith is still single-namespace throughout (ADR-0015) — `Ontology`
+always writes to this namespace, and both backends seed a matching
+`namespace` registry row for it at schema-creation time. A single named
+constant, rather than the literal string repeated in `Ontology` and each
+backend, keeps those three in sync by construction.
 """
 
 
@@ -280,6 +290,14 @@ class StorageBackend(Protocol):
         Returns:
             Events with this successor_id, ordered by occurrence. Each
             event's assertion_id is one predecessor that was superseded.
+        """
+        ...
+
+    def list_namespaces(self) -> list[Namespace]:
+        """List all registered namespaces (SPEC §12.2, KI-022).
+
+        Returns:
+            All namespaces, most recently created first
         """
         ...
 
