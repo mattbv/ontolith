@@ -1414,7 +1414,18 @@ class Ontology:
         reactivated. The resolver must have `review` or `admin` capability
         and must not be an AI principal (ThresholdPolicy always routes AI
         proposals to require_review; an AI resolver would let it approve
-        its own or another AI's disputed value unsupervised).
+        its own or another AI's disputed value unsupervised). The resolver
+        also must not be the author or delegate of *any* member assertion
+        (KI-026) — not just the winner, since an interested party shouldn't
+        get to pick against their own losing entry either. Without this, a
+        principal who authored one side of a disputed static fact could
+        adjudicate the dispute in their own favor unilaterally. This check
+        is deliberately narrower than "any AI member's owner" — an AI
+        principal's accountable owner is still eligible to resolve a
+        contradiction that AI is party to, consistent with `owner` already
+        being who `ThresholdPolicy` routes that AI's own proposals to for
+        review (SPEC §7.4/ADR-0003); only actual authorship/delegation
+        disqualifies a resolver, not the owner relationship.
         Resolution is recorded on the contradiction and appears in provenance.
 
         Args:
@@ -1424,6 +1435,17 @@ class Ontology:
 
         Returns:
             Updated Contradiction with state `resolved`
+
+        Raises:
+            AuthError: resolver is not a known principal
+            NotFoundError: contradiction_id does not name an existing
+                contradiction, or a member assertion could not be found
+                (assertions are append-only and never deleted, so this
+                indicates data corruption, not a benign gap)
+            CapabilityError: resolver lacks review/admin capability, is
+                AI-kind, or is the author/delegate of any member assertion
+            ValidationError: contradiction is not open, or winner_assertion_id
+                is not one of its members
         """
         resolver_principal = self.backend.get_principal(resolver)
         if resolver_principal is None:
@@ -1433,21 +1455,43 @@ class Ontology:
         if resolver_principal.kind == "ai":
             raise CapabilityError(f"Principal {resolver!r} is an AI principal and cannot review")
 
-        contradiction = self.backend.get_contradiction(contradiction_id)
-        if contradiction is None:
-            raise NotFoundError(f"Contradiction not found: {contradiction_id}")
-        if contradiction.state != "open":
-            raise ValidationError(
-                f"Contradiction {contradiction_id} is not open (state: {contradiction.state})"
-            )
-        if winner_assertion_id not in contradiction.member_ids:
-            raise ValidationError(
-                f"Assertion {winner_assertion_id} is not a member of "
-                f"contradiction {contradiction_id}"
-            )
-
+        # Contradiction/membership/self-resolution validation runs inside the
+        # transaction, not before it: reading contradiction.member_ids
+        # outside the transaction would let another thread extend the same
+        # open contradiction (e.g. via a concurrent propose()) between the
+        # validation and the write below — a new member would then escape
+        # both the self-resolution check and the retraction loop entirely.
+        # Raising here rolls back a no-op (nothing has been written yet).
         now = self.clock.now()
         with self.backend.transaction():
+            contradiction = self.backend.get_contradiction(contradiction_id)
+            if contradiction is None:
+                raise NotFoundError(f"Contradiction not found: {contradiction_id}")
+            if contradiction.state != "open":
+                raise ValidationError(
+                    f"Contradiction {contradiction_id} is not open (state: {contradiction.state})"
+                )
+            if winner_assertion_id not in contradiction.member_ids:
+                raise ValidationError(
+                    f"Assertion {winner_assertion_id} is not a member of "
+                    f"contradiction {contradiction_id}"
+                )
+            for member_id in contradiction.member_ids:
+                member = self.backend.get_assertion(member_id)
+                if member is None:
+                    # Assertions are append-only and never deleted (SPEC
+                    # §5) — a contradiction member that can't be found is
+                    # data corruption, not a benign gap to skip past.
+                    raise NotFoundError(
+                        f"Assertion {member_id!r}, a member of contradiction "
+                        f"{contradiction_id!r}, could not be found"
+                    )
+                if resolver in (member.author, member.acting_as):
+                    raise CapabilityError(
+                        f"Principal {resolver!r} cannot resolve a contradiction they are "
+                        f"party to (author or delegate of member assertion {member_id!r})"
+                    )
+
             for member_id in contradiction.member_ids:
                 if member_id != winner_assertion_id:
                     self.backend.set_assertion_status(
