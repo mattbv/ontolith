@@ -49,12 +49,16 @@ jobs:
 
       - name: Public API surface diff (informational, KI-020)
         if: matrix.python-version == '3.12'
-        # warn-only pre-1.0 (Implementation Plan §5) — griffe's own default
-        # behavior already never fails the step, this comment just makes
-        # that explicit rather than implicit. Compares against the PR's
-        # base commit; on a push-to-main run (no PR context) compares
-        # against HEAD itself, i.e. a no-op — the meaningful comparison
-        # already happened during the PR's own run.
+        # warn-only pre-1.0 (Implementation Plan §5): `griffe check` exits 1
+        # on any detected change, including non-breaking ones (verified —
+        # do not remove continue-on-error without re-verifying this).
+        # continue-on-error is what actually makes this informational;
+        # blocking post-1.0 is a one-line removal of that flag, not a
+        # deeper redesign. Compares against the PR's base commit; on a
+        # push-to-main run (no PR context) compares against HEAD itself,
+        # i.e. a no-op — the meaningful comparison already happened during
+        # the PR's own run.
+        continue-on-error: true
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha || 'HEAD' }}
         run: uv run python -m griffe check ontolith -s src -a "$BASE_REF" -f github

@@ -24,13 +24,18 @@ Verified directly, not assumed, before building anything:
 - Running both against the tree as it stood before this ADR: **`pip-audit` found 2 real
   vulnerabilities** — `mcp==1.28.0` (PYSEC-2026-3483, fixed in 1.28.1) and `sqlite-vec==0.1.1`
   (PYSEC-2026-1938, fixed in 0.1.3). **`bandit` found 7 medium-severity findings**, all `B608`
-  (SQL-injection-shaped), all on the same root cause: `store/{sqlite,duckdb}/backend.py`'s
-  vector-search code builds a table name via `f"vector_{scope}"` / string concatenation involving
-  `scope`. `scope` is validated against the closed `VECTOR_SCOPES` frozenset (`store/base.py`)
-  before every one of these call sites — bandit's static heuristic can't see that runtime check,
-  so these are false positives, not real injection risk. (Also 17 low-severity `B101`
-  (`assert_used`) findings — already below the "no unsuppressed mediums+" threshold, not
-  gate-relevant.)
+  (SQL-injection-shaped), across two distinct false-positive shapes rather than one: 5 in
+  `store/{sqlite,duckdb}/backend.py`'s vector-search code, where a table name is built via
+  `f"vector_{scope}"` (4 sites) or an `IN (...)` placeholder-arity string built from a repeated
+  literal `"?"` (1 site, never from external input) — `scope` is validated against the closed
+  `VECTOR_SCOPES` frozenset (`store/base.py`) before every one of these call sites, which bandit's
+  static heuristic can't see; and 2 in `entities_where()` (same two backends), where a
+  `flagged_clause` local is always one of exactly two hardcoded string literals, never
+  caller-controlled, interpolated into a query string — a different call site and a different
+  variable, but bandit's heuristic flags any keyword-containing-string + variable concatenation
+  regardless of the variable's actual provenance. None of the 7 are real injection risk. (Also 17
+  low-severity `B101` (`assert_used`) findings — already below the "no unsuppressed mediums+"
+  threshold, not gate-relevant.)
 - Neither finding set was hypothetical or pre-existing-and-ignorable: wiring these gates as
   blocking *before* fixing them would have broken CI on the first run. Fixing them first is what
   makes "blocking from day one" honest rather than aspirational.
@@ -39,9 +44,14 @@ Verified directly, not assumed, before building anything:
   work directly — no separate "generate a baseline snapshot" step needed, simpler than KI-020's
   original text assumed. Confirmed empirically: run against a commit several PRs back, it
   correctly reported the real breaking changes made since then (the `PolicyStrategy.evaluate()`
-  `kb` parameter addition, `Ontology.namespace`'s literal-to-constant change). Its default exit
-  code is `0` even when it reports changes — i.e., it's *already* warn-only by construction, not
-  something that needs extra CI-side suppression to avoid blocking pre-1.0.
+  `kb` parameter addition, `Ontology.namespace`'s literal-to-constant change) — **and exits `1`**
+  when it does, including for changes that aren't actually breaking (e.g. that same
+  `Ontology.namespace` line: a constant extraction with an identical value still gets reported and
+  still exits `1`). An earlier draft of this ADR claimed the opposite (exit `0` regardless), from a
+  verification bug — piping the command through `head` before checking `$?` captures `head`'s exit
+  code, not `griffe`'s. Caught in review, re-verified directly without the pipe. The step is
+  informational only because of `continue-on-error: true` on the CI step itself (§Decision), not
+  because of anything in `griffe`'s own behavior.
 
 ## Decision
 
@@ -58,10 +68,17 @@ skips = ["B101"]` added for report cleanliness only — that rule was never bloc
 **2. New `.github/workflows/security.yml`**, matching Implementation Plan §7.1's `security.yml
 (PR + weekly): pip-audit · bandit · gitleaks · SBOM (cyclonedx)` line exactly: triggers on
 `pull_request` and a weekly `schedule` (the latter catches a CVE disclosed against an
-already-merged dependency, independent of PR activity). Four independent jobs (pip-audit, bandit,
-gitleaks via `gitleaks/gitleaks-action` — free for public repositories, no license key needed —
-and CycloneDX SBOM generation via the new `cyclonedx-bom` dev dependency's `cyclonedx-py`
-CLI, uploaded as a build artifact). All blocking, now that findings are clean.
+already-merged dependency, independent of PR activity). Two jobs: `scan` (pip-audit, bandit, and
+CycloneDX SBOM generation via the new `cyclonedx-bom` dev dependency's `cyclonedx-py` CLI, sharing
+one checkout/`uv sync` since none of the three depend on each other's output — this repo's Actions
+minutes run out often enough that avoiding three redundant syncs is worth the minor loss of
+per-tool job isolation) and `gitleaks` (via `gitleaks/gitleaks-action@v3` — this repo is private
+under a personal account, not an organization; the action's license requirement is gated on
+account type, not repository visibility, so no `GITLEAKS_LICENSE` is needed *because it's a
+personal account*, not because it's public — it isn't). Workflow-level `permissions: contents:
+read`; `GITLEAKS_ENABLE_COMMENTS: false` so the gitleaks job doesn't need `pull-requests: write`
+(this repo's default `GITHUB_TOKEN` is read-only) — findings still surface via the job's own log
+output. All blocking, now that findings are clean.
 
 **3. `griffe diff` gate, in `ci.yml`'s existing `quality` job**, not `security.yml` — it's an
 API-stability check, not a security scan, closer in spirit to that job's existing
@@ -71,9 +88,11 @@ how the existing `quickstart example`/coverage-upload steps in the `test` job ar
 to a single leg to avoid triplicate output) comparing the current `ontolith` package against the
 PR's base commit (`github.event.pull_request.base.sha`, falling back to `HEAD` — a no-op — on a
 non-PR push run) via `griffe check ontolith -s src -a "$BASE_REF" -f github`. `-f github` emits
-native GitHub Actions `::warning::` annotations, which surface inline on the PR diff without
-failing the step — matching the Implementation Plan's own stated threshold, "warn pre-1.0, block
-post-1.0" (post-1.0 enforcement is a future decision, not made here).
+native GitHub Actions `::warning::` annotations, which surface inline on the PR diff. The step
+itself carries `continue-on-error: true` — `griffe check` exits `1` on any detected change
+(§Context), so without that flag this would be a hard-blocking gate, not the informational one
+Implementation Plan §5's threshold calls for ("warn pre-1.0, block post-1.0"). Blocking post-1.0
+is then a one-line removal of `continue-on-error`, not a redesign.
 
 **4. Deliberately not built in this pass** (both still named in KI-020's resolution and here, so
 neither reads as silently dropped):
@@ -115,12 +134,12 @@ closing the gap ADR-0019's pinned-`__all__` test couldn't (signature-level break
 already-exported symbol).
 
 **Negative / follow-ups:** `nightly.yml` and `release.yml` remain unbuilt — tracked as named,
-explicit follow-ups (above), not silently dropped. Running `bandit` locally
-(`uv run bandit -r src/ontolith -c pyproject.toml`) after adding a `# nosec B608` comment
-sometimes logs a `WARNING nosec encountered (B608), but no failed test` line for a *different*
-suppressed line than the one just edited, even though the overall run still reports zero issues
-and exits `0` — confirmed empirically to be a bandit reporting quirk, not a real gap (removing any
-of the seven suppressions and re-running reliably reintroduces exactly that many real findings).
+explicit follow-ups (above), not silently dropped. Every `uv run bandit -r src/ontolith -c
+pyproject.toml` run logs a `WARNING nosec encountered (B608), but no failed test` line for each of
+the seven suppressed sites — on every run, not intermittently — even though the overall run still
+reports zero issues and exits `0`. Confirmed empirically to be a bandit reporting quirk (the
+warning's line attribution doesn't match the suppression's actual effect), not a real gap: removing
+any of the seven suppressions and re-running reliably reintroduces exactly that many real findings.
 Noted here so a future reader doesn't mistake the warning for something broken.
 
 ## References

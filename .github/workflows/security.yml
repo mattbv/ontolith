@@ -8,9 +8,17 @@ on:
     # already-merged dependencies (Implementation Plan §7.1).
     - cron: "0 6 * * 1"
 
+permissions:
+  contents: read
+
 jobs:
-  pip-audit:
-    name: Dependency vulnerabilities (pip-audit)
+  # pip-audit, bandit, and SBOM generation share one checkout + `uv sync`
+  # instead of three, to cut per-PR Actions-minute usage on this repo's
+  # private-repo minute allotment (this workflow otherwise roughly doubles
+  # security.yml's total runner time for no benefit — none of the three
+  # steps depend on each other's output, they're just sharing setup cost).
+  scan:
+    name: Dependency + static security scan
     runs-on: ubuntu-latest
 
     steps:
@@ -30,26 +38,17 @@ jobs:
       - name: Run pip-audit
         run: uv run pip-audit
 
-  bandit:
-    name: Static security analysis (bandit)
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --all-extras
-
       - name: Run bandit
         run: uv run bandit -r src/ontolith -c pyproject.toml
+
+      - name: Generate SBOM
+        run: uv run cyclonedx-py environment --pyproject pyproject.toml -o sbom.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
 
   gitleaks:
     name: Secret scanning (gitleaks)
@@ -61,34 +60,17 @@ jobs:
           fetch-depth: 0
 
       - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # No GITLEAKS_LICENSE: free for public repositories.
-
-  sbom:
-    name: Generate SBOM (CycloneDX)
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          enable-cache: true
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Install dependencies
-        run: uv sync --all-extras
-
-      - name: Generate SBOM
-        run: uv run cyclonedx-py environment --pyproject pyproject.toml -o sbom.json
-
-      - name: Upload SBOM
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom
-          path: sbom.json
+          # This repo is private under a personal account (not an
+          # organization) — gitleaks-action's license requirement is gated
+          # on org vs. personal account, not public vs. private repo
+          # visibility, so no GITLEAKS_LICENSE is needed here. That would
+          # change if this repo ever moved under an organization.
+          #
+          # PR comments disabled so this job only needs the default
+          # read-only GITHUB_TOKEN (workflow permissions: contents: read,
+          # above) rather than pull-requests: write — findings still surface
+          # via the job's own log/summary output.
+          GITLEAKS_ENABLE_COMMENTS: false
