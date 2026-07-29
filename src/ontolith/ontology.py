@@ -1414,7 +1414,12 @@ class Ontology:
         reactivated. The resolver must have `review` or `admin` capability
         and must not be an AI principal (ThresholdPolicy always routes AI
         proposals to require_review; an AI resolver would let it approve
-        its own or another AI's disputed value unsupervised).
+        its own or another AI's disputed value unsupervised). The resolver
+        also must not be the author or delegate of *any* member assertion
+        (KI-026) — not just the winner, since an interested party shouldn't
+        get to pick against their own losing entry either. Without this, a
+        principal who authored one side of a disputed static fact could
+        adjudicate the dispute in their own favor unilaterally.
         Resolution is recorded on the contradiction and appears in provenance.
 
         Args:
@@ -1424,6 +1429,14 @@ class Ontology:
 
         Returns:
             Updated Contradiction with state `resolved`
+
+        Raises:
+            AuthError: resolver is not a known principal
+            NotFoundError: contradiction_id does not name an existing contradiction
+            CapabilityError: resolver lacks review/admin capability, is
+                AI-kind, or is the author/delegate of any member assertion
+            ValidationError: contradiction is not open, or winner_assertion_id
+                is not one of its members
         """
         resolver_principal = self.backend.get_principal(resolver)
         if resolver_principal is None:
@@ -1445,6 +1458,13 @@ class Ontology:
                 f"Assertion {winner_assertion_id} is not a member of "
                 f"contradiction {contradiction_id}"
             )
+        for member_id in contradiction.member_ids:
+            member = self.backend.get_assertion(member_id)
+            if member is not None and resolver in (member.author, member.acting_as):
+                raise CapabilityError(
+                    f"Principal {resolver!r} cannot resolve a contradiction they are the "
+                    f"author or delegate of (assertion {member_id!r})"
+                )
 
         now = self.clock.now()
         with self.backend.transaction():

@@ -228,3 +228,63 @@ class TestResolveContradictionGuards:
 
         with pytest.raises(CapabilityError, match="AI principal and cannot review"):
             kb.resolve_contradiction(contradiction_id, ada_id, "misconfigured-ai-reviewer")
+
+    def test_resolver_cannot_pick_own_authored_assertion_as_winner(
+        self, make_kb: KbFactory
+    ) -> None:
+        """REVIEWER authored one of the two disputed facts - can't
+        unilaterally pick it as the winner (KI-026)."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ava", "Text", REVIEWER)
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        reviewer_authored_id = next(a.id for a in flagged if a.author == REVIEWER)
+        contradiction = kb.backend.get_open_contradiction("default", entity.id, "Person.name")
+        assert contradiction is not None
+
+        with pytest.raises(CapabilityError, match="cannot resolve a contradiction"):
+            kb.resolve_contradiction(contradiction.id, reviewer_authored_id, REVIEWER)
+
+    def test_resolver_cannot_resolve_when_they_authored_a_losing_member(
+        self, make_kb: KbFactory
+    ) -> None:
+        """REVIEWER authored one of the disputed facts, even the one NOT
+        picked as winner - still blocked, since resolving still means
+        adjudicating a dispute they're a party to (KI-026)."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ava", "Text", REVIEWER)
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        other_id = next(a.id for a in flagged if a.author == HUMAN_WRITE)
+        contradiction = kb.backend.get_open_contradiction("default", entity.id, "Person.name")
+        assert contradiction is not None
+
+        with pytest.raises(CapabilityError, match="cannot resolve a contradiction"):
+            kb.resolve_contradiction(contradiction.id, other_id, REVIEWER)
+
+    def test_resolver_cannot_resolve_via_delegate_authored_assertion(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A disputed fact asserted by REVIEWER's delegate (acting_as)
+        counts the same as one REVIEWER authored directly - the delegation
+        chain doesn't launder around the self-resolution guard."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "erin@example.com",
+            kind="human",
+            auth_method="oidc",
+            owner=REVIEWER,
+            default_capability="write",
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ava", "Text", "erin@example.com", acting_as=REVIEWER)
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        delegated_id = next(a.id for a in flagged if a.author == "erin@example.com")
+        contradiction = kb.backend.get_open_contradiction("default", entity.id, "Person.name")
+        assert contradiction is not None
+
+        with pytest.raises(CapabilityError, match="cannot resolve a contradiction"):
+            kb.resolve_contradiction(contradiction.id, delegated_id, REVIEWER)

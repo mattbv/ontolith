@@ -196,6 +196,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `assertions()`'s composite index led with `namespace`, which no query filters on
   (single-namespace today), making it unusable — confirmed via `EXPLAIN QUERY PLAN` (full
   `SCAN`, not `SEARCH`). Added indexes matching the actual filter shapes in both backends
+- **HIGH:** `resolve_contradiction()` had no self-resolution guard (KI-026, found in a
+  whole-project audit) — a reviewer who authored one of a contradiction's disputed member
+  assertions could pick their own value as the winner, unilaterally settling a dispute they
+  were a party to. `accept_proposal`/`reject_proposal`/`request_changes` already blocked this
+  via their shared self-review check; `resolve_contradiction` now does too, and — unlike the
+  other three, which only check the specific action being taken — checks every member of the
+  contradiction, not just the winner, since an interested party shouldn't get to pick against
+  their own losing entry either. `docs/adr/ADR-0022-rest-write-review-admin.md` incorrectly
+  claimed this guard already existed; corrected.
 
 #### Security
 

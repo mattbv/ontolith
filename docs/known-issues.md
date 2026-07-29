@@ -515,9 +515,9 @@ The other 28 pre-existing mypy errors elsewhere in `conformance/` (untyped test 
 
 ---
 
-## KI-026 — `resolve_contradiction()` has no self-resolution guard
+## KI-026 — `resolve_contradiction()` has no self-resolution guard ✓ RESOLVED (M3)
 
-**Severity:** Architecture gap — governance-integrity hole; a reviewer can unilaterally win a dispute they are party to, with zero check
+**Severity:** Architecture gap — governance-integrity hole; a reviewer could unilaterally win a dispute they were party to, with zero check; now closed
 **Milestone target:** M3
 **SPEC reference:** SPEC §10.3 (contradiction resolution), ADR-0003 (self-review guard precedent)
 
@@ -533,7 +533,7 @@ Surfaced during a whole-project milestone audit (2026-07-29).
 
 ### Fix
 
-In `resolve_contradiction`, resolve each member assertion (`self.backend.get_assertion(member_id)`) and raise `CapabilityError` if `resolver` is the author or delegate of *any* member — not just the winner, since an interested party shouldn't get to pick against their own losing entry either. Add a conformance vector covering self-authored-winner and self-authored-loser-member cases. Correct ADR-0022's §2 claim once fixed.
+`resolve_contradiction` now resolves each member assertion (`self.backend.get_assertion(member_id)`) and raises `CapabilityError` if `resolver` is the author or delegate of *any* member — not just the winner, since an interested party shouldn't get to pick against their own losing entry either. Three new conformance vectors in `conformance/test_contradiction_resolution.py::TestResolveContradictionGuards` cover self-authored-winner, self-authored-losing-member, and delegate-authored cases. ADR-0022's §2 false claim corrected.
 
 ---
 
