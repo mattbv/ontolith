@@ -1,9 +1,10 @@
 """REST interface for Ontolith (SPEC §14.3, ADR-0021).
 
 Exposes read, propose, direct write, proposal review (accept/reject/
-request_changes), contradiction listing/flagging/resolution, namespace
-listing, and principal/token admin over HTTP. Full SPEC §14.3 resource
-parity (``/query`` offset pagination, GraphQL) is out of scope (KI-022).
+request_changes/resubmit), contradiction listing/flagging/resolution,
+namespace listing, and principal/token admin over HTTP. Full SPEC §14.3
+resource parity (``/query`` offset pagination, GraphQL) is out of scope
+(KI-022).
 
 Authentication (ADR-0014, reused unchanged): every route requires an
 ``Authorization: Bearer <token>`` header, resolved server-side via the
@@ -713,10 +714,13 @@ def create_rest_app(
 
     @app.get("/proposals")
     def list_proposals_route(
-        state: str | None = "require_review",
+        state: str | None = "pending",
         _principal: Principal = Depends(_resolve_principal),
     ) -> list[ProposalOut]:
-        """List proposals, defaulting to those pending review.
+        """List proposals, defaulting to those needing attention.
+
+        ``state="pending"`` (the default) merges ``require_review`` and
+        ``changes_requested`` — see ``Ontology.proposals`` (KI-027) for why.
 
         Pass ``state=all`` to list proposals in every state — a plain
         empty query string value can't express "no filter" unambiguously,
@@ -881,6 +885,33 @@ def create_rest_app(
             created_at=proposal.created_at.isoformat(),
             decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
             policy_reason=proposal.policy_reason,
+        )
+
+    # ------------------------------------------------------------------
+    # POST /proposals/{proposal_id}/resubmit
+    # ------------------------------------------------------------------
+
+    @app.post("/proposals/{proposal_id}/resubmit")
+    def resubmit_proposal_route(
+        proposal_id: str,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> ProposeOut:
+        """Resubmit a proposal after changes were requested (KI-027),
+        re-running policy evaluation against the unedited payload. Only the
+        proposal's own author or delegate may call this."""
+        proposal, decision = kb.resubmit(proposal_id, principal.id)
+        return ProposeOut(
+            proposal=ProposalOut(
+                id=proposal.id,
+                namespace=proposal.namespace,
+                author=proposal.author,
+                acting_as=proposal.acting_as,
+                state=proposal.state,
+                created_at=proposal.created_at.isoformat(),
+                decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
+                policy_reason=proposal.policy_reason,
+            ),
+            decision=type(decision).__name__,
         )
 
     # ------------------------------------------------------------------

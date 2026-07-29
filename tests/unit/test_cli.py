@@ -610,13 +610,40 @@ class TestProposalList:
         )  # write capability -> auto_accepted
         proposals = kb.proposals(state=None)
         kb.close()
-        assert len(proposals) == 1  # auto_accepted, invisible to the default require_review filter
+        assert len(proposals) == 1  # auto_accepted, invisible to the default "pending" filter
 
         default_result = runner.invoke(app, ["--db", str(db), "proposal", "list"])
         assert "No proposals found." in default_result.output
 
         all_result = runner.invoke(app, ["--db", str(db), "proposal", "list", "--all"])
         assert "auto_accepted" in all_result.output
+
+    def test_default_includes_changes_requested(self, temp_db: Path) -> None:
+        """KI-027: request_changes() moves a proposal out of require_review;
+        the CLI's default --state pending must still surface it."""
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        reviewer = kb.create_principal(
+            "carol@example.com", kind="human", default_capability="review"
+        )
+        bot = kb.create_principal(
+            "bot@example.com",
+            kind="ai",
+            auth_method="apikey",
+            owner=alice.id,
+            default_capability="propose",
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        proposal, _ = kb.propose(
+            entity.id, "Person.born", "1815", "Text", bot.id, model="test-model-v1"
+        )
+        kb.request_changes(proposal.id, reviewer.id)
+        kb.close()
+
+        result = runner.invoke(app, ["--db", str(temp_db), "proposal", "list"])
+        assert result.exit_code == 0
+        assert proposal.id in result.output
+        assert "changes_requested" in result.output
 
 
 class TestContradictionList:

@@ -635,7 +635,7 @@ class TestListProposalsRoute:
         response = client.get("/proposals")
         assert response.status_code == 401
 
-    def test_defaults_to_require_review(self, tmp_path: Path) -> None:
+    def test_defaults_to_pending(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)  # auto-accepted
@@ -652,6 +652,24 @@ class TestListProposalsRoute:
         assert len(body) == 1
         assert body[0]["state"] == "require_review"
         assert body[0]["author"] == AI
+
+    def test_pending_merges_changes_requested(self, tmp_path: Path) -> None:
+        """KI-027: request_changes() moves a proposal out of require_review;
+        the default "pending" query must still surface it, or a reviewer
+        monitoring GET /proposals loses track of it entirely."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Grace", "Text", AI, model="test-model")
+        kb.request_changes(proposal.id, REVIEWER)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get("/proposals", headers=_auth(token))
+
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body) == 1
+        assert body[0]["state"] == "changes_requested"
 
     def test_state_filter(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -1128,6 +1146,70 @@ class TestReviewProposalRoute:
         response = client.post(f"/proposals/{proposal.id}/review", json={}, headers=_auth(token))
         assert response.status_code == 403
         assert response.json()["code"] == "CAPABILITY_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# POST /proposals/{proposal_id}/resubmit
+# ---------------------------------------------------------------------------
+
+
+class TestResubmitProposalRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        kb.request_changes(proposal.id, REVIEWER)
+        client, _ = _client(kb)
+        response = client.post(f"/proposals/{proposal.id}/resubmit")
+        assert response.status_code == 401
+
+    def test_author_resubmits(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        kb.request_changes(proposal.id, REVIEWER)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(AI, author=ADMIN)
+
+        response = client.post(f"/proposals/{proposal.id}/resubmit", headers=_auth(token))
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["proposal"]["state"] == "require_review"
+        assert body["decision"] == "RequireReview"
+
+    def test_not_found_returns_404(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(AI, author=ADMIN)
+        response = client.post("/proposals/nonexistent/resubmit", headers=_auth(token))
+        assert response.status_code == 404
+        assert response.json()["code"] == "NOT_FOUND"
+
+    def test_unrelated_principal_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        kb.request_changes(proposal.id, REVIEWER)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+
+        response = client.post(f"/proposals/{proposal.id}/resubmit", headers=_auth(token))
+
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
+    def test_wrong_state_rejected(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(AI, author=ADMIN)
+
+        response = client.post(f"/proposals/{proposal.id}/resubmit", headers=_auth(token))
+
+        assert response.status_code == 400
+        assert response.json()["code"] == "VALIDATION_ERROR"
 
 
 # ---------------------------------------------------------------------------
