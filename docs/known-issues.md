@@ -515,6 +515,144 @@ The other 28 pre-existing mypy errors elsewhere in `conformance/` (untyped test 
 
 ---
 
+## KI-026 — `resolve_contradiction()` has no self-resolution guard
+
+**Severity:** Architecture gap — governance-integrity hole; a reviewer can unilaterally win a dispute they are party to, with zero check
+**Milestone target:** M3
+**SPEC reference:** SPEC §10.3 (contradiction resolution), ADR-0003 (self-review guard precedent)
+
+### Description
+
+`Ontology.resolve_contradiction(contradiction_id, winner_assertion_id, resolver)` (`src/ontolith/ontology.py:1405-1463`) checks that `resolver` has `review`/`admin` capability and is not AI-kind, but never checks whether `resolver` is the author (or delegate) of any member assertion in the contradiction — including the one being chosen as winner. `accept_proposal`/`reject_proposal`/`request_changes` all block exactly this via the shared `_require_reviewer` helper (`reviewer in (proposal.author, proposal.acting_as)`, ADR-0003's self-review guard); `resolve_contradiction` has no equivalent call anywhere in its body.
+
+Concretely: a human principal with `review` capability who authored one of two disputed static facts can call `resolve_contradiction(contradiction_id, their_own_assertion_id, their_own_id)` and win — the other party's assertion is retracted, theirs reactivated, with no guard preventing it. `conformance/test_contradiction_resolution.py`'s existing vectors contain no self-authored-winner case.
+
+`docs/adr/ADR-0022-rest-write-review-admin.md`'s §2 audit currently states this guard already exists for `resolve_contradiction`, grouping it with `accept_proposal`/`reject_proposal` — that claim is false for this method specifically.
+
+Surfaced during a whole-project milestone audit (2026-07-29).
+
+### Fix
+
+In `resolve_contradiction`, resolve each member assertion (`self.backend.get_assertion(member_id)`) and raise `CapabilityError` if `resolver` is the author or delegate of *any* member — not just the winner, since an interested party shouldn't get to pick against their own losing entry either. Add a conformance vector covering self-authored-winner and self-authored-loser-member cases. Correct ADR-0022's §2 claim once fixed.
+
+---
+
+## KI-027 — `request_changes()` produces a permanently stuck proposal, invisible to the default review queue
+
+**Severity:** Architecture gap — a shipped governance action strands data with no recovery path
+**Milestone target:** M3
+**SPEC reference:** SPEC §9.1 (proposal state machine — `changes_requested ──resubmit──▶ submitted` is a normative transition, not terminal)
+
+### Description
+
+Once `Ontology.request_changes()` (ADR-0022 update, ships alongside `POST /proposals/{id}/review`) moves a proposal to `changes_requested`, nothing in the codebase can move it anywhere else — `_require_reviewer` (`src/ontolith/ontology.py:1125-1163`) only accepts proposals in `("require_review", "under_review")`, so any further `accept_proposal`/`reject_proposal`/`request_changes` call raises `ValidationError`. No `resubmit` method exists anywhere (confirmed via grep for `changes_requested` across `src/`). `conformance/test_review_workflow.py`'s dead-end test (`test_changes_requested_is_a_dead_end_for_further_review`) pins this as expected behavior, not a bug to fix — the gap was known at ship time (ADR-0022's Update section names it as deliberately out of scope) but was never logged as its own tracked issue, only as ADR prose.
+
+Compounding this: `Ontology.proposals()` defaults to `state="require_review"` (`src/ontolith/ontology.py:1363`) — the call a reviewer would naturally make to see "what's pending" — which silently excludes `changes_requested` proposals. A reviewer must already know to pass `state="changes_requested"` or `state=None` to ever see a proposal again after requesting changes on it.
+
+Surfaced during a whole-project milestone audit (2026-07-29).
+
+### Fix
+
+Implement `Ontology.resubmit(proposal_id, author, ...)` (`changes_requested → submitted`, re-running policy evaluation against the possibly-revised payload) — the actual missing SPEC §9.1 transition. Until that lands, consider whether `proposals()`'s default filter should surface `changes_requested` alongside `require_review` so it isn't silently hidden from the default reviewer-facing query.
+
+---
+
+## KI-028 — `.min_confidence()`/`.trust_at_least()` reintroduce an N+1 backend-round-trip pattern
+
+**Severity:** Performance — unbounded per-entity (and per-assertion) backend round trips, unbenchmarked
+**Milestone target:** M3
+**SPEC reference:** Implementation Plan §9 (performance budgets)
+
+### Description
+
+`QueryBuilder._apply_confidence_trust_filters` (`src/ontolith/query/builder.py:216-235`) runs after `_base_candidates()` resolves the full pre-filter entity list — unbounded when neither `.where()` nor `.semantic()` is chained (`self._backend.entities(namespace=, concept=)` returns every entity of the concept). For each candidate, `_passes_confidence_trust` issues a separate `backend.assertions(subject=entity.id, status="active")` call, and `.trust_at_least()` additionally calls `backend.get_principal(author_id)` once per assertion, uncached even across repeated authors within the same query. `kb.query("Person").trust_at_least(5)` with no other filter on a 100k-entity concept issues on the order of 100k+ separate backend calls before `.limit()` is ever applied.
+
+This is the same defect class KI-001 was created and fixed for — reintroduced, apparently unnoticed, when `.min_confidence()`/`.trust_at_least()` shipped alongside `.semantic()` as part of KI-018's hybrid-retrieval resolution. `tests/benchmarks/test_hybrid_query.py` exercises `.semantic()` and `.semantic()+.where()` only; neither confidence nor trust filtering is benchmarked, so the regression is invisible to CI.
+
+Surfaced during a whole-project milestone audit (2026-07-29).
+
+### Fix
+
+Push `.min_confidence()`/`.trust_at_least()` into a SQL `EXISTS` subquery per filter, mirroring `entities_where()`'s existing per-predicate subquery pattern (both backends), instead of the current Python-side per-entity loop. Add a benchmark exercising both filters at realistic scale (mirroring `test_hybrid_query.py`'s existing large-KB fixture).
+
+---
+
+## KI-029 — MCP `ontolith.schema` and REST `GET /schema` omit `relations`
+
+**Severity:** Architecture gap — SPEC-required schema information is unreachable via two of the four primary interfaces
+**Milestone target:** M3
+**SPEC reference:** SPEC §14.4 (`ontolith.schema` MUST "Return concepts/relations/temporality")
+
+### Description
+
+`schema_tool` (`src/ontolith/interfaces/mcp.py:64-103`) iterates `concept_def.properties` only; `ConceptDef.relations` (`src/ontolith/schema/ir.py:58-73`, populated for every schema that declares a `Relation`) is never read. `GET /schema`'s `ConceptOut`/`get_schema` route (`src/ontolith/interfaces/rest.py:98-103`, `:495-...`) has the identical gap — no relations field on the response model at all.
+
+An agent or REST client inspecting the schema this way cannot see that a relation like `Person.employer` exists, or whether it's `time_varying` — exactly the information that predicts whether a subsequent proposal on that predicate will supersede or contradict (SPEC §10.1).
+
+Surfaced during a whole-project milestone audit (2026-07-29); flagged in a prior 2026-07-14 audit and not yet closed.
+
+### Fix
+
+Add a `relations` list (target concept, inverse, cardinality, temporality) alongside `properties` in both `schema_tool`'s dict output and REST's `ConceptOut`/`SchemaOut` models.
+
+---
+
+## KI-030 — `QueryBuilder.where()` silently no-ops on relation-traversal filter keys
+
+**Severity:** Test gap / DX — a documented example produces an empty result with no error
+**Milestone target:** M3
+**SPEC reference:** N/A — internal DX/correctness gap, not a SPEC deviation
+
+### Description
+
+`QueryBuilder`'s class docstring (`src/ontolith/query/builder.py:28-31`) advertises `kb.as_of("2025-01-01").query(Person).where(employer__name="Acme Corp")` as a working example; `.where()`'s own docstring (`:63-67`) still says "M2 will add relation traversal." `_qualified_filters()` (`:166-168`) compiles any keyword into the literal predicate string `f"{concept}.{key}"` — `employer__name` becomes the literal predicate `"Person.employer__name"`, which matches no assertion. Even a correctly-named relation-target filter (e.g. `employer="org-id"`) can't match, since `entities_where()`'s SQL (`store/{sqlite,duckdb}/backend.py`) only compares `value_lit`, never `value_ref`. `.where()` accepts any of this silently and returns an empty list — no error, no warning — for a pattern its own docstring calls working, two milestones after the "M2 will add" comment was written.
+
+Surfaced during a whole-project milestone audit (2026-07-29); flagged in a prior 2026-07-14 audit and not yet closed.
+
+### Fix
+
+Reject unknown/dunder-containing filter keys with `ValidationError` at `.where()` call time rather than silently compiling them into an unreachable predicate string. Correct the class docstring's example and `.where()`'s own docstring to the actual symbolic-equality-only contract, or record an ADR if relation traversal is being deliberately deferred rather than simply unbuilt.
+
+---
+
+## KI-031 — Schema `value_type`/`required` are declared but never enforced at write time
+
+**Severity:** Architecture gap — declared schema constraints are silently unenforced
+**Milestone target:** M3
+**SPEC reference:** SPEC §4 (constraints are validator-backed); Implementation Plan §4.3 ("validate at edges")
+
+### Description
+
+`Ontology._require_known_predicate` (`src/ontolith/ontology.py:397-409`) rejects an unknown predicate at write time but never checks the caller-supplied `value_type` against the schema-declared `PropertyDef.value_type` (`src/ontolith/schema/ir.py:12-27`), and nothing checks `PropertyDef.required`/`RelationDef.required` at all. A predicate declared `value_type: Integer` in schema currently accepts `assert_literal(..., value_type="Text", ...)` without error; a `required: true` property is never checked as present on an entity.
+
+A prior audit (2026-07-14) flagged this as partially open; cardinality is now enforced (`govern/conflict.py`, ADR-0017) and unknown predicates are now rejected, but the `value_type`/`required` remainder was never itself tracked as its own entry.
+
+Surfaced during a whole-project milestone audit (2026-07-29).
+
+### Fix
+
+Validate `value_type` against the schema-declared type in `_require_known_predicate` (or a sibling helper), raising `ValidationError` on mismatch. Decide and record (ADR) whether/how `required` is enforced at the core layer, given `RequiredFieldsValidator` already exists as a plugin-level alternative (KI-010) — the core-vs-plugin division of responsibility here needs to be an explicit decision, not silence.
+
+---
+
+## KI-032 — CLI has no `proposal accept`/`reject`/`review` commands
+
+**Severity:** Test gap / DX — one of SPEC's four primary interfaces cannot act on its own review queue
+**Milestone target:** M3
+**SPEC reference:** SPEC §14.2 (CLI command surface, `proposal {list|review}`)
+
+### Description
+
+`src/ontolith/interfaces/cli.py`'s `proposal_app` has exactly one subcommand, `list` (`:347`). `Ontology.accept_proposal`/`reject_proposal`/`request_changes` all exist, and REST exposes all three (`POST /proposals/{id}/accept|reject|review`), but the CLI — one of SPEC's four primary interfaces alongside SDK/REST/MCP — has no way to act on any of them. An operator using only the CLI can discover what's pending review (`proposal list`) but cannot accept, reject, or request changes on any of it.
+
+Surfaced during a whole-project milestone audit (2026-07-29).
+
+### Fix
+
+Add `ontolith proposal accept <id> --author`, `proposal reject <id> --author [--reason]`, and `proposal review <id> --author [--reason]` commands, mirroring the existing `principal issue-token`/`revoke-token` command shape (an `--author` option identifying the reviewer, calling straight through to the corresponding `Ontology` method).
+
+---
+
 ## Format
 
 Each entry follows this structure:
