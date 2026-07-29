@@ -82,23 +82,27 @@ not because `Ontology.contradictions()` self-gates — it doesn't, matching
 `Ontology.proposals()`). The eight: `assert_literal`/`assert_ref` require
 `write`/`admin` and hard-block AI-kind principals (ADR-0003) regardless of
 misconfigured capability; `accept_proposal`/`reject_proposal`/
-`resolve_contradiction` require `review`/`admin` and block AI-kind reviewers;
-`flag_contradiction` requires `propose`+; `issue_token`/`revoke_token`/
-`list_tokens` each call `Ontology.require_admin()` internally. The route
-handlers just resolve the principal from the bearer token, pass `.id`
-through, and let the domain exception surface through ADR-0021's existing
-`OntolithError` → HTTP
-
-**Correction (2026-07-29, KI-026):** this section originally also claimed
-`resolve_contradiction` rejected a resolver who authored one of the disputed
-members ("self-review guard"), grouping it with `accept_proposal`/
-`reject_proposal`. That was false — `resolve_contradiction` had no such
-check at all until KI-026's fix added one (a resolver is now blocked from
-being the author or delegate of *any* member assertion, not just the
-winner). `accept_proposal`/`reject_proposal`'s own self-review guard
-(`_require_reviewer`, ADR-0003) was and remains real; only the claim about
-`resolve_contradiction` was wrong.
+`request_changes`/`resolve_contradiction` require `review`/`admin`, block
+AI-kind reviewers, and reject a reviewer/resolver who is party to what
+they're reviewing — the first three via the shared `_require_reviewer`
+helper (author/delegate of the proposal), `resolve_contradiction` via its
+own check (author/delegate of *any* member assertion, not just the one
+being picked as winner — KI-026); `flag_contradiction` requires `propose`+;
+`issue_token`/`revoke_token`/`list_tokens` each call
+`Ontology.require_admin()` internally. The route handlers just resolve the
+principal from the bearer token, pass `.id` through, and let the domain
+exception surface through ADR-0021's existing `OntolithError` → HTTP
 mapping — identical shape to every route ADR-0021 shipped.
+
+**Correction (2026-07-29, KI-026):** the paragraph above originally claimed
+`resolve_contradiction` already rejected a resolver who authored one of the
+disputed members, grouping it with `accept_proposal`/`reject_proposal` as if
+all three shared one guard. That was false — `resolve_contradiction` had no
+such check at all until KI-026's fix added one. `accept_proposal`/
+`reject_proposal`/`request_changes`'s own self-review guard (shared
+`_require_reviewer`, ADR-0003) was and remains real; only the claim about
+`resolve_contradiction` was wrong. The paragraph above now describes the
+post-fix state accurately.
 
 **3. `POST /principals` is the one exception: `Ontology.create_principal`
 has no capability gate of its own.** Unlike every other write/admin method

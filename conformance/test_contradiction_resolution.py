@@ -91,6 +91,18 @@ class TestContradictionRaisedBy:
 
 
 class TestResolveContradiction:
+    def test_third_party_reviewer_can_resolve(self, make_kb: KbFactory) -> None:
+        """REVIEWER, party to neither disputed value, can resolve normally -
+        pins that KI-026's self-resolution guard doesn't block legitimate
+        resolutions, rather than relying implicitly on every other test in
+        this class using a reviewer unrelated to both members."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        contradiction_id, ada_id, _ = _open_contradiction(kb, entity.id)
+
+        resolved = kb.resolve_contradiction(contradiction_id, ada_id, REVIEWER)
+        assert resolved.state == "resolved"
+
     def test_resolve_sets_contradiction_state(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)

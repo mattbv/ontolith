@@ -186,10 +186,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   incoming assertion in a fresh contradiction (previously only the pre-existing member
   got one) and reconstructing flagged-status-at-t from `assertion_event` instead of
   trusting current status
-- **HIGH:** `accept_proposal`/`reject_proposal`/`resolve_contradiction` now reject a
-  reviewer who is the proposal's own author or delegate (`acting_as`) — self-review,
-  including via delegation chain, was previously possible for a misconfigured principal
-  with review capability
+- **HIGH:** `accept_proposal`/`reject_proposal` now reject a reviewer who is the
+  proposal's own author or delegate (`acting_as`) — self-review, including via
+  delegation chain, was previously possible for a misconfigured principal with review
+  capability. (`resolve_contradiction` was incorrectly believed to share this guard at
+  the time — it didn't, and wasn't fixed until KI-026, below.)
 - `ontolith.provenance` (MCP) and `flag_contradiction` fetched and deserialized every
   assertion in the KB to find one or two rows by ID; both now use the indexed
   `get_assertion(id)` lookup

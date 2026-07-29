@@ -518,12 +518,12 @@ The other 28 pre-existing mypy errors elsewhere in `conformance/` (untyped test 
 ## KI-026 — `resolve_contradiction()` has no self-resolution guard ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — governance-integrity hole; a reviewer could unilaterally win a dispute they were party to, with zero check; now closed
-**Milestone target:** M3
+**Milestone target:** M3 — resolved in `fix(govern): close resolve_contradiction self-resolution guard (KI-026)`
 **SPEC reference:** SPEC §10.3 (contradiction resolution), ADR-0003 (self-review guard precedent)
 
 ### Description
 
-`Ontology.resolve_contradiction(contradiction_id, winner_assertion_id, resolver)` (`src/ontolith/ontology.py:1405-1463`) checks that `resolver` has `review`/`admin` capability and is not AI-kind, but never checks whether `resolver` is the author (or delegate) of any member assertion in the contradiction — including the one being chosen as winner. `accept_proposal`/`reject_proposal`/`request_changes` all block exactly this via the shared `_require_reviewer` helper (`reviewer in (proposal.author, proposal.acting_as)`, ADR-0003's self-review guard); `resolve_contradiction` has no equivalent call anywhere in its body.
+`Ontology.resolve_contradiction(contradiction_id, winner_assertion_id, resolver)` (`src/ontolith/ontology.py`) checks that `resolver` has `review`/`admin` capability and is not AI-kind, but never checks whether `resolver` is the author (or delegate) of any member assertion in the contradiction — including the one being chosen as winner. `accept_proposal`/`reject_proposal`/`request_changes` all block exactly this via the shared `_require_reviewer` helper (`reviewer in (proposal.author, proposal.acting_as)`, ADR-0003's self-review guard); `resolve_contradiction` has no equivalent call anywhere in its body.
 
 Concretely: a human principal with `review` capability who authored one of two disputed static facts can call `resolve_contradiction(contradiction_id, their_own_assertion_id, their_own_id)` and win — the other party's assertion is retracted, theirs reactivated, with no guard preventing it. `conformance/test_contradiction_resolution.py`'s existing vectors contain no self-authored-winner case.
 
@@ -533,7 +533,9 @@ Surfaced during a whole-project milestone audit (2026-07-29).
 
 ### Fix
 
-`resolve_contradiction` now resolves each member assertion (`self.backend.get_assertion(member_id)`) and raises `CapabilityError` if `resolver` is the author or delegate of *any* member — not just the winner, since an interested party shouldn't get to pick against their own losing entry either. Three new conformance vectors in `conformance/test_contradiction_resolution.py::TestResolveContradictionGuards` cover self-authored-winner, self-authored-losing-member, and delegate-authored cases. ADR-0022's §2 false claim corrected.
+`resolve_contradiction` now resolves each member assertion (`self.backend.get_assertion(member_id)`) and raises `CapabilityError` if `resolver` is the author or delegate of *any* member — not just the winner, since an interested party shouldn't get to pick against their own losing entry either. All of this validation (state, membership, self-resolution) moved inside the existing `with self.backend.transaction():` block — a review pass caught that reading `contradiction.member_ids` before the transaction opened a real TOCTOU window (another thread could extend the same open contradiction via a concurrent `propose()` between the check and the write, and the new member would escape both the self-resolution check and the retraction loop). A member assertion that can't be resolved (`get_assertion` returns `None`) now raises `NotFoundError` rather than silently skipping the self-resolution check for it — assertions are append-only and never deleted, so a missing member is corruption, not a benign gap. Three new conformance vectors in `conformance/test_contradiction_resolution.py::TestResolveContradictionGuards` cover self-authored-winner, self-authored-losing-member, and delegate-authored cases. ADR-0022's §2 false claim corrected (it had also been copied into an already-written CHANGELOG entry — fixed there too).
+
+Two related, narrower gaps were found while fixing this and are tracked separately rather than expanding this fix's scope: KI-033 (`retract()` lets a party to an open contradiction unilaterally retract the *opposing* member, achieving a similar outcome through a different method) and KI-034 (extending an open contradiction can resurrect an already-`retracted` member back to `flagged`).
 
 ---
 
@@ -650,6 +652,40 @@ Surfaced during a whole-project milestone audit (2026-07-29).
 ### Fix
 
 Add `ontolith proposal accept <id> --author`, `proposal reject <id> --author [--reason]`, and `proposal review <id> --author [--reason]` commands, mirroring the existing `principal issue-token`/`revoke-token` command shape (an `--author` option identifying the reviewer, calling straight through to the corresponding `Ontology` method).
+
+---
+
+## KI-033 — `retract()` lets a party to an open contradiction unilaterally retract the opposing member
+
+**Severity:** Architecture gap — same governance outcome as KI-026, reachable through a different method that has no contradiction awareness at all
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §10.3 (contradiction resolution)
+
+### Description
+
+`Ontology.retract()` routes through `self.policy` like any other governed write; a human principal with `review` (or higher) capability auto-accepts under `ThresholdPolicy`. `retract()` performs no check on whether the target assertion is a `flagged` member of an open contradiction, nor whether the caller is a party to that contradiction (author/delegate of any of its members). A principal who authored one side of a disputed static fact can therefore retract the *opposing* member directly — reproduced: after such a retraction, the contradiction is left `open` with only the retracting party's own value still `flagged`, so a later legitimate resolver effectively has no real choice left to make.
+
+KI-026 closed the front door (`resolve_contradiction` itself); this is a side door reaching a similar outcome through `retract()`, which has no notion of contradictions at all today. Found while fixing KI-026, not introduced by it — pre-existing.
+
+### Fix
+
+Reject retraction of an assertion that is currently a `flagged` member of an open contradiction when the retracting principal is a party to that contradiction (author/delegate of any member) — mirroring KI-026's "any member, not just one side" reasoning. Needs a new conformance vector suite; likely requires `retract()` to look up whether the target assertion belongs to an open contradiction before evaluating policy, which it currently never does at all.
+
+---
+
+## KI-034 — Extending an open contradiction can resurrect an already-`retracted` member back to `flagged`
+
+**Severity:** Test gap — a documented lifecycle transition (`retracted` is meant to be terminal) doesn't hold under a specific sequence
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §5 (assertion lifecycle — `retracted` status)
+
+### Description
+
+Reproduced while investigating KI-033: if an assertion belonging to an open contradiction is retracted (e.g. via the KI-033 gap, or by any other means reaching `retract()`), a subsequent `propose()`/`assert_literal` on the same `(subject, predicate)` that extends the same open contradiction can flip that already-`retracted` assertion's status back to `flagged`. `retracted` is otherwise treated as a terminal status everywhere else in the codebase (SPEC §5's append-only lifecycle); this is the one path found so far where it isn't.
+
+### Fix
+
+Needs a design decision, not just a code fix: should conflict routing (`govern/conflict.py`) exclude `retracted` assertions from the set of "existing members" it can add to when extending a contradiction, treating a retraction as final regardless of the contradiction's own open/resolved state? Record as an ADR update once decided; add a conformance vector pinning the corrected behavior.
 
 ---
 
