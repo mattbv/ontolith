@@ -16,6 +16,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so the griffe-diff step below can resolve the PR's
+          # base ref (KI-020) — same reason commitlint's checkout does this.
+          fetch-depth: 0
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -42,6 +46,18 @@ jobs:
 
       - name: Docstring coverage
         run: uv run interrogate src/ontolith -c pyproject.toml
+
+      - name: Public API surface diff (informational, KI-020)
+        if: matrix.python-version == '3.12'
+        # warn-only pre-1.0 (Implementation Plan §5) — griffe's own default
+        # behavior already never fails the step, this comment just makes
+        # that explicit rather than implicit. Compares against the PR's
+        # base commit; on a push-to-main run (no PR context) compares
+        # against HEAD itself, i.e. a no-op — the meaningful comparison
+        # already happened during the PR's own run.
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || 'HEAD' }}
+        run: uv run python -m griffe check ontolith -s src -a "$BASE_REF" -f github
 
   commitlint:
     name: Commit message format

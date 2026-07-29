@@ -197,6 +197,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (single-namespace today), making it unusable — confirmed via `EXPLAIN QUERY PLAN` (full
   `SCAN`, not `SEARCH`). Added indexes matching the actual filter shapes in both backends
 
+#### Security
+
+- CI now runs `pip-audit`/`bandit`/`gitleaks`/SBOM generation (new `security.yml`, ADR-0026,
+  closes KI-020) and a `griffe check` public-API breaking-change diff (informational pre-1.0, in
+  `ci.yml`). Building the pass surfaced two real vulnerabilities, both fixed: `mcp` bumped to
+  `>=1.28.1,<2.0` (PYSEC-2026-3483) and `sqlite-vec`'s pin bumped to `0.1.3` (PYSEC-2026-1938,
+  `vec0` DELETE+INSERT workarounds from ADR-0020 re-verified against the new version).
+
 ### Security & Correctness Remediation (2026-07-06 – 2026-07-09)
 
 A project audit (`deep-reviewer` + `security-reviewer`) found a chained CRITICAL

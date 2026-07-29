@@ -36,6 +36,7 @@ We use the [MADR](https://adr.github.io/madr/) (Markdown Any Decision Records) f
 - [ADR-0021](ADR-0021-rest-interface.md) — **REST Interface — Read + Propose Slice** (`create_rest_app()` factory, bearer-token auth on all routes, 6 MCP-mirrored endpoints + `GET /proposals`, centralized error mapping, typed Pydantic responses)
 - [ADR-0022](ADR-0022-rest-write-review-admin.md) — **REST Interface — Write, Review, and Admin Slice** (direct write, proposal accept/reject/request_changes, contradiction list/flag/resolve, principal creation + token admin, `/principals` list, `/namespaces` list; `Ontology.create_principal` AI-owner bug fixed; namespace *creation* and multi-namespace scoping remain out of scope — project is still single-namespace throughout)
 - [ADR-0025](ADR-0025-policy-kb-parameter-and-source-quorum.md) — **PolicyStrategy `kb` Parameter and `SourceQuorum`** (`evaluate()` gains a required `kb: KbView` structural-Protocol parameter pinned to an `AsOfView` snapshot at proposal creation time; `SourceQuorum` built as the first KB-inspecting strategy)
+- [ADR-0026](ADR-0026-security-ci-hardening.md) — **Security CI-Hardening Pass** (new `security.yml`: pip-audit/bandit/gitleaks/SBOM, PR + weekly; `griffe check` public-API diff gate in `ci.yml`, warn-only pre-1.0; `mcp`/`sqlite-vec` bumped to fix 2 real CVEs; `nightly.yml`/`release.yml` remain out of scope)
 
 ## Decision Process
 
