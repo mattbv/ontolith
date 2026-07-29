@@ -121,6 +121,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `StorageBackend` gained a new required Protocol method,
   `list_namespaces() -> list[Namespace]` (SPEC §12.2, ADR-0022 update, closes
   KI-022) — any third-party `StorageBackend` implementation must add it.
+- `Ontology.resubmit(proposal_id, author)` (SPEC §9.1, ADR-0022 update, closes KI-027):
+  the missing `changes_requested → submitted → {policy}` transition —
+  `request_changes()` previously left a proposal permanently stuck once changed,
+  with no way back into the review pipeline. Only the proposal's own author or
+  delegate may call it; the existing payload is replayed unedited through a fresh
+  policy evaluation, exactly as a first `propose`/`propose_ref` submission. No
+  `ProposalEvent` is recorded for the resubmission itself, matching `propose()`'s
+  own auto-accept path. `POST /proposals/{proposal_id}/resubmit` (REST) wraps it,
+  returning the same `{proposal, decision}` shape as `POST /proposals`; CLI parity
+  is deferred to KI-032.
+- **Note:** `Ontology.proposals()`'s default changed from `state="require_review"` to
+  `state="pending"`, a new query-level alias merging `require_review` and
+  `changes_requested` — the other half of KI-027: even with `resubmit()` able to act
+  on a `changes_requested` proposal, it stayed invisible to the default review-queue
+  query. `GET /proposals` and `ontolith proposal list --state` both changed their
+  default to `"pending"` for the same reason; an explicit `state=` value still
+  returns a single, unmerged state.
 
 #### Fixed
 - **Breaking:** `Ontology.issue_token(principal_id, author)` now returns

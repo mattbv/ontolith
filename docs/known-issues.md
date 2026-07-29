@@ -539,10 +539,10 @@ Two related, narrower gaps were found while fixing this and are tracked separate
 
 ---
 
-## KI-027 — `request_changes()` produces a permanently stuck proposal, invisible to the default review queue
+## KI-027 — `request_changes()` produces a permanently stuck proposal, invisible to the default review queue ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — a shipped governance action strands data with no recovery path
-**Milestone target:** M3
+**Milestone target:** M3 — resolved in `feat(govern): add Ontology.resubmit(), close request_changes dead end (KI-027)`
 **SPEC reference:** SPEC §9.1 (proposal state machine — `changes_requested ──resubmit──▶ submitted` is a normative transition, not terminal)
 
 ### Description
@@ -555,7 +555,9 @@ Surfaced during a whole-project milestone audit (2026-07-29).
 
 ### Fix
 
-Implement `Ontology.resubmit(proposal_id, author, ...)` (`changes_requested → submitted`, re-running policy evaluation against the possibly-revised payload) — the actual missing SPEC §9.1 transition. Until that lands, consider whether `proposals()`'s default filter should surface `changes_requested` alongside `require_review` so it isn't silently hidden from the default reviewer-facing query.
+Added `Ontology.resubmit(proposal_id, author)` implementing SPEC §9.1's `changes_requested → submitted → {policy}` transition: only the proposal's own author or delegate may call it (the inverse of `_require_reviewer`'s self-review guard); the existing payload is replayed unedited through a fresh policy evaluation, exactly as a first submission via `propose`/`propose_ref`. `Ontology.accept_proposal`'s operation-replay loop was extracted into a shared `_replay_proposal_operations` helper so `resubmit`'s auto-accept branch doesn't duplicate it. `_finalize_non_accepted_decision` (shared with `propose`/`propose_ref`/`retract`) gained an `is_new` flag: `resubmit` re-decides an *existing* persisted row via `update_proposal_state`, where the original callers `INSERT` a brand-new one via `put_proposal` — reusing the insert path on an existing id raised a UNIQUE-constraint `StorageError`, caught by the conformance suite before this shipped. No `ProposalEvent` is recorded for the resubmission itself (an author action, not one of SPEC §9.4's five reviewer actions — `propose`'s own auto-accept path likewise records none). REST gained `POST /proposals/{id}/resubmit`; CLI/MCP parity is deferred to KI-032 (CLI proposal-review commands).
+
+`Ontology.proposals()`'s default changed from `state="require_review"` to `state="pending"`, a new query-level alias merging `require_review` and `changes_requested` — both are still-open proposals needing someone's attention, and without the merge a `changes_requested` proposal remained invisible to the default review-queue query even after `resubmit` existed to act on it. Passing a state explicitly (e.g. `state="require_review"`) still returns a single, unmerged state. `GET /proposals` and `ontolith proposal list --state` both default to `"pending"` for the same reason.
 
 ---
 

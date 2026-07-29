@@ -432,6 +432,53 @@ method — `list_principals`, `request_changes`, and now `list_namespaces` — a
 remaining named gaps (`/query` offset pagination, GraphQL) were always tracked as separate
 concerns, not blocked on "no backing method."
 
+## Update (2026-07-29): `resubmit()` closes the resubmission gap, KI-027
+
+The `request_changes()` update above named resubmission (`changes_requested ──resubmit──▶
+submitted`) as deliberately unaddressed and called `changes_requested` "currently a dead end."
+That gap was logged as its own tracked issue (KI-027, found during a whole-project milestone
+audit) and is now closed: new `Ontology.resubmit(proposal_id, author)` implements the transition,
+re-running policy evaluation against the existing (unedited) payload exactly as a first submission
+via `propose`/`propose_ref` does. Only the proposal's own author or delegate may call it — the
+inverse of `_require_reviewer`'s self-review guard used by `accept_proposal`/`reject_proposal`/
+`request_changes`: this is an author action, not a reviewer one, so the eligibility check requires
+the caller to *be* a party to the proposal rather than forbidding it.
+
+Two implementation details worth recording because they weren't obvious going in:
+
+- `accept_proposal`'s operation-replay loop (the `for op in proposal.payload.get("operations",
+  [])` block dispatching on `assert_literal`/`assert_ref`/`retract`) was extracted into a shared
+  `_replay_proposal_operations` helper so `resubmit`'s own auto-accept branch doesn't duplicate
+  it. Temporality is still re-resolved dynamically per operation at replay time, not trusted from
+  the payload snapshot — unchanged from `accept_proposal`'s existing behavior.
+- `_finalize_non_accepted_decision` (shared by `propose`/`propose_ref`/`retract` since before this
+  update) persists via `put_proposal`, an `INSERT` — correct for those three callers, which are
+  always creating a brand-new row. `resubmit` re-decides an *already-persisted* row, so reusing
+  `_finalize_non_accepted_decision` unmodified raised a `StorageError` (SQLite `UNIQUE constraint
+  failed: proposal.id`) the moment the re-evaluated policy landed on `reject`/`require_review`
+  again — caught by the conformance suite before this shipped, not in production. Fixed by adding
+  an `is_new` flag that switches the persistence call to `update_proposal_state` (an `UPDATE`) when
+  `False`; `resubmit` is the only caller that passes it.
+
+No `ProposalEvent` is recorded for the resubmission itself: `resubmit` isn't one of SPEC §9.4's
+five named reviewer actions (`assign`/`comment`/`accept`/`reject`/`request_changes`), and
+`propose`'s own auto-accept path likewise records no event on first submission — resubmit follows
+that precedent rather than accept/reject/request_changes's event-recording one.
+
+`POST /proposals/{proposal_id}/resubmit` (no request body; `principal.id` from auth supplies
+`author`) wraps it, returning the same `ProposeOut{proposal, decision}` shape `POST /proposals`
+does — CLI parity is deferred to KI-032, which already tracks the CLI's missing proposal-review
+commands as one item.
+
+Separately, `Ontology.proposals()`'s default changed from `state="require_review"` to
+`state="pending"` — a new query-level alias merging `require_review` and `changes_requested`.
+KI-027's audit finding named this half of the bug too: even with `resubmit()` now able to act on a
+`changes_requested` proposal, it stayed invisible to the default review-queue query a reviewer
+would naturally run. `GET /proposals` and `ontolith proposal list --state` both changed their
+default to `"pending"` for the same reason; passing a state explicitly still returns a single,
+unmerged state — `"pending"` is additive, not a replacement for `require_review` as a filter
+value.
+
 ## References
 
 - SPEC §14.3 (REST + GraphQL), §16 (error model), §8.3 (capabilities), §8.1
@@ -442,4 +489,4 @@ concerns, not blocked on "no backing method."
   foundation), ADR-0014 (MCP bearer-token authentication), ADR-0003 (agent
   identity, delegation, self-review guard), ADR-0015 (plugin capability
   isolation — states the project is still single-namespace throughout)
-- `docs/known-issues.md` KI-022 (now fully resolved)
+- `docs/known-issues.md` KI-022 (now fully resolved), KI-027 (resubmission gap, now resolved)
