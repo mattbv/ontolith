@@ -1564,6 +1564,10 @@ class SQLiteBackend:
             t_iso = as_of_time.isoformat()
             query += " AND created_at <= ?"
             params.append(t_iso)
+            # flagged_clause is always one of exactly two hardcoded literals
+            # (never caller-controlled) - not a SQL injection vector despite
+            # bandit's B608 heuristic flagging any keyword-string + variable
+            # concatenation regardless of the variable's actual provenance.
             flagged_clause = "" if include_flagged else " AND status != 'flagged'"
             for predicate, value in predicate_filters.items():
                 query += (
@@ -1573,7 +1577,7 @@ class SQLiteBackend:
                     " AND asserted_at <= ?"
                     " AND (valid_from IS NULL OR valid_from <= ?)"
                     " AND (valid_to IS NULL OR valid_to > ?)"
-                    f"{flagged_clause}"
+                    f"{flagged_clause}"  # nosec B608
                     ")"
                 )
                 params.extend([predicate, value, t_iso, t_iso, t_iso])
@@ -1668,10 +1672,13 @@ class SQLiteBackend:
             existing = cursor.execute(
                 "SELECT vec_rowid FROM vector_id_map WHERE scope = ? AND id = ?", (scope, id)
             ).fetchone()
-            cursor.execute(f"INSERT INTO {table}(embedding) VALUES (?)", (_pack_vector(vec),))
+            # table is built from `scope`, which _validate_scope() above
+            # already checked against the closed VECTOR_SCOPES set — not
+            # caller-controlled free text.
+            cursor.execute(f"INSERT INTO {table}(embedding) VALUES (?)", (_pack_vector(vec),))  # nosec B608
             new_rowid = cursor.lastrowid
             if existing is not None:
-                cursor.execute(f"DELETE FROM {table} WHERE rowid = ?", (existing["vec_rowid"],))
+                cursor.execute(f"DELETE FROM {table} WHERE rowid = ?", (existing["vec_rowid"],))  # nosec B608
             cursor.execute(
                 "INSERT OR REPLACE INTO vector_id_map (scope, id, vec_rowid) VALUES (?, ?, ?)",
                 (scope, id, new_rowid),
@@ -1711,18 +1718,24 @@ class SQLiteBackend:
                 f"but this scope is established at dimension {row['dim']}"
             )
 
+        # table is built from `scope`, already validated above (same
+        # reasoning as vector_upsert) — not caller-controlled free text.
         table = f"vector_{scope}"
         rows = cursor.execute(
-            f"SELECT rowid, distance FROM {table} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",
+            f"SELECT rowid, distance FROM {table} WHERE embedding MATCH ? ORDER BY distance LIMIT ?",  # nosec B608
             (_pack_vector(vec), k),
         ).fetchall()
         if not rows:
             return []
 
+        # placeholders is just N repetitions of the literal "?" (N = len(rowids),
+        # itself derived from `rows` above, never from external input) — an
+        # IN-clause arity string, not a value; the actual rowids are still
+        # bound as parameters below, not interpolated.
         rowids = [r["rowid"] for r in rows]
         placeholders = ",".join("?" for _ in rowids)
         id_rows = cursor.execute(
-            f"SELECT vec_rowid, id FROM vector_id_map WHERE scope = ? AND vec_rowid IN ({placeholders})",
+            f"SELECT vec_rowid, id FROM vector_id_map WHERE scope = ? AND vec_rowid IN ({placeholders})",  # nosec B608
             (scope, *rowids),
         ).fetchall()
         id_by_rowid = {r["vec_rowid"]: r["id"] for r in id_rows}

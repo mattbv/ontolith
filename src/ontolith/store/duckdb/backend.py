@@ -1442,6 +1442,9 @@ class DuckDBBackend:
         self._validate_scope(scope)
         self._ensure_vector_table(scope, len(vec))
         try:
+            # vector_{scope} is built from `scope`, already validated above
+            # against the closed VECTOR_SCOPES set — not caller-controlled
+            # free text.
             self.conn.execute(f"INSERT OR REPLACE INTO vector_{scope} VALUES (?, ?)", [id, vec])
         except duckdb.Error as e:
             raise StorageError(f"Failed to upsert vector (scope={scope}, id={id}): {e}") from e
@@ -1472,8 +1475,10 @@ class DuckDBBackend:
                 f"but this scope is established at dimension {row[0]}"
             )
 
+        # vector_{scope} is built from `scope`, already validated above
+        # (same reasoning as vector_upsert) — not caller-controlled free text.
         rows = self.conn.execute(
-            f"SELECT id, list_distance(embedding, ?) AS distance FROM vector_{scope} "
+            f"SELECT id, list_distance(embedding, ?) AS distance FROM vector_{scope} "  # nosec B608
             "ORDER BY distance LIMIT ?",
             [vec, k],
         ).fetchall()
@@ -1511,6 +1516,10 @@ class DuckDBBackend:
             t_iso = as_of_time.isoformat()
             query += " AND created_at <= ?"
             params.append(t_iso)
+            # flagged_clause is always one of exactly two hardcoded literals
+            # (never caller-controlled) - not a SQL injection vector despite
+            # bandit's B608 heuristic flagging any keyword-string + variable
+            # concatenation regardless of the variable's actual provenance.
             flagged_clause = "" if include_flagged else " AND status != 'flagged'"
             for predicate, value in predicate_filters.items():
                 query += (
@@ -1520,7 +1529,7 @@ class DuckDBBackend:
                     " AND asserted_at <= ?"
                     " AND (valid_from IS NULL OR valid_from <= ?)"
                     " AND (valid_to IS NULL OR valid_to > ?)"
-                    f"{flagged_clause}"
+                    f"{flagged_clause}"  # nosec B608
                     ")"
                 )
                 params.extend([predicate, value, t_iso, t_iso, t_iso])

@@ -25,7 +25,7 @@ dependencies = [
 	"python-ulid>=2.0",
 	# Required, not optional (SPEC §12.1 MUST): the default SQLite backend
 	# uses sqlite-vec for embeddings (ADR-0020).
-	"sqlite-vec==0.1.1", # pinned: pre-v1, breaking changes possible
+	"sqlite-vec==0.1.3", # pinned: pre-v1, breaking changes possible (bumped for PYSEC-2026-1938)
 ]
 
 [project.optional-dependencies]
@@ -33,7 +33,7 @@ store-duckdb = ["duckdb>=1.0"]
 rest = ["fastapi>=0.110", "uvicorn>=0.27"]
 graphql = ["strawberry-graphql>=0.219"]
 mcp = [
-    "mcp>=1.0",
+    "mcp>=1.28.1,<2.0", # >=1.28.1 fixes PYSEC-2026-3483; <2.0 avoids an unreviewed major bump
 ]
 interop = ["pyyaml>=6.0"]
 all = ["ontolith[rest,graphql,mcp,interop,store-duckdb]"]
@@ -56,9 +56,14 @@ dev = [
 	"types-PyYAML>=6.0",
 	"import-linter>=2.0",
 	"interrogate>=1.5",
+	# griffe's CLI ships as a separate distribution from the `griffe` library
+	# itself (KI-020) — used for the public-API-surface diff gate (ci.yml).
+	"griffecli>=2.0",
 	# Security
 	"bandit>=1.7",
 	"pip-audit>=2.7",
+	# SBOM generation for security.yml (Implementation Plan §7.1).
+	"cyclonedx-bom>=7.3.1",
 	# Documentation
 	"mkdocs-material>=9.5",
 	"mkdocstrings[python]>=0.24",
@@ -192,6 +197,16 @@ exclude = ["tests", "conformance", "docs"]
 verbose = 2
 quiet = false
 color = true
+
+[tool.bandit]
+# B101 (assert_used) fires on every `assert` in the codebase, including
+# internal invariant checks (e.g. `assert accepted is not None` after a
+# just-written row is re-fetched) that carry no security meaning — low
+# severity, already below the "no unsuppressed mediums+" gate threshold
+# (Implementation Plan §5), skipped here purely to keep the report
+# signal-only. Genuine B608 (SQL-injection-shaped) findings are suppressed
+# individually with `# nosec B608` plus a comment at each site, not here.
+skips = ["B101"]
 
 [tool.importlinter]
 root_packages = ["ontolith"]
