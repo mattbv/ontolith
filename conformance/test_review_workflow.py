@@ -479,8 +479,17 @@ class TestResubmitProposal:
         )
         kb.request_changes(proposal.id, "dave@example.com")
 
-        resubmitted, _ = kb.resubmit(proposal.id, "carol@example.com")
-        assert resubmitted.state in ("require_review", "auto_accepted")
+        resubmitted, decision = kb.resubmit(proposal.id, "carol@example.com")
+        # erin has propose capability + trust_level=0; carol (acting_as) has
+        # review capability but effective capability/trust is the more
+        # conservative of the two (SPEC §8.4) - deterministically
+        # require_review, not auto_accepted.
+        assert resubmitted.state == "require_review"
+        assert isinstance(decision, RequireReview)
+
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert events[-1].type == "resubmit"
+        assert events[-1].actor == "carol@example.com"
 
     def test_resubmit_auto_accept_applies_operations(self, make_kb: KbFactory) -> None:
         """When the re-evaluated policy auto-accepts, resubmit applies the
@@ -514,6 +523,9 @@ class TestResubmitProposal:
         assert stored.state == "auto_accepted"
         assert stored.decided_at == resubmitted.decided_at
 
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert [e.type for e in events] == ["request_changes", "resubmit"]
+
     def test_resubmit_reject_updates_existing_row(self, make_kb: KbFactory) -> None:
         """Rejecting a resubmission updates the existing proposal row
         (update_proposal_state) rather than attempting a second INSERT
@@ -540,6 +552,9 @@ class TestResubmitProposal:
         assert stored is not None
         assert stored.state == "rejected"
         assert stored.decided_at == rejected.decided_at
+
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert [e.type for e in events] == ["request_changes", "resubmit"]
 
     def test_unrelated_principal_cannot_resubmit(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)
@@ -859,6 +874,12 @@ class TestProposalAndContradictionListing:
 
         listed = kb.proposals(state="pending")
         assert {p.id for p in listed} == {under_review.id, changes_requested_proposal.id}
+        # Both proposals share created_at (FixedClock) - the merge's sort
+        # tie-break falls back to id, matching both backends' own
+        # `ORDER BY created_at DESC, id DESC` (MEDIUM-3).
+        assert [p.id for p in listed] == sorted(
+            [under_review.id, changes_requested_proposal.id], reverse=True
+        )
 
     def test_proposals_explicit_require_review_excludes_changes_requested(
         self, make_kb: KbFactory

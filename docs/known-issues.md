@@ -549,7 +549,7 @@ Two related, narrower gaps were found while fixing this and are tracked separate
 
 Once `Ontology.request_changes()` (ADR-0022 update, ships alongside `POST /proposals/{id}/review`) moves a proposal to `changes_requested`, nothing in the codebase can move it anywhere else — `_require_reviewer` (`src/ontolith/ontology.py:1125-1163`) only accepts proposals in `("require_review", "under_review")`, so any further `accept_proposal`/`reject_proposal`/`request_changes` call raises `ValidationError`. No `resubmit` method exists anywhere (confirmed via grep for `changes_requested` across `src/`). `conformance/test_review_workflow.py`'s dead-end test (`test_changes_requested_is_a_dead_end_for_further_review`) pins this as expected behavior, not a bug to fix — the gap was known at ship time (ADR-0022's Update section names it as deliberately out of scope) but was never logged as its own tracked issue, only as ADR prose.
 
-Compounding this: `Ontology.proposals()` defaults to `state="require_review"` (`src/ontolith/ontology.py:1363`) — the call a reviewer would naturally make to see "what's pending" — which silently excludes `changes_requested` proposals. A reviewer must already know to pass `state="changes_requested"` or `state=None` to ever see a proposal again after requesting changes on it.
+Compounding this: `Ontology.proposals()` defaults to `state="require_review"` (`src/ontolith/ontology.py`) — the call a reviewer would naturally make to see "what's pending" — which silently excludes `changes_requested` proposals. A reviewer must already know to pass `state="changes_requested"` or `state=None` to ever see a proposal again after requesting changes on it.
 
 Surfaced during a whole-project milestone audit (2026-07-29).
 
@@ -688,6 +688,24 @@ Reproduced while investigating KI-033: if an assertion belonging to an open cont
 ### Fix
 
 Needs a design decision, not just a code fix: should conflict routing (`govern/conflict.py`) exclude `retracted` assertions from the set of "existing members" it can add to when extending a contradiction, treating a retraction as final regardless of the contradiction's own open/resolved state? Record as an ADR update once decided; add a conformance vector pinning the corrected behavior.
+
+---
+
+## KI-035 — Proposal-transition methods validate state before opening the write transaction (TOCTOU)
+
+**Severity:** Architecture gap — data-integrity risk under real concurrent traffic, not yet triggered by any test (single-threaded today)
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §9.1 (proposal state machine)
+
+### Description
+
+`Ontology.accept_proposal`/`reject_proposal`/`request_changes`/`resubmit` (`src/ontolith/ontology.py`) each read the proposal, validate its current state (via `_require_reviewer` for the first three; inline in `resubmit`), and run policy evaluation — all *before* opening `with self.backend.transaction():`. Only the resulting writes are atomic; the read-validate window itself is not. Two concurrent calls that both observe the same pre-transition state (e.g. two `resubmit()` calls both reading `changes_requested`, or an `accept_proposal` racing a `reject_proposal` both reading `require_review`) can both pass validation and both reach the transactional write — under an auto-accepting policy this can replay the same proposal's operations twice.
+
+`resolve_contradiction`'s equivalent gap (found and fixed for KI-026: "a review pass caught that reading `contradiction.member_ids` before the transaction opened a real TOCTOU window") shows the fix pattern: move validation inside the transaction, re-reading the row instead of trusting the pre-transaction snapshot. This is the same class of bug applied to the proposal state machine's four transition methods, none of which received that fix. Found while re-reviewing the KI-027 `resubmit()` fix — pre-existing in `accept_proposal`/`reject_proposal`/`request_changes` before this branch, not introduced by it.
+
+### Fix
+
+For each of the four methods, move the state-validation re-check inside `with self.backend.transaction():`, re-reading the proposal row rather than trusting the value fetched before the transaction opened (mirroring KI-026's fix for `resolve_contradiction`). Policy evaluation itself can likely stay outside the transaction (it's read-only against a pinned `kb_view`), but the state check that gates whether its result is even applicable needs to run against the current row, inside the transaction, immediately before the write. Needs a conformance vector simulating the race (two evaluations racing the same pre-transition state) per method.
 
 ---
 

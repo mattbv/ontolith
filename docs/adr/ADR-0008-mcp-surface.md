@@ -25,6 +25,8 @@ The MCP (Model Context Protocol) server exposes Ontolith to AI agents as a tool.
 4. **`ontolith.provenance`** — Provenance projection for any assertion (read)
 5. **`ontolith.propose`** — Create a proposal (propose, NOT write)
 6. **`ontolith.flag_contradiction`** — Open/extend contradiction (propose, NOT write)
+7. **`ontolith.resubmit`** — Resubmit a `changes_requested` proposal (propose, NOT write; added
+   2026-07-29, see Update below, KI-027)
 
 **Forbidden Tools:**
 - ❌ `ontolith.write` — No direct write
@@ -94,6 +96,18 @@ The MCP (Model Context Protocol) server exposes Ontolith to AI agents as a tool.
 
 **No propose (read-only):**
 - Rejected: Agents can't contribute knowledge
+
+## Update (2026-07-29): `ontolith.resubmit` added, KI-027
+
+A 7th tool, **`ontolith.resubmit`**, was added (propose, NOT write) — full rationale and
+implementation notes are recorded in `ADR-0022`'s own 2026-07-29 update, not duplicated here. In
+short: AI proposals always route to `require_review` (ADR-0003), so an AI principal whose proposal
+lands in `changes_requested` has no write capability to fall back on — without this tool, MCP was
+the one interface where that state was a genuine dead end for its own author. `ontolith.resubmit`
+follows the exact same shape as `ontolith.propose`: it re-runs policy evaluation and cannot write
+or edit an assertion directly, so it does not widen the "no direct write" boundary this ADR
+establishes — it accepts only a `proposal_id` and a token-resolved principal, the same footprint as
+the tool it mirrors.
 
 ## References
 
