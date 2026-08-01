@@ -1,8 +1,10 @@
 """Conformance vectors for SPEC §9 review workflow.
 
-Tests accept_proposal()/reject_proposal()/request_changes() — the human-review
-path for proposals that ThresholdPolicy routes to require_review (e.g. AI
-principals). All tests use injected clocks and IDs.
+Tests accept_proposal()/reject_proposal()/request_changes()/resubmit() —
+the human-review path for proposals that ThresholdPolicy routes to
+require_review (e.g. AI principals), and the author-side path back to
+submitted after changes were requested (KI-027). All tests use injected
+clocks and IDs.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ from conformance.conftest import KbFactory
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
 from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
+from ontolith.govern.policy import AutoAccept, Decision, KbView, Reject, RequireReview
+from ontolith.identity import Principal
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 
@@ -22,6 +26,52 @@ HUMAN_AUTHOR = "alice@example.com"
 REVIEWER = "bob@example.com"
 AI_AUTHOR = "gpt-agent"
 AI_OWNER = HUMAN_AUTHOR
+
+
+class _RequireReviewThenAutoAccept:
+    """Stateful test policy: RequireReview on the first evaluate(),
+    AutoAccept on every call after. Lets a test drive a proposal through
+    changes_requested and then exercise resubmit()'s auto-accept branch —
+    unreachable via ThresholdPolicy alone, since AI proposals always
+    require review (ADR-0003) and there's no way to raise a principal's
+    trust_level after creation to flip a human proposal's routing."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def evaluate(
+        self,
+        proposal: object,
+        principal: Principal,
+        kb: KbView,
+        acting_as: Principal | None = None,
+    ) -> Decision:
+        self.calls += 1
+        if self.calls == 1:
+            return RequireReview(reviewers=[], reason="first pass: require review")
+        return AutoAccept(reason="second pass: auto accept")
+
+
+class _RequireReviewThenReject:
+    """Stateful test policy: RequireReview on the first evaluate(), Reject
+    on every call after — exercises resubmit()'s reject branch (an
+    existing, already-persisted proposal being rejected via
+    `update_proposal_state` rather than `put_proposal`, KI-027)."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def evaluate(
+        self,
+        proposal: object,
+        principal: Principal,
+        kb: KbView,
+        acting_as: Principal | None = None,
+    ) -> Decision:
+        self.calls += 1
+        if self.calls == 1:
+            return RequireReview(reviewers=[], reason="first pass: require review")
+        return Reject(reason="second pass: reject")
 
 
 def _kb(make_kb: KbFactory) -> Ontology:
@@ -317,10 +367,10 @@ class TestRequestChanges:
         assert events[0].actor == REVIEWER
         assert events[0].detail == "needs a source"
 
-    def test_changes_requested_is_a_dead_end_for_further_review(self, make_kb: KbFactory) -> None:
+    def test_changes_requested_is_not_pending_review(self, make_kb: KbFactory) -> None:
         """changes_requested is not "pending review" — accept/reject/
-        request_changes again must all raise, since nothing resubmits a
-        changes_requested proposal back to submitted yet (KI-022)."""
+        request_changes again must all raise. Only resubmit() (the
+        author-side action, KI-027) moves it back to submitted."""
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(
@@ -334,6 +384,229 @@ class TestRequestChanges:
             kb.reject_proposal(proposal.id, REVIEWER)
         with pytest.raises(ValidationError, match="not pending review"):
             kb.request_changes(proposal.id, REVIEWER)
+
+
+# ===========================================================================
+# Resubmit path (KI-027)
+# ===========================================================================
+
+
+class TestResubmitProposal:
+    """Author resubmits a changes_requested proposal — SPEC §9.1's
+    `changes_requested -> submitted -> {policy}` transition."""
+
+    def test_resubmit_moves_through_policy_again(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        kb.request_changes(proposal.id, REVIEWER)
+
+        resubmitted, decision = kb.resubmit(proposal.id, AI_AUTHOR)
+        # AI proposals always route to require_review (ADR-0003) - resubmit
+        # re-runs the same policy, so it lands back in require_review, not
+        # auto_accepted.
+        assert resubmitted.state == "require_review"
+        assert type(decision).__name__ == "RequireReview"
+
+        # A landing back in require_review re-opens the decision - the prior
+        # request_changes decided_at must not survive (HIGH-2/MEDIUM-6):
+        # confirm the persisted row agrees with the returned object, not
+        # just the in-memory return value.
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "require_review"
+        assert stored.decided_at is None
+
+    def test_resubmitted_proposal_can_then_be_accepted(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        kb.request_changes(proposal.id, REVIEWER)
+        resubmitted, _ = kb.resubmit(proposal.id, AI_AUTHOR)
+
+        accepted = kb.accept_proposal(resubmitted.id, REVIEWER)
+        assert accepted.state == "accepted"
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        assert len(active) == 1
+        assert active[0].value == "Ada"
+
+    def test_resubmit_always_records_a_proposal_event(self, make_kb: KbFactory) -> None:
+        """Unlike propose()'s own auto-accept path (which records no event
+        for a brand-new proposal), resubmit re-decides an already-persisted
+        row - a ProposalEvent(type="resubmit") is recorded regardless of
+        outcome, or a require_review outcome would leave no trace of when
+        policy last ran (KI-027 / ADR-0025 update)."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        kb.request_changes(proposal.id, REVIEWER, reason="needs a source")
+        kb.resubmit(proposal.id, AI_AUTHOR)
+
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert [e.type for e in events] == ["request_changes", "resubmit"]
+        assert events[1].actor == AI_AUTHOR
+
+    def test_delegate_can_resubmit(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "carol@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        kb.create_principal(
+            "erin@example.com",
+            kind="human",
+            auth_method="oidc",
+            owner="carol@example.com",
+            default_capability="propose",
+            trust_level=0,
+        )
+        kb.create_principal(
+            "dave@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            "erin@example.com",
+            acting_as="carol@example.com",
+        )
+        kb.request_changes(proposal.id, "dave@example.com")
+
+        resubmitted, decision = kb.resubmit(proposal.id, "carol@example.com")
+        # erin has propose capability + trust_level=0; carol (acting_as) has
+        # review capability but effective capability/trust is the more
+        # conservative of the two (SPEC §8.4) - deterministically
+        # require_review, not auto_accepted.
+        assert resubmitted.state == "require_review"
+        assert isinstance(decision, RequireReview)
+
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert events[-1].type == "resubmit"
+        assert events[-1].actor == "carol@example.com"
+
+    def test_resubmit_auto_accept_applies_operations(self, make_kb: KbFactory) -> None:
+        """When the re-evaluated policy auto-accepts, resubmit applies the
+        payload directly (mirroring propose()'s own auto-accept path)
+        instead of routing back through require_review."""
+        clock = FixedClock(T0)
+        ids = FixedIdProvider(["e-1", "a-1", "a-2", "prop-1", "prop-2"])
+        kb = make_kb(clock, ids, policy=_RequireReviewThenAutoAccept())
+        kb.create_principal(
+            HUMAN_AUTHOR, kind="human", auth_method="oidc", default_capability="write"
+        )
+        kb.create_principal(REVIEWER, kind="human", auth_method="oidc", default_capability="review")
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+
+        proposal, decision = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
+        assert isinstance(decision, RequireReview)
+        assert proposal.state == "require_review"
+        kb.request_changes(proposal.id, REVIEWER)
+
+        resubmitted, decision = kb.resubmit(proposal.id, HUMAN_AUTHOR)
+        assert isinstance(decision, AutoAccept)
+        assert resubmitted.state == "auto_accepted"
+        assert resubmitted.decided_at is not None
+
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        assert len(active) == 1
+        assert active[0].value == "Ada"
+
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "auto_accepted"
+        assert stored.decided_at == resubmitted.decided_at
+
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert [e.type for e in events] == ["request_changes", "resubmit"]
+
+    def test_resubmit_reject_updates_existing_row(self, make_kb: KbFactory) -> None:
+        """Rejecting a resubmission updates the existing proposal row
+        (update_proposal_state) rather than attempting a second INSERT
+        (put_proposal would conflict on the already-persisted id)."""
+        clock = FixedClock(T0)
+        ids = FixedIdProvider(["e-1", "prop-1"])
+        kb = make_kb(clock, ids, policy=_RequireReviewThenReject())
+        kb.create_principal(
+            HUMAN_AUTHOR, kind="human", auth_method="oidc", default_capability="write"
+        )
+        kb.create_principal(REVIEWER, kind="human", auth_method="oidc", default_capability="review")
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
+        kb.request_changes(proposal.id, REVIEWER)
+
+        rejected, decision = kb.resubmit(proposal.id, HUMAN_AUTHOR)
+        assert isinstance(decision, Reject)
+        assert rejected.state == "rejected"
+        assert rejected.decided_at is not None
+        assert kb.assertions(subject=entity.id, predicate="Person.name") == []
+
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "rejected"
+        assert stored.decided_at == rejected.decided_at
+
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert [e.type for e in events] == ["request_changes", "resubmit"]
+
+    def test_unrelated_principal_cannot_resubmit(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        kb.request_changes(proposal.id, REVIEWER)
+
+        with pytest.raises(CapabilityError, match="did not author"):
+            kb.resubmit(proposal.id, REVIEWER)
+
+    def test_unknown_author_raises_on_resubmit(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        kb.request_changes(proposal.id, REVIEWER)
+
+        with pytest.raises(AuthError, match="Principal not found"):
+            kb.resubmit(proposal.id, "nobody@example.com")
+
+    def test_unknown_proposal_raises_on_resubmit(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        with pytest.raises(NotFoundError, match="Proposal not found"):
+            kb.resubmit("nonexistent-id", AI_AUTHOR)
+
+    def test_resubmit_requires_changes_requested_state(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        assert proposal.state == "require_review"
+
+        with pytest.raises(ValidationError, match="not awaiting resubmission"):
+            kb.resubmit(proposal.id, AI_AUTHOR)
+
+    def test_already_resubmitted_proposal_cannot_be_resubmitted_again(
+        self, make_kb: KbFactory
+    ) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        kb.request_changes(proposal.id, REVIEWER)
+        kb.resubmit(proposal.id, AI_AUTHOR)
+
+        with pytest.raises(ValidationError, match="not awaiting resubmission"):
+            kb.resubmit(proposal.id, AI_AUTHOR)
 
 
 # ===========================================================================
@@ -580,6 +853,51 @@ class TestProposalAndContradictionListing:
 
         listed = kb.proposals()
         assert [p.id for p in listed] == [pending.id]
+
+    def test_proposals_pending_merges_require_review_and_changes_requested(
+        self, make_kb: KbFactory
+    ) -> None:
+        """KI-027: request_changes() previously moved a proposal out of
+        require_review with no query-level way to see it and every other
+        still-open proposal together. state="pending" is an explicit,
+        documented alias that merges both (it is deliberately NOT the
+        default - see Ontology.proposals's docstring for why)."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        under_review, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        changes_requested_proposal, _ = kb.propose(
+            entity.id, "Person.born", "1815", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        kb.request_changes(changes_requested_proposal.id, REVIEWER)
+
+        listed = kb.proposals(state="pending")
+        assert {p.id for p in listed} == {under_review.id, changes_requested_proposal.id}
+        # Both proposals share created_at (FixedClock) - the merge's sort
+        # tie-break falls back to id, matching both backends' own
+        # `ORDER BY created_at DESC, id DESC` (MEDIUM-3).
+        assert [p.id for p in listed] == sorted(
+            [under_review.id, changes_requested_proposal.id], reverse=True
+        )
+
+    def test_proposals_explicit_require_review_excludes_changes_requested(
+        self, make_kb: KbFactory
+    ) -> None:
+        """Passing state="require_review" explicitly is a single, unmerged
+        filter - only the "pending" alias merges states."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        under_review, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        changes_requested_proposal, _ = kb.propose(
+            entity.id, "Person.born", "1815", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        kb.request_changes(changes_requested_proposal.id, REVIEWER)
+
+        listed = kb.proposals(state="require_review")
+        assert [p.id for p in listed] == [under_review.id]
 
     def test_proposals_state_none_returns_all(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)

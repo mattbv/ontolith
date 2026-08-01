@@ -539,23 +539,25 @@ Two related, narrower gaps were found while fixing this and are tracked separate
 
 ---
 
-## KI-027 — `request_changes()` produces a permanently stuck proposal, invisible to the default review queue
+## KI-027 — `request_changes()` produces a permanently stuck proposal, invisible to the default review queue ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — a shipped governance action strands data with no recovery path
-**Milestone target:** M3
+**Milestone target:** M3 — resolved in `feat(govern): add Ontology.resubmit(), close request_changes dead end (KI-027)`
 **SPEC reference:** SPEC §9.1 (proposal state machine — `changes_requested ──resubmit──▶ submitted` is a normative transition, not terminal)
 
 ### Description
 
 Once `Ontology.request_changes()` (ADR-0022 update, ships alongside `POST /proposals/{id}/review`) moves a proposal to `changes_requested`, nothing in the codebase can move it anywhere else — `_require_reviewer` (`src/ontolith/ontology.py:1125-1163`) only accepts proposals in `("require_review", "under_review")`, so any further `accept_proposal`/`reject_proposal`/`request_changes` call raises `ValidationError`. No `resubmit` method exists anywhere (confirmed via grep for `changes_requested` across `src/`). `conformance/test_review_workflow.py`'s dead-end test (`test_changes_requested_is_a_dead_end_for_further_review`) pins this as expected behavior, not a bug to fix — the gap was known at ship time (ADR-0022's Update section names it as deliberately out of scope) but was never logged as its own tracked issue, only as ADR prose.
 
-Compounding this: `Ontology.proposals()` defaults to `state="require_review"` (`src/ontolith/ontology.py:1363`) — the call a reviewer would naturally make to see "what's pending" — which silently excludes `changes_requested` proposals. A reviewer must already know to pass `state="changes_requested"` or `state=None` to ever see a proposal again after requesting changes on it.
+Compounding this: `Ontology.proposals()` defaults to `state="require_review"` (`src/ontolith/ontology.py`) — the call a reviewer would naturally make to see "what's pending" — which silently excludes `changes_requested` proposals. A reviewer must already know to pass `state="changes_requested"` or `state=None` to ever see a proposal again after requesting changes on it.
 
 Surfaced during a whole-project milestone audit (2026-07-29).
 
 ### Fix
 
-Implement `Ontology.resubmit(proposal_id, author, ...)` (`changes_requested → submitted`, re-running policy evaluation against the possibly-revised payload) — the actual missing SPEC §9.1 transition. Until that lands, consider whether `proposals()`'s default filter should surface `changes_requested` alongside `require_review` so it isn't silently hidden from the default reviewer-facing query.
+Added `Ontology.resubmit(proposal_id, author)` implementing SPEC §9.1's `changes_requested → submitted → {policy}` transition: only the proposal's own author or delegate may call it (the inverse of `_require_reviewer`'s self-review guard); the existing payload is replayed unedited through a fresh policy evaluation, but — unlike `propose`/`propose_ref` — the `kb_view` pinned for that evaluation is the *resubmission* instant, not `proposal.created_at` (ADR-0025 update): the proposal already exists, so a KB-reading `PolicyStrategy` must see what's true now. `Ontology.accept_proposal`'s operation-replay loop was extracted into a shared `_replay_proposal_operations` helper so `resubmit`'s auto-accept branch doesn't duplicate it. `_finalize_non_accepted_decision` (shared with `propose`/`propose_ref`/`retract`) gained an `is_new` flag: `resubmit` re-decides an *existing* persisted row via `update_proposal_state`, where the original callers `INSERT` a brand-new one via `put_proposal` — reusing the insert path on an existing id raised a UNIQUE-constraint `StorageError`, caught by the conformance suite before this shipped. Unlike `propose`'s own auto-accept path (which records no event for a brand-new proposal), `resubmit` always records a `ProposalEvent(type="resubmit")` regardless of outcome — it re-decides an already-persisted row, and a `require_review` outcome with no event would leave no trace of when policy last ran. REST gained `POST /proposals/{id}/resubmit`, MCP gained `ontolith.resubmit` (the only MCP-exposed way for an AI author to act on its own `changes_requested` proposal, since AI proposals always route to require_review per ADR-0003 and carry no write fallback); CLI parity (an explicit `ontolith proposal resubmit` command, vs. the SDK method already reachable through `ontolith proposal list --state pending` for discovery) is deferred to KI-032 (CLI proposal-review commands).
+
+`Ontology.proposals()` gained a `state="pending"` query-level alias merging `require_review` and `changes_requested` — both are still-open proposals needing someone's attention, and without it a `changes_requested` proposal was invisible to any single-state query even after `resubmit` existed to act on it. `"pending"` is deliberately **not** the default: the canonical reviewer loop (`for p in kb.proposals(): kb.accept_proposal(p.id, ...)`) assumes every returned proposal is reviewer-actionable, which is only true of `require_review` — `changes_requested` proposals raise `ValidationError` from `accept_proposal`/`reject_proposal`. The default stays `state="require_review"`; pass `state="pending"` explicitly (`GET /proposals?state=pending`, `ontolith proposal list --state pending`) to see both.
 
 ---
 
@@ -686,6 +688,24 @@ Reproduced while investigating KI-033: if an assertion belonging to an open cont
 ### Fix
 
 Needs a design decision, not just a code fix: should conflict routing (`govern/conflict.py`) exclude `retracted` assertions from the set of "existing members" it can add to when extending a contradiction, treating a retraction as final regardless of the contradiction's own open/resolved state? Record as an ADR update once decided; add a conformance vector pinning the corrected behavior.
+
+---
+
+## KI-035 — Proposal-transition methods validate state before opening the write transaction (TOCTOU)
+
+**Severity:** Architecture gap — data-integrity risk under real concurrent traffic, not yet triggered by any test (single-threaded today)
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §9.1 (proposal state machine)
+
+### Description
+
+`Ontology.accept_proposal`/`reject_proposal`/`request_changes`/`resubmit` (`src/ontolith/ontology.py`) each read the proposal, validate its current state (via `_require_reviewer` for the first three; inline in `resubmit`), and run policy evaluation — all *before* opening `with self.backend.transaction():`. Only the resulting writes are atomic; the read-validate window itself is not. Two concurrent calls that both observe the same pre-transition state (e.g. two `resubmit()` calls both reading `changes_requested`, or an `accept_proposal` racing a `reject_proposal` both reading `require_review`) can both pass validation and both reach the transactional write — under an auto-accepting policy this can replay the same proposal's operations twice.
+
+`resolve_contradiction`'s equivalent gap (found and fixed for KI-026: "a review pass caught that reading `contradiction.member_ids` before the transaction opened a real TOCTOU window") shows the fix pattern: move validation inside the transaction, re-reading the row instead of trusting the pre-transaction snapshot. This is the same class of bug applied to the proposal state machine's four transition methods, none of which received that fix. Found while re-reviewing the KI-027 `resubmit()` fix — pre-existing in `accept_proposal`/`reject_proposal`/`request_changes` before this branch, not introduced by it.
+
+### Fix
+
+For each of the four methods, move the state-validation re-check inside `with self.backend.transaction():`, re-reading the proposal row rather than trusting the value fetched before the transaction opened (mirroring KI-026's fix for `resolve_contradiction`). Policy evaluation itself can likely stay outside the transaction (it's read-only against a pinned `kb_view`), but the state check that gates whether its result is even applicable needs to run against the current row, inside the transaction, immediately before the write. Needs a conformance vector simulating the race (two evaluations racing the same pre-transition state) per method.
 
 ---
 

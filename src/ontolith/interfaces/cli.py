@@ -359,6 +359,8 @@ def list_proposals(
 
     Without this, a reviewer has no way to discover what route_to_review
     (SPEC §10.3) routed to them short of querying the backend directly.
+    ``--state pending`` merges ``require_review`` and ``changes_requested``
+    — see ``Ontology.proposals`` (KI-027) for why that isn't the default.
     """
     kb = _kb()
     try:

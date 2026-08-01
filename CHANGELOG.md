@@ -121,6 +121,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** `StorageBackend` gained a new required Protocol method,
   `list_namespaces() -> list[Namespace]` (SPEC §12.2, ADR-0022 update, closes
   KI-022) — any third-party `StorageBackend` implementation must add it.
+- `Ontology.resubmit(proposal_id, author)` (SPEC §9.1, ADR-0022 update, closes KI-027):
+  the missing `changes_requested → submitted → {policy}` transition —
+  `request_changes()` previously left a proposal permanently stuck once changed,
+  with no way back into the review pipeline. Only the proposal's own author or
+  delegate may call it; the existing payload is replayed unedited through a fresh
+  policy evaluation, evaluated against the resubmission instant rather than the
+  proposal's original `created_at`. A `ProposalEvent(type="resubmit")` is always
+  recorded, regardless of outcome. `POST /proposals/{proposal_id}/resubmit` (REST)
+  and `ontolith.resubmit` (MCP) both wrap it, returning the same `{proposal,
+  decision}` shape as `POST /proposals`; CLI parity is deferred to KI-032.
+- `Ontology.proposals()` (and `GET /proposals`, `ontolith proposal list --state`)
+  gained a `state="pending"` query-level alias merging `require_review` and
+  `changes_requested` — the other half of KI-027: even with `resubmit()` able to act
+  on a `changes_requested` proposal, it was previously invisible to any single-state
+  query a reviewer would naturally run. `"pending"` is an explicit opt-in, not the
+  default (which remains `state="require_review"`) — a canonical reviewer loop
+  (`for p in kb.proposals(): kb.accept_proposal(p.id, ...)`) assumes every returned
+  proposal is reviewer-actionable, which `changes_requested` proposals are not.
 
 #### Fixed
 - **Breaking:** `Ontology.issue_token(principal_id, author)` now returns

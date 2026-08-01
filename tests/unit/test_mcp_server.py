@@ -1,6 +1,6 @@
 """Unit tests for the MCP server (ADR-0008, ADR-0014).
 
-Verifies that all 6 tools return the correct structure, that the no-write
+Verifies that all 7 tools return the correct structure, that the no-write
 invariant holds, and that the acting principal is always resolved from a
 verified bearer token (ADR-0014), never a caller-supplied ID. Tests run
 against a real in-memory SQLite KB.
@@ -584,7 +584,7 @@ class TestProposeTool:
         assert tool_names.isdisjoint(forbidden)
 
     def test_all_required_tools_registered(self, tmp_path: Path) -> None:
-        """ADR-0008: all 6 required tools must be present."""
+        """ADR-0008 plus resubmit (KI-027): all 7 required tools must be present."""
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}
@@ -595,6 +595,7 @@ class TestProposeTool:
             "ontolith.provenance",
             "ontolith.propose",
             "ontolith.flag_contradiction",
+            "ontolith.resubmit",
         }
         assert required.issubset(tool_names)
 
@@ -774,3 +775,81 @@ class TestFlagContradictionTool:
         assert result["action"] == "extended"
         still_flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
         assert {a.id for a in still_flagged} == {flagged[0].id, flagged[1].id, a3.id}
+
+
+# ---------------------------------------------------------------------------
+# ontolith.resubmit
+# ---------------------------------------------------------------------------
+
+
+class TestResubmitTool:
+    def test_resubmit_moves_through_policy_again(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="test-model-v1")
+        kb.request_changes(proposal.id, REVIEWER)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.resubmit").fn(
+            proposal_id=proposal.id,
+            token=kb.issue_token(AI, author=ADMIN)[0],
+        )
+
+        # AI proposals always route to require_review (ADR-0003).
+        assert result["proposal"]["state"] == "require_review"
+        assert result["decision"] == "RequireReview"
+
+    def test_resubmit_unrelated_principal_returns_capability_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="test-model-v1")
+        kb.request_changes(proposal.id, REVIEWER)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.resubmit").fn(
+            proposal_id=proposal.id,
+            token=kb.issue_token(REVIEWER, author=ADMIN)[0],
+        )
+
+        assert "error" in result
+        assert result["code"] == "capability_error"
+
+    def test_resubmit_unknown_proposal_returns_not_found(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.resubmit").fn(
+            proposal_id="nonexistent-id",
+            token=kb.issue_token(AI, author=ADMIN)[0],
+        )
+
+        assert "error" in result
+        assert result["code"] == "not_found"
+
+    def test_resubmit_wrong_state_returns_validation_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="test-model-v1")
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.resubmit").fn(
+            proposal_id=proposal.id,
+            token=kb.issue_token(AI, author=ADMIN)[0],
+        )
+
+        assert "error" in result
+        assert result["code"] == "validation_error"
+
+    def test_resubmit_invalid_token_returns_auth_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="test-model-v1")
+        kb.request_changes(proposal.id, REVIEWER)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.resubmit").fn(
+            proposal_id=proposal.id,
+            token="not-a-real-token",
+        )
+
+        assert "error" in result
+        assert result["code"] == "auth_error"

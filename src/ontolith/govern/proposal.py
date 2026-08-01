@@ -59,19 +59,25 @@ class Proposal(BaseModel):
 
 
 class ProposalEvent(BaseModel):
-    """A structured review action recorded against a proposal (SPEC §9.4).
+    """A structured action recorded against a proposal (SPEC §9.4 plus
+    `resubmit`, KI-027).
 
-    Currently covers the three review actions that exist as Ontology methods:
-    accept, reject, and request_changes. assign/comment are not implemented
-    as methods yet, so no event type exists for them — this is a scoped
-    subset of SPEC §9.4's full action vocabulary, not the complete review
-    workflow.
+    Covers the three SPEC §9.4 review actions implemented as Ontology
+    methods (accept, reject, request_changes) and `resubmit` — an author
+    action, not a reviewer one, but recorded here anyway because
+    `resubmit` re-evaluates policy against an already-persisted proposal
+    (ADR-0025's `kb_view` pin is the resubmission instant, not
+    `proposal.created_at`) and without an event, a `require_review`
+    outcome would leave no trace of when that evaluation happened.
+    assign/comment are not implemented as methods yet, so no event type
+    exists for them — this is a scoped subset of SPEC §9.4's full action
+    vocabulary, not the complete review workflow.
 
     Attributes:
         id: Unique event ID (ULID)
         proposal_id: Proposal this event was recorded against
-        actor: Principal ID who performed the review action
-        type: Which review action this event records
+        actor: Principal ID who performed the action
+        type: Which action this event records
         detail: Optional free-text detail (e.g. a rejection reason)
         at: When the action occurred
     """
@@ -79,7 +85,7 @@ class ProposalEvent(BaseModel):
     id: str
     proposal_id: str
     actor: str
-    type: Literal["accept", "reject", "request_changes"]
+    type: Literal["accept", "reject", "request_changes", "resubmit"]
     detail: str | None = None
     at: datetime
 

@@ -481,7 +481,14 @@ class StorageBackend(Protocol):
         Args:
             proposal_id: Proposal to update
             state: New state (auto_accepted, require_review, rejected, etc.)
-            decided_at: ISO timestamp of the decision
+            decided_at: ISO timestamp of the decision. Set unconditionally,
+                including to None — unlike policy_reason, passing None
+                clears the stored value rather than leaving it unchanged.
+                `Ontology.resubmit` (KI-027) relies on this to re-open an
+                already-decided proposal: a resubmission that lands back in
+                require_review is not yet decided again, and must clear the
+                prior decided_at rather than keep the stale value from the
+                request_changes decision it's superseding.
             policy_reason: Human-readable reason from policy engine. If None,
                 the stored value is left unchanged (not cleared) — the
                 policy-engine reason set at proposal-creation time is

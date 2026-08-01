@@ -3,13 +3,14 @@
 Exposes read/propose/flag tools to AI agents. No direct write tool is exposed;
 all mutations flow through the proposal/policy pipeline.
 
-Tools (ADR-0008):
+Tools (ADR-0008, plus resubmit added for KI-027):
   ontolith.schema           — read concept/relation definitions
   ontolith.get              — fetch entity + current assertions
   ontolith.query            — symbolic entity retrieval
   ontolith.provenance       — full provenance trail for an assertion
   ontolith.propose          — create a proposal (NOT write)
   ontolith.flag_contradiction — open/extend a contradiction for review
+  ontolith.resubmit         — resubmit a changes_requested proposal (NOT write)
 
 Authentication (ADR-0014): every tool, reads included, takes a bearer
 ``token``. The server resolves the token to a Principal via the injected
@@ -439,6 +440,60 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             "member_ids": [assertion_id_a, assertion_id_b],
             "action": action,
             "raised_by": contradiction.raised_by,
+        }
+
+    # ------------------------------------------------------------------
+    # ontolith.resubmit — resubmit a changes_requested proposal (NOT write)
+    # ------------------------------------------------------------------
+
+    @mcp.tool(name="ontolith.resubmit")
+    def resubmit_tool(proposal_id: str, token: str) -> dict[str, Any]:
+        """Resubmit a proposal after changes were requested (KI-027).
+
+        Re-evaluates policy against a fresh view of the knowledge base,
+        same as ``ontolith.propose`` — this is not a direct write. Only the
+        proposal's own author (or delegating principal) may call this; the
+        acting principal is resolved from ``token`` (ADR-0014), never taken
+        as a caller-supplied ID. This is the only MCP-exposed way for an AI
+        principal to act on a ``changes_requested`` proposal it authored —
+        AI proposals always route to require_review (ADR-0003), so an AI
+        author reaching changes_requested has no write capability to fall
+        back on outside this tool.
+
+        Args:
+            proposal_id: ID of the proposal to resubmit
+            token: Bearer token identifying the calling principal (ADR-0014)
+
+        Returns:
+            Dict with "proposal" (id, state, policy_reason, decided_at) and
+            "decision" type, or "error".
+        """
+        from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
+
+        try:
+            author = auth_provider.resolve(token).id
+        except AuthError as exc:
+            return {"error": str(exc), "code": "auth_error"}
+
+        try:
+            proposal, decision = kb.resubmit(proposal_id, author)
+        except AuthError as exc:
+            return {"error": str(exc), "code": "auth_error"}
+        except CapabilityError as exc:
+            return {"error": str(exc), "code": "capability_error"}
+        except NotFoundError as exc:
+            return {"error": str(exc), "code": "not_found"}
+        except ValidationError as exc:
+            return {"error": str(exc), "code": "validation_error"}
+
+        return {
+            "proposal": {
+                "id": proposal.id,
+                "state": proposal.state,
+                "policy_reason": proposal.policy_reason,
+                "decided_at": proposal.decided_at.isoformat() if proposal.decided_at else None,
+            },
+            "decision": type(decision).__name__,
         }
 
     return mcp
