@@ -714,13 +714,16 @@ def create_rest_app(
 
     @app.get("/proposals")
     def list_proposals_route(
-        state: str | None = "pending",
+        state: str | None = "require_review",
         _principal: Principal = Depends(_resolve_principal),
     ) -> list[ProposalOut]:
-        """List proposals, defaulting to those needing attention.
+        """List proposals, defaulting to those pending review.
 
-        ``state="pending"`` (the default) merges ``require_review`` and
-        ``changes_requested`` — see ``Ontology.proposals`` (KI-027) for why.
+        Pass ``state=pending`` to merge ``require_review`` and
+        ``changes_requested`` — see ``Ontology.proposals`` (KI-027) for why
+        that isn't the default: a caller iterating the default result and
+        calling accept/reject on each entry would break the moment a
+        ``changes_requested`` proposal showed up in it.
 
         Pass ``state=all`` to list proposals in every state — a plain
         empty query string value can't express "no filter" unambiguously,

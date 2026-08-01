@@ -635,7 +635,7 @@ class TestListProposalsRoute:
         response = client.get("/proposals")
         assert response.status_code == 401
 
-    def test_defaults_to_pending(self, tmp_path: Path) -> None:
+    def test_defaults_to_require_review(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)  # auto-accepted
@@ -654,9 +654,11 @@ class TestListProposalsRoute:
         assert body[0]["author"] == AI
 
     def test_pending_merges_changes_requested(self, tmp_path: Path) -> None:
-        """KI-027: request_changes() moves a proposal out of require_review;
-        the default "pending" query must still surface it, or a reviewer
-        monitoring GET /proposals loses track of it entirely."""
+        """KI-027: request_changes() moves a proposal out of require_review
+        with no query-level way to see it alongside other still-open
+        proposals. state=pending is an explicit, documented alias that
+        merges both (deliberately not the default - see
+        Ontology.proposals's docstring)."""
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
         proposal, _ = kb.propose(entity.id, "Person.name", "Grace", "Text", AI, model="test-model")
@@ -664,7 +666,7 @@ class TestListProposalsRoute:
 
         client, _ = _client(kb)
         token, _ = kb.issue_token(HUMAN, author=ADMIN)
-        response = client.get("/proposals", headers=_auth(token))
+        response = client.get("/proposals", params={"state": "pending"}, headers=_auth(token))
 
         assert response.status_code == 200
         body = response.json()

@@ -126,18 +126,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `request_changes()` previously left a proposal permanently stuck once changed,
   with no way back into the review pipeline. Only the proposal's own author or
   delegate may call it; the existing payload is replayed unedited through a fresh
-  policy evaluation, exactly as a first `propose`/`propose_ref` submission. No
-  `ProposalEvent` is recorded for the resubmission itself, matching `propose()`'s
-  own auto-accept path. `POST /proposals/{proposal_id}/resubmit` (REST) wraps it,
-  returning the same `{proposal, decision}` shape as `POST /proposals`; CLI parity
-  is deferred to KI-032.
-- **Note:** `Ontology.proposals()`'s default changed from `state="require_review"` to
-  `state="pending"`, a new query-level alias merging `require_review` and
+  policy evaluation, evaluated against the resubmission instant rather than the
+  proposal's original `created_at`. A `ProposalEvent(type="resubmit")` is always
+  recorded, regardless of outcome. `POST /proposals/{proposal_id}/resubmit` (REST)
+  and `ontolith.resubmit` (MCP) both wrap it, returning the same `{proposal,
+  decision}` shape as `POST /proposals`; CLI parity is deferred to KI-032.
+- `Ontology.proposals()` (and `GET /proposals`, `ontolith proposal list --state`)
+  gained a `state="pending"` query-level alias merging `require_review` and
   `changes_requested` — the other half of KI-027: even with `resubmit()` able to act
-  on a `changes_requested` proposal, it stayed invisible to the default review-queue
-  query. `GET /proposals` and `ontolith proposal list --state` both changed their
-  default to `"pending"` for the same reason; an explicit `state=` value still
-  returns a single, unmerged state.
+  on a `changes_requested` proposal, it was previously invisible to any single-state
+  query a reviewer would naturally run. `"pending"` is an explicit opt-in, not the
+  default (which remains `state="require_review"`) — a canonical reviewer loop
+  (`for p in kb.proposals(): kb.accept_proposal(p.id, ...)`) assumes every returned
+  proposal is reviewer-actionable, which `changes_requested` proposals are not.
 
 #### Fixed
 - **Breaking:** `Ontology.issue_token(principal_id, author)` now returns

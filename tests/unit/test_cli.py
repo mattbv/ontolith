@@ -610,7 +610,9 @@ class TestProposalList:
         )  # write capability -> auto_accepted
         proposals = kb.proposals(state=None)
         kb.close()
-        assert len(proposals) == 1  # auto_accepted, invisible to the default "pending" filter
+        assert (
+            len(proposals) == 1
+        )  # auto_accepted, invisible to the default "require_review" filter
 
         default_result = runner.invoke(app, ["--db", str(db), "proposal", "list"])
         assert "No proposals found." in default_result.output
@@ -618,9 +620,12 @@ class TestProposalList:
         all_result = runner.invoke(app, ["--db", str(db), "proposal", "list", "--all"])
         assert "auto_accepted" in all_result.output
 
-    def test_default_includes_changes_requested(self, temp_db: Path) -> None:
-        """KI-027: request_changes() moves a proposal out of require_review;
-        the CLI's default --state pending must still surface it."""
+    def test_state_pending_includes_changes_requested(self, temp_db: Path) -> None:
+        """KI-027: request_changes() moves a proposal out of require_review
+        with no way to see it alongside other still-open proposals.
+        --state pending is an explicit, documented alias that merges both
+        (deliberately not the default - see Ontology.proposals's
+        docstring)."""
         kb = Ontology.connect(temp_db)
         alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
         reviewer = kb.create_principal(
@@ -640,7 +645,12 @@ class TestProposalList:
         kb.request_changes(proposal.id, reviewer.id)
         kb.close()
 
-        result = runner.invoke(app, ["--db", str(temp_db), "proposal", "list"])
+        default_result = runner.invoke(app, ["--db", str(temp_db), "proposal", "list"])
+        assert "No proposals found." in default_result.output
+
+        result = runner.invoke(
+            app, ["--db", str(temp_db), "proposal", "list", "--state", "pending"]
+        )
         assert result.exit_code == 0
         assert proposal.id in result.output
         assert "changes_requested" in result.output

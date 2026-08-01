@@ -410,6 +410,15 @@ class TestResubmitProposal:
         assert resubmitted.state == "require_review"
         assert type(decision).__name__ == "RequireReview"
 
+        # A landing back in require_review re-opens the decision - the prior
+        # request_changes decided_at must not survive (HIGH-2/MEDIUM-6):
+        # confirm the persisted row agrees with the returned object, not
+        # just the in-memory return value.
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "require_review"
+        assert stored.decided_at is None
+
     def test_resubmitted_proposal_can_then_be_accepted(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
@@ -425,36 +434,23 @@ class TestResubmitProposal:
         assert len(active) == 1
         assert active[0].value == "Ada"
 
-    def test_auto_accepting_policy_resubmits_straight_through(self, make_kb: KbFactory) -> None:
-        """A human author's proposal auto-accepts on propose(); if a
-        reviewer requests changes anyway (e.g. review capability elevated
-        mid-flight) and the author resubmits, policy is re-run fresh and
-        may auto-accept again - resubmit does not force human review."""
-        kb = _kb(make_kb)
-        kb.create_principal(
-            "carol@example.com", kind="human", auth_method="oidc", default_capability="review"
-        )
-        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
-        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
-        assert proposal.state == "auto_accepted"
-
-        with pytest.raises(ValidationError, match="not pending review"):
-            kb.request_changes(proposal.id, "carol@example.com")
-
-    def test_resubmit_records_no_proposal_event(self, make_kb: KbFactory) -> None:
-        """resubmit is an author action, not one of SPEC §9.4's five
-        reviewer actions - propose()'s own auto-accept path likewise
-        records no event, and resubmit follows that precedent."""
+    def test_resubmit_always_records_a_proposal_event(self, make_kb: KbFactory) -> None:
+        """Unlike propose()'s own auto-accept path (which records no event
+        for a brand-new proposal), resubmit re-decides an already-persisted
+        row - a ProposalEvent(type="resubmit") is recorded regardless of
+        outcome, or a require_review outcome would leave no trace of when
+        policy last ran (KI-027 / ADR-0025 update)."""
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         proposal, _ = kb.propose(
             entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
         )
-        kb.request_changes(proposal.id, REVIEWER)
+        kb.request_changes(proposal.id, REVIEWER, reason="needs a source")
         kb.resubmit(proposal.id, AI_AUTHOR)
 
         events = kb.backend.get_proposal_events(proposal.id)
-        assert [e.type for e in events] == ["request_changes"]
+        assert [e.type for e in events] == ["request_changes", "resubmit"]
+        assert events[1].actor == AI_AUTHOR
 
     def test_delegate_can_resubmit(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)
@@ -513,6 +509,11 @@ class TestResubmitProposal:
         assert len(active) == 1
         assert active[0].value == "Ada"
 
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "auto_accepted"
+        assert stored.decided_at == resubmitted.decided_at
+
     def test_resubmit_reject_updates_existing_row(self, make_kb: KbFactory) -> None:
         """Rejecting a resubmission updates the existing proposal row
         (update_proposal_state) rather than attempting a second INSERT
@@ -534,6 +535,11 @@ class TestResubmitProposal:
         assert rejected.state == "rejected"
         assert rejected.decided_at is not None
         assert kb.assertions(subject=entity.id, predicate="Person.name") == []
+
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "rejected"
+        assert stored.decided_at == rejected.decided_at
 
     def test_unrelated_principal_cannot_resubmit(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)
@@ -821,7 +827,7 @@ class TestProposalAndContradictionListing:
     discover pending work (SPEC §14.1); route_to_review otherwise routes
     into a void with no way to enumerate what it routed."""
 
-    def test_proposals_defaults_to_pending(self, make_kb: KbFactory) -> None:
+    def test_proposals_defaults_to_require_review(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)  # auto_accepted
@@ -837,9 +843,10 @@ class TestProposalAndContradictionListing:
         self, make_kb: KbFactory
     ) -> None:
         """KI-027: request_changes() previously moved a proposal out of
-        require_review and out of the default proposals() query at the same
-        time, making it invisible to a reviewer monitoring the queue.
-        state="pending" (the new default) surfaces both."""
+        require_review with no query-level way to see it and every other
+        still-open proposal together. state="pending" is an explicit,
+        documented alias that merges both (it is deliberately NOT the
+        default - see Ontology.proposals's docstring for why)."""
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
         under_review, _ = kb.propose(
@@ -850,7 +857,7 @@ class TestProposalAndContradictionListing:
         )
         kb.request_changes(changes_requested_proposal.id, REVIEWER)
 
-        listed = kb.proposals()
+        listed = kb.proposals(state="pending")
         assert {p.id for p in listed} == {under_review.id, changes_requested_proposal.id}
 
     def test_proposals_explicit_require_review_excludes_changes_requested(

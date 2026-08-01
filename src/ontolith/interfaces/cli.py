@@ -348,19 +348,19 @@ def reindex(
 def list_proposals(
     state: Annotated[
         str | None,
-        typer.Option("--state", help="Filter by state (default: pending)."),
-    ] = "pending",
+        typer.Option("--state", help="Filter by state (default: require_review)."),
+    ] = "require_review",
     all_states: Annotated[
         bool,
         typer.Option("--all", help="Show proposals in every state, ignoring --state."),
     ] = False,
 ) -> None:
-    """List proposals, defaulting to those needing attention.
+    """List proposals, defaulting to those pending review.
 
     Without this, a reviewer has no way to discover what route_to_review
     (SPEC §10.3) routed to them short of querying the backend directly.
-    ``--state pending`` (the default) merges ``require_review`` and
-    ``changes_requested`` — see ``Ontology.proposals`` (KI-027).
+    ``--state pending`` merges ``require_review`` and ``changes_requested``
+    — see ``Ontology.proposals`` (KI-027) for why that isn't the default.
     """
     kb = _kb()
     try:

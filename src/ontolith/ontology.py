@@ -334,11 +334,14 @@ class Ontology:
         (`put_proposal`) for a proposal not yet written (propose/
         propose_ref/retract), or UPDATE (`update_proposal_state`) for an
         existing row being re-decided (`resubmit`, KI-027) — `put_proposal`
-        would raise on the row's already-existing id. The require-review
-        branch relies on the caller having already reset `proposal.
-        decided_at` to None before calling when `is_new` is False (a
-        resubmitted proposal that lands back in require_review is, again,
-        not yet decided).
+        would raise on the row's already-existing id. `update_proposal_state`
+        clears the row's `decided_at` unconditionally (it is not
+        COALESCE'd like `policy_reason`), so persistence is correct either
+        way; callers passing `is_new=False` must still reset `proposal.
+        decided_at` to None on their own in-memory copy before calling, or
+        the object this method *returns* will disagree with the row it just
+        wrote (a resubmitted proposal that lands back in require_review is,
+        again, not yet decided).
         """
         if isinstance(decision, Reject):
             rejected = proposal.model_copy(
@@ -1394,17 +1397,25 @@ class Ontology:
         this — the inverse of `_require_reviewer`'s self-review guard: this
         is an author action, not a reviewer one. The payload is replayed
         unedited (in-place payload editing before resubmission is not yet
-        supported); policy is re-evaluated in full against a fresh
-        `kb_view` pinned at the new `now`, exactly as a first submission via
-        `propose`/`propose_ref`. `_require_model_for_ai`/
-        `_require_known_predicate` are deliberately not re-run — the
-        original submission's shape is trusted, matching `accept_proposal`'s
-        existing precedent — but temporality is re-resolved dynamically at
-        replay time on auto-accept (see `_replay_proposal_operations`).
+        supported); policy is re-evaluated against a fresh `kb_view`
+        pinned at the resubmission instant — unlike `propose`/
+        `propose_ref`, that pin is deliberately NOT `proposal.created_at`
+        (ADR-0025): the proposal already exists, so a KB-reading
+        `PolicyStrategy` (e.g. `SourceQuorum`) must evaluate it against
+        what's true now, not what was true when it was first drafted.
+        `_require_model_for_ai`/`_require_known_predicate` are
+        deliberately not re-run — the original submission's shape is
+        trusted, matching `accept_proposal`'s existing precedent — but
+        temporality is re-resolved dynamically at replay time on
+        auto-accept (see `_replay_proposal_operations`).
 
-        No `ProposalEvent` is recorded for the resubmission itself:
-        `resubmit` isn't one of SPEC §9.4's five reviewer actions, and
-        `propose`'s own auto-accept path likewise records no event.
+        A `ProposalEvent(type="resubmit")` is always recorded, regardless
+        of outcome — unlike `propose`'s own auto-accept path (which
+        records none for a brand-new proposal), `resubmit` re-decides an
+        already-persisted row, and without an event a `require_review`
+        outcome would otherwise leave no trace of when policy last ran
+        (`decided_at` stays `None`, `created_at` stays the original
+        submission time).
 
         Args:
             proposal_id: ID of the proposal to resubmit
@@ -1415,12 +1426,13 @@ class Ontology:
             (Proposal, Decision) tuple, matching propose()/propose_ref()
 
         Raises:
-            AuthError: author is not a known principal
+            AuthError: author, or the proposal's original author/delegate
+                (if since removed), is not a known principal
             NotFoundError: proposal_id does not name an existing proposal
             CapabilityError: author is not the proposal's own author/delegate
             ValidationError: proposal is not awaiting resubmission
         """
-        self._get_principal_or_raise(author)
+        caller = self._get_principal_or_raise(author)
         proposal = self.backend.get_proposal(proposal_id)
         if proposal is None:
             raise NotFoundError(f"Proposal not found: {proposal_id}")
@@ -1433,7 +1445,9 @@ class Ontology:
                 f"Proposal {proposal_id} is not awaiting resubmission (state: {proposal.state})"
             )
 
-        principal = self._get_principal_or_raise(proposal.author)
+        principal = (
+            caller if author == proposal.author else self._get_principal_or_raise(proposal.author)
+        )
         delegating = self._resolve_delegation(principal, proposal.author, proposal.acting_as)
 
         now = self.clock.now()
@@ -1443,39 +1457,60 @@ class Ontology:
         resubmitted = proposal.model_copy(update={"state": "submitted", "decided_at": None})
         kb_view = self.as_of(now)
         decision = self.policy.evaluate(resubmitted, principal, kb_view, acting_as=delegating)
-        finalized = self._finalize_non_accepted_decision(resubmitted, decision, now, is_new=False)
-        if finalized is not None:
-            return finalized
-        assert isinstance(decision, AutoAccept)
 
-        accepted = resubmitted.model_copy(
-            update={"state": "auto_accepted", "decided_at": now, "policy_reason": decision.reason}
-        )
         with self.backend.transaction():
-            self.backend.update_proposal_state(
-                proposal_id, "auto_accepted", now.isoformat(), decision.reason
+            finalized = self._finalize_non_accepted_decision(
+                resubmitted, decision, now, is_new=False
             )
-            self._replay_proposal_operations(accepted, now)
-        return accepted, decision
+            if finalized is not None:
+                result, decision = finalized
+            else:
+                assert isinstance(decision, AutoAccept)
+                result = resubmitted.model_copy(
+                    update={
+                        "state": "auto_accepted",
+                        "decided_at": now,
+                        "policy_reason": decision.reason,
+                    }
+                )
+                self.backend.update_proposal_state(
+                    proposal_id, "auto_accepted", now.isoformat(), decision.reason
+                )
+                self._replay_proposal_operations(result, now)
 
-    def proposals(self, state: str | None = "pending") -> list[Proposal]:
-        """List proposals, defaulting to those needing attention (SPEC §14.1).
+            self.backend.put_proposal_event(
+                ProposalEvent(
+                    id=self.id_provider.next(),
+                    proposal_id=proposal_id,
+                    actor=author,
+                    type="resubmit",
+                    detail=getattr(decision, "reason", None),
+                    at=now,
+                )
+            )
+
+        return result, decision
+
+    def proposals(self, state: str | None = "require_review") -> list[Proposal]:
+        """List proposals, defaulting to those pending review (SPEC §14.1).
 
         Without this, `route_to_review` (SPEC §10.3) has no way to surface
         what it routed — a reviewer would need direct backend access to
         discover pending proposals.
 
         Args:
-            state: Filter by proposal state. `"pending"` (the default) is a
-                query-level alias for `require_review` OR `changes_requested`
-                combined — both are still-open proposals needing someone's
-                attention (a reviewer for the former, the author for the
-                latter). Without the alias, `changes_requested` proposals
-                were invisible to the default review-queue query the moment
-                `request_changes` moved them out of `require_review`
-                (KI-027). Pass a state explicitly (e.g.
-                `state="require_review"`) for a single, unmerged state.
-                `None` returns every state
+            state: Filter by proposal state. `"pending"` is a query-level
+                alias for `require_review` OR `changes_requested` combined —
+                both are still-open proposals needing someone's attention (a
+                reviewer for the former, the author for the latter). It is
+                NOT the default: a canonical reviewer loop
+                (`for p in kb.proposals(): kb.accept_proposal(p.id, ...)`)
+                assumes every returned proposal is actionable by a reviewer,
+                which is only true of `require_review` —
+                `changes_requested` proposals raise `ValidationError` from
+                `accept_proposal`/`reject_proposal` (KI-027). Pass
+                `state="changes_requested"` or `state="pending"` explicitly
+                to include them. `None` returns every state.
 
         Returns:
             Matching proposals, most recently created first
@@ -1483,7 +1518,7 @@ class Ontology:
         if state == "pending":
             merged = self.backend.proposals(state="require_review")
             merged += self.backend.proposals(state="changes_requested")
-            merged.sort(key=lambda p: p.created_at, reverse=True)
+            merged.sort(key=lambda p: (p.created_at, p.id), reverse=True)
             return merged
         return self.backend.proposals(state=state)
 
