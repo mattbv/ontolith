@@ -141,6 +141,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposal is reviewer-actionable, which `changes_requested` proposals are not.
 
 #### Fixed
+- **Breaking:** `StorageBackend` gained two new required Protocol methods,
+  `entities_meeting_confidence(entity_ids, threshold) -> set[str]` and
+  `entities_meeting_trust(entity_ids, min_trust) -> set[str]` (KI-028) — any third-party
+  `StorageBackend` implementation must add them.
+- **`QueryBuilder.min_confidence()`/`.trust_at_least()` no longer issue one backend round
+  trip per candidate entity (closes KI-028)** — reintroduced the same N+1 pattern KI-001
+  fixed for `.where()`, apparently unnoticed when the two filters shipped alongside
+  `.semantic()` as part of KI-018's hybrid retrieval. `entities_meeting_confidence`/
+  `.entities_meeting_trust` (both backends) push each filter down to a single bulk
+  `SELECT ... WHERE subject IN (...)` query against the already-narrowed candidate set,
+  replacing the Python-side per-entity `assertions()`/`get_principal()` loop. New
+  benchmarks (`tests/benchmarks/test_hybrid_query.py`) and conformance vectors
+  (`conformance/test_confidence_trust_filters.py`, covering both backends — the
+  pre-existing unit tests only ever exercised SQLite) close the gap that let this ship
+  unbenchmarked in the first place.
 - **Breaking:** `Ontology.issue_token(principal_id, author)` now returns
   `tuple[str, str]` (`(token, credential_id)`) instead of a bare `str` (closes KI-024,
   update to ADR-0014). `issue_token_route` (REST) and `principal issue-token` (CLI)

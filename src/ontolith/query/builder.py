@@ -214,31 +214,30 @@ class QueryBuilder:
         return entities
 
     def _apply_confidence_trust_filters(self, entities: list[Entity]) -> list[Entity]:
-        """Apply .min_confidence()/.trust_at_least() as independent existential filters."""
+        """Apply .min_confidence()/.trust_at_least() as independent existential filters.
+
+        Pushed down to the backend as a bulk id-set lookup (KI-028) rather
+        than one assertions()/get_principal() round trip per candidate
+        entity — `entities` is typically already narrowed by `.where()`/
+        `.semantic()`, so this only ever queries the remaining candidates.
+        """
         if self._min_confidence is None and self._trust_at_least is None:
             return entities
-        return [e for e in entities if self._passes_confidence_trust(e)]
 
-    def _passes_confidence_trust(self, entity: Entity) -> bool:
-        """Whether `entity` has qualifying assertions for every active threshold filter."""
-        assertions = self._backend.assertions(subject=entity.id, status="active")
+        candidate_ids = [e.id for e in entities]
+        qualifying_ids = set(candidate_ids)
 
         if self._min_confidence is not None:
-            threshold = self._min_confidence
-            if not any(a.confidence is not None and a.confidence >= threshold for a in assertions):
-                return False
+            qualifying_ids &= self._backend.entities_meeting_confidence(
+                candidate_ids, self._min_confidence
+            )
 
         if self._trust_at_least is not None:
-            if not any(self._author_meets_trust(a.author) for a in assertions):
-                return False
+            qualifying_ids &= self._backend.entities_meeting_trust(
+                candidate_ids, self._trust_at_least
+            )
 
-        return True
-
-    def _author_meets_trust(self, author_id: str) -> bool:
-        """Whether `author_id` resolves to a principal at or above the trust threshold."""
-        assert self._trust_at_least is not None
-        principal = self._backend.get_principal(author_id)
-        return principal is not None and principal.trust_level >= self._trust_at_least
+        return [e for e in entities if e.id in qualifying_ids]
 
     def first(self) -> Entity | None:
         """Execute query and return first matching entity.

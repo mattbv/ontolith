@@ -561,10 +561,10 @@ Added `Ontology.resubmit(proposal_id, author)` implementing SPEC §9.1's `change
 
 ---
 
-## KI-028 — `.min_confidence()`/`.trust_at_least()` reintroduce an N+1 backend-round-trip pattern
+## KI-028 — `.min_confidence()`/`.trust_at_least()` reintroduce an N+1 backend-round-trip pattern ✓ RESOLVED (M3)
 
 **Severity:** Performance — unbounded per-entity (and per-assertion) backend round trips, unbenchmarked
-**Milestone target:** M3
+**Milestone target:** M3 — resolved in `perf(query): push min_confidence/trust_at_least down to bulk backend lookups (KI-028)`
 **SPEC reference:** Implementation Plan §9 (performance budgets)
 
 ### Description
@@ -577,7 +577,9 @@ Surfaced during a whole-project milestone audit (2026-07-29).
 
 ### Fix
 
-Push `.min_confidence()`/`.trust_at_least()` into a SQL `EXISTS` subquery per filter, mirroring `entities_where()`'s existing per-predicate subquery pattern (both backends), instead of the current Python-side per-entity loop. Add a benchmark exercising both filters at realistic scale (mirroring `test_hybrid_query.py`'s existing large-KB fixture).
+Added `StorageBackend.entities_meeting_confidence(entity_ids, threshold)` / `.entities_meeting_trust(entity_ids, min_trust)` (both backends) — a single `SELECT DISTINCT subject FROM assertion WHERE subject IN (...) AND ...` per filter (a `JOIN principal` for trust), scoped to the already-resolved candidate id set rather than re-scanning the whole concept, and short-circuiting to an empty set with no query at all when the candidate list is empty (`IN ()` is invalid SQL on both backends). `QueryBuilder._apply_confidence_trust_filters` now intersects candidate ids against these bulk lookups instead of looping `assertions()`/`get_principal()` per entity — one or two round trips total regardless of candidate count, not one per candidate. New benchmarks (`test_bench_min_confidence_full_concept_scan`, `test_bench_trust_at_least_full_concept_scan` in `tests/benchmarks/test_hybrid_query.py`) exercise both filters over a 1k-entity concept scan with no `.where()`/`.semantic()` narrowing — the scenario that made the original N+1 invisible — at ~3-4ms mean, comfortably inside the general symbolic-query budget. New conformance vectors (`conformance/test_confidence_trust_filters.py`) prove both backends implement the push-down identically, since the pre-existing unit tests (`tests/unit/test_query.py`) only ever exercised SQLite.
+
+Not addressed (pre-existing, out of scope for this performance fix): `_passes_confidence_trust`'s predecessor never threaded `QueryBuilder._as_of_time` through to the confidence/trust check at all — `kb.as_of(t).query(...).min_confidence(...)` silently evaluates against current-active assertions regardless of `t`. This behavior is unchanged by this fix (the new bulk lookups don't take `as_of_time` either, preserving parity) and is a distinct bitemporal-correctness gap, not a performance one — worth its own tracked issue if bitemporal `.min_confidence()`/`.trust_at_least()` semantics are ever needed.
 
 ---
 
@@ -706,6 +708,24 @@ Needs a design decision, not just a code fix: should conflict routing (`govern/c
 ### Fix
 
 For each of the four methods, move the state-validation re-check inside `with self.backend.transaction():`, re-reading the proposal row rather than trusting the value fetched before the transaction opened (mirroring KI-026's fix for `resolve_contradiction`). Policy evaluation itself can likely stay outside the transaction (it's read-only against a pinned `kb_view`), but the state check that gates whether its result is even applicable needs to run against the current row, inside the transaction, immediately before the write. Needs a conformance vector simulating the race (two evaluations racing the same pre-transition state) per method.
+
+---
+
+## KI-036 — `.min_confidence()`/`.trust_at_least()` ignore `.as_of()`
+
+**Severity:** Architecture gap — bitemporal query results are inconsistent within a single query
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §12 (bitemporal query semantics — `as_of` reconstruction)
+
+### Description
+
+`QueryBuilder._apply_confidence_trust_filters`/`_passes_confidence_trust` (`src/ontolith/query/builder.py`) never reads `self._as_of_time`. `kb.as_of(t).query("Person").where(...)` correctly threads `t` through `_base_candidates()` (both `entities()` and `entities_where()` accept `as_of_time`), but `.min_confidence()`/`.trust_at_least()` chained onto the same query always check current-active assertions/principals regardless of `t` — an entity can pass the `.where()` half of the query as it existed at `t`, then get filtered by confidence/trust values that only became true after `t` (or that existed at `t` but were later superseded/retracted). The result is not a coherent point-in-time view.
+
+Found while fixing KI-028 (the N+1 performance issue for the same two filters); pre-existing before that fix and unchanged by it — the new `entities_meeting_confidence`/`entities_meeting_trust` backend methods intentionally preserve the old (non-bitemporal) behavior rather than silently changing query semantics inside a performance-only fix.
+
+### Fix
+
+Thread `as_of_time` through `entities_meeting_confidence`/`entities_meeting_trust` (both backends), mirroring `entities_where()`'s existing `as_of_time` branch (bitemporal `asserted_at`/`valid_from`/`valid_to` predicates instead of `status = 'active'`, and a join to whichever principal snapshot is correct at `t` — principals aren't currently versioned, so this needs a design decision on what "trust_level as of t" even means before it can be implemented). Needs a conformance vector combining `.as_of()` with `.min_confidence()`/`.trust_at_least()` across a supersession/retraction boundary.
 
 ---
 

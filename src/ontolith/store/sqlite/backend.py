@@ -1606,6 +1606,36 @@ class SQLiteBackend:
             for row in cursor.fetchall()
         ]
 
+    def entities_meeting_confidence(self, entity_ids: list[str], threshold: float) -> set[str]:
+        """Subset of `entity_ids` with >=1 active assertion at or above `threshold` confidence."""
+        if not entity_ids:
+            return set()
+        placeholders = ",".join("?" * len(entity_ids))
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT subject FROM assertion"
+            f" WHERE subject IN ({placeholders})"  # nosec B608 - placeholders are bare '?'
+            " AND status = 'active' AND confidence >= ?",
+            [*entity_ids, threshold],
+        )
+        return {row["subject"] for row in cursor.fetchall()}
+
+    def entities_meeting_trust(self, entity_ids: list[str], min_trust: int) -> set[str]:
+        """Subset of `entity_ids` with >=1 active assertion authored by a
+        principal whose trust_level >= `min_trust`."""
+        if not entity_ids:
+            return set()
+        placeholders = ",".join("?" * len(entity_ids))
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT a.subject FROM assertion a"
+            " JOIN principal p ON p.id = a.author"
+            f" WHERE a.subject IN ({placeholders})"  # nosec B608 - placeholders are bare '?'
+            " AND a.status = 'active' AND p.trust_level >= ?",
+            [*entity_ids, min_trust],
+        )
+        return {row["subject"] for row in cursor.fetchall()}
+
     def _validate_scope(self, scope: str) -> None:
         if scope not in VECTOR_SCOPES:
             raise ValidationError(
