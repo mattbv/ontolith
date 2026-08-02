@@ -98,7 +98,9 @@ class QueryBuilder:
         An entity with only `confidence=None` assertions does not pass —
         None never satisfies a numeric threshold (ADR-0004). Independent of
         `.trust_at_least()`: the qualifying assertion need not be the same
-        one for both filters.
+        one for both filters. Ignores `.as_of()` — always checks
+        currently-active assertions regardless of any bitemporal view
+        pinned on this query (KI-036).
 
         Args:
             threshold: Minimum confidence, 0.0-1.0.
@@ -112,6 +114,10 @@ class QueryBuilder:
     def trust_at_least(self, level: int) -> "QueryBuilder":
         """Keep only entities with at least one active assertion authored by
         a principal whose trust_level >= `level`.
+
+        Ignores `.as_of()` — always checks currently-active assertions and
+        current principal trust levels regardless of any bitemporal view
+        pinned on this query (KI-036).
 
         Args:
             level: Minimum principal trust level, 0-10.
@@ -216,27 +222,34 @@ class QueryBuilder:
     def _apply_confidence_trust_filters(self, entities: list[Entity]) -> list[Entity]:
         """Apply .min_confidence()/.trust_at_least() as independent existential filters.
 
-        Pushed down to the backend as a bulk id-set lookup (KI-028) rather
-        than one assertions()/get_principal() round trip per candidate
-        entity — `entities` is typically already narrowed by `.where()`/
-        `.semantic()`, so this only ever queries the remaining candidates.
+        Pushed down to the backend as a bulk `(namespace, concept)`-scoped
+        lookup (KI-028) rather than one assertions()/get_principal() round
+        trip per candidate entity — one SQL round trip per active filter,
+        regardless of how many candidates `entities` holds or how large the
+        concept is (an id-list-bound query wouldn't have that second
+        property: a `WHERE id IN (...)` with one placeholder per candidate
+        hits SQLite's bound-variable limit, and costs DuckDB per-parameter
+        bind overhead, at real-world scale).
         """
         if self._min_confidence is None and self._trust_at_least is None:
             return entities
+        if not entities:
+            return entities
 
-        candidate_ids = [e.id for e in entities]
-        qualifying_ids = set(candidate_ids)
+        qualifying_ids: set[str] | None = None
 
         if self._min_confidence is not None:
-            qualifying_ids &= self._backend.entities_meeting_confidence(
-                candidate_ids, self._min_confidence
+            qualifying_ids = self._backend.entities_meeting_confidence(
+                self._namespace, self._concept, self._min_confidence
             )
 
         if self._trust_at_least is not None:
-            qualifying_ids &= self._backend.entities_meeting_trust(
-                candidate_ids, self._trust_at_least
+            trust_ids = self._backend.entities_meeting_trust(
+                self._namespace, self._concept, self._trust_at_least
             )
+            qualifying_ids = trust_ids if qualifying_ids is None else qualifying_ids & trust_ids
 
+        assert qualifying_ids is not None
         return [e for e in entities if e.id in qualifying_ids]
 
     def first(self) -> Entity | None:

@@ -3,6 +3,8 @@
 import sqlite3
 import tempfile
 import threading
+import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -1337,6 +1339,84 @@ class TestConcurrency:
         assert errors == []
         entities = backend.entities(namespace="test-ns", concept="Person")
         assert {e.id for e in entities} == {f"solo-entity-{i}" for i in range(self.N_THREADS)}
+
+    @pytest.mark.parametrize(
+        "call_reader",
+        [
+            lambda backend: backend.entities_meeting_confidence("test-ns", "Person", 0.5),
+            lambda backend: backend.entities_meeting_trust("test-ns", "Person", 0),
+        ],
+        ids=["entities_meeting_confidence", "entities_meeting_trust"],
+    )
+    def test_entities_meeting_confidence_or_trust_serialized_with_open_transaction(
+        self, backend: SQLiteBackend, call_reader: Callable[[SQLiteBackend], set[str]]
+    ) -> None:
+        """entities_meeting_confidence/entities_meeting_trust must carry
+        @_synchronized like every other public method (KI-023) - a
+        concurrent call must block on an in-flight transaction rather than
+        dirty-reading its uncommitted write. The writer's transaction is
+        forced to roll back after the reader unblocks, so a passing
+        assertion of `set()` proves the reader waited for the lock rather
+        than observing (and returning) the uncommitted row. Parametrized
+        over both methods - a decorator missing from just one of them still
+        leaves the suite green if only the other is exercised."""
+        backend.put_entity(
+            Entity(
+                id="e0",
+                namespace="test-ns",
+                concept="Person",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                created_by="alice@test.com",
+            )
+        )
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def writer() -> None:
+            with backend.transaction():
+                backend.put_assertion(
+                    Assertion(
+                        id="a0",
+                        namespace="test-ns",
+                        subject="e0",
+                        predicate="Person.name",
+                        value_kind="literal",
+                        value_type="Text",
+                        value="Ada",
+                        author="alice@test.com",
+                        confidence=0.9,
+                        asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+                    )
+                )
+                entered.set()
+                release.wait(timeout=5)
+                raise RuntimeError("forced rollback")
+
+        result: list[set[str]] = []
+
+        def reader() -> None:
+            entered.wait(timeout=5)
+            result.append(call_reader(backend))
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            writer_future = pool.submit(writer)
+            reader_future = pool.submit(reader)
+            try:
+                assert entered.wait(timeout=5)
+                time.sleep(0.1)
+                assert not reader_future.done()  # still blocked on the writer's lock
+            finally:
+                # Always unblock the writer's release.wait(), even if an
+                # assertion above failed - otherwise ThreadPoolExecutor's
+                # __exit__ blocks for the writer's full 5s timeout on every
+                # failing run.
+                release.set()
+            with pytest.raises(RuntimeError, match="forced rollback"):
+                writer_future.result(timeout=5)
+            reader_future.result(timeout=5)
+
+        assert result == [set()]
 
     def test_commit_failure_inside_transaction_raises_storage_error_and_frees_lock(
         self, backend: SQLiteBackend

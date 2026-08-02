@@ -393,45 +393,52 @@ class StorageBackend(Protocol):
         """
         ...
 
-    def entities_meeting_confidence(self, entity_ids: list[str], threshold: float) -> set[str]:
-        """Subset of `entity_ids` with >=1 active assertion at or above `threshold` confidence.
+    def entities_meeting_confidence(
+        self, namespace: str, concept: str, threshold: float
+    ) -> set[str]:
+        """IDs of entities in `(namespace, concept)` with >=1 active assertion
+        at or above `threshold` confidence.
 
         Avoids the N+1 pattern of calling assertions() once per candidate
         entity (QueryBuilder.min_confidence(), KI-028) — one SQL round trip
-        regardless of len(entity_ids). `None` confidence never qualifies
+        regardless of concept size. `None` confidence never qualifies
         (ADR-0004); confidence is compared only on `status = 'active'`
-        assertions.
+        assertions. Scoped by `(namespace, concept)` rather than an
+        explicit id list so the parameter count stays constant regardless
+        of how many entities exist — an id-list-bound query does not (a
+        SQL `IN (...)` with one placeholder per candidate hits both
+        SQLite's bound-variable limit and, on DuckDB, per-parameter bind
+        overhead, at real-world scale).
 
         Args:
-            entity_ids: Candidate entity IDs to check (already narrowed by
-                other filters upstream — this does not itself scope by
-                namespace/concept)
+            namespace: Namespace to scope the scan to
+            concept: Concept to scope the scan to
             threshold: Minimum confidence, 0.0-1.0
 
         Returns:
-            The subset of `entity_ids` with a qualifying assertion. Empty
-            set if `entity_ids` is empty (no query issued).
+            IDs of qualifying entities (may be a superset of any candidate
+            list the caller intends to intersect this against)
         """
         ...
 
-    def entities_meeting_trust(self, entity_ids: list[str], min_trust: int) -> set[str]:
-        """Subset of `entity_ids` with >=1 active assertion authored by a
-        principal whose trust_level >= `min_trust`.
+    def entities_meeting_trust(self, namespace: str, concept: str, min_trust: int) -> set[str]:
+        """IDs of entities in `(namespace, concept)` with >=1 active
+        assertion authored by a principal whose trust_level >= `min_trust`.
 
         Avoids the N+1 pattern of calling assertions() + get_principal()
         once per (candidate entity, assertion) pair (QueryBuilder.
         trust_at_least(), KI-028) — one SQL round trip regardless of
-        len(entity_ids).
+        concept size. Scoped by `(namespace, concept)` for the same reason
+        as `entities_meeting_confidence` — see its docstring.
 
         Args:
-            entity_ids: Candidate entity IDs to check (already narrowed by
-                other filters upstream — this does not itself scope by
-                namespace/concept)
+            namespace: Namespace to scope the scan to
+            concept: Concept to scope the scan to
             min_trust: Minimum principal trust level, 0-10
 
         Returns:
-            The subset of `entity_ids` with a qualifying assertion. Empty
-            set if `entity_ids` is empty (no query issued).
+            IDs of qualifying entities (may be a superset of any candidate
+            list the caller intends to intersect this against)
         """
         ...
 

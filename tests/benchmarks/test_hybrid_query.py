@@ -244,3 +244,26 @@ def test_bench_trust_at_least_full_concept_scan(
 
     results = benchmark(query)
     assert len(results) == 500
+
+
+@pytest.mark.benchmark
+def test_bench_min_confidence_narrowed_by_where(
+    benchmark, seeded_confidence_trust_kb: Ontology
+) -> None:
+    """.where() narrows to a single candidate, then .min_confidence() still
+    scans the full 1k-entity concept (KI-028's fix note: the
+    (namespace, concept)-scoped design doesn't exploit an already-narrow
+    candidate set the way the reverted id-list design would have — this
+    benchmark exists to keep that documented tradeoff visible rather than
+    only benchmarking the scenario the current design is best at)."""
+
+    def query() -> list:
+        return (
+            seeded_confidence_trust_kb.query("Person")
+            .where(name="Person 500")
+            .min_confidence(0.5)
+            .all()
+        )
+
+    results = benchmark(query)
+    assert len(results) == 1

@@ -1606,33 +1606,34 @@ class SQLiteBackend:
             for row in cursor.fetchall()
         ]
 
-    def entities_meeting_confidence(self, entity_ids: list[str], threshold: float) -> set[str]:
-        """Subset of `entity_ids` with >=1 active assertion at or above `threshold` confidence."""
-        if not entity_ids:
-            return set()
-        placeholders = ",".join("?" * len(entity_ids))
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT DISTINCT subject FROM assertion"
-            f" WHERE subject IN ({placeholders})"  # nosec B608 - placeholders are bare '?'
-            " AND status = 'active' AND confidence >= ?",
-            [*entity_ids, threshold],
-        )
-        return {row["subject"] for row in cursor.fetchall()}
-
-    def entities_meeting_trust(self, entity_ids: list[str], min_trust: int) -> set[str]:
-        """Subset of `entity_ids` with >=1 active assertion authored by a
-        principal whose trust_level >= `min_trust`."""
-        if not entity_ids:
-            return set()
-        placeholders = ",".join("?" * len(entity_ids))
+    @_synchronized
+    def entities_meeting_confidence(
+        self, namespace: str, concept: str, threshold: float
+    ) -> set[str]:
+        """IDs of entities in `(namespace, concept)` with >=1 active assertion
+        at or above `threshold` confidence."""
         cursor = self.conn.cursor()
         cursor.execute(
             "SELECT DISTINCT a.subject FROM assertion a"
+            " JOIN entity e ON e.id = a.subject"
+            " WHERE e.namespace = ? AND e.concept = ?"
+            " AND a.status = 'active' AND a.confidence >= ?",
+            (namespace, concept, threshold),
+        )
+        return {row["subject"] for row in cursor.fetchall()}
+
+    @_synchronized
+    def entities_meeting_trust(self, namespace: str, concept: str, min_trust: int) -> set[str]:
+        """IDs of entities in `(namespace, concept)` with >=1 active
+        assertion authored by a principal whose trust_level >= `min_trust`."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT a.subject FROM assertion a"
+            " JOIN entity e ON e.id = a.subject"
             " JOIN principal p ON p.id = a.author"
-            f" WHERE a.subject IN ({placeholders})"  # nosec B608 - placeholders are bare '?'
+            " WHERE e.namespace = ? AND e.concept = ?"
             " AND a.status = 'active' AND p.trust_level >= ?",
-            [*entity_ids, min_trust],
+            (namespace, concept, min_trust),
         )
         return {row["subject"] for row in cursor.fetchall()}
 
