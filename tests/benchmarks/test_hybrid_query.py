@@ -1,7 +1,12 @@
-"""Hybrid retrieval (semantic search) benchmark — M3 baseline.
+"""Hybrid retrieval (semantic search) and confidence/trust filter benchmarks — M3 baseline.
 
 Budget (informational, enforced M4, per implementation plan §9):
   - Hybrid query (vector search, k=10): p95 < 150 ms
+
+.min_confidence()/.trust_at_least() (KI-028) have no dedicated budget row in
+the implementation plan; benchmarked here anyway since they previously
+regressed into the same N+1 pattern KI-001 fixed for .where(), and the
+regression was invisible to CI precisely because nothing benchmarked them.
 
 This benchmark is informational in M3 (no budget gate), matching every
 other row in test_traversal.py. Run with:
@@ -95,6 +100,82 @@ def seeded_hybrid_kb(seeded_hybrid_db_path: Path) -> Ontology:
     kb.close()
 
 
+@pytest.fixture(scope="module")
+def seeded_confidence_trust_db_path() -> Path:
+    """1k Person entities, half authored by a trusted/high-confidence
+    principal and half by an untrusted/low-confidence one (KI-028) — no
+    .where()/.semantic() narrows the candidate set, so .min_confidence()/
+    .trust_at_least() see the full concept scan, matching the scenario
+    that exposed the original N+1 pattern."""
+    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    path = Path(f.name)
+    f.close()
+
+    backend = SQLiteBackend(path)
+    trusted = "trusted@example.com"
+    untrusted = "untrusted@example.com"
+    backend.put_principal(
+        Principal(
+            id=trusted,
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            trust_level=8,
+            created_at=T0,
+        )
+    )
+    backend.put_principal(
+        Principal(
+            id=untrusted,
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            trust_level=1,
+            created_at=T0,
+        )
+    )
+
+    num_entities = 1_000
+    with backend.transaction():
+        for i in range(num_entities):
+            backend.put_entity(
+                Entity(
+                    id=f"entity-{i:06d}",
+                    namespace="default",
+                    concept="Person",
+                    created_at=T0,
+                    created_by=trusted,
+                )
+            )
+        for i in range(num_entities):
+            high_quality = i % 2 == 0
+            backend.put_assertion(
+                Assertion(
+                    id=f"assertion-name-{i:06d}",
+                    namespace="default",
+                    subject=f"entity-{i:06d}",
+                    predicate="Person.name",
+                    value_kind="literal",
+                    value_type="Text",
+                    value=f"Person {i}",
+                    author=trusted if high_quality else untrusted,
+                    confidence=0.9 if high_quality else 0.2,
+                    asserted_at=T0,
+                )
+            )
+    backend.close()
+
+    yield path
+    path.unlink()
+
+
+@pytest.fixture(scope="module")
+def seeded_confidence_trust_kb(seeded_confidence_trust_db_path: Path) -> Ontology:
+    kb = Ontology.connect(seeded_confidence_trust_db_path)
+    yield kb
+    kb.close()
+
+
 # ---------------------------------------------------------------------------
 # Benchmarks
 # ---------------------------------------------------------------------------
@@ -133,3 +214,56 @@ def test_bench_hybrid_semantic_query_intersected_with_where(
 
     results = benchmark(query)
     assert len(results) <= 10
+
+
+@pytest.mark.benchmark
+def test_bench_min_confidence_full_concept_scan(
+    benchmark, seeded_confidence_trust_kb: Ontology
+) -> None:
+    """No .where()/.semantic() - full 1k-entity concept scan filtered by
+    .min_confidence() alone (KI-028: previously one assertions() round trip
+    per candidate entity)."""
+
+    def query() -> list:
+        return seeded_confidence_trust_kb.query("Person").min_confidence(0.5).all()
+
+    results = benchmark(query)
+    assert len(results) == 500
+
+
+@pytest.mark.benchmark
+def test_bench_trust_at_least_full_concept_scan(
+    benchmark, seeded_confidence_trust_kb: Ontology
+) -> None:
+    """No .where()/.semantic() - full 1k-entity concept scan filtered by
+    .trust_at_least() alone (KI-028: previously one assertions() +
+    get_principal() round trip per candidate entity)."""
+
+    def query() -> list:
+        return seeded_confidence_trust_kb.query("Person").trust_at_least(5).all()
+
+    results = benchmark(query)
+    assert len(results) == 500
+
+
+@pytest.mark.benchmark
+def test_bench_min_confidence_narrowed_by_where(
+    benchmark, seeded_confidence_trust_kb: Ontology
+) -> None:
+    """.where() narrows to a single candidate, then .min_confidence() still
+    scans the full 1k-entity concept (KI-028's fix note: the
+    (namespace, concept)-scoped design doesn't exploit an already-narrow
+    candidate set the way the reverted id-list design would have — this
+    benchmark exists to keep that documented tradeoff visible rather than
+    only benchmarking the scenario the current design is best at)."""
+
+    def query() -> list:
+        return (
+            seeded_confidence_trust_kb.query("Person")
+            .where(name="Person 500")
+            .min_confidence(0.5)
+            .all()
+        )
+
+    results = benchmark(query)
+    assert len(results) == 1

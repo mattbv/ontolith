@@ -561,10 +561,10 @@ Added `Ontology.resubmit(proposal_id, author)` implementing SPEC §9.1's `change
 
 ---
 
-## KI-028 — `.min_confidence()`/`.trust_at_least()` reintroduce an N+1 backend-round-trip pattern
+## KI-028 — `.min_confidence()`/`.trust_at_least()` reintroduce an N+1 backend-round-trip pattern ✓ RESOLVED (M3)
 
 **Severity:** Performance — unbounded per-entity (and per-assertion) backend round trips, unbenchmarked
-**Milestone target:** M3
+**Milestone target:** M3 — resolved in `perf(query): push min_confidence/trust_at_least down to bulk backend lookups (KI-028)`
 **SPEC reference:** Implementation Plan §9 (performance budgets)
 
 ### Description
@@ -577,7 +577,17 @@ Surfaced during a whole-project milestone audit (2026-07-29).
 
 ### Fix
 
-Push `.min_confidence()`/`.trust_at_least()` into a SQL `EXISTS` subquery per filter, mirroring `entities_where()`'s existing per-predicate subquery pattern (both backends), instead of the current Python-side per-entity loop. Add a benchmark exercising both filters at realistic scale (mirroring `test_hybrid_query.py`'s existing large-KB fixture).
+Added `StorageBackend.entities_meeting_confidence(namespace, concept, threshold)` / `.entities_meeting_trust(namespace, concept, min_trust)` (both backends) — a single `SELECT DISTINCT a.subject FROM assertion a JOIN entity e ON e.id = a.subject WHERE e.namespace = ? AND e.concept = ? AND ...` per filter (an added `JOIN principal` for trust), returning every qualifying entity id in that `(namespace, concept)` in one query. `QueryBuilder._apply_confidence_trust_filters` intersects this against the already-narrowed candidate list (from `.where()`/`.semantic()`, if chained) — one round trip per active filter, regardless of concept size or candidate count, not one per candidate.
+
+An id-list-bound design (`WHERE id IN (...)`, one placeholder per candidate) was tried first and reverted during review: it hits SQLite's bound-variable limit outright on large concepts (`sqlite3.OperationalError: too many SQL variables` — invisible on this project's dev-machine SQLite build, whose reported limit happens to exceed the 1k-entity benchmark scale, but real on the upstream default of 32766, and much lower on some builds), and costs DuckDB linear per-parameter bind overhead (measured ~83µs/id — a 10k-entity concept scan with both filters chained would cost ~1.7s against the 150ms hybrid-query budget). Scoping by `(namespace, concept)` instead keeps the parameter count constant regardless of data size.
+
+This tradeoff is bidirectional, not a strict improvement: scoping by concept means `.min_confidence()`/`.trust_at_least()` can no longer exploit an already-narrow `.where()`/`.semantic()` candidate set the way the reverted id-list design would have (a `.where()` match narrowed to 1 entity out of 50k measured ~1150x slower under the concept-scan design than the old per-candidate loop would have been for that one candidate). Tracked separately as KI-037 rather than re-introducing the id-list design's own failure mode to chase this back — a hint parameter that a backend may selectively exploit (SQLite can; a naive DuckDB `IN (unnest(?))` measured slower than its own full scan) is the likely fix, and is additive rather than another breaking `StorageBackend` change if landed later.
+
+The two new SQLite methods carry `@_synchronized` like every other public `SQLiteBackend` method (KI-023's invariant) — missing on the first pass, and confirmed via a reproduction that a concurrent call without it returned an uncommitted row from another thread's still-open transaction. `tests/unit/test_sqlite_backend.py::TestConcurrency::test_entities_meeting_confidence_serialized_with_open_transaction` pins this: a reader blocked on an in-flight writer's lock, observing the writer's forced rollback rather than a dirty read.
+
+New benchmarks (`test_bench_min_confidence_full_concept_scan`, `test_bench_trust_at_least_full_concept_scan` in `tests/benchmarks/test_hybrid_query.py`) exercise both filters over a 1k-entity concept scan with no `.where()`/`.semantic()` narrowing — the scenario that made the original N+1 invisible — at ~4-5ms mean, comfortably inside the general symbolic-query budget; informational only, no CI gate, so this alone does not prevent a future reintroduction of the N+1 (a spy-backend unit test asserting call counts would be a stronger regression guard, not added here). New conformance vectors (`conformance/test_confidence_trust_filters.py`) prove both backends implement the push-down identically (the pre-existing unit tests only ever exercised SQLite), including that the two filters compose conjunctively (AND), not disjunctively.
+
+Not addressed (pre-existing, out of scope for this performance fix — tracked as KI-036): `.min_confidence()`/`.trust_at_least()` never threaded `QueryBuilder._as_of_time` through to the confidence/trust check at all, before or after this fix — `kb.as_of(t).query(...).min_confidence(...)` silently evaluates against current-active assertions regardless of `t`. Both builder methods' docstrings now say so explicitly. The new backend methods' signatures deliberately don't reserve an unused `as_of_time` parameter for this — KI-036's fix needs a design decision on what "trust_level as of `t`" even means (principals aren't currently versioned), and a speculative parameter shaped before that decision is made risks being the wrong shape anyway.
 
 ---
 
@@ -706,6 +716,42 @@ Needs a design decision, not just a code fix: should conflict routing (`govern/c
 ### Fix
 
 For each of the four methods, move the state-validation re-check inside `with self.backend.transaction():`, re-reading the proposal row rather than trusting the value fetched before the transaction opened (mirroring KI-026's fix for `resolve_contradiction`). Policy evaluation itself can likely stay outside the transaction (it's read-only against a pinned `kb_view`), but the state check that gates whether its result is even applicable needs to run against the current row, inside the transaction, immediately before the write. Needs a conformance vector simulating the race (two evaluations racing the same pre-transition state) per method.
+
+---
+
+## KI-036 — `.min_confidence()`/`.trust_at_least()` ignore `.as_of()`
+
+**Severity:** Architecture gap — bitemporal query results are inconsistent within a single query
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §12 (bitemporal query semantics — `as_of` reconstruction)
+
+### Description
+
+`QueryBuilder._apply_confidence_trust_filters`/`_passes_confidence_trust` (`src/ontolith/query/builder.py`) never reads `self._as_of_time`. `kb.as_of(t).query("Person").where(...)` correctly threads `t` through `_base_candidates()` (both `entities()` and `entities_where()` accept `as_of_time`), but `.min_confidence()`/`.trust_at_least()` chained onto the same query always check current-active assertions/principals regardless of `t` — an entity can pass the `.where()` half of the query as it existed at `t`, then get filtered by confidence/trust values that only became true after `t` (or that existed at `t` but were later superseded/retracted). The result is not a coherent point-in-time view.
+
+Found while fixing KI-028 (the N+1 performance issue for the same two filters); pre-existing before that fix and unchanged by it — the new `entities_meeting_confidence`/`entities_meeting_trust` backend methods intentionally preserve the old (non-bitemporal) behavior rather than silently changing query semantics inside a performance-only fix.
+
+### Fix
+
+Thread `as_of_time` through `entities_meeting_confidence`/`entities_meeting_trust` (both backends), mirroring `entities_where()`'s existing `as_of_time` branch (bitemporal `asserted_at`/`valid_from`/`valid_to` predicates instead of `status = 'active'`, and a join to whichever principal snapshot is correct at `t` — principals aren't currently versioned, so this needs a design decision on what "trust_level as of t" even means before it can be implemented). Needs a conformance vector combining `.as_of()` with `.min_confidence()`/`.trust_at_least()` across a supersession/retraction boundary.
+
+---
+
+## KI-037 — `.min_confidence()`/`.trust_at_least()` can't exploit an already-narrowed `.where()`/`.semantic()` candidate set
+
+**Severity:** Performance — no budget violated today, but a real, measured slowdown relative to the design it replaced for the selective-query case
+**Milestone target:** Backlog
+**SPEC reference:** Implementation Plan §9 (performance budgets)
+
+### Description
+
+KI-028's fix scoped `entities_meeting_confidence`/`entities_meeting_trust` by `(namespace, concept)` rather than an explicit candidate id list, specifically to keep the SQL parameter count constant regardless of data size (an id-list-bound design was tried first and reverted — see KI-028's own Fix text). The tradeoff: when `.where()` or `.semantic()` has already narrowed the candidate set to a small fraction of the concept (the common case for `.semantic()`, which caps overfetch at `_MAX_OVERFETCH = 1000` regardless of concept size), `.min_confidence()`/`.trust_at_least()` still scan the *entire* `(namespace, concept)` rather than just the narrowed candidates — measured at ~1150x slower than the old per-candidate N+1 loop for a single-candidate `.where()` match against a 50k-entity concept (46ms vs ~0.04ms), and estimated to consume a meaningful fraction of the 150ms hybrid-query budget at 100k+ entities when chained after `.semantic()`.
+
+This is not a regression relative to *shipped* behavior (the id-list design that would have preserved this property was never released — it was caught and reworked during KI-028's own review, before merge), but it is a real, measured cost of the design actually shipped, worth its own tracked follow-up rather than silently living only in KI-028's fix-note prose. `tests/benchmarks/test_hybrid_query.py::test_bench_min_confidence_narrowed_by_where` benchmarks this scenario (informational only, no CI gate) — at the 1k-entity scale used there the cost is small (SQLite's query planner still picks an index-backed scan), so the effect is real but not yet visible at benchmark scale; the 46ms figure above was measured separately at 50k entities.
+
+### Fix
+
+Add an optional hint parameter (e.g. `candidate_ids: frozenset[str] | None = None`) to `entities_meeting_confidence`/`entities_meeting_trust` that a backend *may* exploit or ignore — additive, not breaking, if landed after KI-028's already-breaking signature change. SQLite can bind the full candidate set as a single JSON-encoded parameter (`WHERE subject IN (SELECT value FROM json_each(?))`) rather than one placeholder per id, avoiding both the original bound-variable-limit problem and the current full-concept-scan cost; DuckDB's `unnest`-based equivalent was measured slower than a full scan in this case, so a DuckDB implementation may reasonably choose to ignore the hint and keep scanning. Needs a benchmark demonstrating the win at a `.where()`/`.semantic()`-narrowed scale that's actually visible (the current 1k-entity fixture doesn't show it — a 50k+ fixture would).
 
 ---
 

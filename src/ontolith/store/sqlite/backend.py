@@ -1606,6 +1606,37 @@ class SQLiteBackend:
             for row in cursor.fetchall()
         ]
 
+    @_synchronized
+    def entities_meeting_confidence(
+        self, namespace: str, concept: str, threshold: float
+    ) -> set[str]:
+        """IDs of entities in `(namespace, concept)` with >=1 active assertion
+        at or above `threshold` confidence."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT a.subject FROM assertion a"
+            " JOIN entity e ON e.id = a.subject"
+            " WHERE e.namespace = ? AND e.concept = ?"
+            " AND a.status = 'active' AND a.confidence >= ?",
+            (namespace, concept, threshold),
+        )
+        return {row["subject"] for row in cursor.fetchall()}
+
+    @_synchronized
+    def entities_meeting_trust(self, namespace: str, concept: str, min_trust: int) -> set[str]:
+        """IDs of entities in `(namespace, concept)` with >=1 active
+        assertion authored by a principal whose trust_level >= `min_trust`."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT DISTINCT a.subject FROM assertion a"
+            " JOIN entity e ON e.id = a.subject"
+            " JOIN principal p ON p.id = a.author"
+            " WHERE e.namespace = ? AND e.concept = ?"
+            " AND a.status = 'active' AND p.trust_level >= ?",
+            (namespace, concept, min_trust),
+        )
+        return {row["subject"] for row in cursor.fetchall()}
+
     def _validate_scope(self, scope: str) -> None:
         if scope not in VECTOR_SCOPES:
             raise ValidationError(

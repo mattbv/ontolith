@@ -393,6 +393,55 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def entities_meeting_confidence(
+        self, namespace: str, concept: str, threshold: float
+    ) -> set[str]:
+        """IDs of entities in `(namespace, concept)` with >=1 active assertion
+        at or above `threshold` confidence.
+
+        Avoids the N+1 pattern of calling assertions() once per candidate
+        entity (QueryBuilder.min_confidence(), KI-028) — one SQL round trip
+        regardless of concept size. `None` confidence never qualifies
+        (ADR-0004); confidence is compared only on `status = 'active'`
+        assertions. Scoped by `(namespace, concept)` rather than an
+        explicit id list so the parameter count stays constant regardless
+        of how many entities exist — an id-list-bound query does not (a
+        SQL `IN (...)` with one placeholder per candidate hits both
+        SQLite's bound-variable limit and, on DuckDB, per-parameter bind
+        overhead, at real-world scale).
+
+        Args:
+            namespace: Namespace to scope the scan to
+            concept: Concept to scope the scan to
+            threshold: Minimum confidence, 0.0-1.0
+
+        Returns:
+            IDs of qualifying entities (may be a superset of any candidate
+            list the caller intends to intersect this against)
+        """
+        ...
+
+    def entities_meeting_trust(self, namespace: str, concept: str, min_trust: int) -> set[str]:
+        """IDs of entities in `(namespace, concept)` with >=1 active
+        assertion authored by a principal whose trust_level >= `min_trust`.
+
+        Avoids the N+1 pattern of calling assertions() + get_principal()
+        once per (candidate entity, assertion) pair (QueryBuilder.
+        trust_at_least(), KI-028) — one SQL round trip regardless of
+        concept size. Scoped by `(namespace, concept)` for the same reason
+        as `entities_meeting_confidence` — see its docstring.
+
+        Args:
+            namespace: Namespace to scope the scan to
+            concept: Concept to scope the scan to
+            min_trust: Minimum principal trust level, 0-10
+
+        Returns:
+            IDs of qualifying entities (may be a superset of any candidate
+            list the caller intends to intersect this against)
+        """
+        ...
+
     def vector_upsert(self, scope: str, id: str, vec: list[float]) -> None:
         """Insert or replace the embedding vector for (scope, id).
 
