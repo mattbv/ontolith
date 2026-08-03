@@ -378,12 +378,14 @@ class StorageBackend(Protocol):
         """Query entities matching all predicate=value filters in one SQL query.
 
         Avoids the N+1 pattern of entities() + per-entity assertions() calls.
-        Each filter is (full_predicate, literal_value); ALL must match (AND semantics).
+        Each filter is (full_predicate, value); ALL must match (AND semantics).
+        A filter matches either a literal property (value_lit) or a
+        relation's target entity id (value_ref) — KI-030.
 
         Args:
             namespace: Namespace to query
             concept: Concept to filter by
-            predicate_filters: Dict of full_predicate → literal_value
+            predicate_filters: Dict of full_predicate → value
             as_of_time: If set, applies bitemporal filter on assertions and entity creation
             include_flagged: When as_of_time is set, whether to include
                 'flagged' assertions in the predicate match (excluded by default)

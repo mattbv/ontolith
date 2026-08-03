@@ -141,6 +141,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposal is reviewer-actionable, which `changes_requested` proposals are not.
 
 #### Fixed
+- `QueryBuilder.where()` no longer silently no-ops on relation-traversal filter keys
+  (closes KI-030) — `.where(employer__name="Acme Corp")`, an example the class docstring
+  itself advertised as working, compiled into an unreachable predicate string and always
+  returned an empty result with no error. Dunder-containing keys (`__`) now raise
+  `ValidationError` at `.where()` call time instead, naming the offending key and
+  explaining that multi-hop traversal isn't implemented. Separately,
+  `StorageBackend.entities_where()` (both backends) now matches a filter value against
+  either `value_lit` or `value_ref`, so direct relation-target-id equality
+  (`.where(employer="org-123")`) actually returns matches — previously it silently
+  matched nothing, since only `value_lit` was ever compared. Docstrings on
+  `QueryBuilder`/`.where()`/`StorageBackend.entities_where()` now state the real
+  contract.
 - MCP `ontolith.schema` and `GET /schema` now include each concept's `relations`, and
   each property's `cardinality` (closes KI-029) — both were previously omitted entirely,
   so an agent or REST client had no way to see that a relation like `Person.employer`

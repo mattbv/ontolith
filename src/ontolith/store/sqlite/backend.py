@@ -1542,13 +1542,18 @@ class SQLiteBackend:
     ) -> list[Entity]:
         """Query entities matching all predicate=value filters in one SQL query.
 
-        Uses correlated subqueries so each (predicate, value_lit) pair hits the
+        Uses correlated subqueries so each (predicate, value) pair hits the
         idx_assertion_spo index instead of doing one round-trip per entity.
+        A filter matches either a literal property (`value_lit`) or a
+        relation's target entity id (`value_ref`) — KI-030: relation filters
+        like `employer="org-123"` are equality checks against `value_ref`,
+        not traversal into the target entity's own properties.
 
         Args:
             namespace: Namespace to query
             concept: Concept to filter by
-            predicate_filters: Dict of full_predicate → literal_value (AND semantics)
+            predicate_filters: Dict of full_predicate → value (AND semantics);
+                value is matched against either value_lit or value_ref
             as_of_time: If set, applies bitemporal filter on assertions and entity creation
             include_flagged: When as_of_time is set, whether to include
                 'flagged' assertions in the predicate match (excluded by
@@ -1573,23 +1578,24 @@ class SQLiteBackend:
                 query += (
                     " AND id IN ("
                     "SELECT subject FROM assertion"
-                    " WHERE predicate = ? AND value_lit = ?"
+                    " WHERE predicate = ? AND (value_lit = ? OR value_ref = ?)"
                     " AND asserted_at <= ?"
                     " AND (valid_from IS NULL OR valid_from <= ?)"
                     " AND (valid_to IS NULL OR valid_to > ?)"
                     f"{flagged_clause}"  # nosec B608
                     ")"
                 )
-                params.extend([predicate, value, t_iso, t_iso, t_iso])
+                params.extend([predicate, value, value, t_iso, t_iso, t_iso])
         else:
             for predicate, value in predicate_filters.items():
                 query += (
                     " AND id IN ("
                     "SELECT subject FROM assertion"
-                    " WHERE predicate = ? AND value_lit = ? AND status = 'active'"
+                    " WHERE predicate = ? AND (value_lit = ? OR value_ref = ?)"
+                    " AND status = 'active'"
                     ")"
                 )
-                params.extend([predicate, value])
+                params.extend([predicate, value, value])
 
         cursor = self.conn.cursor()
         cursor.execute(query, params)

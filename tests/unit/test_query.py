@@ -135,6 +135,31 @@ class TestQueryBuilder:
         assert len(results) == 2
         assert {r.id for r in results} == {p1.id, p2.id}
 
+    def test_query_with_relation_filter_matches_target_id(self, kb: Ontology) -> None:
+        """.where(relation=target_id) matches on the relation's value_ref (KI-030)."""
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+
+        acme = kb.create_entity("Organization", author=alice.id)
+        globex = kb.create_entity("Organization", author=alice.id)
+
+        ada = kb.create_entity("Person", author=alice.id)
+        kb.assert_ref(ada.id, "Person.employer", acme.id, alice.id)
+
+        grace = kb.create_entity("Person", author=alice.id)
+        kb.assert_ref(grace.id, "Person.employer", globex.id, alice.id)
+
+        results = kb.query("Person").where(employer=acme.id).all()
+
+        assert {r.id for r in results} == {ada.id}
+
+    def test_where_rejects_dunder_relation_traversal_keys(self, kb: Ontology) -> None:
+        """.where(employer__name=...) is not supported and must fail loudly, not no-op (KI-030)."""
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.create_entity("Person", author=alice.id)
+
+        with pytest.raises(ValidationError, match="employer__name"):
+            kb.query("Person").where(employer__name="Acme Corp")
+
 
 class TestSemanticSearch:
     """Tests for QueryBuilder.semantic(), using LookupEmbedder for exact rank assertions."""

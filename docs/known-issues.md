@@ -613,10 +613,10 @@ The CLI has no schema-inspection command at all — genuinely out of scope for t
 
 ---
 
-## KI-030 — `QueryBuilder.where()` silently no-ops on relation-traversal filter keys
+## KI-030 — `QueryBuilder.where()` silently no-ops on relation-traversal filter keys ✓ RESOLVED (M3)
 
 **Severity:** Test gap / DX — a documented example produces an empty result with no error
-**Milestone target:** M3
+**Milestone target:** M3 — resolved in `fix(query-store): reject dunder relation-traversal keys, match relation filters on value_ref (KI-030)`
 **SPEC reference:** N/A — internal DX/correctness gap, not a SPEC deviation
 
 ### Description
@@ -627,7 +627,9 @@ Surfaced during a whole-project milestone audit (2026-07-29); flagged in a prior
 
 ### Fix
 
-Reject unknown/dunder-containing filter keys with `ValidationError` at `.where()` call time rather than silently compiling them into an unreachable predicate string. Correct the class docstring's example and `.where()`'s own docstring to the actual symbolic-equality-only contract, or record an ADR if relation traversal is being deliberately deferred rather than simply unbuilt.
+`.where()` now rejects any dunder-containing key (e.g. `employer__name`) with a `ValidationError` at call time, naming the offending key and explaining that multi-hop traversal into a related entity's own properties isn't implemented — instead of silently compiling it into `f"{concept}.{key}"`, a predicate string that could never match anything.
+
+Separately, the class docstring's own example used a relation-target filter that — dunder syntax aside — couldn't have worked anyway, since `entities_where()`'s SQL only ever compared `value_lit`. Rather than just deleting the example, `entities_where()` (`store/{sqlite,duckdb}/backend.py`) now matches a filter value against `value_lit` OR `value_ref`, so a direct relation-target-id equality filter (`employer="org-123"`) actually returns matches — the class docstring's example was updated to this form, which now genuinely works. `.where()`'s docstring was rewritten to state the real contract: equality on literal properties and on a relation's target id, no traversal.
 
 ---
 
