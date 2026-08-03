@@ -591,10 +591,10 @@ Not addressed (pre-existing, out of scope for this performance fix — tracked a
 
 ---
 
-## KI-029 — MCP `ontolith.schema` and REST `GET /schema` omit `relations`
+## KI-029 — MCP `ontolith.schema` and REST `GET /schema` omit `relations` ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — SPEC-required schema information is unreachable via two of the four primary interfaces
-**Milestone target:** M3
+**Milestone target:** M3 — resolved in `feat(interfaces): add relations to MCP/REST schema output (KI-029)`
 **SPEC reference:** SPEC §14.4 (`ontolith.schema` MUST "Return concepts/relations/temporality")
 
 ### Description
@@ -607,7 +607,7 @@ Surfaced during a whole-project milestone audit (2026-07-29); flagged in a prior
 
 ### Fix
 
-Add a `relations` list (target concept, inverse, cardinality, temporality) alongside `properties` in both `schema_tool`'s dict output and REST's `ConceptOut`/`SchemaOut` models.
+Added a `relations` list (name, target concept, cardinality, required, temporality, inverse) alongside `properties` in both `schema_tool`'s dict output and REST's new `RelationOut` model on `ConceptOut`/`SchemaOut` — mirroring `PropertyOut`'s existing shape. `ConceptOut.relations` is a required field (not defaulted), so any caller still constructing one without it now fails fast at construction rather than silently omitting the field again; the one in-repo call site (`get_schema` route) was updated accordingly. The CLI has no schema-inspection command at all (tracked separately, out of scope here — KI-032 covers CLI proposal-review commands specifically, not schema).
 
 ---
 

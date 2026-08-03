@@ -18,7 +18,7 @@ from ontolith.core import Assertion, FixedClock, FixedIdProvider
 from ontolith.core.errors import StorageError
 from ontolith.identity.token_auth import TokenAuthProvider
 from ontolith.interfaces.rest import create_rest_app
-from ontolith.schema.ir import ConceptDef, PropertyDef, SchemaIR
+from ontolith.schema.ir import ConceptDef, PropertyDef, RelationDef, SchemaIR
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 HUMAN = "alice@example.com"
@@ -133,6 +133,49 @@ class TestSchemaRoute:
         assert props_by_name["name"]["type"] == "Text"
         assert props_by_name["name"]["required"] is True
         assert props_by_name["employer"]["temporality"] == "time_varying"
+        assert person["relations"] == []
+
+    def test_returns_relations(self, tmp_path: Path) -> None:
+        """KI-029: relations were previously omitted from the response
+        model entirely - a REST client couldn't see that Person.employer
+        exists, or whether it's time_varying (predicts supersession vs.
+        contradiction on a subsequent proposal, SPEC §10.1)."""
+        kb = _kb(tmp_path)
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    relations={
+                        "employer": RelationDef(
+                            name="employer",
+                            target_concept="Organization",
+                            cardinality="single",
+                            temporality="time_varying",
+                            inverse="employees",
+                        ),
+                    },
+                ),
+                "Organization": ConceptDef(name="Organization"),
+            },
+        )
+        kb.backend.put_schema(schema)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.get("/schema", headers=_auth(token))
+
+        body = response.json()
+        concepts_by_name = {c["name"]: c for c in body["concepts"]}
+        person = concepts_by_name["Person"]
+        assert len(person["relations"]) == 1
+        employer = person["relations"][0]
+        assert employer["name"] == "employer"
+        assert employer["target_concept"] == "Organization"
+        assert employer["cardinality"] == "single"
+        assert employer["temporality"] == "time_varying"
+        assert employer["inverse"] == "employees"
 
     def test_respects_namespace_argument(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)

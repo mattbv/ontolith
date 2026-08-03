@@ -96,11 +96,23 @@ class PropertyOut(BaseModel):
     required: bool
 
 
+class RelationOut(BaseModel):
+    """A single concept relation as returned by GET /schema (KI-029)."""
+
+    name: str
+    target_concept: str
+    cardinality: str
+    required: bool
+    temporality: str
+    inverse: str | None = None
+
+
 class ConceptOut(BaseModel):
-    """A single concept and its properties, as returned by GET /schema."""
+    """A single concept and its properties/relations, as returned by GET /schema."""
 
     name: str
     properties: list[PropertyOut]
+    relations: list[RelationOut]
 
 
 class SchemaOut(BaseModel):
@@ -498,7 +510,7 @@ def create_rest_app(
         namespace: str = "default",
         _principal: Principal = Depends(_resolve_principal),
     ) -> SchemaOut:
-        """Return the schema (concepts and their properties) for a namespace."""
+        """Return the schema (concepts, properties, and relations) for a namespace."""
         ir = kb.backend.get_schema(namespace)
         if ir is None:
             return SchemaOut(concepts=[])
@@ -513,6 +525,17 @@ def create_rest_app(
                         required=prop_def.required,
                     )
                     for prop_name, prop_def in concept_def.properties.items()
+                ],
+                relations=[
+                    RelationOut(
+                        name=rel_name,
+                        target_concept=rel_def.target_concept,
+                        cardinality=rel_def.cardinality,
+                        required=rel_def.required,
+                        temporality=rel_def.temporality,
+                        inverse=rel_def.inverse,
+                    )
+                    for rel_name, rel_def in concept_def.relations.items()
                 ],
             )
             for concept_name, concept_def in ir.concepts.items()
