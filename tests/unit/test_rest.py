@@ -113,6 +113,9 @@ class TestSchemaRoute:
                         "employer": PropertyDef(
                             name="employer", value_type="Text", temporality="time_varying"
                         ),
+                        "nicknames": PropertyDef(
+                            name="nicknames", value_type="Text", cardinality="many"
+                        ),
                     },
                 ),
             },
@@ -132,7 +135,9 @@ class TestSchemaRoute:
         props_by_name = {p["name"]: p for p in person["properties"]}
         assert props_by_name["name"]["type"] == "Text"
         assert props_by_name["name"]["required"] is True
+        assert props_by_name["name"]["cardinality"] == "single"
         assert props_by_name["employer"]["temporality"] == "time_varying"
+        assert props_by_name["nicknames"]["cardinality"] == "many"
         assert person["relations"] == []
 
     def test_returns_relations(self, tmp_path: Path) -> None:
@@ -152,12 +157,22 @@ class TestSchemaRoute:
                             name="employer",
                             target_concept="Organization",
                             cardinality="single",
+                            required=True,
                             temporality="time_varying",
                             inverse="employees",
                         ),
                     },
                 ),
-                "Organization": ConceptDef(name="Organization"),
+                "Organization": ConceptDef(
+                    name="Organization",
+                    relations={
+                        "employees": RelationDef(
+                            name="employees",
+                            target_concept="Person",
+                            cardinality="many",
+                        ),
+                    },
+                ),
             },
         )
         kb.backend.put_schema(schema)
@@ -174,7 +189,14 @@ class TestSchemaRoute:
         assert employer["name"] == "employer"
         assert employer["target_concept"] == "Organization"
         assert employer["cardinality"] == "single"
+        assert employer["required"] is True
         assert employer["temporality"] == "time_varying"
+        assert employer["inverse"] == "employees"
+
+        employees = concepts_by_name["Organization"]["relations"][0]
+        assert employees["cardinality"] == "many"
+        assert employees["required"] is False
+        assert employees["inverse"] is None
         assert employer["inverse"] == "employees"
 
     def test_respects_namespace_argument(self, tmp_path: Path) -> None:

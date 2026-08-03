@@ -607,7 +607,9 @@ Surfaced during a whole-project milestone audit (2026-07-29); flagged in a prior
 
 ### Fix
 
-Added a `relations` list (name, target concept, cardinality, required, temporality, inverse) alongside `properties` in both `schema_tool`'s dict output and REST's new `RelationOut` model on `ConceptOut`/`SchemaOut` — mirroring `PropertyOut`'s existing shape. `ConceptOut.relations` is a required field (not defaulted), so any caller still constructing one without it now fails fast at construction rather than silently omitting the field again; the one in-repo call site (`get_schema` route) was updated accordingly. The CLI has no schema-inspection command at all (tracked separately, out of scope here — KI-032 covers CLI proposal-review commands specifically, not schema).
+Added a `relations` list (name, target concept, cardinality, required, temporality, inverse) alongside `properties` in both `schema_tool`'s dict output and REST's new `RelationOut` model on `ConceptOut`/`SchemaOut` — mirroring `PropertyOut`'s existing shape. `ConceptOut.relations` is a required field (not defaulted), so any caller still constructing one without it now fails fast at construction rather than silently omitting the field again; the one in-repo call site (`get_schema` route) was updated accordingly. `PropertyOut`/the property dict output also gained `cardinality` in the same pass — an omission of the same class (SPEC §4/ADR-0017: cardinality, not just temporality, predicts contradiction-vs-coexistence for a subsequent proposal), left inconsistent with relations (which already had it) had this not been caught in review.
+
+The CLI has no schema-inspection command at all — genuinely out of scope for this fix (a new CLI command, not an output-shape change), but this text previously claimed it was "tracked separately" under KI-032, which was wrong: KI-032 covers CLI proposal-review commands and never mentions schema. Corrected; the actual gap is now tracked as KI-038.
 
 ---
 
@@ -752,6 +754,22 @@ This is not a regression relative to *shipped* behavior (the id-list design that
 ### Fix
 
 Add an optional hint parameter (e.g. `candidate_ids: frozenset[str] | None = None`) to `entities_meeting_confidence`/`entities_meeting_trust` that a backend *may* exploit or ignore — additive, not breaking, if landed after KI-028's already-breaking signature change. SQLite can bind the full candidate set as a single JSON-encoded parameter (`WHERE subject IN (SELECT value FROM json_each(?))`) rather than one placeholder per id, avoiding both the original bound-variable-limit problem and the current full-concept-scan cost; DuckDB's `unnest`-based equivalent was measured slower than a full scan in this case, so a DuckDB implementation may reasonably choose to ignore the hint and keep scanning. Needs a benchmark demonstrating the win at a `.where()`/`.semantic()`-narrowed scale that's actually visible (the current 1k-entity fixture doesn't show it — a 50k+ fixture would).
+
+---
+
+## KI-038 — CLI has no `schema` command
+
+**Severity:** Architecture gap — SPEC-normative CLI surface is entirely unimplemented
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §14.2 (`ontolith schema {show|migrate}`)
+
+### Description
+
+`src/ontolith/interfaces/cli.py` registers `principal`/`entity`/`proposal`/`contradiction`/`namespace` sub-apps plus top-level `assert`/`assertions`/`query`/`reindex` commands — no `schema` command at all, despite SPEC §14.2 normatively listing `ontolith schema {show|migrate}` as part of the CLI surface. Found while fixing KI-029 (MCP/REST schema output), which had initially described this gap as "tracked separately... KI-032 covers CLI proposal-review commands specifically" — that framing was wrong: KI-032 doesn't mention schema at all, so the gap had no actual tracked issue until now.
+
+### Fix
+
+Add `ontolith schema show [--namespace]` printing concepts/properties/relations (mirroring MCP's `ontolith.schema`/REST's `GET /schema` output, now that KI-029 closed the relations gap there too). `ontolith schema migrate` is a larger, separate piece of work (schema versioning/migration isn't implemented anywhere yet) — split into its own issue if `show` lands first.
 
 ---
 

@@ -59,7 +59,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     mcp: FastMCP = FastMCP(name)
 
     # ------------------------------------------------------------------
-    # ontolith.schema — list concepts and their properties
+    # ontolith.schema — list concepts and their properties/relations
     # ------------------------------------------------------------------
 
     @mcp.tool(name="ontolith.schema")
@@ -95,6 +95,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
                         {
                             "name": prop_name,
                             "type": prop_def.value_type,
+                            "cardinality": prop_def.cardinality,
                             "temporality": prop_def.temporality,
                             "required": prop_def.required,
                         }

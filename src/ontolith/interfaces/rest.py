@@ -92,6 +92,7 @@ class PropertyOut(BaseModel):
 
     name: str
     type: str
+    cardinality: str
     temporality: str
     required: bool
 
@@ -521,6 +522,7 @@ def create_rest_app(
                     PropertyOut(
                         name=prop_name,
                         type=prop_def.value_type,
+                        cardinality=prop_def.cardinality,
                         temporality=prop_def.temporality,
                         required=prop_def.required,
                     )
