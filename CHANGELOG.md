@@ -141,6 +141,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposal is reviewer-actionable, which `changes_requested` proposals are not.
 
 #### Fixed
+- MCP `ontolith.schema` and `GET /schema` now include each concept's `relations`, and
+  each property's `cardinality` (closes KI-029) — both were previously omitted entirely,
+  so an agent or REST client had no way to see that a relation like `Person.employer`
+  exists, whether it's `time_varying`, or its cardinality — the information that
+  predicts supersession vs. contradiction on a subsequent proposal (SPEC §10.1,
+  ADR-0017). REST's `ConceptOut` gained a new required `relations: list[RelationOut]`
+  field (name, target concept, cardinality, required, temporality, inverse) alongside
+  the existing `properties`, mirroring `PropertyOut`'s shape (which itself gained
+  `cardinality`) — code constructing `ConceptOut`/`PropertyOut` directly (not part of
+  the public API surface per ADR-0019 — neither is exported from `interfaces.rest`)
+  must now supply the new fields.
 - **Breaking:** `StorageBackend` gained two new required Protocol methods,
   `entities_meeting_confidence(namespace, concept, threshold) -> set[str]` and
   `entities_meeting_trust(namespace, concept, min_trust) -> set[str]` (KI-028) — any

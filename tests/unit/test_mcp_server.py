@@ -15,7 +15,7 @@ from ontolith import Ontology
 from ontolith.core import Assertion, FixedClock, FixedIdProvider
 from ontolith.identity.token_auth import TokenAuthProvider
 from ontolith.interfaces.mcp import create_mcp_server
-from ontolith.schema.ir import ConceptDef, PropertyDef, SchemaIR
+from ontolith.schema.ir import ConceptDef, PropertyDef, RelationDef, SchemaIR
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 HUMAN = "alice@example.com"
@@ -77,6 +77,9 @@ class TestSchemaTool:
                         "employer": PropertyDef(
                             name="employer", value_type="Text", temporality="time_varying"
                         ),
+                        "nicknames": PropertyDef(
+                            name="nicknames", value_type="Text", cardinality="many"
+                        ),
                     },
                 ),
             },
@@ -96,7 +99,66 @@ class TestSchemaTool:
         props_by_name = {p["name"]: p for p in person["properties"]}
         assert props_by_name["name"]["type"] == "Text"
         assert props_by_name["name"]["required"] is True
+        assert props_by_name["name"]["cardinality"] == "single"
         assert props_by_name["employer"]["temporality"] == "time_varying"
+        assert props_by_name["nicknames"]["cardinality"] == "many"
+        assert person["relations"] == []
+
+    def test_schema_returns_relations(self, tmp_path: Path) -> None:
+        """KI-029: relations were previously omitted entirely - an agent
+        inspecting the schema this way couldn't see that Person.employer
+        exists, or whether it's time_varying (predicts supersession vs.
+        contradiction on a subsequent proposal, SPEC §10.1)."""
+        kb = _kb(tmp_path)
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    relations={
+                        "employer": RelationDef(
+                            name="employer",
+                            target_concept="Organization",
+                            cardinality="single",
+                            required=True,
+                            temporality="time_varying",
+                            inverse="employees",
+                        ),
+                    },
+                ),
+                "Organization": ConceptDef(
+                    name="Organization",
+                    relations={
+                        "employees": RelationDef(
+                            name="employees",
+                            target_concept="Person",
+                            cardinality="many",
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.backend.put_schema(schema)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.schema").fn(
+            token=kb.issue_token(HUMAN, author=ADMIN)[0]
+        )
+
+        concepts_by_name = {c["name"]: c for c in result["concepts"]}
+        employer = concepts_by_name["Person"]["relations"][0]
+        assert employer["name"] == "employer"
+        assert employer["target_concept"] == "Organization"
+        assert employer["cardinality"] == "single"
+        assert employer["required"] is True
+        assert employer["temporality"] == "time_varying"
+        assert employer["inverse"] == "employees"
+
+        employees = concepts_by_name["Organization"]["relations"][0]
+        assert employees["cardinality"] == "many"
+        assert employees["required"] is False
+        assert employees["inverse"] is None
 
     def test_schema_respects_namespace_argument(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)

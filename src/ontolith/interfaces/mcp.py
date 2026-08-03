@@ -59,21 +59,22 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     mcp: FastMCP = FastMCP(name)
 
     # ------------------------------------------------------------------
-    # ontolith.schema — list concepts and their properties
+    # ontolith.schema — list concepts and their properties/relations
     # ------------------------------------------------------------------
 
     @mcp.tool(name="ontolith.schema")
     def schema_tool(token: str, namespace: str = "default") -> dict[str, Any]:
-        """Return the schema (concepts and their properties) for a namespace.
+        """Return the schema (concepts, properties, and relations) for a namespace.
 
         Args:
             token: Bearer token identifying the calling principal (ADR-0014)
             namespace: Namespace to inspect (default: "default")
 
         Returns:
-            Dict with "concepts" key listing concept names and their
-            property definitions from the active schema version, or "error"
-            if the token does not resolve to a valid principal.
+            Dict with "concepts" key listing concept names, their property
+            definitions, and their relation definitions from the active
+            schema version (SPEC §14.4), or "error" if the token does not
+            resolve to a valid principal.
         """
         from ontolith.core.errors import AuthError
 
@@ -94,10 +95,22 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
                         {
                             "name": prop_name,
                             "type": prop_def.value_type,
+                            "cardinality": prop_def.cardinality,
                             "temporality": prop_def.temporality,
                             "required": prop_def.required,
                         }
                         for prop_name, prop_def in concept_def.properties.items()
+                    ],
+                    "relations": [
+                        {
+                            "name": rel_name,
+                            "target_concept": rel_def.target_concept,
+                            "cardinality": rel_def.cardinality,
+                            "required": rel_def.required,
+                            "temporality": rel_def.temporality,
+                            "inverse": rel_def.inverse,
+                        }
+                        for rel_name, rel_def in concept_def.relations.items()
                     ],
                 }
             )
