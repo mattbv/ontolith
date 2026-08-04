@@ -15,7 +15,7 @@ from ontolith import Ontology
 from ontolith.core import Assertion, FixedClock, FixedIdProvider
 from ontolith.core.errors import ValidationError
 from ontolith.govern.conflict import Activate, Contradict, Supersede, route
-from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
+from ontolith.schema import ConceptDef, PropertyDef, RelationDef, SchemaIR
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -628,6 +628,38 @@ class TestValueTypeMismatchRejected:
 
         assertion = kb.assert_literal(entity.id, "Person.age", "42", "Integer", AUTHOR)
         assert assertion.value_type == "Integer"
+
+    def test_relation_declared_predicate_has_no_value_type_to_mismatch(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A predicate declared as a relation has no PropertyDef.value_type
+        to compare against, so a literal assertion under it is permitted
+        regardless of the caller-supplied value_type — a schema-declared-kind
+        mismatch is a distinct, deliberately out-of-scope gap (KI-040), not
+        this check's concern."""
+        clock = FixedClock(T0)
+        ids = FixedIdProvider(["p-0", "e-1", "e-2", "a-1"])
+        kb = make_kb(clock, ids)
+        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+        kb.create_principal(ADMIN, kind="human", auth_method="oidc", default_capability="admin")
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    relations={
+                        "employer": RelationDef(name="employer", target_concept="Organization"),
+                    },
+                ),
+                "Organization": ConceptDef(name="Organization"),
+            },
+        )
+        kb.apply_schema(schema, author=ADMIN)
+        entity = kb.create_entity("Person", author=AUTHOR)
+
+        assertion = kb.assert_literal(entity.id, "Person.employer", "Acme Corp", "Text", AUTHOR)
+        assert assertion.value == "Acme Corp"
 
 
 # ===========================================================================

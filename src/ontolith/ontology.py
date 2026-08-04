@@ -448,7 +448,7 @@ class Ontology:
                 raise ValidationError(
                     f"Predicate {predicate!r} is declared value_type={declared!r} in "
                     f"schema {schema.namespace!r} version {schema.version}, but this "
-                    f"assertion supplies value_type={value_type!r}"
+                    f"write supplies value_type={value_type!r}"
                 )
 
     def _retraction_valid_to(self, assertion_id: str, now: datetime) -> str | None:
