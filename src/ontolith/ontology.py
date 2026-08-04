@@ -418,19 +418,38 @@ class Ontology:
         schema = self.backend.get_schema(self.namespace)
         return schema.cardinality_of(predicate) if schema is not None else "single"
 
-    def _require_known_predicate(self, predicate: str) -> None:
+    def _require_known_predicate(self, predicate: str, value_type: str | None = None) -> None:
         """Reject an unknown predicate at write time (SPEC §4) rather than
         silently defaulting its temporality/cardinality to static/single.
+
+        When `value_type` is given (literal write paths only), also reject a
+        mismatch against the schema-declared `PropertyDef.value_type`
+        (KI-031) — e.g. writing `value_type="Text"` against a predicate
+        declared `Integer`. No check is performed when the predicate
+        resolves to a relation (relations have no value_type;
+        SchemaIR.value_type_of returns None) — a caller asserting a literal
+        against a relation-declared predicate is a predicate-kind mismatch,
+        tracked separately as KI-040, not this.
 
         No-op when no schema is registered for the namespace yet — a
         schema-less namespace has nothing to validate a predicate against.
         """
         schema = self.backend.get_schema(self.namespace)
-        if schema is not None and not schema.has_predicate(predicate):
+        if schema is None:
+            return
+        if not schema.has_predicate(predicate):
             raise ValidationError(
                 f"Unknown predicate {predicate!r}: not declared in schema "
                 f"{schema.namespace!r} version {schema.version}"
             )
+        if value_type is not None:
+            declared = schema.value_type_of(predicate)
+            if declared is not None and declared != value_type:
+                raise ValidationError(
+                    f"Predicate {predicate!r} is declared value_type={declared!r} in "
+                    f"schema {schema.namespace!r} version {schema.version}, but this "
+                    f"write supplies value_type={value_type!r}"
+                )
 
     def _retraction_valid_to(self, assertion_id: str, now: datetime) -> str | None:
         """Compute valid_to for a retraction.
@@ -532,9 +551,14 @@ class Ontology:
 
         Returns:
             Assertion as persisted (status/supersedes reflect conflict routing)
+
+        Raises:
+            ValidationError: predicate is not declared in the active schema,
+                or value_type does not match the schema-declared value_type
+                for predicate (KI-031)
         """
         self._check_direct_write_capability(author, acting_as)
-        self._require_known_predicate(predicate)
+        self._require_known_predicate(predicate, value_type)
         temporality = self._resolve_temporality(predicate)
 
         assertion = Assertion(
@@ -795,12 +819,14 @@ class Ontology:
         Raises:
             AuthError: author or acting_as is not a known principal
             CapabilityError: delegation is unauthorized
-            ValidationError: author is ai-kind and model is not provided, or
-                predicate is not declared in the active schema
+            ValidationError: author is ai-kind and model is not provided,
+                predicate is not declared in the active schema, or
+                value_type does not match the schema-declared value_type
+                for predicate (KI-031)
         """
         principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
-        self._require_known_predicate(predicate)
+        self._require_known_predicate(predicate, value_type)
         delegating = self._resolve_delegation(principal, author, acting_as)
         temporality = self._resolve_temporality(predicate)
 

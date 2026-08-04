@@ -170,6 +170,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cardinality`) — code constructing `ConceptOut`/`PropertyOut` directly (not part of
   the public API surface per ADR-0019 — neither is exported from `interfaces.rest`)
   must now supply the new fields.
+- **Breaking:** `assert_literal`/`propose` now raise `ValidationError` when the caller's
+  `value_type` doesn't match the schema-declared `PropertyDef.value_type` for `predicate`
+  (closes the `value_type` half of KI-031) — previously a predicate declared
+  `value_type: Integer` silently accepted a literal written with `value_type="Text"` (or
+  any other mismatched, case-sensitive-mismatched type), with no error anywhere.
+  `SchemaIR` gained `value_type_of(predicate)`; `assert_ref`/`propose_ref` are unaffected
+  (relations have no `value_type`), and no check fires for a namespace with no registered
+  schema. This can break a schema-driven CSV import (`plugins/reference/csv_importer.py`)
+  that previously relied on its `value_type` column defaulting to `"Text"` for every row —
+  under a registered schema whose properties aren't all `Text`, that default may now raise
+  mid-import. `required` remains unenforced anywhere in this codebase — ADR-0028 records
+  the decision to keep it out of core (SPEC §4 assigns it to the validator layer; a
+  per-write core gate is structurally the wrong shape for a check that's necessarily
+  cross-assertion), and corrects an inaccurate first-draft claim that the existing
+  `RequiredFieldsValidator` plugin already covered it — it doesn't read the schema's
+  `required` field (KI-041), and no code path invokes any `Validator` plugin at all
+  (KI-042).
 - **Breaking:** `StorageBackend` gained two new required Protocol methods,
   `entities_meeting_confidence(namespace, concept, threshold) -> set[str]` and
   `entities_meeting_trust(namespace, concept, min_trust) -> set[str]` (KI-028) — any

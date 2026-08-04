@@ -635,11 +635,11 @@ Separately, the class docstring's own example used a relation-target filter that
 
 ---
 
-## KI-031 — Schema `value_type`/`required` are declared but never enforced at write time
+## KI-031 — Schema `value_type`/`required` are declared but never enforced at write time — PARTIALLY RESOLVED (M3)
 
 **Severity:** Architecture gap — declared schema constraints are silently unenforced
-**Milestone target:** M3
-**SPEC reference:** SPEC §4 (constraints are validator-backed); Implementation Plan §4.3 ("validate at edges")
+**Milestone target:** M3 — `value_type` resolved; `required` remains open, tracked forward as KI-041/KI-042
+**SPEC reference:** SPEC §4 (`value_type` is a core type; `required`/`unique`/`constraints` are validator-backed, §13); Implementation Plan §4.3 ("validate at edges")
 
 ### Description
 
@@ -651,7 +651,9 @@ Surfaced during a whole-project milestone audit (2026-07-29).
 
 ### Fix
 
-Validate `value_type` against the schema-declared type in `_require_known_predicate` (or a sibling helper), raising `ValidationError` on mismatch. Decide and record (ADR) whether/how `required` is enforced at the core layer, given `RequiredFieldsValidator` already exists as a plugin-level alternative (KI-010) — the core-vs-plugin division of responsibility here needs to be an explicit decision, not silence.
+**`value_type`: resolved.** `_require_known_predicate` (`src/ontolith/ontology.py`) now takes an optional `value_type` parameter; `assert_literal` and `propose` (the two literal write paths) pass their caller-supplied `value_type` through, and a mismatch against the schema's declared `PropertyDef.value_type` (via new `SchemaIR.value_type_of()`) raises `ValidationError` — same shape and same call sites as the existing unknown-predicate check. `assert_ref`/`propose_ref` are unaffected (relations have no `value_type`). No check fires when the predicate resolves to a relation (`value_type` is a required field on `PropertyDef`, so a property can never itself omit it), or when no schema is registered for the namespace. Enforcement is submission-time only — a proposal is not re-validated against a possibly-changed schema when later accepted/resubmitted, matching the existing, documented precedent that `_require_known_predicate` isn't re-run at replay either.
+
+**`required`: still open, deliberately deferred, not silently dropped.** ADR-0028 records the decision not to add a core-layer required-field presence check — SPEC §4 itself assigns `required` to the validator layer (§13), and structurally a per-write core gate is the wrong shape for it anyway (an entity necessarily fails every required declaration for a moment right after `create_entity`, before its other properties are asserted). This ADR's first draft justified the deferral by pointing at `RequiredFieldsValidator` (KI-010) as an already-working answer; that turned out to be inaccurate on review and was corrected before merge: the plugin's required-predicate set is independently configured, not derived from `PropertyDef.required`/`RelationDef.required` (now tracked as **KI-041**), and more fundamentally, no code path anywhere invokes any registered `Validator.validate()` at all — the protocol exists but nothing calls it (now tracked as **KI-042**). Today `required` is schema metadata, surfaced read-only via `GET /schema`/`ontolith.schema`/codegen, enforced by nobody. See ADR-0028 for the full corrected rationale.
 
 ---
 
@@ -810,6 +812,42 @@ This was surfaced during KI-030's review: `entities_where()`'s `value_lit`/`valu
 ### Fix
 
 Add a kind check to `_require_known_predicate` (or a new dedicated check in `assert_literal`/`assert_ref`) that rejects a literal assertion against a schema-declared relation predicate, and vice versa, with a clear `ValidationError`. Once that guarantee holds, `entities_where()` could optionally be tightened to select `value_lit` vs. `value_ref` based on the predicate's declared kind (resolved via schema) rather than matching both unconditionally — removing the union entirely for the common case and only falling back to it for callers without a registered schema (where kind can't be known in advance).
+
+---
+
+## KI-041 — `RequiredFieldsValidator` doesn't read the schema's `PropertyDef.required`/`RelationDef.required`
+
+**Severity:** Architecture gap — a schema author's `required=True` declaration has no observable effect anywhere, including in the one plugin whose job description matches it
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §4 (`required` — validator-backed, §13), §13.2 (Validator protocol)
+
+### Description
+
+`RequiredFieldsValidator` (`src/ontolith/plugins/reference/required_fields_validator.py`) checks whether an entity has all of a *separately, independently configured* set of required predicates (`required_predicates`, a constructor argument defaulting to `{"Person": ("name",)}`) — it never reads `SchemaIR`/`PropertyDef.required`/`RelationDef.required` at all. A schema author who declares `PropertyDef(name="ssn", value_type="Text", required=True)` gets no enforcement from this plugin unless a deployment separately, manually, redundantly re-declares `"ssn"` in the plugin's own `required_predicates` mapping — the two `required` declarations (schema's and the plugin's) are unrelated in code, easy to let drift out of sync, and nothing points out that they should agree.
+
+Surfaced during KI-031's review (2026-08-04): ADR-0028's first draft justified deferring core-layer `required` enforcement by claiming this plugin "already does this correctly" — it does a presence/absence check, but not *the schema's* presence/absence check.
+
+### Fix
+
+Give `RequiredFieldsValidator` an option (or a sibling `Validator`, or a classmethod constructor) to derive its `required_predicates` from a `SchemaIR` — iterating each concept's properties/relations and collecting the ones with `required=True` — rather than requiring a hand-maintained, schema-independent mapping. Needs KI-042 (validators aren't invoked anywhere yet) resolved first, or alongside, for this to have any observable effect.
+
+---
+
+## KI-042 — No code path invokes registered `Validator` plugins; `Validator.validate()` is unreachable
+
+**Severity:** Architecture gap — an entire plugin protocol category (`Validator`) is wired to nothing
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §13.2 (Validator protocol)
+
+### Description
+
+`PluginRegistry` (`src/ontolith/plugins/registry.py`) registers plugins, resolves their capability-scoped views, and enforces the manifest/capability model (ADR-0015) — but nothing in `src/ontolith/` ever calls `.validate()` on a registered `Validator` plugin. `RequiredFieldsValidator` (KI-010) implements the `Validator` protocol correctly and is registrable, but is never actually run: it isn't consulted during `assert_literal`/`assert_ref`/`propose`/`propose_ref`, `accept_proposal`, or anywhere else. Grepping `src/` for `.validate(` (the protocol's one method) turns up zero call sites outside the protocol/plugin definitions themselves.
+
+Surfaced during KI-031's review (2026-08-04) — ADR-0028's first draft described this plugin as "already wired into the `Validator` protocol," which conflated *implementing* the protocol with being *invoked* by anything.
+
+### Fix
+
+Decide and record (ADR) where in the write path registered validators should run — candidates include: synchronously inside `assert_literal`/`assert_ref`/`propose`/`propose_ref` before commit (blocking, consistent with policy evaluation's placement); asynchronously as a post-commit hook (non-blocking, but then a `Validator` can only flag, not prevent); or only at `accept_proposal` time for the governed path (leaving direct writes unchecked, which may or may not be intended). Whichever shape is chosen, it needs to compose with KI-041 (deriving `required_predicates` from schema) to make schema-declared `required` mean anything end to end.
 
 ---
 
