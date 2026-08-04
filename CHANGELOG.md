@@ -309,6 +309,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ci.yml`). Building the pass surfaced two real vulnerabilities, both fixed: `mcp` bumped to
   `>=1.28.1,<2.0` (PYSEC-2026-3483) and `sqlite-vec`'s pin bumped to `0.1.3` (PYSEC-2026-1938,
   `vec0` DELETE+INSERT workarounds from ADR-0020 re-verified against the new version).
+- `cryptography` (a transitive dependency of `mcp` via `pyjwt[crypto]`, not directly declared)
+  bumped 49.0.0 → 50.0.0 (`uv lock --upgrade-package cryptography`) to fix PYSEC-2026-3552 —
+  disclosed after `security.yml`'s previous scheduled run, first caught failing `pip-audit` on
+  `main` post-merge rather than on any feature PR's own diff. No `pyproject.toml` change (the
+  version floor lives in the lockfile only). Also newly caught while `pip-audit` was blocking
+  the same CI job from ever reaching its later steps: two `# nosec B608` annotations were
+  missing on the `UNION ALL` relation-filter query `entities_where()` gained for KI-030 (both
+  backends) — same already-justified false-positive shape as the pre-existing vector-search
+  `nosec`s (predicate/value are always parameter-bound; only a hardcoded-literal clause is
+  interpolated), just never actually run locally against `bandit` until this pass.
 
 ### Security & Correctness Remediation (2026-07-06 – 2026-07-09)
 
