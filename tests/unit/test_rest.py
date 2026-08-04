@@ -329,6 +329,21 @@ class TestQueryRoute:
         assert body["count"] == 0
         assert body["entities"] == []
 
+    def test_dunder_filter_key_returns_400(self, tmp_path: Path) -> None:
+        """A relation-traversal-shaped key fails loudly instead of returning 200 + empty (KI-030)."""
+        kb = _kb(tmp_path)
+        kb.create_entity("Person", author=HUMAN)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/query",
+            json={"concept": "Person", "filters": {"employer__name": "Acme Corp"}},
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 400
+
     def test_semantic_ranks_by_similarity(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)

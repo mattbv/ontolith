@@ -1172,6 +1172,37 @@ class TestSQLiteBackend:
             )
         assert len(backend.entities()) == 3
 
+    def test_entities_where_matches_relation_target_id(self, backend: SQLiteBackend) -> None:
+        """entities_where() matches a relation filter against value_ref, not just value_lit (KI-030)."""
+        for entity_id in ("person-001", "org-001"):
+            backend.put_entity(
+                Entity(
+                    id=entity_id,
+                    namespace="test-ns",
+                    concept="Person" if entity_id.startswith("person") else "Organization",
+                    created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                    created_by="alice@test.com",
+                )
+            )
+        backend.put_assertion(
+            Assertion(
+                id="assertion-001",
+                namespace="test-ns",
+                subject="person-001",
+                predicate="Person.employer",
+                value_kind="ref",
+                value="org-001",
+                author="alice@test.com",
+                asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+
+        results = backend.entities_where("test-ns", "Person", {"Person.employer": "org-001"})
+        assert [r.id for r in results] == ["person-001"]
+
+        no_match = backend.entities_where("test-ns", "Person", {"Person.employer": "org-002"})
+        assert no_match == []
+
     def test_contradictions_filter_by_state(self, backend: SQLiteBackend) -> None:
         backend.put_contradiction(
             Contradiction(

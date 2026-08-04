@@ -141,6 +141,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposal is reviewer-actionable, which `changes_requested` proposals are not.
 
 #### Fixed
+- **Breaking:** `QueryBuilder.where()` no longer silently no-ops on relation-traversal
+  filter keys (closes KI-030) — `.where(employer__name="Acme Corp")`, an example the class
+  docstring itself advertised as working, compiled into an unreachable predicate string
+  and always returned an empty result with no error. Dunder-containing keys (`__`) now
+  raise `ValidationError` at `.where()` call time instead, naming the offending key and
+  explaining that neither multi-hop traversal nor lookup operators are implemented
+  (ADR-0027, KI-039) — a caller that previously got `[]` back for such a key now gets an
+  exception (MCP: `{"error": ..., "code": "validation_error"}`; REST `POST /query`: `400`
+  instead of `200` with an empty list). Separately, `StorageBackend.entities_where()`
+  (both backends) now matches a filter value against either `value_lit` or `value_ref` via
+  a `UNION ALL` of two indexed point lookups (a new `idx_assertion_pred_ref` index backs
+  the `value_ref` arm), so direct relation-target-id equality (`.where(employer="org-123")`)
+  actually returns matches — previously it silently matched nothing, since only
+  `value_lit` was ever compared, and an initial `value_lit = ? OR value_ref = ?` version of
+  this fix was reworked before merge after it was measured to fall back to a full table
+  scan on SQLite. Docstrings on `QueryBuilder`/`.where()`/`StorageBackend.entities_where()`
+  now state the real contract; SPEC §11.1, the PRD walkthrough, and a use-case doc example
+  were corrected to match (see ADR-0027).
 - MCP `ontolith.schema` and `GET /schema` now include each concept's `relations`, and
   each property's `cardinality` (closes KI-029) — both were previously omitted entirely,
   so an agent or REST client had no way to see that a relation like `Person.employer`

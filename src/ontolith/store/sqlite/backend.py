@@ -357,6 +357,18 @@ class SQLiteBackend:
             ON assertion(predicate, value_lit, status)
         """)
 
+        # Companion to idx_assertion_pred_value for relation (value_ref)
+        # filters in entities_where() (KI-030). Kept as a separate index
+        # rather than adding value_ref to idx_assertion_pred_value: SQLite's
+        # planner won't reliably pick a single (predicate, value_lit OR
+        # value_ref, status) index for an OR-shaped predicate, so
+        # entities_where() issues two seekable point queries (UNION ALL)
+        # instead — one per index — confirmed via EXPLAIN QUERY PLAN.
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_assertion_pred_ref
+            ON assertion(predicate, value_ref, status)
+        """)
+
         # Tracks the embedding dimension established per scope (ADR-0020).
         # vec0 virtual tables (vector_{scope}) are created lazily, on first
         # vector_upsert for that scope, once the dimension is known — this
@@ -1542,13 +1554,24 @@ class SQLiteBackend:
     ) -> list[Entity]:
         """Query entities matching all predicate=value filters in one SQL query.
 
-        Uses correlated subqueries so each (predicate, value_lit) pair hits the
-        idx_assertion_spo index instead of doing one round-trip per entity.
+        Uses correlated subqueries so each (predicate, value) pair hits the
+        idx_assertion_pred_value/idx_assertion_pred_ref indexes instead of
+        doing one round-trip per entity. A filter matches either a literal
+        property (`value_lit`) or a relation's target entity id (`value_ref`)
+        — KI-030: relation filters like `employer="org-123"` are equality
+        checks against `value_ref`, not traversal into the target entity's
+        own properties. The two are checked via a UNION ALL of two
+        single-column point lookups rather than one `value_lit = ? OR
+        value_ref = ?` predicate — SQLite's planner doesn't reliably pick a
+        seekable plan for the latter (falls back to a full table SCAN on the
+        as_of branch; confirmed via EXPLAIN QUERY PLAN), which turned every
+        `.where()` call — not just relation filters — into an unindexed scan.
 
         Args:
             namespace: Namespace to query
             concept: Concept to filter by
-            predicate_filters: Dict of full_predicate → literal_value (AND semantics)
+            predicate_filters: Dict of full_predicate → value (AND semantics);
+                value is matched against either value_lit or value_ref
             as_of_time: If set, applies bitemporal filter on assertions and entity creation
             include_flagged: When as_of_time is set, whether to include
                 'flagged' assertions in the predicate match (excluded by
@@ -1570,26 +1593,36 @@ class SQLiteBackend:
             # concatenation regardless of the variable's actual provenance.
             flagged_clause = "" if include_flagged else " AND status != 'flagged'"
             for predicate, value in predicate_filters.items():
-                query += (
-                    " AND id IN ("
-                    "SELECT subject FROM assertion"
-                    " WHERE predicate = ? AND value_lit = ?"
+                bitemporal_clause = (
                     " AND asserted_at <= ?"
                     " AND (valid_from IS NULL OR valid_from <= ?)"
                     " AND (valid_to IS NULL OR valid_to > ?)"
                     f"{flagged_clause}"  # nosec B608
+                )
+                query += (
+                    " AND id IN ("
+                    "SELECT subject FROM assertion"
+                    f" WHERE predicate = ? AND value_lit = ?{bitemporal_clause}"
+                    " UNION ALL "
+                    "SELECT subject FROM assertion"
+                    f" WHERE predicate = ? AND value_ref = ?{bitemporal_clause}"
                     ")"
                 )
-                params.extend([predicate, value, t_iso, t_iso, t_iso])
+                params.extend(
+                    [predicate, value, t_iso, t_iso, t_iso, predicate, value, t_iso, t_iso, t_iso]
+                )
         else:
             for predicate, value in predicate_filters.items():
                 query += (
                     " AND id IN ("
                     "SELECT subject FROM assertion"
                     " WHERE predicate = ? AND value_lit = ? AND status = 'active'"
+                    " UNION ALL "
+                    "SELECT subject FROM assertion"
+                    " WHERE predicate = ? AND value_ref = ? AND status = 'active'"
                     ")"
                 )
-                params.extend([predicate, value])
+                params.extend([predicate, value, predicate, value])
 
         cursor = self.conn.cursor()
         cursor.execute(query, params)
