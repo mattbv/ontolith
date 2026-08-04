@@ -130,7 +130,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposal's original `created_at`. A `ProposalEvent(type="resubmit")` is always
   recorded, regardless of outcome. `POST /proposals/{proposal_id}/resubmit` (REST)
   and `ontolith.resubmit` (MCP) both wrap it, returning the same `{proposal,
-  decision}` shape as `POST /proposals`; CLI parity is deferred to KI-032.
+  decision}` shape as `POST /proposals`; CLI parity landed separately — see the
+  KI-032 entry below.
 - `Ontology.proposals()` (and `GET /proposals`, `ontolith proposal list --state`)
   gained a `state="pending"` query-level alias merging `require_review` and
   `changes_requested` — the other half of KI-027: even with `resubmit()` able to act
@@ -139,6 +140,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default (which remains `state="require_review"`) — a canonical reviewer loop
   (`for p in kb.proposals(): kb.accept_proposal(p.id, ...)`) assumes every returned
   proposal is reviewer-actionable, which `changes_requested` proposals are not.
+- CLI `ontolith proposal accept|reject|review <id> --reviewer [--reason]` and
+  `ontolith proposal resubmit <id> --author` (closes KI-032): previously
+  `proposal list` was the CLI's only proposal command, so an operator using only
+  the CLI could see what was pending review but had no way to act on it — every
+  other primary interface (SDK, REST, MCP-for-`resubmit`) already could. `review`
+  maps to `Ontology.request_changes` — SPEC §14.2 literally names the CLI command
+  `proposal {list|review}`, and REST's `/review` route agrees. `accept`/
+  `reject`/`review` take `--reviewer` (with `--author` accepted as an alias);
+  `resubmit` takes `--author`, since there the acting principal genuinely must be
+  the proposal's own author or delegate — the two options are deliberately not the
+  same name for the same reason across all four commands. `resubmit` closes the
+  CLI gap `Ontology.resubmit`/REST/MCP explicitly deferred to this KI when it
+  shipped (see the KI-027 entry above).
 
 #### Fixed
 - **Breaking:** `QueryBuilder.where()` no longer silently no-ops on relation-traversal
