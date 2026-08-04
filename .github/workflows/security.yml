@@ -38,13 +38,23 @@ jobs:
       - name: Run pip-audit
         run: uv run pip-audit
 
+      # `if: always()` below: these three steps are otherwise independent of
+      # pip-audit's outcome, but without it a pip-audit failure silently
+      # skips bandit/SBOM for the rest of the job (a real incident — a
+      # newly-disclosed transitive-dependency CVE masked two genuine bandit
+      # findings for a full PR before anyone noticed bandit hadn't actually
+      # run). The job still fails overall if any step fails; this only
+      # ensures every step gets a chance to report its own result.
       - name: Run bandit
+        if: always()
         run: uv run bandit -r src/ontolith -c pyproject.toml
 
       - name: Generate SBOM
+        if: always()
         run: uv run cyclonedx-py environment --pyproject pyproject.toml -o sbom.json
 
       - name: Upload SBOM
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sbom

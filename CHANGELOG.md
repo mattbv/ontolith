@@ -314,11 +314,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disclosed after `security.yml`'s previous scheduled run, first caught failing `pip-audit` on
   `main` post-merge rather than on any feature PR's own diff. No `pyproject.toml` change (the
   version floor lives in the lockfile only). Also newly caught while `pip-audit` was blocking
-  the same CI job from ever reaching its later steps: two `# nosec B608` annotations were
-  missing on the `UNION ALL` relation-filter query `entities_where()` gained for KI-030 (both
-  backends) — same already-justified false-positive shape as the pre-existing vector-search
-  `nosec`s (predicate/value are always parameter-bound; only a hardcoded-literal clause is
-  interpolated), just never actually run locally against `bandit` until this pass.
+  the same CI job from ever reaching its later steps: one genuine `bandit` B608 finding per
+  backend on the `UNION ALL` relation-filter query `entities_where()` gained for KI-030 — same
+  already-justified false-positive shape as the pre-existing vector-search `nosec`s (predicate/
+  value are always parameter-bound; only a hardcoded-literal clause is interpolated), just never
+  actually run locally against `bandit` until this pass. `security.yml`'s `bandit`/SBOM steps
+  now run with `if: always()` so a `pip-audit` failure can no longer mask them again — the same
+  masking is exactly how the two bandit findings went unseen across a full PR.
 
 ### Security & Correctness Remediation (2026-07-06 – 2026-07-09)
 

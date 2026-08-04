@@ -1549,15 +1549,15 @@ class DuckDBBackend:
                 # predicate/value are always bound via `?` below, never
                 # interpolated; the only interpolated piece is
                 # bitemporal_clause, itself built from hardcoded literals
-                # (see its own nosec above) - same already-justified pattern,
-                # not a new SQL injection surface.
+                # (see the flagged_clause justification above) - same
+                # already-justified pattern, not a new SQL injection surface.
                 query += (
-                    " AND id IN ("
+                    " AND id IN ("  # nosec B608
                     "SELECT subject FROM assertion"
-                    f" WHERE predicate = ? AND value_lit = ?{bitemporal_clause}"  # nosec B608
+                    f" WHERE predicate = ? AND value_lit = ?{bitemporal_clause}"
                     " UNION ALL "
                     "SELECT subject FROM assertion"
-                    f" WHERE predicate = ? AND value_ref = ?{bitemporal_clause}"  # nosec B608
+                    f" WHERE predicate = ? AND value_ref = ?{bitemporal_clause}"
                     ")"
                 )
                 params.extend(
