@@ -656,6 +656,196 @@ class TestProposalList:
         assert "changes_requested" in result.output
 
 
+class TestProposalAccept:
+    def test_accepts_pending_proposal(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        reviewer = kb.create_principal(
+            "carol@example.com", kind="human", default_capability="review"
+        )
+        bot = kb.create_principal(
+            "bot@example.com",
+            kind="ai",
+            auth_method="apikey",
+            owner=alice.id,
+            default_capability="propose",
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", bot.id, model="v1")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "proposal", "accept", proposal.id, "--author", reviewer.id],
+        )
+        assert result.exit_code == 0
+        assert proposal.id in result.output
+        assert "accepted" in result.output
+
+        kb = Ontology.connect(temp_db)
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "accepted"
+        kb.close()
+
+    def test_accept_unknown_proposal_exits_nonzero(self, seeded_db: tuple[Path, str, str]) -> None:
+        db, author, _ = seeded_db
+        result = runner.invoke(
+            app, ["--db", str(db), "proposal", "accept", "nonexistent", "--author", author]
+        )
+        assert result.exit_code == 1
+        assert "Error" in result.output
+
+
+class TestProposalReject:
+    def test_rejects_pending_proposal(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        reviewer = kb.create_principal(
+            "carol@example.com", kind="human", default_capability="review"
+        )
+        bot = kb.create_principal(
+            "bot@example.com",
+            kind="ai",
+            auth_method="apikey",
+            owner=alice.id,
+            default_capability="propose",
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", bot.id, model="v1")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "proposal",
+                "reject",
+                proposal.id,
+                "--author",
+                reviewer.id,
+                "--reason",
+                "not credible",
+            ],
+        )
+        assert result.exit_code == 0
+        assert proposal.id in result.output
+        assert "rejected" in result.output
+
+        kb = Ontology.connect(temp_db)
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "rejected"
+        kb.close()
+
+    def test_reject_unknown_proposal_exits_nonzero(self, seeded_db: tuple[Path, str, str]) -> None:
+        db, author, _ = seeded_db
+        result = runner.invoke(
+            app, ["--db", str(db), "proposal", "reject", "nonexistent", "--author", author]
+        )
+        assert result.exit_code == 1
+        assert "Error" in result.output
+
+
+class TestProposalReview:
+    def test_requests_changes_on_pending_proposal(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        reviewer = kb.create_principal(
+            "carol@example.com", kind="human", default_capability="review"
+        )
+        bot = kb.create_principal(
+            "bot@example.com",
+            kind="ai",
+            auth_method="apikey",
+            owner=alice.id,
+            default_capability="propose",
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", bot.id, model="v1")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "proposal",
+                "review",
+                proposal.id,
+                "--author",
+                reviewer.id,
+                "--reason",
+                "needs a source",
+            ],
+        )
+        assert result.exit_code == 0
+        assert proposal.id in result.output
+        assert "changes_requested" in result.output
+
+        kb = Ontology.connect(temp_db)
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "changes_requested"
+        kb.close()
+
+    def test_review_unknown_proposal_exits_nonzero(self, seeded_db: tuple[Path, str, str]) -> None:
+        db, author, _ = seeded_db
+        result = runner.invoke(
+            app, ["--db", str(db), "proposal", "review", "nonexistent", "--author", author]
+        )
+        assert result.exit_code == 1
+        assert "Error" in result.output
+
+
+class TestProposalResubmit:
+    def test_resubmits_proposal_after_changes_requested(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        reviewer = kb.create_principal(
+            "carol@example.com", kind="human", default_capability="review"
+        )
+        bot = kb.create_principal(
+            "bot@example.com",
+            kind="ai",
+            auth_method="apikey",
+            owner=alice.id,
+            default_capability="propose",
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", bot.id, model="v1")
+        kb.request_changes(proposal.id, reviewer.id)
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "proposal", "resubmit", proposal.id, "--author", bot.id],
+        )
+        assert result.exit_code == 0
+        assert proposal.id in result.output
+        # bot is ai-kind: ADR-0003's "AI proposals always require review" holds on
+        # resubmit too, so the re-evaluated decision lands back on require_review,
+        # not auto-accepted.
+        assert "decision=RequireReview" in result.output
+
+        kb = Ontology.connect(temp_db)
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "require_review"
+        kb.close()
+
+    def test_resubmit_unknown_proposal_exits_nonzero(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        db, author, _ = seeded_db
+        result = runner.invoke(
+            app, ["--db", str(db), "proposal", "resubmit", "nonexistent", "--author", author]
+        )
+        assert result.exit_code == 1
+        assert "Error" in result.output
+
+
 class TestContradictionList:
     def test_lists_open_contradictions_by_default(self, seeded_db: tuple[Path, str, str]) -> None:
         db, author, entity_id = seeded_db

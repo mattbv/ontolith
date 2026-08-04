@@ -657,7 +657,7 @@ Surfaced during a whole-project milestone audit (2026-07-29).
 
 ---
 
-## KI-032 — CLI has no `proposal accept`/`reject`/`review` commands
+## KI-032 — CLI has no `proposal accept`/`reject`/`review` commands ✓ RESOLVED (M3)
 
 **Severity:** Test gap / DX — one of SPEC's four primary interfaces cannot act on its own review queue
 **Milestone target:** M3
@@ -671,7 +671,7 @@ Surfaced during a whole-project milestone audit (2026-07-29).
 
 ### Fix
 
-Add `ontolith proposal accept <id> --author`, `proposal reject <id> --author [--reason]`, and `proposal review <id> --author [--reason]` commands, mirroring the existing `principal issue-token`/`revoke-token` command shape (an `--author` option identifying the reviewer, calling straight through to the corresponding `Ontology` method).
+Added `ontolith proposal accept <id> --author`, `proposal reject <id> --author [--reason]`, and `proposal review <id> --author [--reason]` (mapping to `request_changes`, mirroring REST's `/review` route name), each calling straight through to the corresponding `Ontology` method and following the existing `principal issue-token`/`revoke-token` command shape (an `--author` option identifying the acting principal). Also added `ontolith proposal resubmit <id> --author` — REST/MCP both gained a `resubmit` action alongside accept/reject/review when KI-027 closed the `request_changes` dead end, with CLI parity explicitly deferred to this KI at the time (see `CHANGELOG.md`'s KI-027 entry); closing it here keeps all four proposal-lifecycle actions available from every primary interface, not three of four.
 
 ---
 

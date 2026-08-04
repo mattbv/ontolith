@@ -139,6 +139,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default (which remains `state="require_review"`) — a canonical reviewer loop
   (`for p in kb.proposals(): kb.accept_proposal(p.id, ...)`) assumes every returned
   proposal is reviewer-actionable, which `changes_requested` proposals are not.
+- CLI `ontolith proposal accept|reject|review|resubmit <id> --author [--reason]`
+  (closes KI-032): previously `proposal list` was the CLI's only proposal command,
+  so an operator using only the CLI could see what was pending review but had no
+  way to act on it — every other primary interface (SDK, REST, MCP-for-`resubmit`)
+  already could. `review` maps to `Ontology.request_changes`, matching REST's
+  `/review` route name rather than the SDK method name. `resubmit` closes the CLI
+  gap `Ontology.resubmit`/REST/MCP explicitly deferred to this KI when it shipped
+  (see the KI-027 entry above).
 
 #### Fixed
 - **Breaking:** `QueryBuilder.where()` no longer silently no-ops on relation-traversal
