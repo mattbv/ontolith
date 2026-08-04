@@ -154,6 +154,21 @@ class SchemaIR(BaseModel):
         field = self._resolve_field(predicate)
         return field.cardinality if field is not None else "single"
 
+    def value_type_of(self, predicate: str) -> str | None:
+        """Resolve the declared value_type of a literal property predicate
+        (SPEC §4, KI-031).
+
+        Args:
+            predicate: Dotted predicate, e.g. "Person.name" or "Person.age"
+
+        Returns:
+            The declared value_type, or None if the predicate is
+            unresolvable or resolves to a RelationDef — relations have no
+            value_type (predicate-kind mismatches are KI-040, not this).
+        """
+        field = self._resolve_field(predicate)
+        return field.value_type if isinstance(field, PropertyDef) else None
+
     def to_json(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
         return self.model_dump()

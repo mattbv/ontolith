@@ -170,6 +170,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `cardinality`) — code constructing `ConceptOut`/`PropertyOut` directly (not part of
   the public API surface per ADR-0019 — neither is exported from `interfaces.rest`)
   must now supply the new fields.
+- **Breaking:** `assert_literal`/`propose` now raise `ValidationError` when the caller's
+  `value_type` doesn't match the schema-declared `PropertyDef.value_type` for `predicate`
+  (closes KI-031) — previously a predicate declared `value_type: Integer` silently
+  accepted a literal written with `value_type="Text"` (or any other mismatched type), with
+  no error anywhere. `SchemaIR` gained `value_type_of(predicate)`; `assert_ref`/
+  `propose_ref` are unaffected (relations have no `value_type`), and no check fires for a
+  namespace with no registered schema. `required` deliberately remains unenforced at the
+  core layer — ADR-0028 records that as a decision (the existing `RequiredFieldsValidator`
+  plugin, KI-010, is the intended enforcement point), not the same kind of gap as
+  `value_type`.
 - **Breaking:** `StorageBackend` gained two new required Protocol methods,
   `entities_meeting_confidence(namespace, concept, threshold) -> set[str]` and
   `entities_meeting_trust(namespace, concept, min_trust) -> set[str]` (KI-028) — any

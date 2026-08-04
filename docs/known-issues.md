@@ -635,7 +635,7 @@ Separately, the class docstring's own example used a relation-target filter that
 
 ---
 
-## KI-031 — Schema `value_type`/`required` are declared but never enforced at write time
+## KI-031 — Schema `value_type`/`required` are declared but never enforced at write time ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — declared schema constraints are silently unenforced
 **Milestone target:** M3
@@ -651,7 +651,9 @@ Surfaced during a whole-project milestone audit (2026-07-29).
 
 ### Fix
 
-Validate `value_type` against the schema-declared type in `_require_known_predicate` (or a sibling helper), raising `ValidationError` on mismatch. Decide and record (ADR) whether/how `required` is enforced at the core layer, given `RequiredFieldsValidator` already exists as a plugin-level alternative (KI-010) — the core-vs-plugin division of responsibility here needs to be an explicit decision, not silence.
+`_require_known_predicate` (`src/ontolith/ontology.py`) now takes an optional `value_type` parameter; `assert_literal` and `propose` (the two literal write paths) pass their caller-supplied `value_type` through, and a mismatch against the schema's declared `PropertyDef.value_type` (via new `SchemaIR.value_type_of()`) raises `ValidationError` — same shape and same call sites as the existing unknown-predicate check. `assert_ref`/`propose_ref` are unaffected (relations have no `value_type`). No check fires when the predicate resolves to a relation, or when no schema is registered for the namespace.
+
+`required` deliberately stays plugin-level: ADR-0028 records the decision not to add a second, core-layer required-field check, given `RequiredFieldsValidator` (KI-010) already does this and the check is fundamentally cross-assertion (re-querying the subject's full active-predicate set), not a per-write structural check like `value_type` — running it on every write would threaten the `propose` p95 < 50ms budget, and "what's required" varies per deployment in a way a single hard-coded core gate can't accommodate. See ADR-0028 for the full rationale, including why `value_type` and `required` warrant different treatment despite both being unenforced constraints on the same `PropertyDef`.
 
 ---
 

@@ -208,6 +208,43 @@ class TestCardinalityOf:
         assert self._schema().cardinality_of("Person.unknown_field") == "single"
 
 
+class TestValueTypeOf:
+    """SchemaIR.value_type_of() — write-time value_type validation (KI-031, ADR-0028)."""
+
+    def _schema(self) -> SchemaIR:
+        return SchemaIR(
+            namespace="test",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "name": PropertyDef(name="name", value_type="Text"),
+                        "age": PropertyDef(name="age", value_type="Integer"),
+                    },
+                    relations={
+                        "employer": RelationDef(name="employer", target_concept="Organization"),
+                    },
+                ),
+                "Organization": ConceptDef(name="Organization"),
+            },
+        )
+
+    def test_resolves_declared_value_type(self) -> None:
+        assert self._schema().value_type_of("Person.name") == "Text"
+        assert self._schema().value_type_of("Person.age") == "Integer"
+
+    def test_relation_has_no_value_type(self) -> None:
+        """Relations have no value_type — that's a predicate-kind mismatch (KI-040), not this."""
+        assert self._schema().value_type_of("Person.employer") is None
+
+    def test_unknown_predicate_returns_none(self) -> None:
+        assert self._schema().value_type_of("Person.unknown_field") is None
+
+    def test_malformed_predicate_returns_none(self) -> None:
+        assert self._schema().value_type_of("NoDotHere") is None
+
+
 class TestHasPredicate:
     """SchemaIR.has_predicate() — write-time unknown-predicate validation."""
 

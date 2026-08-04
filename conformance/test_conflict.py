@@ -592,6 +592,45 @@ class TestUnknownPredicateRejected:
 
 
 # ===========================================================================
+# value_type mismatch rejected at write time (SPEC §4, KI-031, ADR-0028)
+# ===========================================================================
+
+
+class TestValueTypeMismatchRejected:
+    def test_propose_value_type_mismatch_raises(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        with pytest.raises(ValidationError, match="declared value_type"):
+            kb.propose(entity.id, "Person.name", "42", "Integer", AUTHOR)
+
+    def test_assert_literal_value_type_mismatch_raises(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        with pytest.raises(ValidationError, match="declared value_type"):
+            kb.assert_literal(entity.id, "Person.name", "42", "Integer", AUTHOR)
+
+    def test_assert_literal_matching_value_type_succeeds(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        assert assertion.value_type == "Text"
+
+    def test_value_type_mismatch_permitted_without_a_registered_schema(
+        self, make_kb: KbFactory
+    ) -> None:
+        """No schema in the namespace: nothing to validate value_type
+        against, so any value_type is accepted."""
+        clock = FixedClock(T0)
+        ids = FixedIdProvider(["p-0", "e-1", "a-1"])
+        kb = make_kb(clock, ids)
+        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+        entity = kb.create_entity("Person", author=AUTHOR)
+
+        assertion = kb.assert_literal(entity.id, "Person.age", "42", "Integer", AUTHOR)
+        assert assertion.value_type == "Integer"
+
+
+# ===========================================================================
 # Explicit valid_from/valid_to on the governed write API
 # ===========================================================================
 
