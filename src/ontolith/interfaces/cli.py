@@ -380,18 +380,22 @@ def list_proposals(
 @proposal_app.command("accept")
 def accept_proposal(
     proposal_id: Annotated[str, typer.Argument(help="Proposal ID to accept.")],
-    author: Annotated[
-        str, typer.Option("--author", help="Reviewer principal accepting this proposal.")
+    reviewer: Annotated[
+        str,
+        typer.Option("--reviewer", "--author", help="Reviewer principal accepting this proposal."),
     ],
 ) -> None:
     """Accept a pending proposal, committing its operations (SPEC §9).
 
-    Requires the `--author` principal to hold `review` (or `admin`)
-    capability and not be the proposal's own author or delegate.
+    Requires the `--reviewer` principal to hold `review` (or `admin`)
+    capability, not be AI-kind, and not be the proposal's own author or
+    delegate (SPEC §9.4). The proposal must be in `require_review` or
+    `under_review` state — a `changes_requested` proposal must go through
+    `proposal resubmit` (KI-027) first.
     """
     kb = _kb()
     try:
-        proposal = kb.accept_proposal(proposal_id, author)
+        proposal = kb.accept_proposal(proposal_id, reviewer)
         typer.echo(f"Accepted: {proposal.id}  state={proposal.state}")
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -403,8 +407,9 @@ def accept_proposal(
 @proposal_app.command("reject")
 def reject_proposal(
     proposal_id: Annotated[str, typer.Argument(help="Proposal ID to reject.")],
-    author: Annotated[
-        str, typer.Option("--author", help="Reviewer principal rejecting this proposal.")
+    reviewer: Annotated[
+        str,
+        typer.Option("--reviewer", "--author", help="Reviewer principal rejecting this proposal."),
     ],
     reason: Annotated[
         str, typer.Option("--reason", help="Optional explanation for the rejection.")
@@ -412,12 +417,14 @@ def reject_proposal(
 ) -> None:
     """Reject a pending proposal. No operations are applied (SPEC §9).
 
-    Requires the `--author` principal to hold `review` (or `admin`)
-    capability and not be the proposal's own author or delegate.
+    Requires the `--reviewer` principal to hold `review` (or `admin`)
+    capability, not be AI-kind, and not be the proposal's own author or
+    delegate (SPEC §9.4). The proposal must be in `require_review` or
+    `under_review` state.
     """
     kb = _kb()
     try:
-        proposal = kb.reject_proposal(proposal_id, author, reason=reason)
+        proposal = kb.reject_proposal(proposal_id, reviewer, reason=reason)
         typer.echo(f"Rejected: {proposal.id}  state={proposal.state}")
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -427,23 +434,29 @@ def reject_proposal(
 
 
 @proposal_app.command("review")
-def request_changes(
+def review_proposal(
     proposal_id: Annotated[str, typer.Argument(help="Proposal ID to request changes on.")],
-    author: Annotated[str, typer.Option("--author", help="Reviewer principal requesting changes.")],
+    reviewer: Annotated[
+        str,
+        typer.Option("--reviewer", "--author", help="Reviewer principal requesting changes."),
+    ],
     reason: Annotated[
         str, typer.Option("--reason", help="Optional explanation of what needs to change.")
     ] = "",
 ) -> None:
-    """Request changes on a pending proposal (SPEC §9.1/§9.4).
+    """Request changes on a pending proposal — does not accept or reject it
+    (SPEC §9.1/§9.4).
 
     Moves the proposal to `changes_requested`; its author or delegate can
     then move it back to `submitted` via `proposal resubmit` (KI-027).
-    Requires the `--author` principal to hold `review` (or `admin`)
-    capability and not be the proposal's own author or delegate.
+    Requires the `--reviewer` principal to hold `review` (or `admin`)
+    capability, not be AI-kind, and not be the proposal's own author or
+    delegate. The proposal must be in `require_review` or `under_review`
+    state.
     """
     kb = _kb()
     try:
-        proposal = kb.request_changes(proposal_id, author, reason=reason)
+        proposal = kb.request_changes(proposal_id, reviewer, reason=reason)
         typer.echo(f"Changes requested: {proposal.id}  state={proposal.state}")
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -463,14 +476,17 @@ def resubmit_proposal(
     """Resubmit a proposal after changes were requested (SPEC §9.1, KI-027).
 
     Only the proposal's own author or delegating principal may call this —
-    the payload is replayed unedited through a fresh policy evaluation.
+    the payload is replayed unedited through a fresh policy evaluation
+    (which may auto-accept, require review again, or reject — resubmitting
+    does not guarantee acceptance). The proposal must be in
+    `changes_requested` state.
     """
     kb = _kb()
     try:
         proposal, decision = kb.resubmit(proposal_id, author)
         typer.echo(
             f"Resubmitted: {proposal.id}  state={proposal.state}  "
-            f"decision={type(decision).__name__}"
+            f"decision={type(decision).__name__}  reason={proposal.policy_reason or '-'}"
         )
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)

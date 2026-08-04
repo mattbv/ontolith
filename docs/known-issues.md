@@ -660,7 +660,7 @@ Surfaced during a whole-project milestone audit (2026-07-29).
 ## KI-032 — CLI has no `proposal accept`/`reject`/`review` commands ✓ RESOLVED (M3)
 
 **Severity:** Test gap / DX — one of SPEC's four primary interfaces cannot act on its own review queue
-**Milestone target:** M3
+**Milestone target:** M3 — resolved in `feat(interfaces): add CLI proposal accept/reject/review/resubmit commands (KI-032)`
 **SPEC reference:** SPEC §14.2 (CLI command surface, `proposal {list|review}`)
 
 ### Description
@@ -671,7 +671,7 @@ Surfaced during a whole-project milestone audit (2026-07-29).
 
 ### Fix
 
-Added `ontolith proposal accept <id> --author`, `proposal reject <id> --author [--reason]`, and `proposal review <id> --author [--reason]` (mapping to `request_changes`, mirroring REST's `/review` route name), each calling straight through to the corresponding `Ontology` method and following the existing `principal issue-token`/`revoke-token` command shape (an `--author` option identifying the acting principal). Also added `ontolith proposal resubmit <id> --author` — REST/MCP both gained a `resubmit` action alongside accept/reject/review when KI-027 closed the `request_changes` dead end, with CLI parity explicitly deferred to this KI at the time (see `CHANGELOG.md`'s KI-027 entry); closing it here keeps all four proposal-lifecycle actions available from every primary interface, not three of four.
+Added `ontolith proposal accept <id> --reviewer`, `proposal reject <id> --reviewer [--reason]`, and `proposal review <id> --reviewer [--reason]` (mapping to `request_changes`; the `review` name is SPEC §14.2's own literal command name, `proposal {list|review}`, not just a REST-route echo), each calling straight through to the corresponding `Ontology` method. `--reviewer` accepts `--author` as an alias — caught in review: `Proposal.author` is a real, distinct field `_require_reviewer` explicitly checks the acting principal is *not* (self-review is rejected), so naming the reviewer option `--author` reads as an assertion guaranteed false on every successful call; `--author` is kept working as an alias rather than a breaking rename. Also added `ontolith proposal resubmit <id> --author` (correctly `--author` here — the resubmitting principal genuinely is the proposal's own author or delegate) — REST/MCP both gained a `resubmit` action alongside accept/reject/review when KI-027 closed the `request_changes` dead end, with CLI parity explicitly deferred to this KI at the time (see `CHANGELOG.md`'s KI-027 entry); closing it here keeps all four proposal-lifecycle actions available from every primary interface, not three of four.
 
 ---
 

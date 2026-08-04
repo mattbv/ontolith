@@ -657,7 +657,45 @@ class TestProposalList:
 
 
 class TestProposalAccept:
-    def test_accepts_pending_proposal(self, temp_db: Path) -> None:
+    def test_accepts_pending_proposal_and_commits_operations(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        reviewer = kb.create_principal(
+            "carol@example.com", kind="human", default_capability="review"
+        )
+        bot = kb.create_principal(
+            "bot@example.com",
+            kind="ai",
+            auth_method="apikey",
+            owner=alice.id,
+            default_capability="propose",
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", bot.id, model="v1")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "proposal", "accept", proposal.id, "--reviewer", reviewer.id],
+        )
+        assert result.exit_code == 0
+        assert proposal.id in result.output
+        assert "accepted" in result.output
+
+        kb = Ontology.connect(temp_db)
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "accepted"
+        # accept, unlike reject/review, commits the payload through conflict
+        # routing (ontology.py:1313) - a state-only check wouldn't catch a
+        # regression that flipped the state without replaying operations.
+        active = kb.assertions(subject=entity.id, predicate="Person.name")
+        assert [a.value for a in active] == ["Ada"]
+        kb.close()
+
+    def test_accept_author_flag_is_accepted_as_reviewer_alias(self, temp_db: Path) -> None:
+        """--author remains a working alias for --reviewer (pre-review-fix
+        flag name), so existing scripts/muscle memory don't break."""
         kb = Ontology.connect(temp_db)
         alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
         reviewer = kb.create_principal(
@@ -679,26 +717,42 @@ class TestProposalAccept:
             ["--db", str(temp_db), "proposal", "accept", proposal.id, "--author", reviewer.id],
         )
         assert result.exit_code == 0
-        assert proposal.id in result.output
         assert "accepted" in result.output
 
+    def test_accept_nonexistent_proposal_reports_not_found(self, temp_db: Path) -> None:
         kb = Ontology.connect(temp_db)
-        stored = kb.backend.get_proposal(proposal.id)
-        assert stored is not None
-        assert stored.state == "accepted"
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
         kb.close()
 
-    def test_accept_unknown_proposal_exits_nonzero(self, seeded_db: tuple[Path, str, str]) -> None:
-        db, author, _ = seeded_db
         result = runner.invoke(
-            app, ["--db", str(db), "proposal", "accept", "nonexistent", "--author", author]
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "proposal",
+                "accept",
+                "nonexistent",
+                "--reviewer",
+                "carol@example.com",
+            ],
         )
         assert result.exit_code == 1
-        assert "Error" in result.output
+        assert "not found" in result.output.lower()
+
+    def test_accept_without_review_capability_exits_nonzero(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        """seeded_db's principal only holds write capability, not review."""
+        db, author, _ = seeded_db
+        result = runner.invoke(
+            app, ["--db", str(db), "proposal", "accept", "nonexistent", "--reviewer", author]
+        )
+        assert result.exit_code == 1
+        assert "lacks review capability" in result.output
 
 
 class TestProposalReject:
-    def test_rejects_pending_proposal(self, temp_db: Path) -> None:
+    def test_rejects_pending_proposal_and_records_reason(self, temp_db: Path) -> None:
         kb = Ontology.connect(temp_db)
         alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
         reviewer = kb.create_principal(
@@ -723,7 +777,7 @@ class TestProposalReject:
                 "proposal",
                 "reject",
                 proposal.id,
-                "--author",
+                "--reviewer",
                 reviewer.id,
                 "--reason",
                 "not credible",
@@ -737,19 +791,44 @@ class TestProposalReject:
         stored = kb.backend.get_proposal(proposal.id)
         assert stored is not None
         assert stored.state == "rejected"
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert events[-1].type == "reject"
+        assert events[-1].detail == "not credible"
         kb.close()
 
-    def test_reject_unknown_proposal_exits_nonzero(self, seeded_db: tuple[Path, str, str]) -> None:
-        db, author, _ = seeded_db
+    def test_reject_nonexistent_proposal_reports_not_found(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        kb.close()
+
         result = runner.invoke(
-            app, ["--db", str(db), "proposal", "reject", "nonexistent", "--author", author]
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "proposal",
+                "reject",
+                "nonexistent",
+                "--reviewer",
+                "carol@example.com",
+            ],
         )
         assert result.exit_code == 1
-        assert "Error" in result.output
+        assert "not found" in result.output.lower()
+
+    def test_reject_without_review_capability_exits_nonzero(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        db, author, _ = seeded_db
+        result = runner.invoke(
+            app, ["--db", str(db), "proposal", "reject", "nonexistent", "--reviewer", author]
+        )
+        assert result.exit_code == 1
+        assert "lacks review capability" in result.output
 
 
 class TestProposalReview:
-    def test_requests_changes_on_pending_proposal(self, temp_db: Path) -> None:
+    def test_requests_changes_on_pending_proposal_and_records_reason(self, temp_db: Path) -> None:
         kb = Ontology.connect(temp_db)
         alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
         reviewer = kb.create_principal(
@@ -774,7 +853,7 @@ class TestProposalReview:
                 "proposal",
                 "review",
                 proposal.id,
-                "--author",
+                "--reviewer",
                 reviewer.id,
                 "--reason",
                 "needs a source",
@@ -788,15 +867,40 @@ class TestProposalReview:
         stored = kb.backend.get_proposal(proposal.id)
         assert stored is not None
         assert stored.state == "changes_requested"
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert events[-1].type == "request_changes"
+        assert events[-1].detail == "needs a source"
         kb.close()
 
-    def test_review_unknown_proposal_exits_nonzero(self, seeded_db: tuple[Path, str, str]) -> None:
-        db, author, _ = seeded_db
+    def test_review_nonexistent_proposal_reports_not_found(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        kb.close()
+
         result = runner.invoke(
-            app, ["--db", str(db), "proposal", "review", "nonexistent", "--author", author]
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "proposal",
+                "review",
+                "nonexistent",
+                "--reviewer",
+                "carol@example.com",
+            ],
         )
         assert result.exit_code == 1
-        assert "Error" in result.output
+        assert "not found" in result.output.lower()
+
+    def test_review_without_review_capability_exits_nonzero(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        db, author, _ = seeded_db
+        result = runner.invoke(
+            app, ["--db", str(db), "proposal", "review", "nonexistent", "--reviewer", author]
+        )
+        assert result.exit_code == 1
+        assert "lacks review capability" in result.output
 
 
 class TestProposalResubmit:
@@ -828,6 +932,7 @@ class TestProposalResubmit:
         # resubmit too, so the re-evaluated decision lands back on require_review,
         # not auto-accepted.
         assert "decision=RequireReview" in result.output
+        assert "reason=AI proposals require review" in result.output
 
         kb = Ontology.connect(temp_db)
         stored = kb.backend.get_proposal(proposal.id)
