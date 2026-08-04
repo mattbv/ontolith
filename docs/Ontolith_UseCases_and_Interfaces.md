@@ -190,8 +190,10 @@ litbot.propose(Claim(text="Compound X reduces marker M",
                source="doi:10.1/meta-2026", confidence=0.85)
 
 # What did the field believe a year ago vs now?
-last_year = kb.as_of("2025-06-01").query(Claim).where(text__contains="Compound X")
-today     = kb.query(Claim).where(text__contains="Compound X")
+# (equality, not substring match — __contains-style lookup operators are
+# not yet supported; tracked as KI-039)
+last_year = kb.as_of("2025-06-01").query(Claim).where(text="Compound X reduces marker M")
+today     = kb.query(Claim).where(text="Compound X reduces marker M")
 ```
 
 ### 4.4 Regulated lookup: "what was the policy on the transaction date?"

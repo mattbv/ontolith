@@ -355,13 +355,17 @@ Resolution events **MUST** appear in provenance.
 ### 11.1 Query builder (normative shape)
 ```python
 kb.query(Person) \
-  .where(employer__name="Analytical Engine Co.") \   # symbolic filter / traverse
+  .where(employer="org-123") \                        # symbolic filter: property or
+                                                        #   relation-target-id equality
   .semantic("computing pioneers") \                   # vector search (optional)
   .as_of("2025-01-01") \                              # temporal (optional)
   .min_confidence(0.5) \                              # provenance-aware (optional)
   .trust_at_least(2) \                                # filter by author trust (optional)
   .limit(20)
 ```
+Multi-hop traversal through a related entity's own properties (e.g. a hypothetical
+`employer__name=` filter) is **deferred** — `.where()` supports equality on the queried
+concept's own literal properties and relation-target ids only (ADR-0027).
 
 ### 11.2 Symbolic semantics
 - Filters compile to predicate lookups over `active` assertions (or the `as_of` snapshot).

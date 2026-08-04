@@ -167,7 +167,7 @@ else:
 
 # 5. Query / ground - hybrid symbolic + semantic (sqlite-vec embedded by default)
 results = (kb.query(Person)
-             .where(employer__name="Analytical Engine Co.")
+             .where(employer=engine_co.id)
              .semantic("computing pioneers")
              .limit(10))
 

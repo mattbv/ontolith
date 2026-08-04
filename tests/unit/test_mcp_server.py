@@ -275,6 +275,20 @@ class TestQueryTool:
         assert "error" in result
         assert result["code"] == "auth_error"
 
+    def test_query_dunder_filter_key_returns_validation_error(self, tmp_path: Path) -> None:
+        """A relation-traversal-shaped key fails loudly instead of returning an empty result (KI-030)."""
+        kb = _kb(tmp_path)
+        kb.create_entity("Person", author=HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person",
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            filters={"employer__name": "Acme Corp"},
+        )
+        assert "error" in result
+        assert result["code"] == "validation_error"
+
 
 # ---------------------------------------------------------------------------
 # ontolith.provenance

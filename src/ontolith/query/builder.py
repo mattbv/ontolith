@@ -66,11 +66,12 @@ class QueryBuilder:
         Filters are equality checks against the concept's own predicates —
         both literal properties (`name="Ada Lovelace"`) and relations, where
         the value is compared against the relation's target entity id
-        (`employer="org-123"`). Multi-hop traversal through a related
-        entity's own properties (e.g. `employer__name=`) is NOT supported —
-        such dunder-containing keys never matched anything (KI-030) and are
-        now rejected outright instead of silently compiling into an
-        unreachable predicate.
+        (`employer="org-123"`). Double-underscore ("dunder") filter keys are
+        NOT supported — neither multi-hop traversal through a related
+        entity's own properties (a hypothetical `employer__name=`, ADR-0027)
+        nor lookup operators (a hypothetical `text__contains=`, KI-039). Such
+        keys never matched anything (KI-030) and are now rejected outright
+        instead of silently compiling into an unreachable predicate.
 
         Args:
             **kwargs: Property/relation filters as keyword arguments
@@ -79,16 +80,17 @@ class QueryBuilder:
             Self for chaining
 
         Raises:
-            ValidationError: A filter key contains "__" (nested-traversal
-                syntax is not implemented).
+            ValidationError: A filter key contains "__" (neither
+                nested-traversal nor lookup-operator syntax is implemented).
         """
         for key in kwargs:
             if "__" in key:
                 raise ValidationError(
-                    f"where({key}=...) is not supported: relation traversal through "
-                    "a double-underscore key (e.g. employer__name) is not implemented. "
-                    "Filter on the relation's target id directly (e.g. employer=<id>) "
-                    "or fetch the related entity separately."
+                    f"where({key}=...) is not supported: double-underscore filter keys "
+                    "are not implemented — neither relation traversal (e.g. "
+                    "employer__name, ADR-0027) nor lookup operators (e.g. "
+                    "text__contains, KI-039). Filter on this concept's own properties "
+                    "or a relation's target id directly with equality (e.g. employer=<id>)."
                 )
         self._filters.update(kwargs)
         return self

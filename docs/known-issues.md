@@ -627,9 +627,11 @@ Surfaced during a whole-project milestone audit (2026-07-29); flagged in a prior
 
 ### Fix
 
-`.where()` now rejects any dunder-containing key (e.g. `employer__name`) with a `ValidationError` at call time, naming the offending key and explaining that multi-hop traversal into a related entity's own properties isn't implemented — instead of silently compiling it into `f"{concept}.{key}"`, a predicate string that could never match anything.
+`.where()` now rejects any dunder-containing key (e.g. `employer__name`) with a `ValidationError` at call time, naming the offending key and explaining that neither multi-hop traversal nor lookup operators are implemented (ADR-0027 records this as a deliberate deferral, not an oversight; see also KI-039) — instead of silently compiling it into `f"{concept}.{key}"`, a predicate string that could never match anything. MCP's `ontolith.query` tool and REST's `POST /query` both already mapped `ValidationError` correctly (400 / structured error) once `.where()` started raising it; only MCP's `query_tool` needed an explicit `try`/`except` added, since it previously called `.where()` outside its existing error-handling block.
 
-Separately, the class docstring's own example used a relation-target filter that — dunder syntax aside — couldn't have worked anyway, since `entities_where()`'s SQL only ever compared `value_lit`. Rather than just deleting the example, `entities_where()` (`store/{sqlite,duckdb}/backend.py`) now matches a filter value against `value_lit` OR `value_ref`, so a direct relation-target-id equality filter (`employer="org-123"`) actually returns matches — the class docstring's example was updated to this form, which now genuinely works. `.where()`'s docstring was rewritten to state the real contract: equality on literal properties and on a relation's target id, no traversal.
+Separately, the class docstring's own example used a relation-target filter that — dunder syntax aside — couldn't have worked anyway, since `entities_where()`'s SQL only ever compared `value_lit`. Rather than just deleting the example, `entities_where()` (`store/{sqlite,duckdb}/backend.py`) now matches a filter value against `value_lit` or `value_ref`, so a direct relation-target-id equality filter (`employer="org-123"`) actually returns matches — the class docstring's example was updated to this form, which now genuinely works. `.where()`'s docstring was rewritten to state the real contract: equality on literal properties and on a relation's target id, no traversal.
+
+**Caught in review, fixed before merge:** the first version of the `value_ref` match used a single `value_lit = ? OR value_ref = ?` predicate. Measured against a 100k-assertion SQLite fixture, the `OR` defeated both `idx_assertion_pred_value` and a new `idx_assertion_pred_ref` companion index — the planner fell back to a full table scan on the bitemporal (`as_of`) branch (~9x slower measured; ~600x at 50k rows for a single predicate) — turning every `.where()` call, not just relation filters, into an unindexed scan on the backend the SPEC performance budgets target. Reworked into a `UNION ALL` of two single-column point lookups, one per index, which restored (slightly beat) the pre-fix latency. The SPEC §11.1 example, PRD walkthrough, and a `docs/Ontolith_UseCases_and_Interfaces.md` example (an unrelated but same-shaped `__contains` lookup-operator gap, KI-039) were also brought in line with the actual (equality-only) contract, and ADR-0027 records the traversal/lookup-operator deferral as a decision rather than leaving the SPEC and code in silent disagreement.
 
 ---
 
@@ -772,6 +774,42 @@ Add an optional hint parameter (e.g. `candidate_ids: frozenset[str] | None = Non
 ### Fix
 
 Add `ontolith schema show [--namespace]` printing concepts/properties/relations (mirroring MCP's `ontolith.schema`/REST's `GET /schema` output, now that KI-029 closed the relations gap there too). `ontolith schema migrate` is a larger, separate piece of work (schema versioning/migration isn't implemented anywhere yet) — split into its own issue if `show` lands first.
+
+---
+
+## KI-039 — `QueryBuilder.where()` has no lookup-operator syntax (e.g. `__contains`), despite a documented example using one
+
+**Severity:** Documentation/DX gap — a documented use-case example used a filter shape the code never implemented
+**Milestone target:** Backlog
+**SPEC reference:** N/A — not covered by SPEC §11.1's normative shape; only appeared in a worked example
+
+### Description
+
+`docs/Ontolith_UseCases_and_Interfaces.md` §4.3 used `kb.query(Claim).where(text__contains="Compound X")` to illustrate a substring/lookup-style filter. `.where()` has never supported any lookup-operator syntax — only bare equality — so this example was exactly as broken as KI-030's `employer__name` traversal example: a double-underscore key that (pre-KI-030) silently compiled into an unreachable predicate and matched nothing, and (post-KI-030) now raises `ValidationError` instead, same as any other dunder key.
+
+Surfaced while fixing KI-030 and drafting ADR-0027, which defers both traversal and lookup operators as a single scope decision; the use-case doc was corrected to an equivalent equality-based example in the same pass, but implementing `__contains` (or any other operator) itself is out of scope for that fix.
+
+### Fix
+
+If prioritized: extend `.where()`'s key parsing to recognize a closed set of lookup-operator suffixes (`__contains`, `__gt`, `__lt`, etc. — Django-style), resolve the operator against the appropriate SQL predicate per backend (`LIKE` for `__contains`, etc.), and update `ValidationError`'s dunder-rejection message to no longer claim *all* dunder keys are relation traversal once a real operator syntax exists. Needs its own design pass on which operators are worth supporting and how they compose with `value_ref`-typed (relation) predicates, where substring/comparison operators arguably don't make sense at all.
+
+---
+
+## KI-040 — Nothing validates that a predicate's declared kind (property vs. relation) matches how it's written or filtered
+
+**Severity:** Architecture gap — a narrow, currently-theoretical write-time/read-time consistency gap
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §4 (Schema — properties and relations are distinct declaration kinds)
+
+### Description
+
+`SchemaIR.has_predicate`/`_resolve_field` (`src/ontolith/schema/ir.py`) resolve a predicate name against *either* `ConceptDef.properties` or `ConceptDef.relations` with no kind check propagated back to the caller. `Ontology._require_known_predicate` (used by both `assert_literal` and `assert_ref`) only checks that the predicate is declared *somewhere* in the schema — nothing stops `assert_literal(subj, "Person.employer", "Acme Corp", "Text", ...)` from writing a literal value under a predicate the schema declares as a relation, or the reverse (`assert_ref` writing a `value_ref` under a property-declared predicate).
+
+This was surfaced during KI-030's review: `entities_where()`'s `value_lit`/`value_ref` union match can't distinguish a predicate's intended kind either — it matches both columns unconditionally for every filter, so if a predicate ever did carry mixed-kind assertions (via the gap above), `.where()` would match across both without the caller being able to tell which kind actually matched. Today this is narrow and mostly theoretical: nothing in the codebase currently writes mixed-kind assertions under one predicate, so the union match is safe in practice, not just in theory-free-today.
+
+### Fix
+
+Add a kind check to `_require_known_predicate` (or a new dedicated check in `assert_literal`/`assert_ref`) that rejects a literal assertion against a schema-declared relation predicate, and vice versa, with a clear `ValidationError`. Once that guarantee holds, `entities_where()` could optionally be tightened to select `value_lit` vs. `value_ref` based on the predicate's declared kind (resolved via schema) rather than matching both unconditionally — removing the union entirely for the common case and only falling back to it for callers without a registered schema (where kind can't be known in advance).
 
 ---
 

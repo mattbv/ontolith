@@ -183,14 +183,18 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         Args:
             concept: Concept name to query (e.g. "Person")
             token: Bearer token identifying the calling principal (ADR-0014)
-            filters: Optional dict of property_name → value (e.g. {"name": "Ada"})
+            filters: Optional dict of property/relation name → value — a
+                relation filter matches the relation's target entity id
+                (e.g. {"employer": "org-123"}). Double-underscore keys (e.g.
+                "employer__name") are not supported and raise a
+                validation_error (ADR-0027, KI-030).
             namespace: Namespace to query (default: "default")
 
         Returns:
             Dict with "entities" list and "count", or "error" if the token
-            does not resolve to a valid principal.
+            does not resolve to a valid principal or a filter key is invalid.
         """
-        from ontolith.core.errors import AuthError
+        from ontolith.core.errors import AuthError, ValidationError
 
         try:
             auth_provider.resolve(token)
@@ -198,9 +202,12 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             return {"error": str(exc), "code": "auth_error"}
 
         builder = kb.query(concept)
-        if filters:
-            builder = builder.where(**filters)
-        entities = builder.all()
+        try:
+            if filters:
+                builder = builder.where(**filters)
+            entities = builder.all()
+        except ValidationError as exc:
+            return {"error": str(exc), "code": "validation_error"}
         return {
             "concept": concept,
             "count": len(entities),

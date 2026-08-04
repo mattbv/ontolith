@@ -356,6 +356,15 @@ class DuckDBBackend:
             ON assertion(predicate, value_lit, status)
         """)
 
+        # Companion to idx_assertion_pred_value for relation (value_ref)
+        # filters in entities_where() (KI-030) — kept as a separate index,
+        # matching the SQLite backend, rather than an OR-shaped predicate
+        # against a single combined index.
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_assertion_pred_ref
+            ON assertion(predicate, value_ref, status)
+        """)
+
         # Vector storage bookkeeping (SPEC §11.3, ADR-0020). One plain table
         # per scope (`vector_entity`, `vector_assertion`), created lazily on
         # first vector_upsert once the scope's dimension is known — see
@@ -1495,11 +1504,15 @@ class DuckDBBackend:
         """Query entities matching all predicate=value filters in one SQL query.
 
         Uses correlated subqueries so each (predicate, value) pair hits the
-        idx_assertion_spo index instead of doing one round-trip per entity.
-        A filter matches either a literal property (`value_lit`) or a
-        relation's target entity id (`value_ref`) — KI-030: relation filters
-        like `employer="org-123"` are equality checks against `value_ref`,
-        not traversal into the target entity's own properties.
+        idx_assertion_pred_value/idx_assertion_pred_ref indexes instead of
+        doing one round-trip per entity. A filter matches either a literal
+        property (`value_lit`) or a relation's target entity id (`value_ref`)
+        — KI-030: relation filters like `employer="org-123"` are equality
+        checks against `value_ref`, not traversal into the target entity's
+        own properties. The two are checked via a UNION ALL of two
+        single-column point lookups rather than one `value_lit = ? OR
+        value_ref = ?` predicate, matching the SQLite backend (whose planner
+        doesn't reliably pick a seekable plan for the OR form).
 
         Args:
             namespace: Namespace to query
@@ -1527,27 +1540,36 @@ class DuckDBBackend:
             # concatenation regardless of the variable's actual provenance.
             flagged_clause = "" if include_flagged else " AND status != 'flagged'"
             for predicate, value in predicate_filters.items():
-                query += (
-                    " AND id IN ("
-                    "SELECT subject FROM assertion"
-                    " WHERE predicate = ? AND (value_lit = ? OR value_ref = ?)"
+                bitemporal_clause = (
                     " AND asserted_at <= ?"
                     " AND (valid_from IS NULL OR valid_from <= ?)"
                     " AND (valid_to IS NULL OR valid_to > ?)"
                     f"{flagged_clause}"  # nosec B608
+                )
+                query += (
+                    " AND id IN ("
+                    "SELECT subject FROM assertion"
+                    f" WHERE predicate = ? AND value_lit = ?{bitemporal_clause}"
+                    " UNION ALL "
+                    "SELECT subject FROM assertion"
+                    f" WHERE predicate = ? AND value_ref = ?{bitemporal_clause}"
                     ")"
                 )
-                params.extend([predicate, value, value, t_iso, t_iso, t_iso])
+                params.extend(
+                    [predicate, value, t_iso, t_iso, t_iso, predicate, value, t_iso, t_iso, t_iso]
+                )
         else:
             for predicate, value in predicate_filters.items():
                 query += (
                     " AND id IN ("
                     "SELECT subject FROM assertion"
-                    " WHERE predicate = ? AND (value_lit = ? OR value_ref = ?)"
-                    " AND status = 'active'"
+                    " WHERE predicate = ? AND value_lit = ? AND status = 'active'"
+                    " UNION ALL "
+                    "SELECT subject FROM assertion"
+                    " WHERE predicate = ? AND value_ref = ? AND status = 'active'"
                     ")"
                 )
-                params.extend([predicate, value, value])
+                params.extend([predicate, value, predicate, value])
 
         cursor = self.conn.execute(query, params)
         rows = cursor.fetchall()

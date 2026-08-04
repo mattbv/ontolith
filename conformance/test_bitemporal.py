@@ -524,6 +524,20 @@ class TestAsOfQuery:
         # Not visible at T1 (half-open interval)
         assert kb.as_of(T1).query("Person").where(name="Ada").all() == []
 
+    def test_query_where_relation_filter_applies_temporal_filter(self, make_kb: KbFactory) -> None:
+        """A relation-target-id filter (value_ref) respects as_of, same as a literal filter (KI-030)."""
+        kb = _kb(make_kb)
+        person = kb.create_entity("Person", author=AUTHOR)
+        org = kb.create_entity("Organization", author=AUTHOR)
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=(T1 - T0).days)
+        kb.assert_ref(person.id, "Person.employer", org.id, AUTHOR)
+
+        assert kb.as_of(T0).query("Person").where(employer=org.id).all() == []
+        assert len(kb.as_of(T1).query("Person").where(employer=org.id).all()) == 1
+
     def test_query_count_at_different_times(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)
         advance_days = 180

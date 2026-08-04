@@ -180,6 +180,9 @@ class QueryIn(BaseModel):
     """
 
     concept: str
+    # Property/relation name -> value (equality only). A relation filter matches
+    # the relation's target entity id. Double-underscore keys (e.g. "employer__name")
+    # are not supported and return a 400 validation_error (ADR-0027, KI-030).
     filters: dict[str, str] | None = None
     semantic: str | None = None
     min_confidence: float | None = None
