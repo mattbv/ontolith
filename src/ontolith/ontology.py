@@ -1202,13 +1202,30 @@ class Ontology:
                 if mid != assertion.id:
                     # KI-034: `retracted` is a terminal status (SPEC §5) —
                     # extending an already-open contradiction must never flip
-                    # a member that's since been legitimately retracted (e.g.
-                    # by a neutral party via retract(), or by
-                    # resolve_contradiction()) back to `flagged`. Its id
-                    # stays in the contradiction's member_ids for audit —
-                    # only the re-flagging write is skipped.
+                    # a member that's since been legitimately retracted
+                    # (e.g. by a neutral party via retract(), KI-033) back
+                    # to `flagged`. Its id is deliberately left in the
+                    # contradiction's member_ids — that list isn't audit-only,
+                    # it's also the eligibility set resolve_contradiction()
+                    # and _reject_retract_if_party_to_contradiction() scan
+                    # (KI-044 tracks resolve_contradiction() itself still
+                    # being able to pick a retracted member as winner) —
+                    # only this method's own re-flagging write is skipped.
                     existing_member = self.backend.get_assertion(mid)
-                    if existing_member is not None and existing_member.status == "retracted":
+                    if existing_member is None:
+                        # Assertions are append-only and never deleted (SPEC
+                        # §5) — a contradiction member that can't be found is
+                        # data corruption, not a benign gap to skip past
+                        # (matches resolve_contradiction's own precedent,
+                        # KI-026). `result.existing_contradiction_id`, not
+                        # `open_contradiction.id`: this branch is also
+                        # reached for a brand-new contradiction, where
+                        # `open_contradiction` is still `None`.
+                        raise NotFoundError(
+                            f"Assertion {mid!r}, a member of contradiction "
+                            f"{result.existing_contradiction_id!r}, could not be found"
+                        )
+                    if existing_member.status == "retracted":
                         continue
                     # Extending an already-open contradiction re-flags members
                     # that are already flagged (idempotent status write) — only
@@ -1777,6 +1794,15 @@ class Ontology:
 
             for member_id in contradiction.member_ids:
                 if member_id != winner_assertion_id:
+                    # A loser already `retracted` (KI-034 — e.g. a neutral
+                    # third party's own earlier retract()) needs no further
+                    # write: re-retracting is a no-op status-wise, and
+                    # writing it anyway would record a second, misattributed
+                    # `retracted` event as if the resolver had just done it.
+                    loser = self.backend.get_assertion(member_id)
+                    assert loser is not None  # already resolved via the loop above
+                    if loser.status == "retracted":
+                        continue
                     self.backend.set_assertion_status(
                         member_id, "retracted", valid_to=self._retraction_valid_to(member_id, now)
                     )
@@ -1869,6 +1895,16 @@ class Ontology:
                 action = "created"
 
             for aid, assertion in ((assertion_id_a, a), (assertion_id_b, b)):
+                # KI-034: `retracted`/`superseded` are terminal — flagging
+                # an assertion explicitly named here must not resurrect one
+                # any more than conflict-routing's own contradiction
+                # extension may (_apply_with_conflict_routing). Without
+                # this, any >= propose-capability principal (including an
+                # AI principal over MCP's ontolith.flag_contradiction, which
+                # carries no write capability at all) could re-flag a
+                # deliberately terminalized assertion back into dispute.
+                if assertion.status in ("retracted", "superseded"):
+                    continue
                 if assertion.status != "flagged":
                     self.backend.set_assertion_status(aid, "flagged")
                     self._record_assertion_event(aid, author, "flagged", now)

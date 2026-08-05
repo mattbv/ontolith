@@ -156,17 +156,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Fixed
 - **`retracted` now stays terminal when an open contradiction is extended by a new disputed
-  value (closes KI-034).** `retracted` is otherwise treated as a terminal status everywhere
-  else in the codebase (SPEC §5's append-only lifecycle) — this was the one path found so
-  far where it wasn't. `Ontology._apply_with_conflict_routing`'s "extend an already-open
-  contradiction" branch (not `govern/conflict.py`'s pure `route()`, which is bypassed
-  entirely once a contradiction is already open) unconditionally re-flagged every existing
-  member alongside the incoming assertion, including one that had since been legitimately
-  retracted (e.g. by a neutral third party via `retract()`, KI-033) — resurrecting it back
-  to `flagged`. The flagging loop now skips the status write (and its event) for any member
-  whose current status is already `retracted`; the member's id is deliberately left in the
-  `Contradiction`'s own `member_ids` for audit, only the assertion's own status stops
-  changing. Found while investigating KI-033, not introduced by it — pre-existing.
+  value (closes KI-034).** `retracted` is meant to be a terminal status everywhere in the
+  codebase (SPEC §5's append-only lifecycle) — this was the path reachable from the
+  write/proposal pipeline where it wasn't. `Ontology._apply_with_conflict_routing`'s "extend
+  an already-open contradiction" branch (not `govern/conflict.py`'s pure `route()`, which is
+  bypassed entirely once a contradiction is already open) unconditionally re-flagged every
+  existing member alongside the incoming assertion, including one that had since been
+  legitimately retracted (e.g. by a neutral third party via `retract()`, KI-033) —
+  resurrecting it back to `flagged`. The flagging loop now skips the status write (and its
+  event) for any member whose current status is already `retracted`, and now raises
+  `NotFoundError` for a missing member instead of silently falling through into an unguarded
+  write, matching `resolve_contradiction`'s own KI-026 precedent (found in review). The
+  member's id is deliberately left in the `Contradiction`'s own `member_ids` — that list
+  isn't audit-only, it's also `resolve_contradiction`'s winner-eligibility set and
+  `_reject_retract_if_party_to_contradiction`'s scan set — only the re-flagging write is
+  skipped. Review found the identical resurrection bug in `flag_contradiction()`'s own,
+  separate flagging loop (SPEC §14, MCP `ontolith.flag_contradiction`, reachable at only
+  `propose` capability including by an AI principal) — fixed the same way here, now also
+  guarding `superseded`. `resolve_contradiction` itself no longer re-emits a duplicate,
+  resolver-misattributed `retracted` event for a loser that's already `retracted`. Filed
+  **KI-044** (backlog, not fixed here): `resolve_contradiction()` can still pick an
+  already-`retracted` member as the *winner*, reactivating it to `active` with a closed
+  `valid_to` window — a broader winner-eligibility question this fix doesn't expand into.
+  Found while investigating KI-033, not introduced by it — pre-existing.
 - **`Ontology.retract()` now rejects retracting a flagged member of an open contradiction
   when the retracting principal (author or delegate) is a party to that contradiction —
   author or delegate of *any* member, not just the target being retracted (closes
