@@ -1018,6 +1018,45 @@ class Ontology:
             self._apply_with_conflict_routing(assertion, temporality)
         return accepted, decision
 
+    def _reject_retract_if_party_to_contradiction(
+        self, assertion_id: str, author: str, acting_as: str | None
+    ) -> None:
+        """Block retracting a flagged contradiction member the retracting
+        principal is a party to (KI-033) — mirrors resolve_contradiction's
+        self-resolution guard (KI-026): checks every member, not just the
+        target, since an interested party shouldn't get to unilaterally
+        retract the *opposing* member either. Without this, a principal who
+        authored one side of a disputed static fact could reach the same
+        outcome as adjudicating the dispute in their own favor, just via
+        retract() instead of resolve_contradiction() — leaving the
+        contradiction stuck open with only their own value still flagged.
+
+        Must run inside the same transaction that performs the retraction
+        (like resolve_contradiction's own check), so a contradiction opened
+        or extended concurrently can't slip past this check between read
+        and write.
+        """
+        target = self.backend.get_assertion(assertion_id)
+        if target is None or target.status != "flagged":
+            return
+        contradiction = self.backend.get_open_contradiction(
+            self.namespace, target.subject, target.predicate
+        )
+        if contradiction is None or assertion_id not in contradiction.member_ids:
+            return
+        retracting_parties = {author} | ({acting_as} if acting_as is not None else set())
+        for member_id in contradiction.member_ids:
+            member = self.backend.get_assertion(member_id)
+            if member is not None and retracting_parties & (
+                {member.author, member.acting_as} - {None}
+            ):
+                raise CapabilityError(
+                    f"Principal {author!r} cannot retract assertion {assertion_id!r}: it is a "
+                    f"flagged member of open contradiction {contradiction.id!r} they are party "
+                    f"to (author or delegate of member assertion {member_id!r}) — use "
+                    "resolve_contradiction() instead"
+                )
+
     def retract(
         self,
         assertion_id: str,
@@ -1029,6 +1068,12 @@ class Ontology:
 
         When ``acting_as`` is set the retraction is made on behalf of another
         principal (delegation, ADR-0003).
+
+        Raises:
+            CapabilityError: assertion is a flagged member of an open
+                contradiction the retracting principal is a party to
+                (author or delegate of any member, KI-033) — use
+                resolve_contradiction() instead
 
         Returns:
             (Proposal, Decision) tuple
@@ -1063,6 +1108,7 @@ class Ontology:
             update={"state": "auto_accepted", "decided_at": now, "policy_reason": decision.reason}
         )
         with self.backend.transaction():
+            self._reject_retract_if_party_to_contradiction(assertion_id, author, acting_as)
             self.backend.put_proposal(accepted)
             self.backend.set_assertion_status(
                 assertion_id, "retracted", valid_to=self._retraction_valid_to(assertion_id, now)
@@ -1274,6 +1320,9 @@ class Ontology:
                     ref_assertion, self._resolve_temporality(op["predicate"])
                 )
             elif op["kind"] == "retract":
+                self._reject_retract_if_party_to_contradiction(
+                    op["assertion_id"], proposal.author, proposal.acting_as
+                )
                 self.backend.set_assertion_status(
                     op["assertion_id"],
                     "retracted",
@@ -1302,7 +1351,10 @@ class Ontology:
             AuthError: reviewer is not a known principal
             NotFoundError: proposal_id does not name an existing proposal
             CapabilityError: reviewer lacks review/admin capability, is
-                AI-kind, or is the proposal's own author/delegate
+                AI-kind, or is the proposal's own author/delegate; or a
+                staged retract operation targets a flagged contradiction
+                member the proposal's own author/delegate is party to
+                (KI-033)
             ValidationError: proposal is not pending review
         """
         proposal = self._require_reviewer(proposal_id, reviewer)
@@ -1455,7 +1507,10 @@ class Ontology:
             AuthError: author, or the proposal's original author/delegate
                 (if since removed), is not a known principal
             NotFoundError: proposal_id does not name an existing proposal
-            CapabilityError: author is not the proposal's own author/delegate
+            CapabilityError: author is not the proposal's own author/delegate;
+                or, on auto-accept, a staged retract operation targets a
+                flagged contradiction member the proposal's own
+                author/delegate is party to (KI-033)
             ValidationError: proposal is not awaiting resubmission
         """
         caller = self._get_principal_or_raise(author)

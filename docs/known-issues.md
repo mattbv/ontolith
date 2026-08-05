@@ -675,10 +675,10 @@ Added `ontolith proposal accept <id> --reviewer`, `proposal reject <id> --review
 
 ---
 
-## KI-033 — `retract()` lets a party to an open contradiction unilaterally retract the opposing member
+## KI-033 — `retract()` lets a party to an open contradiction unilaterally retract the opposing member ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — same governance outcome as KI-026, reachable through a different method that has no contradiction awareness at all
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved in `fix(govern): reject retract() of a contradiction member the retracting principal is party to (KI-033)`
 **SPEC reference:** SPEC §10.3 (contradiction resolution)
 
 ### Description
@@ -689,7 +689,7 @@ KI-026 closed the front door (`resolve_contradiction` itself); this is a side do
 
 ### Fix
 
-Reject retraction of an assertion that is currently a `flagged` member of an open contradiction when the retracting principal is a party to that contradiction (author/delegate of any member) — mirroring KI-026's "any member, not just one side" reasoning. Needs a new conformance vector suite; likely requires `retract()` to look up whether the target assertion belongs to an open contradiction before evaluating policy, which it currently never does at all.
+New `Ontology._reject_retract_if_party_to_contradiction(assertion_id, author, acting_as)`: if the target assertion is currently `flagged` and a member of an open contradiction, raises `CapabilityError` when the retracting principal (author or delegate) is the author or delegate of *any* member of that contradiction — mirroring KI-026's "any member, not just one side" reasoning, so retracting your own losing entry is blocked too, not just the opposing one. Runs inside the same transaction that performs the retraction, in both call sites that can execute a `retract`-kind operation — `retract()`'s own auto-accept branch, and `_replay_proposal_operations`'s `retract` branch (shared by `accept_proposal`/`resubmit`, closing the same gap when a lower-capability party's retract proposal goes through the review queue instead of auto-accepting) — matching `resolve_contradiction`'s own reasoning for checking inside the transaction: a contradiction opened or extended concurrently can't slip past a check made only beforehand. A neutral third party (author/delegate of no member) is unaffected. New conformance vectors in `conformance/test_contradiction_resolution.py::TestRetractContradictionGuard`.
 
 ---
 

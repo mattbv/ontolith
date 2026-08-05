@@ -155,6 +155,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped (see the KI-027 entry above).
 
 #### Fixed
+- **`Ontology.retract()` now rejects retracting a flagged member of an open contradiction
+  when the retracting principal (author or delegate) is a party to that contradiction —
+  author or delegate of *any* member, not just the target being retracted (closes
+  KI-033).** `retract()` routes through the normal policy path like any other write; a
+  human principal with `write`/`review`/`admin` capability auto-accepts under
+  `ThresholdPolicy` with no contradiction awareness at all, so a principal who authored
+  one side of a disputed static fact could retract the *opposing* member directly —
+  reaching the same one-sided outcome `resolve_contradiction`'s KI-026 self-resolution
+  guard already blocks, just through a side door with no notion of contradictions.
+  Retracting your own losing member is blocked too, for the same "any member" reasoning
+  KI-026 established: giving up your own side unilaterally ends the dispute in the other
+  party's favor just as much as picking your own side as the winner would. The new
+  `_reject_retract_if_party_to_contradiction` check runs inside the same transaction that
+  performs the retraction (both in `retract()`'s own auto-accept branch and in
+  `_replay_proposal_operations`'s `retract` branch, shared by `accept_proposal`/
+  `resubmit`) so a contradiction opened or extended concurrently can't slip past it
+  between read and write — mirroring `resolve_contradiction`'s own race-safety reasoning.
+  A neutral third party (author/delegate of no member) is unaffected; `resolve_contradiction`
+  remains the correct way to actually close out a disputed fact.
 - **Breaking:** `QueryBuilder.where()` no longer silently no-ops on relation-traversal
   filter keys (closes KI-030) — `.where(employer__name="Acme Corp")`, an example the class
   docstring itself advertised as working, compiled into an unreachable predicate string
