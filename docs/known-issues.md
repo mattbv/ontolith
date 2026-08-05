@@ -709,10 +709,10 @@ The primary bug lives in `Ontology._apply_with_conflict_routing`'s own "extend a
 
 ---
 
-## KI-035 — Proposal-transition methods validate state before opening the write transaction (TOCTOU)
+## KI-035 — Proposal-transition methods validate state before opening the write transaction (TOCTOU) ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — data-integrity risk under real concurrent traffic, not yet triggered by any test (single-threaded today)
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved in `fix(govern): close proposal-transition TOCTOU window (KI-035)`
 **SPEC reference:** SPEC §9.1 (proposal state machine)
 
 ### Description
@@ -723,7 +723,7 @@ The primary bug lives in `Ontology._apply_with_conflict_routing`'s own "extend a
 
 ### Fix
 
-For each of the four methods, move the state-validation re-check inside `with self.backend.transaction():`, re-reading the proposal row rather than trusting the value fetched before the transaction opened (mirroring KI-026's fix for `resolve_contradiction`). Policy evaluation itself can likely stay outside the transaction (it's read-only against a pinned `kb_view`), but the state check that gates whether its result is even applicable needs to run against the current row, inside the transaction, immediately before the write. Needs a conformance vector simulating the race (two evaluations racing the same pre-transition state) per method.
+`_require_reviewer` split into `_require_reviewer_principal(reviewer)` (auth/capability/AI-kind checks — depend only on the reviewer's own identity, safe to run once before the transaction opens) and `_require_pending_proposal(proposal_id, reviewer)` (re-reads the proposal fresh and checks self-review + state — MUST run inside the transaction, immediately before the write). `accept_proposal`/`reject_proposal`/`request_changes` all now call `_require_pending_proposal` as the first thing inside their `with self.backend.transaction():` block, mirroring `resolve_contradiction`'s own KI-026 fix. `resubmit` keeps its original author/state checks before policy evaluation (needed to construct the object policy evaluates against) as an optimistic fast-fail, but adds a second, authoritative re-read-and-recheck as the first thing inside its own transaction, before `_finalize_non_accepted_decision`/the auto-accept write — so a proposal a concurrent call already moved out of `changes_requested` is detected and rejected rather than double-processed. New conformance vectors in `conformance/test_review_workflow.py::TestProposalTransitionTOCTOU`, one per method: a `_RacingClock` test double (subclasses `FixedClock`) fires a one-shot side effect the first time `.now()` is called — exactly the point, in all four methods, right before the write transaction opens — running a real, complete sibling transition as if it had just won the race, deterministically simulating the exact TOCTOU window without needing real threads. All four confirmed to fail without the fix (reverted `ontology.py` locally and re-ran).
 
 ---
 

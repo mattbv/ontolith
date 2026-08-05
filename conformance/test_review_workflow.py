@@ -9,6 +9,7 @@ clocks and IDs.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 import pytest
@@ -72,6 +73,33 @@ class _RequireReviewThenReject:
         if self.calls == 1:
             return RequireReview(reviewers=[], reason="first pass: require review")
         return Reject(reason="second pass: reject")
+
+
+class _RacingClock(FixedClock):
+    """Test clock double simulating the KI-035 TOCTOU race deterministically,
+    without real threads.
+
+    Its `.now()` fires a one-shot side effect (`racer`) directly against
+    the backend the *first* time it's called, then behaves like a normal
+    `FixedClock`. Each of the four proposal-transition methods calls
+    `self.clock.now()` exactly once, as the very last thing before opening
+    its write transaction — the precise point where a genuine concurrent
+    actor's own transaction could have already landed. Swapping `kb.clock`
+    for one of these right before calling the method under test makes
+    `racer` fire at exactly that point, simulating "another transition won
+    the race and committed first" without any actual concurrency.
+    """
+
+    def __init__(self, fixed_time: datetime, racer: Callable[[], None]) -> None:
+        super().__init__(fixed_time)
+        self._racer = racer
+        self._fired = False
+
+    def now(self) -> datetime:
+        if not self._fired:
+            self._fired = True
+            self._racer()
+        return super().now()
 
 
 def _kb(make_kb: KbFactory) -> Ontology:
@@ -932,3 +960,118 @@ class TestProposalAndContradictionListing:
         assert kb.contradictions() == []
         assert len(kb.contradictions(state=None)) == 1
         assert kb.contradictions(state="resolved")[0].id == contradiction.id
+
+
+# ===========================================================================
+# Proposal-transition TOCTOU (KI-035)
+# ===========================================================================
+
+
+class TestProposalTransitionTOCTOU:
+    """accept_proposal/reject_proposal/request_changes/resubmit each read
+    the proposal, validate its current state, and run policy evaluation —
+    all before opening the write transaction. Only the writes themselves
+    were atomic; the read-validate window was not, so two concurrent calls
+    that both observed the same pre-transition state could both pass
+    validation and both reach a write.
+
+    `_RacingClock` simulates a genuine concurrent actor deterministically:
+    it fires a one-shot side effect the first time `.now()` is called —
+    exactly the point, in all four methods, right before the write
+    transaction opens — that runs a *real*, complete sibling transition
+    (its own full read-validate-write cycle) as if it had just won a race.
+    The method under test must then, on its own fresh re-read taken inside
+    its own transaction, detect the state the racer left behind and raise
+    rather than proceed to double-process the proposal."""
+
+    def test_accept_proposal_loses_race_to_concurrent_reject(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        assert proposal.state == "require_review"
+
+        def racer() -> None:
+            kb.reject_proposal(proposal.id, REVIEWER, reason="racer got there first")
+
+        kb.clock = _RacingClock(T0, racer)
+        with pytest.raises(ValidationError, match="not pending review"):
+            kb.accept_proposal(proposal.id, REVIEWER)
+
+        # The racer's write stands; accept_proposal must not have overwritten
+        # it or replayed operations on top of an already-decided proposal.
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "rejected"
+        assert kb.assertions(subject=entity.id, predicate="Person.name") == []
+
+    def test_reject_proposal_loses_race_to_concurrent_accept(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        def racer() -> None:
+            kb.accept_proposal(proposal.id, REVIEWER)
+
+        kb.clock = _RacingClock(T0, racer)
+        with pytest.raises(ValidationError, match="not pending review"):
+            kb.reject_proposal(proposal.id, REVIEWER, reason="too late")
+
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "accepted"
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+        assert len(active) == 1
+        assert active[0].value == "Ada"
+
+    def test_request_changes_loses_race_to_concurrent_accept(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        def racer() -> None:
+            kb.accept_proposal(proposal.id, REVIEWER)
+
+        kb.clock = _RacingClock(T0, racer)
+        with pytest.raises(ValidationError, match="not pending review"):
+            kb.request_changes(proposal.id, REVIEWER, reason="too slow")
+
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "accepted"
+
+    def test_resubmit_loses_race_to_concurrent_resubmit(self, make_kb: KbFactory) -> None:
+        """Both racer and the outer call are resubmit() itself - the only
+        transition that shares resubmit's `changes_requested` precondition
+        is another resubmit()."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        kb.request_changes(proposal.id, REVIEWER)
+        assert kb.backend.get_proposal(proposal.id).state == "changes_requested"  # type: ignore[union-attr]
+
+        def racer() -> None:
+            # AI proposals always require review (ADR-0003) - the racer's
+            # own resubmit() lands back in require_review, not a terminal
+            # state, but that's still a transition away from
+            # changes_requested, which is all this test needs to prove.
+            kb.resubmit(proposal.id, AI_AUTHOR)
+
+        kb.clock = _RacingClock(T0, racer)
+        with pytest.raises(ValidationError, match="not awaiting resubmission"):
+            kb.resubmit(proposal.id, AI_AUTHOR)
+
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.state == "require_review"
+        # Only the racer's single ProposalEvent(type="resubmit") exists -
+        # the outer, losing call must not have recorded a second one.
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert [e.type for e in events if e.type == "resubmit"] == ["resubmit"]

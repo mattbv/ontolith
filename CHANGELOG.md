@@ -155,6 +155,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped (see the KI-027 entry above).
 
 #### Fixed
+- **`accept_proposal`/`reject_proposal`/`request_changes`/`resubmit` no longer have a TOCTOU
+  window between validating a proposal's state and writing its transition (closes KI-035).**
+  All four read the proposal, validated its current state, and ran policy evaluation before
+  ever opening the write transaction — only the writes themselves were atomic. Two concurrent
+  calls that both observed the same pre-transition state (e.g. an `accept_proposal` racing a
+  `reject_proposal`, both reading `require_review`) could both pass validation and both reach
+  their write, replaying the same proposal's operations twice under an auto-accepting policy.
+  `_require_reviewer` split into `_require_reviewer_principal` (reviewer-identity checks, safe
+  before the transaction) and `_require_pending_proposal` (re-reads the proposal fresh and
+  checks self-review/state — now called as the first thing inside the transaction, in all
+  three reviewer-side methods); `resubmit` keeps its original pre-transaction checks as an
+  optimistic fast-fail but adds an authoritative re-check inside its own transaction before
+  any write. Mirrors `resolve_contradiction`'s own KI-026 fix for the identical bug shape.
+  New conformance vectors (`TestProposalTransitionTOCTOU`) deterministically simulate the race
+  per method via a `_RacingClock` test double, without real threads — confirmed to fail
+  without the fix. Pre-existing, not yet triggered by any test or reported incident
+  (single-threaded usage today); found while re-reviewing the KI-027 `resubmit()` fix.
 - **`retracted` now stays terminal when an open contradiction is extended by a new disputed
   value (closes KI-034).** `retracted` is meant to be a terminal status everywhere in the
   codebase (SPEC §5's append-only lifecycle) — this was the path reachable from the
