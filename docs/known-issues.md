@@ -693,10 +693,10 @@ New `Ontology._reject_retract_if_party_to_contradiction(assertion_id, parties)`:
 
 ---
 
-## KI-034 — Extending an open contradiction can resurrect an already-`retracted` member back to `flagged`
+## KI-034 — Extending an open contradiction can resurrect an already-`retracted` member back to `flagged` ✓ RESOLVED (M3)
 
 **Severity:** Test gap — a documented lifecycle transition (`retracted` is meant to be terminal) doesn't hold under a specific sequence
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved in `fix(govern): retracted stays terminal across contradiction extension (KI-034)`
 **SPEC reference:** SPEC §5 (assertion lifecycle — `retracted` status)
 
 ### Description
@@ -705,7 +705,7 @@ Reproduced while investigating KI-033: if an assertion belonging to an open cont
 
 ### Fix
 
-Needs a design decision, not just a code fix: should conflict routing (`govern/conflict.py`) exclude `retracted` assertions from the set of "existing members" it can add to when extending a contradiction, treating a retraction as final regardless of the contradiction's own open/resolved state? Record as an ADR update once decided; add a conformance vector pinning the corrected behavior.
+The bug lives in `Ontology._apply_with_conflict_routing`'s own "extend an already-open contradiction" branch (not `govern/conflict.py`'s pure `route()` — that path is bypassed entirely once a contradiction is already open), which unconditionally re-flagged every id in `open_contradiction.member_ids` alongside the incoming assertion. The `Contradict`-branch flagging loop now looks up each existing member's *current* status and skips the `set_assertion_status(..., "flagged")` write (and its accompanying event) for any member already `retracted` — treating retraction as final regardless of the contradiction's own open/resolved state, matching how every other status transition in the codebase treats it. The member's id is deliberately left in the `Contradiction`'s own `member_ids` (for audit — it was still genuinely part of the dispute's history); only the assertion's own `status` field stops changing. New conformance vectors in `conformance/test_contradiction_resolution.py::TestRetractedIsTerminalAcrossExtension`, including one confirming the primary vector fails without the fix (reverted locally and re-run to verify).
 
 ---
 
@@ -859,7 +859,7 @@ Decide and record (ADR) where in the write path registered validators should run
 
 ### Description
 
-`resolve_contradiction()` requires `review`/`admin` capability and blocks AI-kind resolvers (SPEC §10.3: disputed static facts are adjudicated by review, not auto-resolved). `retract()` has no such floor — any human/service principal with plain `write` capability auto-accepts under `ThresholdPolicy` for *any* retraction, including one targeting a `flagged` member of an open contradiction. KI-033 closed the *self-dealing* half of this (a party to the contradiction can no longer retract a member they're a party to — see KI-033, and `_reject_retract_if_party_to_contradiction`), but a **neutral** `write`-capability principal — party to neither disputed value — can still retract one member outright, leaving the contradiction `open` with a `retracted` member and no path back to a normal resolution outcome (feeds KI-034's resurrection path if the contradiction is later extended). `conformance/test_contradiction_resolution.py::TestRetractContradictionGuard::test_neutral_third_party_can_still_retract_flagged_member` pins this as current, intentional-for-now behavior.
+`resolve_contradiction()` requires `review`/`admin` capability and blocks AI-kind resolvers (SPEC §10.3: disputed static facts are adjudicated by review, not auto-resolved). `retract()` has no such floor — any human/service principal with plain `write` capability auto-accepts under `ThresholdPolicy` for *any* retraction, including one targeting a `flagged` member of an open contradiction. KI-033 closed the *self-dealing* half of this (a party to the contradiction can no longer retract a member they're a party to — see KI-033, and `_reject_retract_if_party_to_contradiction`), but a **neutral** `write`-capability principal — party to neither disputed value — can still retract one member outright, leaving the contradiction `open` with a `retracted` member and no path back to a normal resolution outcome (KI-034 separately ensures that retracted member stays terminal rather than being resurrected if the contradiction is later extended, but doesn't address the capability floor itself). `conformance/test_contradiction_resolution.py::TestRetractContradictionGuard::test_neutral_third_party_can_still_retract_flagged_member` pins this as current, intentional-for-now behavior.
 
 Found during KI-033's review (2026-08-05): the party-to-contradiction check that review closed the loop on is a narrower guard than the capability floor `resolve_contradiction()` itself enforces, and nothing currently states that gap is deliberate.
 

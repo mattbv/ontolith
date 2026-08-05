@@ -1153,7 +1153,9 @@ class Ontology:
 
         # If a contradiction is already open, all existing assertions for this
         # (subject, predicate) are flagged — no active ones exist. Any new
-        # incoming assertion must be added to the same contradiction.
+        # incoming assertion must be added to the same contradiction. Any
+        # member already `retracted` is the one exception (KI-034) — see the
+        # Contradict branch below.
         if open_contradiction is not None and temporality == "static":
             all_member_ids = list(dict.fromkeys(open_contradiction.member_ids + [assertion.id]))
             result: ConflictResult = Contradict(
@@ -1198,6 +1200,16 @@ class Ontology:
         elif isinstance(result, Contradict):
             for mid in result.member_ids:
                 if mid != assertion.id:
+                    # KI-034: `retracted` is a terminal status (SPEC §5) —
+                    # extending an already-open contradiction must never flip
+                    # a member that's since been legitimately retracted (e.g.
+                    # by a neutral party via retract(), or by
+                    # resolve_contradiction()) back to `flagged`. Its id
+                    # stays in the contradiction's member_ids for audit —
+                    # only the re-flagging write is skipped.
+                    existing_member = self.backend.get_assertion(mid)
+                    if existing_member is not None and existing_member.status == "retracted":
+                        continue
                     # Extending an already-open contradiction re-flags members
                     # that are already flagged (idempotent status write) — only
                     # emit an event for an actual transition, not a no-op.

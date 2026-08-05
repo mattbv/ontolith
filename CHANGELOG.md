@@ -155,6 +155,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped (see the KI-027 entry above).
 
 #### Fixed
+- **`retracted` now stays terminal when an open contradiction is extended by a new disputed
+  value (closes KI-034).** `retracted` is otherwise treated as a terminal status everywhere
+  else in the codebase (SPEC §5's append-only lifecycle) — this was the one path found so
+  far where it wasn't. `Ontology._apply_with_conflict_routing`'s "extend an already-open
+  contradiction" branch (not `govern/conflict.py`'s pure `route()`, which is bypassed
+  entirely once a contradiction is already open) unconditionally re-flagged every existing
+  member alongside the incoming assertion, including one that had since been legitimately
+  retracted (e.g. by a neutral third party via `retract()`, KI-033) — resurrecting it back
+  to `flagged`. The flagging loop now skips the status write (and its event) for any member
+  whose current status is already `retracted`; the member's id is deliberately left in the
+  `Contradiction`'s own `member_ids` for audit, only the assertion's own status stops
+  changing. Found while investigating KI-033, not introduced by it — pre-existing.
 - **`Ontology.retract()` now rejects retracting a flagged member of an open contradiction
   when the retracting principal (author or delegate) is a party to that contradiction —
   author or delegate of *any* member, not just the target being retracted (closes
