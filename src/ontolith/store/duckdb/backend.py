@@ -1546,8 +1546,13 @@ class DuckDBBackend:
                     " AND (valid_to IS NULL OR valid_to > ?)"
                     f"{flagged_clause}"  # nosec B608
                 )
+                # predicate/value are always bound via `?` below, never
+                # interpolated; the only interpolated piece is
+                # bitemporal_clause, itself built from hardcoded literals
+                # (see the flagged_clause justification above) - same
+                # already-justified pattern, not a new SQL injection surface.
                 query += (
-                    " AND id IN ("
+                    " AND id IN ("  # nosec B608
                     "SELECT subject FROM assertion"
                     f" WHERE predicate = ? AND value_lit = ?{bitemporal_clause}"
                     " UNION ALL "
