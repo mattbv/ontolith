@@ -1019,10 +1019,10 @@ class Ontology:
         return accepted, decision
 
     def _reject_retract_if_party_to_contradiction(
-        self, assertion_id: str, author: str, acting_as: str | None
+        self, assertion_id: str, parties: set[str]
     ) -> None:
-        """Block retracting a flagged contradiction member the retracting
-        principal is a party to (KI-033) — mirrors resolve_contradiction's
+        """Block retracting a flagged contradiction member any of ``parties``
+        is a party to (KI-033) — mirrors resolve_contradiction's
         self-resolution guard (KI-026): checks every member, not just the
         target, since an interested party shouldn't get to unilaterally
         retract the *opposing* member either. Without this, a principal who
@@ -1030,11 +1030,29 @@ class Ontology:
         outcome as adjudicating the dispute in their own favor, just via
         retract() instead of resolve_contradiction() — leaving the
         contradiction stuck open with only their own value still flagged.
+        ``parties`` covers every principal whose decision actually causes
+        the retraction to take effect — the retracting caller (and its
+        delegate) for retract()'s own auto-accept path, plus the accepting
+        reviewer for a retract proposal that instead went through review
+        (accept_proposal): a reviewer who is themselves a party to the same
+        contradiction can reach the identical one-sided outcome by approving
+        a neutral principal's retract proposal, not just by retracting
+        directly.
 
         Must run inside the same transaction that performs the retraction
-        (like resolve_contradiction's own check), so a contradiction opened
-        or extended concurrently can't slip past this check between read
-        and write.
+        (like resolve_contradiction's own check) and before any of that
+        transaction's writes land, so raising here rolls back a no-op —
+        a contradiction opened or extended concurrently in another
+        transaction can't be missed by a check made only beforehand, and a
+        raise here can't leave a partial write in place either. A proposal
+        this rejects has no further path to `accepted` — `reject_proposal`
+        is the only way to close it out.
+
+        Raises:
+            NotFoundError: a contradiction member assertion could not be
+                found — assertions are append-only and never deleted (SPEC
+                §5), so this is data corruption, not a benign gap to skip
+                past (matches resolve_contradiction's own precedent, KI-026)
         """
         target = self.backend.get_assertion(assertion_id)
         if target is None or target.status != "flagged":
@@ -1044,16 +1062,18 @@ class Ontology:
         )
         if contradiction is None or assertion_id not in contradiction.member_ids:
             return
-        retracting_parties = {author} | ({acting_as} if acting_as is not None else set())
         for member_id in contradiction.member_ids:
             member = self.backend.get_assertion(member_id)
-            if member is not None and retracting_parties & (
-                {member.author, member.acting_as} - {None}
-            ):
+            if member is None:
+                raise NotFoundError(
+                    f"Assertion {member_id!r}, a member of contradiction "
+                    f"{contradiction.id!r}, could not be found"
+                )
+            if parties & ({member.author, member.acting_as} - {None}):
                 raise CapabilityError(
-                    f"Principal {author!r} cannot retract assertion {assertion_id!r}: it is a "
-                    f"flagged member of open contradiction {contradiction.id!r} they are party "
-                    f"to (author or delegate of member assertion {member_id!r}) — use "
+                    f"Cannot retract assertion {assertion_id!r}: it is a flagged member of "
+                    f"open contradiction {contradiction.id!r} that {sorted(parties)!r} are "
+                    f"party to (author or delegate of member assertion {member_id!r}) — use "
                     "resolve_contradiction() instead"
                 )
 
@@ -1107,8 +1127,9 @@ class Ontology:
         accepted = proposal.model_copy(
             update={"state": "auto_accepted", "decided_at": now, "policy_reason": decision.reason}
         )
+        retracting_parties = {author} | ({acting_as} if acting_as is not None else set())
         with self.backend.transaction():
-            self._reject_retract_if_party_to_contradiction(assertion_id, author, acting_as)
+            self._reject_retract_if_party_to_contradiction(assertion_id, retracting_parties)
             self.backend.put_proposal(accepted)
             self.backend.set_assertion_status(
                 assertion_id, "retracted", valid_to=self._retraction_valid_to(assertion_id, now)
@@ -1263,7 +1284,9 @@ class Ontology:
             )
         return proposal
 
-    def _replay_proposal_operations(self, proposal: Proposal, now: datetime) -> None:
+    def _replay_proposal_operations(
+        self, proposal: Proposal, now: datetime, *, extra_retracting_party: str | None = None
+    ) -> None:
         """Apply a proposal's staged operations through SPEC §10 conflict
         routing. Shared by `accept_proposal` and `resubmit` (KI-027) — MUST
         be called inside an open `backend.transaction()`.
@@ -1272,6 +1295,16 @@ class Ontology:
         for each operation's predicate, never trusted from the payload's
         stored snapshot (`TestAcceptProposalReResolvesTemporality`) — the
         schema may have changed between proposal creation and replay.
+
+        ``extra_retracting_party``: the accepting reviewer, when called from
+        `accept_proposal` (KI-033) — a `retract` operation's contradiction
+        guard (`_reject_retract_if_party_to_contradiction`) must also cover
+        the reviewer, not just the proposal's own author/delegate, since a
+        reviewer who is themselves a party to the same contradiction can
+        reach the identical one-sided outcome by approving a neutral
+        principal's retract proposal. `resubmit` passes nothing extra —
+        its caller is already required to be the proposal's own
+        author/delegate, already covered by `proposal.author`/`acting_as`.
         """
         for op in proposal.payload.get("operations", []):
             if op["kind"] == "assert_literal":
@@ -1320,8 +1353,13 @@ class Ontology:
                     ref_assertion, self._resolve_temporality(op["predicate"])
                 )
             elif op["kind"] == "retract":
+                retracting_parties = {proposal.author} | (
+                    {proposal.acting_as} if proposal.acting_as is not None else set()
+                )
+                if extra_retracting_party is not None:
+                    retracting_parties.add(extra_retracting_party)
                 self._reject_retract_if_party_to_contradiction(
-                    op["assertion_id"], proposal.author, proposal.acting_as
+                    op["assertion_id"], retracting_parties
                 )
                 self.backend.set_assertion_status(
                     op["assertion_id"],
@@ -1353,8 +1391,8 @@ class Ontology:
             CapabilityError: reviewer lacks review/admin capability, is
                 AI-kind, or is the proposal's own author/delegate; or a
                 staged retract operation targets a flagged contradiction
-                member the proposal's own author/delegate is party to
-                (KI-033)
+                member the proposal's own author/delegate *or the accepting
+                reviewer* is party to (KI-033)
             ValidationError: proposal is not pending review
         """
         proposal = self._require_reviewer(proposal_id, reviewer)
@@ -1362,7 +1400,7 @@ class Ontology:
         now = self.clock.now()
 
         with self.backend.transaction():
-            self._replay_proposal_operations(proposal, now)
+            self._replay_proposal_operations(proposal, now, extra_retracting_party=reviewer)
             self.backend.update_proposal_state(proposal_id, "accepted", now.isoformat())
             self.backend.put_proposal_event(
                 ProposalEvent(
@@ -1510,7 +1548,12 @@ class Ontology:
             CapabilityError: author is not the proposal's own author/delegate;
                 or, on auto-accept, a staged retract operation targets a
                 flagged contradiction member the proposal's own
-                author/delegate is party to (KI-033)
+                author/delegate is party to — shares the same
+                `_reject_retract_if_party_to_contradiction` guard as
+                `accept_proposal` (KI-033), though only reachable here if
+                the author's effective capability/trust has risen since the
+                original submission, since that same guard already blocks a
+                party at `retract()`'s own auto-accept time otherwise
             ValidationError: proposal is not awaiting resubmission
         """
         caller = self._get_principal_or_raise(author)

@@ -689,7 +689,7 @@ KI-026 closed the front door (`resolve_contradiction` itself); this is a side do
 
 ### Fix
 
-New `Ontology._reject_retract_if_party_to_contradiction(assertion_id, author, acting_as)`: if the target assertion is currently `flagged` and a member of an open contradiction, raises `CapabilityError` when the retracting principal (author or delegate) is the author or delegate of *any* member of that contradiction — mirroring KI-026's "any member, not just one side" reasoning, so retracting your own losing entry is blocked too, not just the opposing one. Runs inside the same transaction that performs the retraction, in both call sites that can execute a `retract`-kind operation — `retract()`'s own auto-accept branch, and `_replay_proposal_operations`'s `retract` branch (shared by `accept_proposal`/`resubmit`, closing the same gap when a lower-capability party's retract proposal goes through the review queue instead of auto-accepting) — matching `resolve_contradiction`'s own reasoning for checking inside the transaction: a contradiction opened or extended concurrently can't slip past a check made only beforehand. A neutral third party (author/delegate of no member) is unaffected. New conformance vectors in `conformance/test_contradiction_resolution.py::TestRetractContradictionGuard`.
+New `Ontology._reject_retract_if_party_to_contradiction(assertion_id, parties)`: if the target assertion is currently `flagged` and a member of an open contradiction, raises `CapabilityError` when any of `parties` is the author or delegate of *any* member of that contradiction — mirroring KI-026's "any member, not just one side" reasoning, so retracting your own losing entry is blocked too, not just the opposing one. A missing member (`get_assertion` returns `None`) raises `NotFoundError` rather than silently skipping the check for it, matching `resolve_contradiction`'s own precedent (assertions are append-only and never deleted, so a missing member is corruption, not a benign gap). Runs inside the same transaction that performs the retraction, before any of that transaction's writes land, in both call sites that can execute a `retract`-kind operation — `retract()`'s own auto-accept branch (`parties = {author, acting_as}`), and `_replay_proposal_operations`'s `retract` branch (shared by `accept_proposal`/`resubmit`; `parties = {proposal.author, proposal.acting_as}`, plus the accepting reviewer when called from `accept_proposal` — a reviewer who is themselves a party to the same contradiction can reach the identical one-sided outcome by approving a *neutral* principal's retract proposal, not just by retracting directly, so `parties` must cover whoever's decision actually causes the retraction, not only the original proposer). Matches `resolve_contradiction`'s own reasoning for checking inside the transaction: a contradiction opened or extended concurrently can't slip past a check made only beforehand. A neutral third party (author/delegate of no member) is unaffected by this guard — whether that should itself require `resolve_contradiction`-grade `review`/`admin` capability, rather than plain `write`, is a separate, broader question tracked as KI-043, not expanded into this fix's scope. New conformance vectors in `conformance/test_contradiction_resolution.py::TestRetractContradictionGuard`.
 
 ---
 
@@ -848,6 +848,24 @@ Surfaced during KI-031's review (2026-08-04) — ADR-0028's first draft describe
 ### Fix
 
 Decide and record (ADR) where in the write path registered validators should run — candidates include: synchronously inside `assert_literal`/`assert_ref`/`propose`/`propose_ref` before commit (blocking, consistent with policy evaluation's placement); asynchronously as a post-commit hook (non-blocking, but then a `Validator` can only flag, not prevent); or only at `accept_proposal` time for the governed path (leaving direct writes unchecked, which may or may not be intended). Whichever shape is chosen, it needs to compose with KI-041 (deriving `required_predicates` from schema) to make schema-declared `required` mean anything end to end.
+
+---
+
+## KI-043 — `retract()` lets any `write`-capability principal unilaterally shrink an open contradiction, unlike `resolve_contradiction()`
+
+**Severity:** Architecture gap — a review-grade governance action (disturbing a disputed static fact) is reachable at a lower capability floor through a different method
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §10.3 (contradiction resolution — routed to review, not auto-resolved)
+
+### Description
+
+`resolve_contradiction()` requires `review`/`admin` capability and blocks AI-kind resolvers (SPEC §10.3: disputed static facts are adjudicated by review, not auto-resolved). `retract()` has no such floor — any human/service principal with plain `write` capability auto-accepts under `ThresholdPolicy` for *any* retraction, including one targeting a `flagged` member of an open contradiction. KI-033 closed the *self-dealing* half of this (a party to the contradiction can no longer retract a member they're a party to — see KI-033, and `_reject_retract_if_party_to_contradiction`), but a **neutral** `write`-capability principal — party to neither disputed value — can still retract one member outright, leaving the contradiction `open` with a `retracted` member and no path back to a normal resolution outcome (feeds KI-034's resurrection path if the contradiction is later extended). `conformance/test_contradiction_resolution.py::TestRetractContradictionGuard::test_neutral_third_party_can_still_retract_flagged_member` pins this as current, intentional-for-now behavior.
+
+Found during KI-033's review (2026-08-05): the party-to-contradiction check that review closed the loop on is a narrower guard than the capability floor `resolve_contradiction()` itself enforces, and nothing currently states that gap is deliberate.
+
+### Fix
+
+Decide (ADR) whether retracting a `flagged` contradiction member should require the same `review`/`admin` + non-AI floor `resolve_contradiction()` enforces, rather than the ordinary `write` floor every other retraction uses — and if so, add that check to `_reject_retract_if_party_to_contradiction` (or a sibling capability gate) alongside the existing party check, updating the now-misleadingly-named "neutral third party" test above to reflect the new floor.
 
 ---
 

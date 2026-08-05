@@ -383,6 +383,44 @@ class TestRetractContradictionGuard:
 
         assert kb.backend.get_assertion(ada_id).status == "retracted"  # type: ignore[union-attr]
 
+    def test_flagged_status_without_open_contradiction_is_unaffected(
+        self, make_kb: KbFactory
+    ) -> None:
+        """Defensive branch: an assertion whose status happens to be
+        `flagged` with no matching open contradiction record (there is no
+        code path that produces this today - every `flagged` status is
+        always paired with a Contradiction row) does not trip this guard;
+        retract() proceeds normally rather than treating a `None` lookup as
+        a reason to block."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        a = kb.assert_literal(entity.id, "Person.born", "1815", "Text", HUMAN_WRITE)
+        kb.backend.set_assertion_status(a.id, "flagged")
+
+        kb.retract(a.id, HUMAN_WRITE)
+
+        assert kb.backend.get_assertion(a.id).status == "retracted"  # type: ignore[union-attr]
+
+    def test_missing_contradiction_member_raises_not_found(self, make_kb: KbFactory) -> None:
+        """A contradiction member that can't be found is data corruption
+        (assertions are append-only and never deleted, SPEC §5), not a
+        benign gap to skip past - matches resolve_contradiction's own
+        precedent (KI-026)."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "dave@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        _, ada_id, _ = _open_contradiction(kb, entity.id)
+        contradiction = kb.backend.get_open_contradiction("default", entity.id, "Person.name")
+        assert contradiction is not None
+        kb.backend.update_contradiction_members(
+            contradiction.id, [*contradiction.member_ids, "nonexistent-assertion-id"]
+        )
+
+        with pytest.raises(NotFoundError, match="could not be found"):
+            kb.retract(ada_id, "dave@example.com")
+
     def test_party_via_accept_proposal_is_also_blocked(self, make_kb: KbFactory) -> None:
         """The guard also applies when the retraction reaches its effect via
         accept_proposal() (e.g. a lower-capability delegate's retract
@@ -415,3 +453,37 @@ class TestRetractContradictionGuard:
 
         with pytest.raises(CapabilityError, match="party to"):
             kb.accept_proposal(proposal.id, "frank@example.com")
+
+    def test_party_reviewer_cannot_accept_a_neutral_proposers_retract_proposal(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The party doesn't have to be the proposer at all - a reviewer who
+        is themselves a party to the contradiction can reach the exact same
+        one-sided outcome by *approving* an entirely neutral principal's
+        retract proposal, so the guard must check the accepting reviewer
+        too, not just the proposal's own author/delegate (found in review)."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "grace@example.com", kind="human", auth_method="oidc", default_capability="propose"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ava", "Text", REVIEWER)
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        opposing_id = next(a.id for a in flagged if a.author == HUMAN_WRITE)
+
+        # grace has no stake in either disputed value and no delegation -
+        # her own low capability (propose, trust 0) is why this lands in
+        # the review queue, not any party-to-contradiction reasoning.
+        proposal, decision = kb.retract(opposing_id, "grace@example.com")
+        assert proposal.state == "require_review"
+
+        # REVIEWER authored the *other* disputed value ("Ava") - approving
+        # grace's proposal to retract "Ada" would let REVIEWER settle the
+        # dispute in their own favor just by reviewing someone else's
+        # proposal instead of retracting directly.
+        with pytest.raises(CapabilityError, match="party to"):
+            kb.accept_proposal(proposal.id, REVIEWER)
+
+        assert kb.backend.get_assertion(opposing_id).status == "flagged"  # type: ignore[union-attr]
+        assert kb.backend.get_proposal(proposal.id).state == "require_review"  # type: ignore[union-attr]
