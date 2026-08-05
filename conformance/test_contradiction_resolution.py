@@ -162,6 +162,29 @@ class TestResolveContradiction:
         assert by_id[ada_id].value == "Ada"
         assert by_id[ava_id].value == "Ava"
 
+    def test_no_duplicate_retracted_event_for_an_already_retracted_loser(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A loser that's already `retracted` (e.g. a neutral third party's
+        own earlier retract(), KI-033/KI-034) needs no further write -
+        re-retracting it is a status no-op and must not record a second,
+        resolver-misattributed `retracted` event as if the resolver had
+        just done it (found in KI-034's review)."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "dave@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        contradiction_id, ada_id, ava_id = _open_contradiction(kb, entity.id)
+        kb.retract(ava_id, "dave@example.com")
+        events_before = kb.backend.get_assertion_events(ava_id)
+
+        kb.resolve_contradiction(contradiction_id, ada_id, REVIEWER)
+
+        events_after = kb.backend.get_assertion_events(ava_id)
+        assert events_after == events_before
+        assert kb.backend.get_assertion(ava_id).status == "retracted"  # type: ignore[union-attr]
+
     def test_three_member_contradiction_resolves_all_losers(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
@@ -487,3 +510,110 @@ class TestRetractContradictionGuard:
 
         assert kb.backend.get_assertion(opposing_id).status == "flagged"  # type: ignore[union-attr]
         assert kb.backend.get_proposal(proposal.id).state == "require_review"  # type: ignore[union-attr]
+
+
+# ===========================================================================
+# `retracted` is terminal across contradiction extension (KI-034)
+# ===========================================================================
+
+
+class TestRetractedIsTerminalAcrossExtension:
+    """`retracted` is meant to be a terminal status everywhere in the
+    codebase (SPEC §5's append-only lifecycle). Extending an already-open
+    contradiction with a fresh disputed value previously re-flagged *every*
+    existing member unconditionally, including one that had since been
+    legitimately retracted (e.g. by a neutral party via retract(), KI-033) -
+    resurrecting it back to `flagged`. Only the first test below actually
+    exercises the regression (confirmed by reverting the fix locally and
+    re-running - it fails without it); the other two pin adjacent, already
+    correct-pre-fix invariants (no duplicate event, membership retained for
+    audit) that this change deliberately preserves rather than disturbs."""
+
+    def test_extending_open_contradiction_does_not_resurrect_retracted_member(
+        self, make_kb: KbFactory
+    ) -> None:
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "dave@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        contradiction_id, ada_id, ava_id = _open_contradiction(kb, entity.id)
+
+        # A neutral third party retracts one member outright (allowed -
+        # dave is party to neither disputed value, KI-033).
+        kb.retract(ada_id, "dave@example.com")
+        assert kb.backend.get_assertion(ada_id).status == "retracted"  # type: ignore[union-attr]
+
+        # A third disputed value extends the still-open contradiction.
+        kb.propose(entity.id, "Person.name", "Aida", "Text", REVIEWER)
+
+        assert kb.backend.get_assertion(ada_id).status == "retracted"  # type: ignore[union-attr]
+        assert kb.backend.get_assertion(ava_id).status == "flagged"  # type: ignore[union-attr]
+        flagged_values = {
+            a.value
+            for a in kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        }
+        assert flagged_values == {"Ava", "Aida"}
+
+    def test_extending_open_contradiction_records_no_flagged_event_for_retracted_member(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The retracted member's event trail is untouched - no spurious
+        'flagged' event is recorded for it just because the contradiction it
+        once belonged to was extended."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "dave@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        _, ada_id, _ = _open_contradiction(kb, entity.id)
+        kb.retract(ada_id, "dave@example.com")
+        events_before = kb.backend.get_assertion_events(ada_id)
+
+        kb.propose(entity.id, "Person.name", "Aida", "Text", REVIEWER)
+
+        events_after = kb.backend.get_assertion_events(ada_id)
+        assert events_after == events_before
+
+    def test_retracted_member_stays_in_contradiction_membership_for_audit(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The retracted assertion's id is not dropped from the
+        contradiction's own member_ids - only its status stops changing."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "dave@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        contradiction_id, ada_id, _ = _open_contradiction(kb, entity.id)
+        kb.retract(ada_id, "dave@example.com")
+
+        kb.propose(entity.id, "Person.name", "Aida", "Text", REVIEWER)
+
+        contradiction = kb.backend.get_contradiction(contradiction_id)
+        assert contradiction is not None
+        assert ada_id in contradiction.member_ids
+
+    def test_flag_contradiction_does_not_resurrect_a_retracted_assertion(
+        self, make_kb: KbFactory
+    ) -> None:
+        """flag_contradiction() has its own, separate flagging loop from
+        conflict-routing's extend-branch above - found in review to have
+        the identical resurrection bug, and it's reachable at only
+        `propose` capability (including by an AI principal via MCP's
+        ontolith.flag_contradiction, which carries no write capability at
+        all)."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "dave@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        a = kb.assert_literal(entity.id, "Person.born", "1815", "Text", HUMAN_WRITE)
+        b = kb.assert_literal(entity.id, "Person.born", "1816", "Text", HUMAN_WRITE)
+        kb.retract(a.id, "dave@example.com")
+        assert kb.backend.get_assertion(a.id).status == "retracted"  # type: ignore[union-attr]
+
+        kb.flag_contradiction(a.id, b.id, NON_REVIEWER)
+
+        assert kb.backend.get_assertion(a.id).status == "retracted"  # type: ignore[union-attr]
+        assert kb.backend.get_assertion(b.id).status == "flagged"  # type: ignore[union-attr]
