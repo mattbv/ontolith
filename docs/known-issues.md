@@ -723,7 +723,9 @@ The primary bug lives in `Ontology._apply_with_conflict_routing`'s own "extend a
 
 ### Fix
 
-`_require_reviewer` split into `_require_reviewer_principal(reviewer)` (auth/capability/AI-kind checks — depend only on the reviewer's own identity, safe to run once before the transaction opens) and `_require_pending_proposal(proposal_id, reviewer)` (re-reads the proposal fresh and checks self-review + state — MUST run inside the transaction, immediately before the write). `accept_proposal`/`reject_proposal`/`request_changes` all now call `_require_pending_proposal` as the first thing inside their `with self.backend.transaction():` block, mirroring `resolve_contradiction`'s own KI-026 fix. `resubmit` keeps its original author/state checks before policy evaluation (needed to construct the object policy evaluates against) as an optimistic fast-fail, but adds a second, authoritative re-read-and-recheck as the first thing inside its own transaction, before `_finalize_non_accepted_decision`/the auto-accept write — so a proposal a concurrent call already moved out of `changes_requested` is detected and rejected rather than double-processed. New conformance vectors in `conformance/test_review_workflow.py::TestProposalTransitionTOCTOU`, one per method: a `_RacingClock` test double (subclasses `FixedClock`) fires a one-shot side effect the first time `.now()` is called — exactly the point, in all four methods, right before the write transaction opens — running a real, complete sibling transition as if it had just won the race, deterministically simulating the exact TOCTOU window without needing real threads. All four confirmed to fail without the fix (reverted `ontology.py` locally and re-ran).
+`_require_reviewer` split into `_require_reviewer_principal(reviewer)` (auth/capability/AI-kind checks — depend only on the reviewer's own identity, safe to run once before the transaction opens) and `_require_pending_proposal(proposal_id, reviewer)` (re-reads the proposal fresh and checks self-review + state — MUST run inside the transaction, immediately before the write). `accept_proposal`/`reject_proposal`/`request_changes` all now call `_require_pending_proposal` as the first thing inside their `with self.backend.transaction():` block, mirroring `resolve_contradiction`'s own KI-026 fix. `resubmit` keeps its original author/state checks before policy evaluation (needed to construct the object policy evaluates against) as an optimistic fast-fail, but adds a second, authoritative re-read-and-recheck as the first thing inside its own transaction, before `_finalize_non_accepted_decision`/the auto-accept write — so a proposal a concurrent call already moved out of `changes_requested` is detected and rejected rather than double-processed. New conformance vectors in `conformance/test_review_workflow.py::TestProposalTransitionTOCTOU`, one per method: a `_RacingClock` test double (subclasses `FixedClock`) fires a one-shot side effect the first time `.now()` is called — for `accept_proposal`/`reject_proposal`/`request_changes` that's the exact point right before the write transaction opens; `resubmit` calls it slightly earlier (before policy evaluation, itself before the transaction), a marginally wider window but still inside the same gap the fix closes — running a real, complete sibling transition as if it had just won the race, deterministically simulating the TOCTOU window without needing real threads. All four confirmed to fail without the fix (reverted `ontology.py` locally and re-ran). `resubmit`'s in-transaction re-check closes the race on the proposal's *state* only, not on the `kb_view` its policy decision was evaluated against outside the transaction — a pre-existing, deliberate tradeoff (per this KI's own Fix text) shared by `propose`/`propose_ref`/`retract`, not something newly closed here.
+
+Review found the identical TOCTOU shape in `flag_contradiction()` (reads two assertions and any existing open contradiction before its transaction, filed separately as KI-045) and that `DuckDBBackend` has no equivalent of `SQLiteBackend`'s KI-023 lock, so this fix's serialization guarantee is airtight only for SQLite today (filed as KI-046) — neither expanded into this fix's scope.
 
 ---
 
@@ -884,6 +886,47 @@ Found during KI-034's review (2026-08-05).
 ### Fix
 
 Decide (ADR) whether `resolve_contradiction()`'s winner-eligibility check should exclude members whose current status is already `retracted` (raising `ValidationError`, mirroring the existing "winner not a member" check) — treating retraction as final for winner selection too, not just for conflict-routing extension (KI-034) and party-to-contradiction retraction (KI-033). Add a conformance vector pinning whichever behavior is chosen.
+
+---
+
+## KI-045 — `flag_contradiction()` reads its target assertions and any existing open contradiction before opening its write transaction (TOCTOU)
+
+**Severity:** Architecture gap — same bug shape as KI-035, on a method KI-035 didn't touch
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §9.1 (proposal state machine); SPEC §10.3 (contradiction resolution)
+
+### Description
+
+`Ontology.flag_contradiction(assertion_id_a, assertion_id_b, author, rationale=None)` reads both target assertions and looks up any existing open contradiction for their `(subject, predicate)` — all before opening `with self.backend.transaction():`. Two concrete consequences of deciding from that stale snapshot:
+
+- The KI-034 terminal-status guard (skip re-flagging a `retracted`/`superseded` assertion) tests a `status` read before the transaction. A concurrent `retract()` or supersession landing in the gap means the guard can still see a stale `active` status and re-flag an assertion that's since become terminal — the exact resurrection KI-034 closed, reachable via this race at only `propose` capability (including via MCP `ontolith.flag_contradiction`, which carries no write capability at all).
+- The pre-fetched `existing` (open) contradiction is equally stale: a concurrent `resolve_contradiction()` that closes it in the gap leaves this call calling `update_contradiction_members()` on a now-`resolved` contradiction (no state guard on that write) and re-flagging the just-reactivated winner back into dispute.
+
+Found during KI-035's review (2026-08-05) — KI-035 itself scopes to the four proposal-transition methods (`accept_proposal`/`reject_proposal`/`request_changes`/`resubmit`) and deliberately didn't expand to cover this separate method.
+
+### Fix
+
+Mechanically identical to KI-035's fix: move the assertion/contradiction reads and the terminal-status/existing-contradiction decisions to the first statements inside `flag_contradiction()`'s own `with self.backend.transaction():` block, re-reading fresh rather than trusting the pre-transaction snapshot. Add a conformance vector using the same `_RacingClock` technique KI-035 introduced (`conformance/test_review_workflow.py`).
+
+---
+
+## KI-046 — `DuckDBBackend` has no equivalent of `SQLiteBackend`'s concurrency lock (KI-023)
+
+**Severity:** Architecture gap — backend-specific correctness gap; concurrency-dependent fixes (e.g. KI-035) are only airtight on SQLite today
+**Milestone target:** Backlog
+**SPEC reference:** Implementation Plan (conformance kit: both backends must satisfy the same guarantees)
+
+### Description
+
+`SQLiteBackend.begin()` (`store/sqlite/backend.py`) acquires a `threading.RLock` and holds it across the full span of an explicit transaction (KI-023) — a losing thread in a race blocks in `begin()` until the winner commits or rolls back, then re-reads and provably sees the winner's committed state. `DuckDBBackend.transaction()`/`begin()` (`store/duckdb/backend.py`) has no equivalent lock and no `_in_transaction` guard at all — two concurrent transitions on the same connection don't serialize the way SQLite's do; a second `BEGIN TRANSACTION` on the shared connection while one is already open is unguarded from the Python side.
+
+Concrete consequence: KI-035's proposal-transition TOCTOU fix (and any future fix relying on the same "the transaction serializes concurrent callers" reasoning) is airtight for `SQLiteBackend` but not proven for `DuckDBBackend` — KI-035's own conformance vectors are parametrized over both backends via mocked/single-threaded racing (`_RacingClock`), which doesn't exercise real concurrency and so can't surface this gap either way.
+
+Found during KI-035's review (2026-08-05).
+
+### Fix
+
+Decide (ADR) whether `DuckDBBackend` needs a KI-023-equivalent lock (simplest: mirror `SQLiteBackend`'s `threading.RLock` approach) or a different concurrency story (e.g. DuckDB's own multi-connection model, if `ontolith` ever moves away from one shared connection per backend instance). Add a real, threaded regression test for `DuckDBBackend` mirroring `tests/unit/test_sqlite_backend.py`'s KI-023 coverage once decided.
 
 ---
 

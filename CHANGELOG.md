@@ -171,7 +171,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   New conformance vectors (`TestProposalTransitionTOCTOU`) deterministically simulate the race
   per method via a `_RacingClock` test double, without real threads — confirmed to fail
   without the fix. Pre-existing, not yet triggered by any test or reported incident
-  (single-threaded usage today); found while re-reviewing the KI-027 `resubmit()` fix.
+  (single-threaded usage today); found while re-reviewing the KI-027 `resubmit()` fix. Review
+  found the identical TOCTOU shape in `flag_contradiction()` (filed separately as KI-045, not
+  fixed here — KI-035 itself scopes to the four proposal-transition methods) and that
+  `DuckDBBackend` has no equivalent of `SQLiteBackend`'s KI-023 concurrency lock, so this
+  fix's serialization guarantee is proven airtight only for SQLite today (filed as KI-046).
 - **`retracted` now stays terminal when an open contradiction is extended by a new disputed
   value (closes KI-034).** `retracted` is meant to be a terminal status everywhere in the
   codebase (SPEC §5's append-only lifecycle) — this was the path reachable from the

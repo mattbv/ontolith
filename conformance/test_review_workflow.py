@@ -82,12 +82,17 @@ class _RacingClock(FixedClock):
     Its `.now()` fires a one-shot side effect (`racer`) directly against
     the backend the *first* time it's called, then behaves like a normal
     `FixedClock`. Each of the four proposal-transition methods calls
-    `self.clock.now()` exactly once, as the very last thing before opening
-    its write transaction — the precise point where a genuine concurrent
-    actor's own transaction could have already landed. Swapping `kb.clock`
-    for one of these right before calling the method under test makes
-    `racer` fire at exactly that point, simulating "another transition won
-    the race and committed first" without any actual concurrency.
+    `self.clock.now()` exactly once: for `accept_proposal`/`reject_proposal`/
+    `request_changes`, that's the very last thing before opening the write
+    transaction; `resubmit` calls it slightly earlier still (before policy
+    evaluation, which itself runs before the transaction opens) — the
+    racer's write in that test lands before the outer call's own policy
+    evaluation rather than strictly between evaluation and the write, a
+    slightly wider window than the real one but still inside the same gap
+    the fix closes. Swapping `kb.clock` for one of these right before
+    calling the method under test makes `racer` fire at that point,
+    simulating "another transition won the race and committed first"
+    without any actual concurrency.
     """
 
     def __init__(self, fixed_time: datetime, racer: Callable[[], None]) -> None:
@@ -977,12 +982,13 @@ class TestProposalTransitionTOCTOU:
 
     `_RacingClock` simulates a genuine concurrent actor deterministically:
     it fires a one-shot side effect the first time `.now()` is called —
-    exactly the point, in all four methods, right before the write
-    transaction opens — that runs a *real*, complete sibling transition
-    (its own full read-validate-write cycle) as if it had just won a race.
-    The method under test must then, on its own fresh re-read taken inside
-    its own transaction, detect the state the racer left behind and raise
-    rather than proceed to double-process the proposal."""
+    for three of the four methods that's the exact point right before the
+    write transaction opens; see `_RacingClock`'s own docstring for how
+    `resubmit` differs slightly — that runs a *real*, complete sibling
+    transition (its own full read-validate-write cycle) as if it had just
+    won a race. The method under test must then, on its own fresh re-read
+    taken inside its own transaction, detect the state the racer left
+    behind and raise rather than proceed to double-process the proposal."""
 
     def test_accept_proposal_loses_race_to_concurrent_reject(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)
@@ -1065,7 +1071,16 @@ class TestProposalTransitionTOCTOU:
             kb.resubmit(proposal.id, AI_AUTHOR)
 
         kb.clock = _RacingClock(T0, racer)
-        with pytest.raises(ValidationError, match="not awaiting resubmission"):
+        # match pins the *current* state in the message (require_review, set
+        # by the racer's own completed resubmit) rather than just the
+        # generic "not awaiting resubmission" prefix shared by both the
+        # optimistic pre-transaction check and this fix's in-transaction
+        # one - only the latter can see require_review here, since the
+        # proposal was still changes_requested when the optimistic check
+        # ran, before the racing clock's one-shot side effect fired.
+        with pytest.raises(
+            ValidationError, match="not awaiting resubmission.*state: require_review"
+        ):
             kb.resubmit(proposal.id, AI_AUTHOR)
 
         stored = kb.backend.get_proposal(proposal.id)

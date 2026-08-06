@@ -1281,6 +1281,14 @@ class Ontology:
         checks (self-review, state) that must instead run *inside* the
         transaction, immediately before the write.
 
+        This method's "safe to run once, before the transaction" claim
+        depends on there being no code path that updates an existing
+        principal's `default_capability`/`kind` after creation — true
+        today (no such update path exists anywhere in the codebase). A
+        future "update principal capability" feature would need to move
+        these checks inside the transaction too, the same way the
+        proposal-level ones already were for KI-035.
+
         Args:
             reviewer: Principal ID of the reviewer
 
@@ -1677,7 +1685,16 @@ class Ontology:
             # KI-035: authoritative re-check, fresh, first thing inside the
             # transaction — the checks above (author/state) ran before
             # policy evaluation and are only optimistic. Raising here rolls
-            # back a no-op; nothing has been written yet.
+            # back a no-op; nothing has been written yet. This closes the
+            # race on the proposal's *state* only — `decision` was computed
+            # against `kb_view` taken outside the transaction, so a
+            # concurrent write landing between policy evaluation and here
+            # could still mean a KB-reading PolicyStrategy (e.g.
+            # SourceQuorum) auto-accepts against KB state it never actually
+            # saw. That's a pre-existing, deliberate tradeoff shared by
+            # propose/propose_ref/retract (KI-035's own text: "policy
+            # evaluation itself can likely stay outside the transaction"),
+            # not something this fix claims to close.
             current = self.backend.get_proposal(proposal_id)
             assert current is not None  # append-only; existed moments ago
             if current.state != "changes_requested":
