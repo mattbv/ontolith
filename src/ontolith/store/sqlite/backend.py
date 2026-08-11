@@ -7,6 +7,7 @@ Default storage adapter for Ontolith. Provides:
 - Vector search via sqlite-vec (ADR-0020)
 """
 
+import json
 import sqlite3
 import struct
 import threading
@@ -15,7 +16,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
-from typing import Concatenate, ParamSpec, TypeVar, cast
+from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 
 import sqlite_vec
 
@@ -1646,32 +1647,49 @@ class SQLiteBackend:
 
     @_synchronized
     def entities_meeting_confidence(
-        self, namespace: str, concept: str, threshold: float, as_of_time: datetime | None = None
+        self,
+        namespace: str,
+        concept: str,
+        threshold: float,
+        as_of_time: datetime | None = None,
+        candidate_ids: frozenset[str] | None = None,
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion at or
         above `threshold` confidence, active at `as_of_time` (KI-036) or
-        currently active if `as_of_time` is None."""
-        cursor = self.conn.cursor()
+        currently active if `as_of_time` is None. `candidate_ids`, if given,
+        narrows the scan below `(namespace, concept)` (KI-037) via a single
+        JSON-encoded bound parameter rather than one placeholder per id."""
+        if candidate_ids is not None and not candidate_ids:
+            return set()
+
+        query = (
+            "SELECT DISTINCT a.subject FROM assertion a"
+            " JOIN entity e ON e.id = a.subject"
+            " WHERE e.namespace = ? AND e.concept = ? AND a.confidence >= ?"
+        )
+        params: list[Any] = [namespace, concept, threshold]
+
         if as_of_time is not None:
             t_iso = as_of_time.isoformat()
-            cursor.execute(
-                "SELECT DISTINCT a.subject FROM assertion a"
-                " JOIN entity e ON e.id = a.subject"
-                " WHERE e.namespace = ? AND e.concept = ? AND a.confidence >= ?"
+            query += (
                 " AND a.status != 'flagged'"
                 " AND a.asserted_at <= ?"
                 " AND (a.valid_from IS NULL OR a.valid_from <= ?)"
-                " AND (a.valid_to IS NULL OR a.valid_to > ?)",
-                (namespace, concept, threshold, t_iso, t_iso, t_iso),
+                " AND (a.valid_to IS NULL OR a.valid_to > ?)"
             )
+            params.extend([t_iso, t_iso, t_iso])
         else:
-            cursor.execute(
-                "SELECT DISTINCT a.subject FROM assertion a"
-                " JOIN entity e ON e.id = a.subject"
-                " WHERE e.namespace = ? AND e.concept = ?"
-                " AND a.status = 'active' AND a.confidence >= ?",
-                (namespace, concept, threshold),
-            )
+            query += " AND a.status = 'active'"
+
+        if candidate_ids is not None:
+            # nosec B608 — no interpolation of caller data into the SQL
+            # text; the id set is bound as a single JSON parameter, decoded
+            # by SQLite's own json_each() table-valued function.
+            query += " AND e.id IN (SELECT value FROM json_each(?))"  # nosec B608
+            params.append(json.dumps(list(candidate_ids)))
+
+        cursor = self.conn.cursor()
+        cursor.execute(query, params)
         return {row["subject"] for row in cursor.fetchall()}
 
     @_synchronized
@@ -1681,34 +1699,42 @@ class SQLiteBackend:
         concept: str,
         min_trust: int,
         as_of_time: datetime | None = None,
+        candidate_ids: frozenset[str] | None = None,
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion,
         active at `as_of_time` (KI-036) or currently active if `as_of_time`
         is None, authored by a principal whose current trust_level >=
-        `min_trust`."""
-        cursor = self.conn.cursor()
+        `min_trust`. `candidate_ids` narrows the scan the same way as
+        `entities_meeting_confidence` (KI-037) — see its docstring."""
+        if candidate_ids is not None and not candidate_ids:
+            return set()
+
+        query = (
+            "SELECT DISTINCT a.subject FROM assertion a"
+            " JOIN entity e ON e.id = a.subject"
+            " JOIN principal p ON p.id = a.author"
+            " WHERE e.namespace = ? AND e.concept = ? AND p.trust_level >= ?"
+        )
+        params: list[Any] = [namespace, concept, min_trust]
+
         if as_of_time is not None:
             t_iso = as_of_time.isoformat()
-            cursor.execute(
-                "SELECT DISTINCT a.subject FROM assertion a"
-                " JOIN entity e ON e.id = a.subject"
-                " JOIN principal p ON p.id = a.author"
-                " WHERE e.namespace = ? AND e.concept = ? AND p.trust_level >= ?"
+            query += (
                 " AND a.status != 'flagged'"
                 " AND a.asserted_at <= ?"
                 " AND (a.valid_from IS NULL OR a.valid_from <= ?)"
-                " AND (a.valid_to IS NULL OR a.valid_to > ?)",
-                (namespace, concept, min_trust, t_iso, t_iso, t_iso),
+                " AND (a.valid_to IS NULL OR a.valid_to > ?)"
             )
+            params.extend([t_iso, t_iso, t_iso])
         else:
-            cursor.execute(
-                "SELECT DISTINCT a.subject FROM assertion a"
-                " JOIN entity e ON e.id = a.subject"
-                " JOIN principal p ON p.id = a.author"
-                " WHERE e.namespace = ? AND e.concept = ?"
-                " AND a.status = 'active' AND p.trust_level >= ?",
-                (namespace, concept, min_trust),
-            )
+            query += " AND a.status = 'active'"
+
+        if candidate_ids is not None:
+            query += " AND e.id IN (SELECT value FROM json_each(?))"  # nosec B608
+            params.append(json.dumps(list(candidate_ids)))
+
+        cursor = self.conn.cursor()
+        cursor.execute(query, params)
         return {row["subject"] for row in cursor.fetchall()}
 
     def _validate_scope(self, scope: str) -> None:

@@ -155,6 +155,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped (see the KI-027 entry above).
 
 #### Fixed
+- **`.min_confidence()`/`.trust_at_least()` now exploit an already-narrowed `.where()`/
+  `.semantic()` candidate set instead of always scanning the full concept (closes
+  KI-037).** `StorageBackend.entities_meeting_confidence`/`entities_meeting_trust` (port +
+  both backends) gained an optional `candidate_ids` hint, additive on top of KI-036's
+  already-breaking `as_of_time` signature change; `QueryBuilder` passes it only when
+  `.where()`/`.semantic()` actually narrowed the base candidate set. SQLite binds the id
+  set as a single JSON-encoded parameter (`json_each`) rather than one placeholder per id
+  — measured ~17x faster at 50k entities for a single-candidate `.where()` match (12.4ms
+  vs 212.3ms median, both benchmarked in the same session). `DuckDBBackend` accepts the
+  parameter for protocol conformance but deliberately ignores it, per this KI's own
+  finding that an `unnest()`-based narrowing measured slower than DuckDB's existing scan
+  — correct either way, since `QueryBuilder` always re-intersects the result against its
+  own candidate list. New conformance vectors (cross-backend correctness) and SQLite-only
+  unit vectors (does narrowing actually narrow, including an empty-set short-circuit) —
+  all confirmed to fail without the fix.
 - **`.min_confidence()`/`.trust_at_least()` now respect `.as_of()` (closes KI-036).**
   `QueryBuilder._apply_confidence_trust_filters` never read `self._as_of_time`, so
   `kb.as_of(t).query(...).min_confidence(...)`/`.trust_at_least(...)` always checked

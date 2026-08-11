@@ -250,17 +250,139 @@ def test_bench_trust_at_least_full_concept_scan(
 def test_bench_min_confidence_narrowed_by_where(
     benchmark, seeded_confidence_trust_kb: Ontology
 ) -> None:
-    """.where() narrows to a single candidate, then .min_confidence() still
-    scans the full 1k-entity concept (KI-028's fix note: the
-    (namespace, concept)-scoped design doesn't exploit an already-narrow
-    candidate set the way the reverted id-list design would have — this
-    benchmark exists to keep that documented tradeoff visible rather than
-    only benchmarking the scenario the current design is best at)."""
+    """.where() narrows to a single candidate, then .min_confidence() scopes
+    its scan to that candidate via candidate_ids (KI-037) rather than the
+    full concept (KI-028's original fix note: the (namespace, concept)
+    -scoped design didn't exploit an already-narrow candidate set the way
+    the reverted id-list design would have). At this 1k-entity scale the
+    win isn't visible — SQLite's query planner already picks an
+    index-backed scan for the unnarrowed case too — see
+    `test_bench_min_confidence_narrowed_by_where_50k` for a scale where it
+    is."""
 
     def query() -> list:
         return (
             seeded_confidence_trust_kb.query("Person")
             .where(name="Person 500")
+            .min_confidence(0.5)
+            .all()
+        )
+
+    results = benchmark(query)
+    assert len(results) == 1
+
+
+@pytest.fixture(scope="module")
+def seeded_confidence_trust_50k_db_path() -> Path:
+    """50k Person entities, same shape as `seeded_confidence_trust_db_path`
+    but at the scale KI-037's fix note says the candidate_ids narrowing win
+    actually becomes visible (the 1k fixture's cost is small enough that
+    SQLite's planner already picks an index-backed scan either way)."""
+    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    path = Path(f.name)
+    f.close()
+
+    backend = SQLiteBackend(path)
+    trusted = "trusted@example.com"
+    untrusted = "untrusted@example.com"
+    backend.put_principal(
+        Principal(
+            id=trusted,
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            trust_level=8,
+            created_at=T0,
+        )
+    )
+    backend.put_principal(
+        Principal(
+            id=untrusted,
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            trust_level=1,
+            created_at=T0,
+        )
+    )
+
+    num_entities = 50_000
+    with backend.transaction():
+        for i in range(num_entities):
+            backend.put_entity(
+                Entity(
+                    id=f"entity-{i:06d}",
+                    namespace="default",
+                    concept="Person",
+                    created_at=T0,
+                    created_by=trusted,
+                )
+            )
+        for i in range(num_entities):
+            high_quality = i % 2 == 0
+            backend.put_assertion(
+                Assertion(
+                    id=f"assertion-name-{i:06d}",
+                    namespace="default",
+                    subject=f"entity-{i:06d}",
+                    predicate="Person.name",
+                    value_kind="literal",
+                    value_type="Text",
+                    value=f"Person {i}",
+                    author=trusted if high_quality else untrusted,
+                    confidence=0.9 if high_quality else 0.2,
+                    asserted_at=T0,
+                )
+            )
+    backend.close()
+
+    yield path
+    path.unlink()
+
+
+@pytest.fixture(scope="module")
+def seeded_confidence_trust_50k_kb(seeded_confidence_trust_50k_db_path: Path) -> Ontology:
+    kb = Ontology.connect(seeded_confidence_trust_50k_db_path)
+    yield kb
+    kb.close()
+
+
+@pytest.mark.benchmark
+def test_bench_min_confidence_full_concept_scan_50k(
+    benchmark, seeded_confidence_trust_50k_kb: Ontology
+) -> None:
+    """No .where()/.semantic() at 50k entities — the direct comparison
+    baseline for `test_bench_min_confidence_narrowed_by_where_50k` below,
+    run in the same session/table so the win is visible without needing
+    `--benchmark-compare` against a separate historical run."""
+
+    def query() -> list:
+        return seeded_confidence_trust_50k_kb.query("Person").min_confidence(0.5).all()
+
+    results = benchmark(query)
+    assert len(results) == 25_000
+
+
+@pytest.mark.benchmark
+def test_bench_min_confidence_narrowed_by_where_50k(
+    benchmark, seeded_confidence_trust_50k_kb: Ontology
+) -> None:
+    """Same query as `test_bench_min_confidence_narrowed_by_where`, at 50k
+    entities instead of 1k — the scale KI-037's own Fix text says is needed
+    to make the candidate_ids narrowing win visible: run alongside
+    `test_bench_min_confidence_full_concept_scan_50k`, this measured ~17x
+    faster (median 12.4ms vs 212.3ms) in the same benchmark session. Not
+    O(1): `EXPLAIN QUERY PLAN` shows SQLite still `SEARCH`es the full
+    `(namespace, concept)` range of the `entity` index before
+    bloom-filtering against `candidate_ids` — only the assertion-side join
+    is pruned to the candidate set, not the entity-side scan. A tighter
+    bound would need a covering index keyed to make the candidate lookup
+    itself the seek, which is out of scope here."""
+
+    def query() -> list:
+        return (
+            seeded_confidence_trust_50k_kb.query("Person")
+            .where(name="Person 25000")
             .min_confidence(0.5)
             .all()
         )

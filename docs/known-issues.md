@@ -751,10 +751,10 @@ New conformance vectors in `conformance/test_confidence_trust_filters.py::TestAs
 
 ---
 
-## KI-037 — `.min_confidence()`/`.trust_at_least()` can't exploit an already-narrowed `.where()`/`.semantic()` candidate set
+## KI-037 — `.min_confidence()`/`.trust_at_least()` can't exploit an already-narrowed `.where()`/`.semantic()` candidate set ✓ RESOLVED (M3)
 
 **Severity:** Performance — no budget violated today, but a real, measured slowdown relative to the design it replaced for the selective-query case
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved in `perf(query): let entities_meeting_confidence/trust exploit a narrowed candidate set (KI-037)`
 **SPEC reference:** Implementation Plan §9 (performance budgets)
 
 ### Description
@@ -765,7 +765,13 @@ This is not a regression relative to *shipped* behavior (the id-list design that
 
 ### Fix
 
-Add an optional hint parameter (e.g. `candidate_ids: frozenset[str] | None = None`) to `entities_meeting_confidence`/`entities_meeting_trust` that a backend *may* exploit or ignore — additive, not breaking, if landed after KI-028's already-breaking signature change. SQLite can bind the full candidate set as a single JSON-encoded parameter (`WHERE subject IN (SELECT value FROM json_each(?))`) rather than one placeholder per id, avoiding both the original bound-variable-limit problem and the current full-concept-scan cost; DuckDB's `unnest`-based equivalent was measured slower than a full scan in this case, so a DuckDB implementation may reasonably choose to ignore the hint and keep scanning. Needs a benchmark demonstrating the win at a `.where()`/`.semantic()`-narrowed scale that's actually visible (the current 1k-entity fixture doesn't show it — a 50k+ fixture would).
+`StorageBackend.entities_meeting_confidence`/`entities_meeting_trust` (port + both backends) gained an optional `candidate_ids: frozenset[str] | None = None` hint, additive on top of KI-036's already-breaking `as_of_time` signature change. `QueryBuilder._apply_confidence_trust_filters` passes it only when `.where()`/`.semantic()` actually narrowed the base candidate set (never on a bare full-concept query, where the hint carries no benefit and SQLite would pay to encode it for nothing).
+
+SQLite binds the id set as a single JSON-encoded parameter (`AND e.id IN (SELECT value FROM json_each(?))`) rather than one placeholder per id, sidestepping both the original bound-variable-limit problem and the full-concept-scan cost — measured ~17x faster at 50k entities for a single-candidate `.where()` match (`test_bench_min_confidence_narrowed_by_where_50k` vs `test_bench_min_confidence_full_concept_scan_50k`, run in the same benchmark session: 12.4ms median vs 212.3ms). Not O(1): `EXPLAIN QUERY PLAN` shows SQLite still `SEARCH`es the full `(namespace, concept)` range of the `entity` index before bloom-filtering against `candidate_ids` — only the assertion-side join is pruned. `DuckDBBackend` accepts the parameter (for `StorageBackend` protocol conformance) but deliberately ignores it, per this KI's own finding that an `unnest()`-based narrowing measured slower than DuckDB's existing unscoped scan — correct either way, since `QueryBuilder` always re-intersects the returned set against its own candidate list regardless of whether a backend used the hint.
+
+New conformance vectors (`TestCandidateIdsNarrowing` in `conformance/test_confidence_trust_filters.py`, cross-backend) pin the invariant that holds regardless of whether a backend narrows: `candidate_ids` never resurrects a non-qualifying entity, and the end-to-end `.where()`-narrowed `QueryBuilder` result is correct on both backends. SQLite-specific "does narrowing actually narrow" vectors (`TestCandidateIdsNarrowing` in `tests/unit/test_sqlite_backend.py`) confirm the id set genuinely restricts the scan, and that an explicit empty `candidate_ids` short-circuits to an empty result without querying. All confirmed to fail without the fix.
+
+Docstrings on both port methods were rewritten: `(namespace, concept)` is still always the mandatory scope (this is what bounds the parameter count — see KI-028's own reverted id-list design), and `candidate_ids` is an optional narrowing hint layered on top, not a replacement for it.
 
 ---
 

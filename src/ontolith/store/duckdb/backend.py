@@ -1592,11 +1592,24 @@ class DuckDBBackend:
         ]
 
     def entities_meeting_confidence(
-        self, namespace: str, concept: str, threshold: float, as_of_time: datetime | None = None
+        self,
+        namespace: str,
+        concept: str,
+        threshold: float,
+        as_of_time: datetime | None = None,
+        candidate_ids: frozenset[str] | None = None,
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion at or
         above `threshold` confidence, active at `as_of_time` (KI-036) or
-        currently active if `as_of_time` is None."""
+        currently active if `as_of_time` is None.
+
+        `candidate_ids` (KI-037) is accepted for `StorageBackend` protocol
+        conformance but deliberately ignored here — an `unnest()`-based
+        narrowing was measured slower than the unscoped `(namespace,
+        concept)` scan this method already runs, so this backend always
+        does the full scan; the caller (`QueryBuilder`) re-intersects the
+        returned set against its own candidate list regardless, so
+        ignoring the hint is correct, just not faster."""
         if as_of_time is not None:
             t_iso = as_of_time.isoformat()
             cursor = self.conn.execute(
@@ -1625,11 +1638,14 @@ class DuckDBBackend:
         concept: str,
         min_trust: int,
         as_of_time: datetime | None = None,
+        candidate_ids: frozenset[str] | None = None,
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion,
         active at `as_of_time` (KI-036) or currently active if `as_of_time`
         is None, authored by a principal whose current trust_level >=
-        `min_trust`."""
+        `min_trust`. `candidate_ids` (KI-037) is accepted for protocol
+        conformance but ignored here — see `entities_meeting_confidence`'s
+        docstring."""
         if as_of_time is not None:
             t_iso = as_of_time.isoformat()
             cursor = self.conn.execute(

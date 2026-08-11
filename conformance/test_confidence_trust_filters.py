@@ -549,3 +549,53 @@ class TestAsOfConfidenceTrust:
         assert kb.query("Person").min_confidence(0.5).trust_at_least(5).all() == []
         results = kb.as_of(t).query("Person").min_confidence(0.5).trust_at_least(5).all()
         assert {r.id for r in results} == {entity.id}
+
+
+class TestCandidateIdsNarrowing:
+    """KI-037: `entities_meeting_confidence`/`entities_meeting_trust` accept
+    an optional `candidate_ids` narrowing hint on top of `(namespace,
+    concept)`. A backend MAY ignore it (DuckDB does - see its docstring),
+    so cross-backend vectors here only pin the invariant that holds either
+    way: candidate_ids never resurrects a non-qualifying entity, and the
+    end-to-end `QueryBuilder` result is unaffected by whichever backend is
+    under test. SQLite-specific "does narrowing actually narrow" vectors
+    live in `tests/unit/test_sqlite_backend.py`, since that's the one
+    backend that implements it."""
+
+    def test_entities_meeting_confidence_candidate_not_qualifying_is_excluded(
+        self, make_kb: KbFactory
+    ) -> None:
+        """Narrowing to a candidate that doesn't itself meet the threshold
+        must not resurrect it - candidate_ids restricts scope, it doesn't
+        override the threshold check."""
+        kb = _kb(make_kb)
+        low = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(low.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.1)
+
+        narrowed = kb.backend.entities_meeting_confidence(
+            "default", "Person", 0.5, candidate_ids=frozenset({low.id})
+        )
+        assert narrowed == set()
+
+    def test_where_narrowed_min_confidence_excludes_higher_confidence_non_match(
+        self, make_kb: KbFactory
+    ) -> None:
+        """End-to-end via QueryBuilder: a higher-confidence entity that
+        .where() already excluded must not reappear just because
+        candidate_ids-based narrowing (or a backend ignoring it) touches
+        the SQL differently than the unnarrowed path."""
+        kb = _kb(make_kb)
+        matching = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(matching.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.5)
+        nonmatching_higher_confidence = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(
+            nonmatching_higher_confidence.id,
+            "Person.name",
+            "Grace",
+            "Text",
+            TRUSTED,
+            confidence=0.99,
+        )
+
+        results = kb.query("Person").where(name="Ada").min_confidence(0.5).all()
+        assert {r.id for r in results} == {matching.id}
