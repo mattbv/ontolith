@@ -327,3 +327,225 @@ class TestAsOfConfidenceTrust:
         assert {r.id for r in results_mid} == {entity.id}
 
         assert kb.query("Person").trust_at_least(5).all() == []
+
+    def test_min_confidence_as_of_excludes_assertion_not_yet_known(
+        self, make_kb: KbFactory
+    ) -> None:
+        """Isolates the `asserted_at` clause from `valid_from`: a fact
+        backdated to before t (`valid_from <= t`) still must not be visible
+        at `.as_of(t)` if we didn't learn of it (`asserted_at`) until after
+        t - the two temporal dimensions are independent."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        t = clock.now()
+
+        clock.advance(days=2)
+        kb.assert_literal(
+            entity.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.9, valid_from=t
+        )
+
+        assert kb.as_of(t).query("Person").min_confidence(0.5).all() == []
+        results_now = kb.query("Person").min_confidence(0.5).all()
+        assert {r.id for r in results_now} == {entity.id}
+
+    def test_min_confidence_as_of_excludes_future_valid_from(self, make_kb: KbFactory) -> None:
+        """Isolates the `valid_from` clause from `asserted_at`: asserted at
+        t itself (`asserted_at <= t` trivially holds), but the fact doesn't
+        become true until later - `.as_of(t)` must not see it yet."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        t = clock.now()
+        future_valid_from = t + timedelta(days=5)
+
+        kb.assert_literal(
+            entity.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            TRUSTED,
+            confidence=0.9,
+            valid_from=future_valid_from,
+        )
+
+        assert kb.as_of(t).query("Person").min_confidence(0.5).all() == []
+        results = kb.as_of(future_valid_from).query("Person").min_confidence(0.5).all()
+        assert {r.id for r in results} == {entity.id}
+
+    def test_min_confidence_as_of_excludes_at_valid_to_boundary(self, make_kb: KbFactory) -> None:
+        """Half-open interval (valid_from <= t < valid_to): `.as_of()`
+        pinned exactly at `valid_to` must exclude; one second earlier must
+        still include."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        t0 = clock.now()
+        valid_to = t0 + timedelta(days=1)
+        kb.assert_literal(
+            entity.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            TRUSTED,
+            confidence=0.9,
+            valid_from=t0,
+            valid_to=valid_to,
+        )
+
+        just_before = valid_to - timedelta(seconds=1)
+        results = kb.as_of(just_before).query("Person").min_confidence(0.5).all()
+        assert {r.id for r in results} == {entity.id}
+        assert kb.as_of(valid_to).query("Person").min_confidence(0.5).all() == []
+
+    def test_min_confidence_as_of_excludes_flagged_assertion(self, make_kb: KbFactory) -> None:
+        """A high-confidence assertion that was active and undisputed at t
+        but is flagged as part of a contradiction later must still be
+        excluded at `.as_of(t)` - `status` is not itself bitemporally
+        versioned; the flagged check always reflects current status."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        first = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.9)
+        t = clock.now()
+
+        clock.advance(days=1)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", TRUSTED, confidence=0.9)
+
+        reloaded = kb.backend.get_assertion(first.id)
+        assert reloaded is not None
+        assert reloaded.status == "flagged"
+
+        assert kb.as_of(t).query("Person").min_confidence(0.5).all() == []
+
+    def test_trust_at_least_as_of_excludes_assertion_not_yet_known(
+        self, make_kb: KbFactory
+    ) -> None:
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        t = clock.now()
+
+        clock.advance(days=2)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED, valid_from=t)
+
+        assert kb.as_of(t).query("Person").trust_at_least(5).all() == []
+        results_now = kb.query("Person").trust_at_least(5).all()
+        assert {r.id for r in results_now} == {entity.id}
+
+    def test_trust_at_least_as_of_excludes_future_valid_from(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        t = clock.now()
+        future_valid_from = t + timedelta(days=5)
+
+        kb.assert_literal(
+            entity.id, "Person.name", "Ada", "Text", TRUSTED, valid_from=future_valid_from
+        )
+
+        assert kb.as_of(t).query("Person").trust_at_least(5).all() == []
+        results = kb.as_of(future_valid_from).query("Person").trust_at_least(5).all()
+        assert {r.id for r in results} == {entity.id}
+
+    def test_trust_at_least_as_of_excludes_at_valid_to_boundary(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        t0 = clock.now()
+        valid_to = t0 + timedelta(days=1)
+        kb.assert_literal(
+            entity.id, "Person.name", "Ada", "Text", TRUSTED, valid_from=t0, valid_to=valid_to
+        )
+
+        just_before = valid_to - timedelta(seconds=1)
+        results = kb.as_of(just_before).query("Person").trust_at_least(5).all()
+        assert {r.id for r in results} == {entity.id}
+        assert kb.as_of(valid_to).query("Person").trust_at_least(5).all() == []
+
+    def test_trust_at_least_as_of_excludes_flagged_assertion(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        first = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED)
+        t = clock.now()
+
+        clock.advance(days=1)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", TRUSTED)
+
+        reloaded = kb.backend.get_assertion(first.id)
+        assert reloaded is not None
+        assert reloaded.status == "flagged"
+
+        assert kb.as_of(t).query("Person").trust_at_least(5).all() == []
+
+    def test_as_of_min_confidence_combined_with_where(self, make_kb: KbFactory) -> None:
+        """The exact regression shape this KI describes: an entity passes
+        `.where()` both at t and now, but only qualifies on confidence at t
+        - the confidence check, not just the candidate set, must respect
+        `.as_of()`."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED)
+        born = kb.assert_literal(entity.id, "Person.born", "1815", "Text", TRUSTED, confidence=0.9)
+        before_retraction = clock.now()
+
+        clock.advance(days=1)
+        kb.retract(born.id, TRUSTED)
+
+        assert kb.query("Person").where(name="Ada").min_confidence(0.5).all() == []
+        results = (
+            kb.as_of(before_retraction).query("Person").where(name="Ada").min_confidence(0.5).all()
+        )
+        assert {r.id for r in results} == {entity.id}
+
+    def test_as_of_trust_at_least_combined_with_where(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", UNTRUSTED)
+        born = kb.assert_literal(entity.id, "Person.born", "1815", "Text", TRUSTED)
+        before_retraction = clock.now()
+
+        clock.advance(days=1)
+        kb.retract(born.id, TRUSTED)
+
+        assert kb.query("Person").where(name="Ada").trust_at_least(5).all() == []
+        results = (
+            kb.as_of(before_retraction).query("Person").where(name="Ada").trust_at_least(5).all()
+        )
+        assert {r.id for r in results} == {entity.id}
+
+    def test_as_of_min_confidence_and_trust_at_least_intersect_across_boundary(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The `qualifying_ids & trust_ids` intersection (ADR-0020
+        amendment) must also respect `.as_of()`: both qualifying assertions
+        were active at t; only the confidence one survives to now."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        confident = kb.assert_literal(
+            entity.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.9
+        )
+        kb.assert_literal(entity.id, "Person.born", "1815", "Text", TRUSTED, confidence=0.1)
+        t = clock.now()
+
+        clock.advance(days=1)
+        kb.retract(confident.id, TRUSTED)
+
+        assert kb.query("Person").min_confidence(0.5).trust_at_least(5).all() == []
+        results = kb.as_of(t).query("Person").min_confidence(0.5).trust_at_least(5).all()
+        assert {r.id for r in results} == {entity.id}

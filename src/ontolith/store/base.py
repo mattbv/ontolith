@@ -408,22 +408,29 @@ class StorageBackend(Protocol):
         (ADR-0004). When `as_of_time` is None, "active" means
         `status = 'active'`; when set, it means the same bitemporal window
         `entities_where()` uses (`asserted_at <= as_of_time`, `valid_from`/
-        `valid_to` bracketing `as_of_time`, flagged assertions excluded) —
-        KI-036, so `kb.as_of(t).query(...).min_confidence(...)` evaluates
-        against a coherent point-in-time view instead of always checking
-        current-active assertions regardless of `t`. Scoped by
-        `(namespace, concept)` rather than an explicit id list so the
-        parameter count stays constant regardless of how many entities
-        exist — an id-list-bound query does not (a SQL `IN (...)` with one
-        placeholder per candidate hits both SQLite's bound-variable limit
-        and, on DuckDB, per-parameter bind overhead, at real-world scale).
+        `valid_to` bracketing `as_of_time`) — KI-036, so
+        `kb.as_of(t).query(...).min_confidence(...)` evaluates against a
+        coherent point-in-time view instead of always checking
+        current-active assertions regardless of `t`. One caveat: `status`
+        itself is not bitemporally versioned, only current status is ever
+        stored, so a `status = 'flagged'` assertion (a static contradiction,
+        SPEC §10.3) is excluded even at a `t` before it was flagged —
+        matching `entities_where()`'s own default (`include_flagged=False`),
+        which is the only mode reachable from `QueryBuilder` and thus the
+        only one implemented here. Scoped by `(namespace, concept)` rather
+        than an explicit id list so the parameter count stays constant
+        regardless of how many entities exist — an id-list-bound query does
+        not (a SQL `IN (...)` with one placeholder per candidate hits both
+        SQLite's bound-variable limit and, on DuckDB, per-parameter bind
+        overhead, at real-world scale).
 
         Args:
             namespace: Namespace to scope the scan to
             concept: Concept to scope the scan to
             threshold: Minimum confidence, 0.0-1.0
             as_of_time: If set, evaluate against this point in time instead
-                of current state (KI-036)
+                of current state (KI-036) — see the flagged-status caveat
+                above
 
         Returns:
             IDs of qualifying entities (may be a superset of any candidate
@@ -449,16 +456,19 @@ class StorageBackend(Protocol):
         as `entities_meeting_confidence` — see its docstring.
 
         `as_of_time` bitemporally scopes which *assertion* qualifies, the
-        same way `entities_meeting_confidence` does — but `trust_level`
-        itself is always the principal's current value, never a historical
-        one (KI-036). This is not an approximation: no code path ever
-        updates a principal's `trust_level` after creation (grep the
-        codebase for `UPDATE principal` — the only such statements touch
-        `principal_credential`), so "trust_level as of any t at or after
-        the principal's creation" and "trust_level now" are the same value
-        by construction. A principal cannot author an assertion before it
-        exists, so this holds for every `as_of_time` an assertion's
-        `asserted_at` could satisfy.
+        same way `entities_meeting_confidence` does (including its
+        flagged-status caveat) — but `trust_level` itself is always the
+        principal's current value, never a historical one (KI-036). This is
+        not an approximation: no code path updates a principal's
+        `trust_level` after creation, so "trust_level as of any t at or
+        after the principal's creation" and "trust_level now" are the same
+        value by construction (guarded by
+        `tests/unit/test_principal_trust_immutability_invariant.py`, which
+        fails the day a mutation path is added — that would mean this
+        method needs real principal versioning, not this shortcut). A
+        principal cannot author an assertion before it exists, so this
+        holds for every `as_of_time` an assertion's `asserted_at` could
+        satisfy.
 
         Args:
             namespace: Namespace to scope the scan to
