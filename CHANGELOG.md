@@ -155,6 +155,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped (see the KI-027 entry above).
 
 #### Fixed
+- **`.min_confidence()`/`.trust_at_least()` now respect `.as_of()` (closes KI-036).**
+  `QueryBuilder._apply_confidence_trust_filters` never read `self._as_of_time`, so
+  `kb.as_of(t).query(...).min_confidence(...)`/`.trust_at_least(...)` always checked
+  current-active assertions regardless of `t` — an entity could pass the `.where()` half
+  of a bitemporal query as it existed at `t`, then get filtered by confidence/trust values
+  that only became true later (or that existed at `t` but were since superseded/retracted).
+  `StorageBackend.entities_meeting_confidence`/`entities_meeting_trust` (port + both
+  backends) gained an `as_of_time` parameter, mirroring `entities_where()`'s existing
+  bitemporal-window branch; `QueryBuilder` now threads `self._as_of_time` through both.
+  `trust_level` itself is always the principal's current value, not a historical one — no
+  code path updates a principal's `trust_level` after creation, so there is no historical
+  value to reconstruct; only which assertion counts as qualifying is bitemporally scoped.
+  A new regression guard (`tests/unit/test_principal_trust_immutability_invariant.py`) fails
+  if a `principal` table mutation path is ever added, since that would break this shortcut.
+  `status` itself is not bitemporally versioned, so a flagged assertion is excluded
+  regardless of `t`, even before it was flagged — matching `entities_where()`'s own default.
+  Conformance vectors (`TestAsOfConfidenceTrust`, 22 cases across both backends) cover a
+  retraction boundary and a schema-declared time_varying supersession boundary per filter,
+  plus — per review — vectors isolating each of the four temporal clauses individually
+  (backdated-but-not-yet-known, future `valid_from`, the `valid_to` half-open boundary,
+  flagged-exclusion) and vectors combining `.as_of()` with `.where()` and with both filters
+  chained together; every clause confirmed individually load-bearing via mutation testing.
+  Review also found that `.trust_at_least()` ignores delegation attenuation (SPEC §8.4) —
+  pre-existing, not introduced here, filed separately as KI-047.
 - **`accept_proposal`/`reject_proposal`/`request_changes`/`resubmit` no longer have a TOCTOU
   window between validating a proposal's state and writing its transition (closes KI-035).**
   All four read the proposal, validated its current state, and ran policy evaluation before

@@ -729,10 +729,10 @@ Review found the identical TOCTOU shape in `flag_contradiction()` (reads two ass
 
 ---
 
-## KI-036 — `.min_confidence()`/`.trust_at_least()` ignore `.as_of()`
+## KI-036 — `.min_confidence()`/`.trust_at_least()` ignore `.as_of()` ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — bitemporal query results are inconsistent within a single query
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved in `fix(query): thread as_of_time through confidence/trust filters (KI-036)`
 **SPEC reference:** SPEC §12 (bitemporal query semantics — `as_of` reconstruction)
 
 ### Description
@@ -743,7 +743,11 @@ Found while fixing KI-028 (the N+1 performance issue for the same two filters); 
 
 ### Fix
 
-Thread `as_of_time` through `entities_meeting_confidence`/`entities_meeting_trust` (both backends), mirroring `entities_where()`'s existing `as_of_time` branch (bitemporal `asserted_at`/`valid_from`/`valid_to` predicates instead of `status = 'active'`, and a join to whichever principal snapshot is correct at `t` — principals aren't currently versioned, so this needs a design decision on what "trust_level as of t" even means before it can be implemented). Needs a conformance vector combining `.as_of()` with `.min_confidence()`/`.trust_at_least()` across a supersession/retraction boundary.
+`StorageBackend.entities_meeting_confidence`/`entities_meeting_trust` (port + both backends) gained an `as_of_time: datetime | None = None` parameter, and `QueryBuilder._apply_confidence_trust_filters` now passes `self._as_of_time` through to both. When set, each method switches from `status = 'active'` to the same bitemporal window `entities_where()` already uses (`asserted_at <= as_of_time`, `valid_from`/`valid_to` bracketing it) — so the qualifying assertion is whichever one was actually active at `t`, not whichever is active now. One caveat, since `status` itself is not bitemporally versioned: a `status = 'flagged'` assertion (an open static contradiction) is excluded regardless of `t`, even at a `t` before it was flagged — matching `entities_where()`'s own default (`include_flagged=False`), the only mode `QueryBuilder` ever reaches.
+
+The design question this KI flagged — what "trust_level as of `t`" means, since principals aren't versioned — resolved to: `trust_level` is always the principal's *current* value, never a historical one. This isn't an approximation: no code path anywhere updates a principal's `trust_level` after creation (confirmed by grep — the only `UPDATE principal*` statements touch `principal_credential`, never `principal` itself), so "trust_level as of any t at or after the principal's creation" and "trust_level now" are provably the same number. Only which *assertion* counts as qualifying is bitemporally scoped; the trust threshold it's compared against is not, because there is nothing to reconstruct. A new regression guard, `tests/unit/test_principal_trust_immutability_invariant.py`, greps both backends for any `UPDATE`/`DELETE FROM` targeting the `principal` table and fails if one is ever added — the prompt that this shortcut needs replacing with real principal versioning before `.trust_at_least()` + `.as_of()` can keep relying on it.
+
+New conformance vectors in `conformance/test_confidence_trust_filters.py::TestAsOfConfidenceTrust` (22 cases across both backends): a retraction-boundary pair and a schema-declared `Person.employer` time_varying supersession-boundary pair per filter (as originally landed); plus, per review, boundary vectors isolating each of the four temporal clauses individually (backdated-but-not-yet-known, future `valid_from`, the `valid_to` half-open boundary, and flagged-exclusion) per filter, and vectors combining `.as_of()` with `.where()` and with both filters chained together. Mutation-testing each clause in the SQLite backend (blanking `status != 'flagged'`, `valid_from`, `valid_to`, and `asserted_at` one at a time and rerunning the suite) confirms every clause is now individually pinned by a failing test, not just exercised incidentally.
 
 ---
 
@@ -927,6 +931,24 @@ Found during KI-035's review (2026-08-05).
 ### Fix
 
 Decide (ADR) whether `DuckDBBackend` needs a KI-023-equivalent lock (simplest: mirror `SQLiteBackend`'s `threading.RLock` approach) or a different concurrency story (e.g. DuckDB's own multi-connection model, if `ontolith` ever moves away from one shared connection per backend instance). Add a real, threaded regression test for `DuckDBBackend` mirroring `tests/unit/test_sqlite_backend.py`'s KI-023 coverage once decided.
+
+---
+
+## KI-047 — `.trust_at_least()` ignores delegation attenuation (SPEC §8.4)
+
+**Severity:** Architecture gap — a query-time trust check can disagree with the policy engine's own trust semantics for the same assertion
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §8.4 (effective capability/trust under delegation)
+
+### Description
+
+`entities_meeting_trust` (`store/sqlite/backend.py`, `store/duckdb/backend.py`) joins `assertion.author = principal.id` and compares `principal.trust_level` directly. But an assertion made under delegation (`acting_as` set) has its *effective* trust attenuated — `govern/policy.py`'s `ThresholdPolicy`/`SourceQuorum` compute `min(principal.trust_level, acting_as.trust_level)` for exactly this reason (SPEC §8.4: "effective capability is min(author, acting_as) when delegating, not a wholesale substitution" — the same rule this project already applies to *capability*, `ontology.py:_check_direct_write_capability`). `entities_meeting_trust` reads only `author`'s raw `trust_level` and never looks at `acting_as` at all, so a low-trust delegate acting as a high-trust principal is scored as fully trusted by `.trust_at_least()` even though the policy engine that decided whether to auto-accept that same assertion would have scored it lower (or vice versa: a high-trust delegate acting as a low-trust principal is scored as low-trust by the query filter, though SPEC's `min()` rule agrees with that direction).
+
+Pre-existing since `.trust_at_least()` first shipped; not introduced or worsened by KI-028 or KI-036, both of which touch how the underlying query is scoped/bitemporally filtered but neither of which reads `acting_as`. Found during KI-036's review while double-checking the "trust_level is exact, not an approximation" claim that fix's docstrings make — that claim is true for whether `trust_level` needs bitemporal reconstruction, but doesn't cover this separate gap in which column the query reads.
+
+### Fix
+
+`entities_meeting_trust` needs a `LEFT JOIN` to a second `principal` alias on `assertion.acting_as`, and to compare `min(p.trust_level, COALESCE(delegate.trust_level, p.trust_level))` (or equivalent `CASE`) against `min_trust`, matching `govern/policy.py`'s existing formula exactly. Needs a conformance vector with a delegated assertion where the author's and delegate's trust levels straddle the threshold in both directions, and a decision on whether `QueryBuilder`'s docstrings should say "effective trust_level" instead of "trust_level" once fixed.
 
 ---
 
