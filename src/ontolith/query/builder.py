@@ -118,9 +118,9 @@ class QueryBuilder:
         An entity with only `confidence=None` assertions does not pass —
         None never satisfies a numeric threshold (ADR-0004). Independent of
         `.trust_at_least()`: the qualifying assertion need not be the same
-        one for both filters. Ignores `.as_of()` — always checks
-        currently-active assertions regardless of any bitemporal view
-        pinned on this query (KI-036).
+        one for both filters. Respects `.as_of()` (KI-036): if this query
+        is pinned to a point in time, the qualifying assertion must be
+        active at that time, not merely currently active.
 
         Args:
             threshold: Minimum confidence, 0.0-1.0.
@@ -135,9 +135,12 @@ class QueryBuilder:
         """Keep only entities with at least one active assertion authored by
         a principal whose trust_level >= `level`.
 
-        Ignores `.as_of()` — always checks currently-active assertions and
-        current principal trust levels regardless of any bitemporal view
-        pinned on this query (KI-036).
+        Respects `.as_of()` (KI-036) for which assertion counts as
+        qualifying, the same way `.min_confidence()` does. `trust_level`
+        itself is always the principal's current value: no code path ever
+        changes a principal's trust_level after creation, so there is no
+        historical value to reconstruct — "as of t" and "now" are the same
+        number by construction.
 
         Args:
             level: Minimum principal trust level, 0-10.
@@ -260,12 +263,12 @@ class QueryBuilder:
 
         if self._min_confidence is not None:
             qualifying_ids = self._backend.entities_meeting_confidence(
-                self._namespace, self._concept, self._min_confidence
+                self._namespace, self._concept, self._min_confidence, as_of_time=self._as_of_time
             )
 
         if self._trust_at_least is not None:
             trust_ids = self._backend.entities_meeting_trust(
-                self._namespace, self._concept, self._trust_at_least
+                self._namespace, self._concept, self._trust_at_least, as_of_time=self._as_of_time
             )
             qualifying_ids = trust_ids if qualifying_ids is None else qualifying_ids & trust_ids
 

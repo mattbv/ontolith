@@ -155,6 +155,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped (see the KI-027 entry above).
 
 #### Fixed
+- **`.min_confidence()`/`.trust_at_least()` now respect `.as_of()` (closes KI-036).**
+  `QueryBuilder._apply_confidence_trust_filters` never read `self._as_of_time`, so
+  `kb.as_of(t).query(...).min_confidence(...)`/`.trust_at_least(...)` always checked
+  current-active assertions regardless of `t` — an entity could pass the `.where()` half
+  of a bitemporal query as it existed at `t`, then get filtered by confidence/trust values
+  that only became true later (or that existed at `t` but were since superseded/retracted).
+  `StorageBackend.entities_meeting_confidence`/`entities_meeting_trust` (port + both
+  backends) gained an `as_of_time` parameter, mirroring `entities_where()`'s existing
+  bitemporal-window branch; `QueryBuilder` now threads `self._as_of_time` through both.
+  `trust_level` itself is always the principal's current value, not a historical one — no
+  code path updates a principal's `trust_level` after creation, so there is no historical
+  value to reconstruct; only which assertion counts as qualifying is bitemporally scoped.
+  New conformance vectors (`TestAsOfConfidenceTrust`) cover a retraction boundary and a
+  schema-declared time_varying supersession boundary for both filters — confirmed to fail
+  without the fix.
 - **`accept_proposal`/`reject_proposal`/`request_changes`/`resubmit` no longer have a TOCTOU
   window between validating a proposal's state and writing its transition (closes KI-035).**
   All four read the proposal, validated its current state, and ran policy evaluation before

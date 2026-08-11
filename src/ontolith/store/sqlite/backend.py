@@ -1646,33 +1646,69 @@ class SQLiteBackend:
 
     @_synchronized
     def entities_meeting_confidence(
-        self, namespace: str, concept: str, threshold: float
+        self, namespace: str, concept: str, threshold: float, as_of_time: datetime | None = None
     ) -> set[str]:
-        """IDs of entities in `(namespace, concept)` with >=1 active assertion
-        at or above `threshold` confidence."""
+        """IDs of entities in `(namespace, concept)` with >=1 assertion at or
+        above `threshold` confidence, active at `as_of_time` (KI-036) or
+        currently active if `as_of_time` is None."""
         cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT DISTINCT a.subject FROM assertion a"
-            " JOIN entity e ON e.id = a.subject"
-            " WHERE e.namespace = ? AND e.concept = ?"
-            " AND a.status = 'active' AND a.confidence >= ?",
-            (namespace, concept, threshold),
-        )
+        if as_of_time is not None:
+            t_iso = as_of_time.isoformat()
+            cursor.execute(
+                "SELECT DISTINCT a.subject FROM assertion a"
+                " JOIN entity e ON e.id = a.subject"
+                " WHERE e.namespace = ? AND e.concept = ? AND a.confidence >= ?"
+                " AND a.status != 'flagged'"
+                " AND a.asserted_at <= ?"
+                " AND (a.valid_from IS NULL OR a.valid_from <= ?)"
+                " AND (a.valid_to IS NULL OR a.valid_to > ?)",
+                (namespace, concept, threshold, t_iso, t_iso, t_iso),
+            )
+        else:
+            cursor.execute(
+                "SELECT DISTINCT a.subject FROM assertion a"
+                " JOIN entity e ON e.id = a.subject"
+                " WHERE e.namespace = ? AND e.concept = ?"
+                " AND a.status = 'active' AND a.confidence >= ?",
+                (namespace, concept, threshold),
+            )
         return {row["subject"] for row in cursor.fetchall()}
 
     @_synchronized
-    def entities_meeting_trust(self, namespace: str, concept: str, min_trust: int) -> set[str]:
-        """IDs of entities in `(namespace, concept)` with >=1 active
-        assertion authored by a principal whose trust_level >= `min_trust`."""
+    def entities_meeting_trust(
+        self,
+        namespace: str,
+        concept: str,
+        min_trust: int,
+        as_of_time: datetime | None = None,
+    ) -> set[str]:
+        """IDs of entities in `(namespace, concept)` with >=1 assertion,
+        active at `as_of_time` (KI-036) or currently active if `as_of_time`
+        is None, authored by a principal whose current trust_level >=
+        `min_trust`."""
         cursor = self.conn.cursor()
-        cursor.execute(
-            "SELECT DISTINCT a.subject FROM assertion a"
-            " JOIN entity e ON e.id = a.subject"
-            " JOIN principal p ON p.id = a.author"
-            " WHERE e.namespace = ? AND e.concept = ?"
-            " AND a.status = 'active' AND p.trust_level >= ?",
-            (namespace, concept, min_trust),
-        )
+        if as_of_time is not None:
+            t_iso = as_of_time.isoformat()
+            cursor.execute(
+                "SELECT DISTINCT a.subject FROM assertion a"
+                " JOIN entity e ON e.id = a.subject"
+                " JOIN principal p ON p.id = a.author"
+                " WHERE e.namespace = ? AND e.concept = ? AND p.trust_level >= ?"
+                " AND a.status != 'flagged'"
+                " AND a.asserted_at <= ?"
+                " AND (a.valid_from IS NULL OR a.valid_from <= ?)"
+                " AND (a.valid_to IS NULL OR a.valid_to > ?)",
+                (namespace, concept, min_trust, t_iso, t_iso, t_iso),
+            )
+        else:
+            cursor.execute(
+                "SELECT DISTINCT a.subject FROM assertion a"
+                " JOIN entity e ON e.id = a.subject"
+                " JOIN principal p ON p.id = a.author"
+                " WHERE e.namespace = ? AND e.concept = ?"
+                " AND a.status = 'active' AND p.trust_level >= ?",
+                (namespace, concept, min_trust),
+            )
         return {row["subject"] for row in cursor.fetchall()}
 
     def _validate_scope(self, scope: str) -> None:

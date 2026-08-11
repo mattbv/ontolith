@@ -5,20 +5,26 @@ entities_meeting_trust() as a single (namespace, concept)-scoped lookup per
 filter rather than a per-entity assertions()/get_principal() round trip —
 this file proves both backends implement that push-down identically, since
 tests/unit/test_query.py only ever exercises the SQLite backend directly.
+
+TestAsOfConfidenceTrust additionally covers KI-036: both filters must thread
+`.as_of()`'s pinned time through to that push-down instead of always
+checking current-active state regardless of it.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from conformance.conftest import KbFactory
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
+from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 
 TRUSTED = "trusted@example.com"
 UNTRUSTED = "untrusted@example.com"
+ADMIN = "admin@example.com"
 
 
 def _kb(make_kb: KbFactory) -> Ontology:
@@ -31,6 +37,31 @@ def _kb(make_kb: KbFactory) -> Ontology:
     kb.create_principal(
         UNTRUSTED, kind="human", auth_method="oidc", default_capability="write", trust_level=1
     )
+    return kb
+
+
+def _kb_time_varying(make_kb: KbFactory) -> Ontology:
+    """`_kb()` plus a schema declaring `Person.employer` time_varying, for
+    tests that need a real supersession boundary (SPEC §10.2) rather than a
+    retraction - `Person.name` stays static (the default) via this schema."""
+    kb = _kb(make_kb)
+    kb.create_principal(ADMIN, kind="human", auth_method="oidc", default_capability="admin")
+    schema = SchemaIR(
+        namespace="default",
+        version=1,
+        concepts={
+            "Person": ConceptDef(
+                name="Person",
+                properties={
+                    "name": PropertyDef(name="name", value_type="Text"),
+                    "employer": PropertyDef(
+                        name="employer", value_type="Text", temporality="time_varying"
+                    ),
+                },
+            ),
+        },
+    )
+    kb.apply_schema(schema, author=ADMIN)
     return kb
 
 
@@ -210,3 +241,89 @@ class TestConfidenceAndTrustCombined:
 
         results = kb.query("Person").where(name="Ada").min_confidence(0.5).all()
         assert {r.id for r in results} == {matching_high_conf.id}
+
+
+class TestAsOfConfidenceTrust:
+    """KI-036: .min_confidence()/.trust_at_least() must respect .as_of() -
+    a query pinned to time t must evaluate against a coherent point-in-time
+    view, not always against current-active assertions/principals regardless
+    of t."""
+
+    def test_min_confidence_as_of_before_retraction_still_qualifies(
+        self, make_kb: KbFactory
+    ) -> None:
+        """Before the fix, .as_of(t) was ignored entirely by .min_confidence()
+        - a query pinned to a time before a later retraction would wrongly
+        see the retraction's effect early (status='active' is checked, not
+        the bitemporal window)."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        high = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.9)
+        before_retraction = clock.now()
+
+        clock.advance(days=1)
+        kb.retract(high.id, TRUSTED)
+
+        assert kb.query("Person").min_confidence(0.5).all() == []
+        results = kb.as_of(before_retraction).query("Person").min_confidence(0.5).all()
+        assert {r.id for r in results} == {entity.id}
+
+    def test_trust_at_least_as_of_before_retraction_still_qualifies(
+        self, make_kb: KbFactory
+    ) -> None:
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED)
+        before_retraction = clock.now()
+
+        clock.advance(days=1)
+        kb.retract(assertion.id, TRUSTED)
+
+        assert kb.query("Person").trust_at_least(5).all() == []
+        results = kb.as_of(before_retraction).query("Person").trust_at_least(5).all()
+        assert {r.id for r in results} == {entity.id}
+
+    def test_min_confidence_as_of_respects_supersession_window(self, make_kb: KbFactory) -> None:
+        """Person.employer is time_varying (SPEC §10.2): a second value
+        supersedes the first rather than contradicting it. .min_confidence()
+        pinned to a time inside the first assertion's window must see the
+        first assertion's confidence - not the second's, which is active
+        now but did not exist yet at that time."""
+        kb = _kb_time_varying(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(entity.id, "Person.employer", "Acme", "Text", TRUSTED, confidence=0.9)
+        mid = clock.now() + timedelta(hours=12)
+
+        clock.advance(days=1)
+        kb.assert_literal(entity.id, "Person.employer", "Beta", "Text", TRUSTED, confidence=0.1)
+
+        results_mid = kb.as_of(mid).query("Person").min_confidence(0.5).all()
+        assert {r.id for r in results_mid} == {entity.id}
+
+        assert kb.query("Person").min_confidence(0.5).all() == []
+
+    def test_trust_at_least_as_of_respects_supersession_window(self, make_kb: KbFactory) -> None:
+        """Same shape as the confidence version above, but the two
+        supersession-chain assertions come from differently-trusted authors
+        - the qualifying assertion at each point in time is the one active
+        then, not whichever happens to be active now."""
+        kb = _kb_time_varying(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(entity.id, "Person.employer", "Acme", "Text", TRUSTED)
+        mid = clock.now() + timedelta(hours=12)
+
+        clock.advance(days=1)
+        kb.assert_literal(entity.id, "Person.employer", "Beta", "Text", UNTRUSTED)
+
+        results_mid = kb.as_of(mid).query("Person").trust_at_least(5).all()
+        assert {r.id for r in results_mid} == {entity.id}
+
+        assert kb.query("Person").trust_at_least(5).all() == []

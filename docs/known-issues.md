@@ -729,10 +729,10 @@ Review found the identical TOCTOU shape in `flag_contradiction()` (reads two ass
 
 ---
 
-## KI-036 — `.min_confidence()`/`.trust_at_least()` ignore `.as_of()`
+## KI-036 — `.min_confidence()`/`.trust_at_least()` ignore `.as_of()` ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — bitemporal query results are inconsistent within a single query
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved in `fix(query): thread as_of_time through confidence/trust filters (KI-036)`
 **SPEC reference:** SPEC §12 (bitemporal query semantics — `as_of` reconstruction)
 
 ### Description
@@ -743,7 +743,11 @@ Found while fixing KI-028 (the N+1 performance issue for the same two filters); 
 
 ### Fix
 
-Thread `as_of_time` through `entities_meeting_confidence`/`entities_meeting_trust` (both backends), mirroring `entities_where()`'s existing `as_of_time` branch (bitemporal `asserted_at`/`valid_from`/`valid_to` predicates instead of `status = 'active'`, and a join to whichever principal snapshot is correct at `t` — principals aren't currently versioned, so this needs a design decision on what "trust_level as of t" even means before it can be implemented). Needs a conformance vector combining `.as_of()` with `.min_confidence()`/`.trust_at_least()` across a supersession/retraction boundary.
+`StorageBackend.entities_meeting_confidence`/`entities_meeting_trust` (port + both backends) gained an `as_of_time: datetime | None = None` parameter, and `QueryBuilder._apply_confidence_trust_filters` now passes `self._as_of_time` through to both. When set, each method switches from `status = 'active'` to the same bitemporal window `entities_where()` already uses (`asserted_at <= as_of_time`, `valid_from`/`valid_to` bracketing it, flagged assertions excluded) — so the qualifying assertion is whichever one was actually active at `t`, not whichever is active now.
+
+The design question this KI flagged — what "trust_level as of `t`" means, since principals aren't versioned — resolved to: `trust_level` is always the principal's *current* value, never a historical one. This isn't an approximation: no code path anywhere updates a principal's `trust_level` after creation (confirmed by grep — the only `UPDATE principal*` statements touch `principal_credential`, never `principal` itself), so "trust_level as of any t at or after the principal's creation" and "trust_level now" are provably the same number. Only which *assertion* counts as qualifying is bitemporally scoped; the trust threshold it's compared against is not, because there is nothing to reconstruct.
+
+New conformance vectors in `conformance/test_confidence_trust_filters.py::TestAsOfConfidenceTrust` (8 cases across both backends): a retraction-boundary pair (`.as_of()` pinned before a later retraction must still see the retracted assertion) for each filter, and a schema-declared `Person.employer` time_varying supersession-boundary pair (`.as_of()` pinned inside the first assertion's window must see its confidence/author-trust, not the second assertion's, which superseded it later) for each filter. All four confirmed to fail without the fix (reverted the `store`/`query` changes locally and re-ran).
 
 ---
 
