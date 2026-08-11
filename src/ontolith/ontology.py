@@ -1268,31 +1268,36 @@ class Ontology:
             self.backend.put_assertion(assertion)
             return assertion
 
-    def _require_reviewer(self, proposal_id: str, reviewer: str) -> Proposal:
-        """Shared eligibility gate for accept_proposal/reject_proposal/request_changes (SPEC §9.4).
+    def _require_reviewer_principal(self, reviewer: str) -> Principal:
+        """Reviewer-eligibility checks that depend only on the reviewer's
+        own identity, never on any proposal's mutable state — safe to run
+        once, before the write transaction opens (KI-035). The reviewer
+        must have `review` or `admin` capability, must not be an AI
+        principal (ThresholdPolicy always routes AI proposals to
+        require_review — an AI reviewer would defeat that guarantee).
 
-        The reviewer must have `review` or `admin` capability, must not be
-        an AI principal (ThresholdPolicy always routes AI proposals to
-        require_review — an AI reviewer would defeat that guarantee), and
-        must not be the proposal's own author or delegating principal
-        (self-review would let a misconfigured AI principal with `review`
-        capability, or a delegate reviewing their own delegated proposal,
-        approve its own work). The proposal must exist and be in
-        `require_review` or `under_review` state.
+        Shared by accept_proposal/reject_proposal/request_changes
+        (SPEC §9.4). See `_require_pending_proposal` for the proposal-level
+        checks (self-review, state) that must instead run *inside* the
+        transaction, immediately before the write.
+
+        This method's "safe to run once, before the transaction" claim
+        depends on there being no code path that updates an existing
+        principal's `default_capability`/`kind` after creation — true
+        today (no such update path exists anywhere in the codebase). A
+        future "update principal capability" feature would need to move
+        these checks inside the transaction too, the same way the
+        proposal-level ones already were for KI-035.
 
         Args:
-            proposal_id: ID of the proposal being reviewed
             reviewer: Principal ID of the reviewer
 
         Returns:
-            The proposal being reviewed
+            The reviewer's Principal
 
         Raises:
             AuthError: reviewer is not a known principal
-            NotFoundError: proposal_id does not name an existing proposal
-            CapabilityError: reviewer lacks review/admin capability, is
-                AI-kind, or is the proposal's own author/delegate
-            ValidationError: proposal is not pending review
+            CapabilityError: reviewer lacks review/admin capability, or is AI-kind
         """
         reviewer_principal = self.backend.get_principal(reviewer)
         if reviewer_principal is None:
@@ -1301,7 +1306,43 @@ class Ontology:
             raise CapabilityError(f"Principal {reviewer} lacks review capability")
         if reviewer_principal.kind == "ai":
             raise CapabilityError(f"Principal {reviewer!r} is an AI principal and cannot review")
+        return reviewer_principal
 
+    def _require_pending_proposal(self, proposal_id: str, reviewer: str) -> Proposal:
+        """Re-read the proposal fresh and validate it's still reviewable by
+        `reviewer` right now (SPEC §9.4). MUST be called inside the same
+        `backend.transaction()` block that performs the transition's write,
+        immediately before that write — not from a proposal object fetched
+        before the transaction opened (KI-035, a TOCTOU gap: two concurrent
+        transition calls that both read the same pre-transition state
+        outside any transaction could both pass validation and both reach
+        their writes). Mirrors `resolve_contradiction`'s own KI-026 fix:
+        move validation inside the transaction and re-read, rather than
+        trust a pre-transaction snapshot.
+
+        The proposal's own author or delegating principal must not be
+        `reviewer` (self-review would let a misconfigured AI principal with
+        `review` capability, or a delegate reviewing their own delegated
+        proposal, approve its own work) — `author`/`acting_as` never change
+        after a proposal is created, so checking them here (rather than
+        before the transaction, alongside `_require_reviewer_principal`)
+        is only about co-locating the read with the state check below, not
+        about a race on those fields specifically. The proposal must exist
+        and be in `require_review` or `under_review` state.
+
+        Args:
+            proposal_id: ID of the proposal being reviewed
+            reviewer: Principal ID of the reviewer
+
+        Returns:
+            The freshly-read proposal being reviewed
+
+        Raises:
+            NotFoundError: proposal_id does not name an existing proposal
+            CapabilityError: reviewer is the proposal's own author/delegate
+            ValidationError: proposal is not pending review (including when
+                a concurrent transition already moved it out of that state)
+        """
         proposal = self.backend.get_proposal(proposal_id)
         if proposal is None:
             raise NotFoundError(f"Proposal not found: {proposal_id}")
@@ -1402,10 +1443,12 @@ class Ontology:
     def accept_proposal(self, proposal_id: str, reviewer: str) -> Proposal:
         """Accept a pending proposal, replaying its operations (SPEC §9).
 
-        See `_require_reviewer` for the reviewer-eligibility and
-        proposal-state checks shared with `reject_proposal`/
-        `request_changes`. Operations are replayed through SPEC §10
-        conflict routing inside a single transaction.
+        See `_require_reviewer_principal` for the reviewer-eligibility
+        checks and `_require_pending_proposal` for the proposal-state
+        check (KI-035: run inside the transaction, immediately before the
+        write, not before it — a TOCTOU gap otherwise), both shared with
+        `reject_proposal`/`request_changes`. Operations are replayed
+        through SPEC §10 conflict routing inside the same transaction.
 
         Args:
             proposal_id: ID of the proposal to accept
@@ -1422,13 +1465,16 @@ class Ontology:
                 staged retract operation targets a flagged contradiction
                 member the proposal's own author/delegate *or the accepting
                 reviewer* is party to (KI-033)
-            ValidationError: proposal is not pending review
+            ValidationError: proposal is not pending review (including when
+                a concurrent transition already moved it out of that state,
+                KI-035)
         """
-        proposal = self._require_reviewer(proposal_id, reviewer)
+        self._require_reviewer_principal(reviewer)
 
         now = self.clock.now()
 
         with self.backend.transaction():
+            proposal = self._require_pending_proposal(proposal_id, reviewer)
             self._replay_proposal_operations(proposal, now, extra_retracting_party=reviewer)
             self.backend.update_proposal_state(proposal_id, "accepted", now.isoformat())
             self.backend.put_proposal_event(
@@ -1448,10 +1494,11 @@ class Ontology:
     def reject_proposal(self, proposal_id: str, reviewer: str, reason: str = "") -> Proposal:
         """Reject a pending proposal (SPEC §9).
 
-        See `_require_reviewer` for the reviewer-eligibility and
-        proposal-state checks shared with `accept_proposal`/
-        `request_changes`. No operations are applied; the proposal is
-        marked rejected.
+        See `_require_reviewer_principal`/`_require_pending_proposal` for
+        the reviewer-eligibility and proposal-state checks shared with
+        `accept_proposal`/`request_changes` — the latter runs inside the
+        transaction, immediately before the write (KI-035). No operations
+        are applied; the proposal is marked rejected.
 
         Args:
             proposal_id: ID of the proposal to reject
@@ -1466,12 +1513,15 @@ class Ontology:
             NotFoundError: proposal_id does not name an existing proposal
             CapabilityError: reviewer lacks review/admin capability, is
                 AI-kind, or is the proposal's own author/delegate
-            ValidationError: proposal is not pending review
+            ValidationError: proposal is not pending review (including when
+                a concurrent transition already moved it out of that state,
+                KI-035)
         """
-        self._require_reviewer(proposal_id, reviewer)
+        self._require_reviewer_principal(reviewer)
 
         now = self.clock.now()
         with self.backend.transaction():
+            self._require_pending_proposal(proposal_id, reviewer)
             self.backend.update_proposal_state(proposal_id, "rejected", now.isoformat())
             self.backend.put_proposal_event(
                 ProposalEvent(
@@ -1491,12 +1541,14 @@ class Ontology:
     def request_changes(self, proposal_id: str, reviewer: str, reason: str = "") -> Proposal:
         """Request changes on a pending proposal (SPEC §9.1/§9.4).
 
-        See `_require_reviewer` for the reviewer-eligibility and
-        proposal-state checks shared with `accept_proposal`/
-        `reject_proposal`. No operations are applied; the proposal moves to
-        `changes_requested` — SPEC §9.1's third `under_review` outcome,
-        alongside `accepted`/`rejected`. The proposal's own author or
-        delegate can move it back to `submitted` via `resubmit` (KI-027).
+        See `_require_reviewer_principal`/`_require_pending_proposal` for
+        the reviewer-eligibility and proposal-state checks shared with
+        `accept_proposal`/`reject_proposal` — the latter runs inside the
+        transaction, immediately before the write (KI-035). No operations
+        are applied; the proposal moves to `changes_requested` — SPEC
+        §9.1's third `under_review` outcome, alongside `accepted`/
+        `rejected`. The proposal's own author or delegate can move it back
+        to `submitted` via `resubmit` (KI-027).
 
         Args:
             proposal_id: ID of the proposal
@@ -1511,12 +1563,15 @@ class Ontology:
             NotFoundError: proposal_id does not name an existing proposal
             CapabilityError: reviewer lacks review/admin capability, is
                 AI-kind, or is the proposal's own author/delegate
-            ValidationError: proposal is not pending review
+            ValidationError: proposal is not pending review (including when
+                a concurrent transition already moved it out of that state,
+                KI-035)
         """
-        self._require_reviewer(proposal_id, reviewer)
+        self._require_reviewer_principal(reviewer)
 
         now = self.clock.now()
         with self.backend.transaction():
+            self._require_pending_proposal(proposal_id, reviewer)
             self.backend.update_proposal_state(proposal_id, "changes_requested", now.isoformat())
             self.backend.put_proposal_event(
                 ProposalEvent(
@@ -1539,11 +1594,11 @@ class Ontology:
         `request_changes` previously left (KI-027).
 
         Only the proposal's own author or delegating principal may call
-        this — the inverse of `_require_reviewer`'s self-review guard: this
-        is an author action, not a reviewer one. The payload is replayed
-        unedited (in-place payload editing before resubmission is not yet
-        supported); policy is re-evaluated against a fresh `kb_view`
-        pinned at the resubmission instant — unlike `propose`/
+        this — the inverse of `_require_pending_proposal`'s self-review
+        guard: this is an author action, not a reviewer one. The payload is
+        replayed unedited (in-place payload editing before resubmission is
+        not yet supported); policy is re-evaluated against a fresh
+        `kb_view` pinned at the resubmission instant — unlike `propose`/
         `propose_ref`, that pin is deliberately NOT `proposal.created_at`
         (ADR-0025): the proposal already exists, so a KB-reading
         `PolicyStrategy` (e.g. `SourceQuorum`) must evaluate it against
@@ -1553,6 +1608,19 @@ class Ontology:
         trusted, matching `accept_proposal`'s existing precedent — but
         temporality is re-resolved dynamically at replay time on
         auto-accept (see `_replay_proposal_operations`).
+
+        The initial `author`/state validation below runs before policy
+        evaluation (needed to construct the `resubmitted` object policy
+        evaluates against) and is optimistic — a fast, clear failure for
+        the common, non-racing case. It is NOT the authoritative check: the
+        state is re-read and re-validated a second time, fresh, as the
+        first thing inside the write transaction, immediately before any
+        write (KI-035) — two concurrent `resubmit()` calls (or a
+        `resubmit()` racing an `accept_proposal`/`reject_proposal`) that
+        both pass the optimistic check outside the transaction must not
+        both reach a write; only the one that wins the transaction lock
+        and still sees `changes_requested` on its fresh, authoritative
+        re-read may proceed.
 
         A `ProposalEvent(type="resubmit")` is always recorded, regardless
         of outcome — unlike `propose`'s own auto-accept path (which
@@ -1583,7 +1651,9 @@ class Ontology:
                 the author's effective capability/trust has risen since the
                 original submission, since that same guard already blocks a
                 party at `retract()`'s own auto-accept time otherwise
-            ValidationError: proposal is not awaiting resubmission
+            ValidationError: proposal is not awaiting resubmission (including
+                when a concurrent transition already moved it out of that
+                state between the optimistic check and the write, KI-035)
         """
         caller = self._get_principal_or_raise(author)
         proposal = self.backend.get_proposal(proposal_id)
@@ -1612,6 +1682,25 @@ class Ontology:
         decision = self.policy.evaluate(resubmitted, principal, kb_view, acting_as=delegating)
 
         with self.backend.transaction():
+            # KI-035: authoritative re-check, fresh, first thing inside the
+            # transaction — the checks above (author/state) ran before
+            # policy evaluation and are only optimistic. Raising here rolls
+            # back a no-op; nothing has been written yet. This closes the
+            # race on the proposal's *state* only — `decision` was computed
+            # against `kb_view` taken outside the transaction, so a
+            # concurrent write landing between policy evaluation and here
+            # could still mean a KB-reading PolicyStrategy (e.g.
+            # SourceQuorum) auto-accepts against KB state it never actually
+            # saw. That's a pre-existing, deliberate tradeoff shared by
+            # propose/propose_ref/retract (KI-035's own text: "policy
+            # evaluation itself can likely stay outside the transaction"),
+            # not something this fix claims to close.
+            current = self.backend.get_proposal(proposal_id)
+            assert current is not None  # append-only; existed moments ago
+            if current.state != "changes_requested":
+                raise ValidationError(
+                    f"Proposal {proposal_id} is not awaiting resubmission (state: {current.state})"
+                )
             finalized = self._finalize_non_accepted_decision(
                 resubmitted, decision, now, is_new=False
             )
