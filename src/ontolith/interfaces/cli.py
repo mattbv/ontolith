@@ -563,9 +563,14 @@ def schema_show(
 ) -> None:
     """Print concepts, properties, and relations for the active schema (SPEC §14.2).
 
-    Mirrors MCP's `ontolith.schema`/REST's `GET /schema` output (KI-029,
-    KI-038) — the CLI had no way to inspect a registered schema at all
-    before this command existed, unlike every other primary interface.
+    Same field set as MCP's `ontolith.schema`/REST's `GET /schema` output
+    (KI-029, KI-038) — the CLI had no way to inspect a registered schema at
+    all before this command existed, unlike every other primary interface.
+    Property/relation attribute order is normalized here (cardinality,
+    temporality, required, [inverse]) rather than copied verbatim — REST's
+    `PropertyOut`/`RelationOut` and MCP's dict output don't actually agree
+    with each other on relation field order either, so there is no single
+    "the" order to mirror.
     """
     kb = _kb()
     try:

@@ -1024,7 +1024,18 @@ class TestSchemaShow:
             concepts={
                 "Organization": ConceptDef(
                     name="Organization",
-                    properties={"name": PropertyDef(name="name", value_type="Text")},
+                    properties={
+                        "name": PropertyDef(name="name", value_type="Text"),
+                        "tags": PropertyDef(name="tags", value_type="Text", cardinality="many"),
+                    },
+                    relations={
+                        "employees": RelationDef(
+                            name="employees",
+                            target_concept="Person",
+                            cardinality="many",
+                            inverse="employer",
+                        ),
+                    },
                 ),
                 "Person": ConceptDef(
                     name="Person",
@@ -1034,6 +1045,7 @@ class TestSchemaShow:
                             name="employer",
                             target_concept="Organization",
                             temporality="time_varying",
+                            inverse="employees",
                         )
                     },
                 ),
@@ -1042,31 +1054,83 @@ class TestSchemaShow:
         kb.apply_schema(schema, author=admin.id)
         kb.close()
 
+        # Bump to version 2 with the exact same concepts - pins that the
+        # printed version tracks the latest applied version, not the first.
+        kb = Ontology.connect(temp_db)
+        kb.apply_schema(
+            SchemaIR(namespace="default", version=2, concepts=schema.concepts), author=admin.id
+        )
+        kb.close()
+
         result = runner.invoke(app, ["--db", str(temp_db), "schema", "show"])
         assert result.exit_code == 0
-        assert "namespace=default  version=1" in result.output
-        assert "Organization" in result.output
-        assert "Person" in result.output
-        assert "name: Text" in result.output
-        assert "required=True" in result.output
-        assert "employer -> Organization" in result.output
-        assert "temporality=time_varying" in result.output
+        lines = result.output.splitlines()
+        assert lines[0] == "namespace=default  version=2"
+        # Concept order and each concept's properties-before-relations
+        # ordering is pinned exactly, not just via substring containment.
+        assert lines[1:6] == [
+            "",
+            "Organization",
+            "  name: Text  cardinality=single  temporality=static  required=False",
+            "  tags: Text  cardinality=many  temporality=static  required=False",
+            "  employees -> Person  cardinality=many  temporality=static"
+            "  required=False  inverse=employer",
+        ]
+        assert lines[6:] == [
+            "",
+            "Person",
+            "  name: Text  cardinality=single  temporality=static  required=True",
+            "  employer -> Organization  cardinality=single  temporality=time_varying"
+            "  required=False  inverse=employees",
+        ]
 
     def test_namespace_option_targets_a_different_namespace(self, temp_db: Path) -> None:
-        """This project is single-namespace throughout (ADR-0015), so a
-        namespace with no schema is the only other case reachable - proves
-        --namespace is actually threaded through rather than hardcoded to
-        the default."""
+        """Schema registration is namespace-scoped independent of entity
+        writes (this project's entity/assertion writes stay single
+        -namespace per ADR-0015, but `apply_schema` keys on
+        `SchemaIR.namespace` directly - a namespace can have a schema
+        without ever having an entity). Proves `--namespace` is threaded
+        through to a genuinely different, populated namespace, not merely
+        that an empty one prints "not found"."""
         kb = Ontology.connect(temp_db)
         admin = kb.create_principal(
             "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
         )
-        schema = SchemaIR(
-            namespace="default",
-            version=1,
-            concepts={"Person": ConceptDef(name="Person")},
+        kb.apply_schema(
+            SchemaIR(
+                namespace="default", version=1, concepts={"Person": ConceptDef(name="Person")}
+            ),
+            author=admin.id,
         )
-        kb.apply_schema(schema, author=admin.id)
+        kb.apply_schema(
+            SchemaIR(namespace="other", version=1, concepts={"Widget": ConceptDef(name="Widget")}),
+            author=admin.id,
+        )
+        kb.close()
+
+        default_result = runner.invoke(app, ["--db", str(temp_db), "schema", "show"])
+        assert "Person" in default_result.output
+        assert "Widget" not in default_result.output
+
+        other_result = runner.invoke(
+            app, ["--db", str(temp_db), "schema", "show", "--namespace", "other"]
+        )
+        assert other_result.exit_code == 0
+        assert "namespace=other  version=1" in other_result.output
+        assert "Widget" in other_result.output
+        assert "Person" not in other_result.output
+
+    def test_namespace_with_no_schema_prints_message(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        admin = kb.create_principal(
+            "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
+        )
+        kb.apply_schema(
+            SchemaIR(
+                namespace="default", version=1, concepts={"Person": ConceptDef(name="Person")}
+            ),
+            author=admin.id,
+        )
         kb.close()
 
         result = runner.invoke(

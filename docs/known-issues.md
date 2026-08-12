@@ -609,7 +609,7 @@ Surfaced during a whole-project milestone audit (2026-07-29); flagged in a prior
 
 Added a `relations` list (name, target concept, cardinality, required, temporality, inverse) alongside `properties` in both `schema_tool`'s dict output and REST's new `RelationOut` model on `ConceptOut`/`SchemaOut` — mirroring `PropertyOut`'s existing shape. `ConceptOut.relations` is a required field (not defaulted), so any caller still constructing one without it now fails fast at construction rather than silently omitting the field again; the one in-repo call site (`get_schema` route) was updated accordingly. `PropertyOut`/the property dict output also gained `cardinality` in the same pass — an omission of the same class (SPEC §4/ADR-0017: cardinality, not just temporality, predicts contradiction-vs-coexistence for a subsequent proposal), left inconsistent with relations (which already had it) had this not been caught in review.
 
-The CLI has no schema-inspection command at all — genuinely out of scope for this fix (a new CLI command, not an output-shape change), but this text previously claimed it was "tracked separately" under KI-032, which was wrong: KI-032 covers CLI proposal-review commands and never mentions schema. Corrected; the actual gap is now tracked as KI-038.
+The CLI has no schema-inspection command at all — genuinely out of scope for this fix (a new CLI command, not an output-shape change), but this text previously claimed it was "tracked separately" under KI-032, which was wrong: KI-032 covers CLI proposal-review commands and never mentions schema. Corrected; the actual gap is now tracked as KI-038 (`ontolith schema show` closed by KI-038; `ontolith schema migrate` remains open, forward-tracked as KI-048).
 
 ---
 
@@ -777,10 +777,10 @@ Docstrings on both port methods were rewritten: `(namespace, concept)` is still 
 
 ---
 
-## KI-038 — CLI has no `schema` command (partially resolved — `show` done, `migrate` still open)
+## KI-038 — CLI has no `schema` command — PARTIALLY RESOLVED (M3)
 
 **Severity:** Architecture gap — SPEC-normative CLI surface is entirely unimplemented
-**Milestone target:** M3 for `show` (resolved in `feat(cli): add schema show command (KI-038)`); `migrate` remains Backlog
+**Milestone target:** M3 for `show` (resolved in `feat(cli): add schema show command (KI-038)`); `migrate` forward-tracked as KI-048
 **SPEC reference:** SPEC §14.2 (`ontolith schema {show|migrate}`)
 
 ### Description
@@ -789,9 +789,9 @@ Docstrings on both port methods were rewritten: `(namespace, concept)` is still 
 
 ### Fix
 
-Added `ontolith schema show [--namespace]` (new `schema_app` sub-app, matching every other CLI sub-command's `_kb()`/try-except-finally shape), printing `namespace=... version=...` followed by each concept's properties (`name: value_type  cardinality=...  temporality=...  required=...`) and relations (`name -> target_concept  cardinality=...  temporality=...  required=...  inverse=...`) — mirroring MCP's `ontolith.schema`/REST's `GET /schema` output field-for-field (both already fixed by KI-029 to include relations). A namespace with no registered schema prints a plain message rather than an empty/error output, matching other read-path commands' "nothing found" convention elsewhere in the CLI.
+Added `ontolith schema show [--namespace]` (new `schema_app` sub-app, matching every other CLI sub-command's `_kb()`/try-except-finally shape), printing `namespace=... version=...` followed by each concept's properties (`name: value_type  cardinality=...  temporality=...  required=...`) and relations (`name -> target_concept  cardinality=...  temporality=...  required=...  inverse=...`) — the same field set as MCP's `ontolith.schema`/REST's `GET /schema` output (both already fixed by KI-029 to include relations), though not their exact attribute order: REST's own `PropertyOut`/`RelationOut` don't even agree with each other on relation field order, so the CLI normalizes to one consistent order instead of copying either verbatim. A namespace with no registered schema prints a plain message rather than an empty/error output, matching other read-path commands' "nothing found" convention elsewhere in the CLI.
 
-`ontolith schema migrate` remains unresolved — it's a larger, separate piece of work (schema versioning/migration isn't implemented anywhere yet, only monotonic version numbering via `apply_schema`) and was out of scope for this pass, as this KI's own Fix text anticipated. This entry stays open (not marked RESOLVED) for that half.
+`ontolith schema migrate` remains unresolved — it's a larger, separate piece of work (schema versioning/migration isn't implemented anywhere yet, only monotonic version numbering via `apply_schema`) and was out of scope for this pass, as this KI's own original Fix text anticipated ("split into its own issue if `show` lands first"). Forward-tracked as **KI-048**, matching the pattern KI-031 set for its own leftover half, rather than leaving it implicit in this entry's own partially-resolved status.
 
 ---
 
@@ -959,6 +959,22 @@ Pre-existing since `.trust_at_least()` first shipped; not introduced or worsened
 ### Fix
 
 `entities_meeting_trust` needs a `LEFT JOIN` to a second `principal` alias on `assertion.acting_as`, and to compare `min(p.trust_level, COALESCE(delegate.trust_level, p.trust_level))` (or equivalent `CASE`) against `min_trust`, matching `govern/policy.py`'s existing formula exactly. Needs a conformance vector with a delegated assertion where the author's and delegate's trust levels straddle the threshold in both directions, and a decision on whether `QueryBuilder`'s docstrings should say "effective trust_level" instead of "trust_level" once fixed.
+
+---
+
+## KI-048 — CLI has no `schema migrate` command
+
+**Severity:** Architecture gap — SPEC-normative CLI surface remains partially unimplemented
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §14.2 (`ontolith schema {show|migrate}`)
+
+### Description
+
+KI-038 added `ontolith schema show` but explicitly left `ontolith schema migrate` unimplemented, forward-tracked here per that entry's own Fix text ("split into its own issue if `show` lands first"). Schema versioning/migration isn't implemented anywhere in the codebase yet — `Ontology.apply_schema` enforces strict monotonic version numbering (`current_latest + 1`) but has no concept of a migration plan, diffing between versions, or data backfill; there is no `StorageBackend` port method or SDK call for anything migration-shaped, on any interface (SDK, REST, MCP, CLI).
+
+### Fix
+
+Needs a design decision before implementation, not just a CLI command: what does "migrate" mean here — applying a new `SchemaIR` version is already possible via `apply_schema`, so `ontolith schema migrate` most plausibly means either (a) a thin CLI wrapper around `apply_schema` reading a YAML/class-DSL file from disk (the smallest useful slice, no new domain logic), or (b) something that also handles property renames/type changes against existing assertion data (a substantially larger scope touching append-only semantics — renaming a predicate doesn't rewrite historical assertions, so old and new predicate names would coexist, which needs its own ADR). Scope this to (a) first if picked up, and record the (a)/(b) boundary decision as an ADR rather than deciding it implicitly inside a CLI PR.
 
 ---
 
