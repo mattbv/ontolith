@@ -19,11 +19,13 @@ entity_app = typer.Typer(help="Manage entities.", no_args_is_help=True)
 proposal_app = typer.Typer(help="Inspect and act on proposals.", no_args_is_help=True)
 contradiction_app = typer.Typer(help="Inspect contradictions.", no_args_is_help=True)
 namespace_app = typer.Typer(help="Inspect namespaces.", no_args_is_help=True)
+schema_app = typer.Typer(help="Inspect the active schema.", no_args_is_help=True)
 app.add_typer(principal_app, name="principal")
 app.add_typer(entity_app, name="entity")
 app.add_typer(proposal_app, name="proposal")
 app.add_typer(contradiction_app, name="contradiction")
 app.add_typer(namespace_app, name="namespace")
+app.add_typer(schema_app, name="schema")
 
 # Module-level DB path, set by the root callback before any command runs.
 _db_path: Path = Path("ontolith.db")
@@ -542,6 +544,58 @@ def list_namespaces() -> None:
     try:
         for n in kb.list_namespaces():
             typer.echo(f"{n.id}  created={n.created_at}")
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
+# ─── schema ───────────────────────────────────────────────────────────────────
+
+
+@schema_app.command("show")
+def schema_show(
+    namespace: Annotated[
+        str,
+        typer.Option("--namespace", help="Namespace to inspect."),
+    ] = "default",
+) -> None:
+    """Print concepts, properties, and relations for the active schema (SPEC §14.2).
+
+    Same field set as MCP's `ontolith.schema`/REST's `GET /schema` output
+    (KI-029, KI-038) — the CLI had no way to inspect a registered schema at
+    all before this command existed, unlike every other primary interface.
+    Property/relation attribute order is normalized here (cardinality,
+    temporality, required, [inverse]) rather than copied verbatim — REST's
+    `PropertyOut`/`RelationOut` and MCP's dict output don't actually agree
+    with each other on relation field order either, so there is no single
+    "the" order to mirror.
+    """
+    kb = _kb()
+    try:
+        ir = kb.backend.get_schema(namespace)
+        if ir is None:
+            typer.echo(f"No schema registered for namespace {namespace!r}.")
+            return
+        typer.echo(f"namespace={ir.namespace}  version={ir.version}")
+        for concept_name, concept_def in ir.concepts.items():
+            typer.echo(f"\n{concept_name}")
+            for prop_name, prop_def in concept_def.properties.items():
+                typer.echo(
+                    f"  {prop_name}: {prop_def.value_type}"
+                    f"  cardinality={prop_def.cardinality}"
+                    f"  temporality={prop_def.temporality}"
+                    f"  required={prop_def.required}"
+                )
+            for rel_name, rel_def in concept_def.relations.items():
+                typer.echo(
+                    f"  {rel_name} -> {rel_def.target_concept}"
+                    f"  cardinality={rel_def.cardinality}"
+                    f"  temporality={rel_def.temporality}"
+                    f"  required={rel_def.required}"
+                    f"  inverse={rel_def.inverse}"
+                )
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None

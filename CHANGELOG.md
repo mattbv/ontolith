@@ -153,6 +153,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same name for the same reason across all four commands. `resubmit` closes the
   CLI gap `Ontology.resubmit`/REST/MCP explicitly deferred to this KI when it
   shipped (see the KI-027 entry above).
+- CLI `ontolith schema show [--namespace]` (partially closes KI-038): SPEC §14.2
+  normatively lists `ontolith schema {show|migrate}` as CLI surface, but the CLI had
+  no `schema` command at all — every other primary interface (SDK, REST, MCP) could
+  already inspect a registered schema. Prints concepts, properties, and relations —
+  the same field set as MCP's `ontolith.schema`/REST's `GET /schema` output (both
+  already extended by KI-029 to include relations), normalized to one consistent
+  attribute order rather than copying either verbatim (REST's own `PropertyOut`/
+  `RelationOut` don't agree with each other on relation field order). `ontolith
+  schema migrate` remains unimplemented — schema versioning/migration isn't built
+  anywhere yet, only monotonic version numbering via `apply_schema` — forward-tracked
+  as KI-048 rather than left implicit in KI-038's now-partial-resolved status.
 
 #### Fixed
 - **Breaking:** `StorageBackend.entities_meeting_confidence`/`entities_meeting_trust` (port

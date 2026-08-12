@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from ontolith import Ontology
 from ontolith.interfaces.cli import app
+from ontolith.schema import ConceptDef, PropertyDef, RelationDef, SchemaIR
 
 runner = CliRunner()
 
@@ -997,3 +998,144 @@ class TestNamespaceList:
         result = runner.invoke(app, ["--db", str(temp_db), "namespace", "list"])
         assert result.exit_code == 0
         assert "default" in result.output
+
+
+class TestSchemaShow:
+    """KI-038: `ontolith schema show` - previously the only primary
+    interface (SDK/REST/MCP all could) with no way to inspect a registered
+    schema at all."""
+
+    def test_no_schema_registered_prints_message(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.close()
+
+        result = runner.invoke(app, ["--db", str(temp_db), "schema", "show"])
+        assert result.exit_code == 0
+        assert "No schema registered" in result.output
+
+    def test_shows_properties_and_relations(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        admin = kb.create_principal(
+            "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
+        )
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Organization": ConceptDef(
+                    name="Organization",
+                    properties={
+                        "name": PropertyDef(name="name", value_type="Text"),
+                        "tags": PropertyDef(name="tags", value_type="Text", cardinality="many"),
+                    },
+                    relations={
+                        "employees": RelationDef(
+                            name="employees",
+                            target_concept="Person",
+                            cardinality="many",
+                            inverse="employer",
+                        ),
+                    },
+                ),
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={"name": PropertyDef(name="name", value_type="Text", required=True)},
+                    relations={
+                        "employer": RelationDef(
+                            name="employer",
+                            target_concept="Organization",
+                            temporality="time_varying",
+                            inverse="employees",
+                        )
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(schema, author=admin.id)
+        kb.close()
+
+        # Bump to version 2 with the exact same concepts - pins that the
+        # printed version tracks the latest applied version, not the first.
+        kb = Ontology.connect(temp_db)
+        kb.apply_schema(
+            SchemaIR(namespace="default", version=2, concepts=schema.concepts), author=admin.id
+        )
+        kb.close()
+
+        result = runner.invoke(app, ["--db", str(temp_db), "schema", "show"])
+        assert result.exit_code == 0
+        lines = result.output.splitlines()
+        assert lines[0] == "namespace=default  version=2"
+        # Concept order and each concept's properties-before-relations
+        # ordering is pinned exactly, not just via substring containment.
+        assert lines[1:6] == [
+            "",
+            "Organization",
+            "  name: Text  cardinality=single  temporality=static  required=False",
+            "  tags: Text  cardinality=many  temporality=static  required=False",
+            "  employees -> Person  cardinality=many  temporality=static"
+            "  required=False  inverse=employer",
+        ]
+        assert lines[6:] == [
+            "",
+            "Person",
+            "  name: Text  cardinality=single  temporality=static  required=True",
+            "  employer -> Organization  cardinality=single  temporality=time_varying"
+            "  required=False  inverse=employees",
+        ]
+
+    def test_namespace_option_targets_a_different_namespace(self, temp_db: Path) -> None:
+        """Schema registration is namespace-scoped independent of entity
+        writes (this project's entity/assertion writes stay single
+        -namespace per ADR-0015, but `apply_schema` keys on
+        `SchemaIR.namespace` directly - a namespace can have a schema
+        without ever having an entity). Proves `--namespace` is threaded
+        through to a genuinely different, populated namespace, not merely
+        that an empty one prints "not found"."""
+        kb = Ontology.connect(temp_db)
+        admin = kb.create_principal(
+            "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
+        )
+        kb.apply_schema(
+            SchemaIR(
+                namespace="default", version=1, concepts={"Person": ConceptDef(name="Person")}
+            ),
+            author=admin.id,
+        )
+        kb.apply_schema(
+            SchemaIR(namespace="other", version=1, concepts={"Widget": ConceptDef(name="Widget")}),
+            author=admin.id,
+        )
+        kb.close()
+
+        default_result = runner.invoke(app, ["--db", str(temp_db), "schema", "show"])
+        assert "Person" in default_result.output
+        assert "Widget" not in default_result.output
+
+        other_result = runner.invoke(
+            app, ["--db", str(temp_db), "schema", "show", "--namespace", "other"]
+        )
+        assert other_result.exit_code == 0
+        assert "namespace=other  version=1" in other_result.output
+        assert "Widget" in other_result.output
+        assert "Person" not in other_result.output
+
+    def test_namespace_with_no_schema_prints_message(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        admin = kb.create_principal(
+            "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
+        )
+        kb.apply_schema(
+            SchemaIR(
+                namespace="default", version=1, concepts={"Person": ConceptDef(name="Person")}
+            ),
+            author=admin.id,
+        )
+        kb.close()
+
+        result = runner.invoke(
+            app, ["--db", str(temp_db), "schema", "show", "--namespace", "other"]
+        )
+        assert result.exit_code == 0
+        assert "No schema registered for namespace 'other'" in result.output
+        assert "Person" not in result.output
