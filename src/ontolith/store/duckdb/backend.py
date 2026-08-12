@@ -1592,31 +1592,52 @@ class DuckDBBackend:
         ]
 
     def entities_meeting_confidence(
-        self, namespace: str, concept: str, threshold: float, as_of_time: datetime | None = None
+        self,
+        namespace: str,
+        concept: str,
+        threshold: float,
+        as_of_time: datetime | None = None,
+        candidate_ids: frozenset[str] | None = None,
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion at or
         above `threshold` confidence, active at `as_of_time` (KI-036) or
-        currently active if `as_of_time` is None."""
+        currently active if `as_of_time` is None. `candidate_ids`, if given,
+        narrows the scan below `(namespace, concept)` via `unnest()` (KI-037)
+        — `QueryBuilder` only ever passes a set bounded by
+        `_CANDIDATE_HINT_MAX` (1000), the range measured to be a genuine win
+        here (~2-3x at 10k-50k entities); an earlier, unbounded version of
+        this hint measured `unnest()` as a regression on both very small
+        candidate sets (~1k entities, where everything is already fast) and
+        large ones (thousands of candidates against a 10k-entity concept,
+        >100x slower) — bounding the hint's size, not avoiding `unnest()`
+        altogether, is what makes it a reliable win."""
+        if candidate_ids is not None and not candidate_ids:
+            return set()
+
+        query = (
+            "SELECT DISTINCT a.subject FROM assertion a"
+            " JOIN entity e ON e.id = a.subject"
+            " WHERE e.namespace = ? AND e.concept = ? AND a.confidence >= ?"
+        )
+        params: list[Any] = [namespace, concept, threshold]
+
         if as_of_time is not None:
             t_iso = as_of_time.isoformat()
-            cursor = self.conn.execute(
-                "SELECT DISTINCT a.subject FROM assertion a"
-                " JOIN entity e ON e.id = a.subject"
-                " WHERE e.namespace = ? AND e.concept = ? AND a.confidence >= ?"
+            query += (
                 " AND a.status != 'flagged'"
                 " AND a.asserted_at <= ?"
                 " AND (a.valid_from IS NULL OR a.valid_from <= ?)"
-                " AND (a.valid_to IS NULL OR a.valid_to > ?)",
-                (namespace, concept, threshold, t_iso, t_iso, t_iso),
+                " AND (a.valid_to IS NULL OR a.valid_to > ?)"
             )
+            params.extend([t_iso, t_iso, t_iso])
         else:
-            cursor = self.conn.execute(
-                "SELECT DISTINCT a.subject FROM assertion a"
-                " JOIN entity e ON e.id = a.subject"
-                " WHERE e.namespace = ? AND e.concept = ?"
-                " AND a.status = 'active' AND a.confidence >= ?",
-                (namespace, concept, threshold),
-            )
+            query += " AND a.status = 'active'"
+
+        if candidate_ids is not None:
+            query += " AND e.id IN (SELECT unnest(?))"
+            params.append(list(candidate_ids))
+
+        cursor = self.conn.execute(query, params)
         return {row[0] for row in cursor.fetchall()}
 
     def entities_meeting_trust(
@@ -1625,33 +1646,41 @@ class DuckDBBackend:
         concept: str,
         min_trust: int,
         as_of_time: datetime | None = None,
+        candidate_ids: frozenset[str] | None = None,
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion,
         active at `as_of_time` (KI-036) or currently active if `as_of_time`
         is None, authored by a principal whose current trust_level >=
-        `min_trust`."""
+        `min_trust`. `candidate_ids` narrows the scan the same way as
+        `entities_meeting_confidence` (KI-037) — see its docstring."""
+        if candidate_ids is not None and not candidate_ids:
+            return set()
+
+        query = (
+            "SELECT DISTINCT a.subject FROM assertion a"
+            " JOIN entity e ON e.id = a.subject"
+            " JOIN principal p ON p.id = a.author"
+            " WHERE e.namespace = ? AND e.concept = ? AND p.trust_level >= ?"
+        )
+        params: list[Any] = [namespace, concept, min_trust]
+
         if as_of_time is not None:
             t_iso = as_of_time.isoformat()
-            cursor = self.conn.execute(
-                "SELECT DISTINCT a.subject FROM assertion a"
-                " JOIN entity e ON e.id = a.subject"
-                " JOIN principal p ON p.id = a.author"
-                " WHERE e.namespace = ? AND e.concept = ? AND p.trust_level >= ?"
+            query += (
                 " AND a.status != 'flagged'"
                 " AND a.asserted_at <= ?"
                 " AND (a.valid_from IS NULL OR a.valid_from <= ?)"
-                " AND (a.valid_to IS NULL OR a.valid_to > ?)",
-                (namespace, concept, min_trust, t_iso, t_iso, t_iso),
+                " AND (a.valid_to IS NULL OR a.valid_to > ?)"
             )
+            params.extend([t_iso, t_iso, t_iso])
         else:
-            cursor = self.conn.execute(
-                "SELECT DISTINCT a.subject FROM assertion a"
-                " JOIN entity e ON e.id = a.subject"
-                " JOIN principal p ON p.id = a.author"
-                " WHERE e.namespace = ? AND e.concept = ?"
-                " AND a.status = 'active' AND p.trust_level >= ?",
-                (namespace, concept, min_trust),
-            )
+            query += " AND a.status = 'active'"
+
+        if candidate_ids is not None:
+            query += " AND e.id IN (SELECT unnest(?))"
+            params.append(list(candidate_ids))
+
+        cursor = self.conn.execute(query, params)
         return {row[0] for row in cursor.fetchall()}
 
     def close(self) -> None:

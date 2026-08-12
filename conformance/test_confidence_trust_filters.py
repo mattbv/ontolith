@@ -549,3 +549,112 @@ class TestAsOfConfidenceTrust:
         assert kb.query("Person").min_confidence(0.5).trust_at_least(5).all() == []
         results = kb.as_of(t).query("Person").min_confidence(0.5).trust_at_least(5).all()
         assert {r.id for r in results} == {entity.id}
+
+
+class TestCandidateIdsNarrowing:
+    """KI-037: `entities_meeting_confidence`/`entities_meeting_trust` accept
+    an optional `candidate_ids` narrowing hint on top of `(namespace,
+    concept)`. The port's contract lets a backend use it or ignore it (both
+    current backends - SQLite via `json_each`, DuckDB via `unnest()` - use
+    it; a future third-party backend need not), so cross-backend vectors
+    here pin only the invariant that holds either way:
+    `(full_qualifying_set & candidate_ids) <= narrowed <= full_qualifying_set`
+    - a narrowed call never returns a non-qualifying entity, and never
+    drops a candidate that genuinely qualifies, regardless of whether the
+    backend actually restricted its scan. Backend-specific "does narrowing
+    actually narrow" vectors, pinning each backend's own implementation,
+    live in `tests/unit/test_sqlite_backend.py` and
+    `tests/unit/test_duckdb_backend.py`."""
+
+    def test_entities_meeting_confidence_narrowed_result_bounded_by_full_and_candidates(
+        self, make_kb: KbFactory
+    ) -> None:
+        kb = _kb(make_kb)
+        in_candidates_qualifying = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(
+            in_candidates_qualifying.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.9
+        )
+        in_candidates_not_qualifying = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(
+            in_candidates_not_qualifying.id, "Person.name", "Bob", "Text", TRUSTED, confidence=0.1
+        )
+        outside_candidates_qualifying = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(
+            outside_candidates_qualifying.id,
+            "Person.name",
+            "Grace",
+            "Text",
+            TRUSTED,
+            confidence=0.9,
+        )
+
+        full = kb.backend.entities_meeting_confidence("default", "Person", 0.5)
+        candidate_ids = frozenset({in_candidates_qualifying.id, in_candidates_not_qualifying.id})
+        narrowed = kb.backend.entities_meeting_confidence(
+            "default", "Person", 0.5, candidate_ids=candidate_ids
+        )
+
+        assert narrowed <= full
+        assert (full & candidate_ids) <= narrowed
+
+    def test_entities_meeting_trust_narrowed_result_bounded_by_full_and_candidates(
+        self, make_kb: KbFactory
+    ) -> None:
+        kb = _kb(make_kb)
+        in_candidates_qualifying = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(in_candidates_qualifying.id, "Person.name", "Ada", "Text", TRUSTED)
+        in_candidates_not_qualifying = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(in_candidates_not_qualifying.id, "Person.name", "Bob", "Text", UNTRUSTED)
+        outside_candidates_qualifying = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(outside_candidates_qualifying.id, "Person.name", "Grace", "Text", TRUSTED)
+
+        full = kb.backend.entities_meeting_trust("default", "Person", 5)
+        candidate_ids = frozenset({in_candidates_qualifying.id, in_candidates_not_qualifying.id})
+        narrowed = kb.backend.entities_meeting_trust(
+            "default", "Person", 5, candidate_ids=candidate_ids
+        )
+
+        assert narrowed <= full
+        assert (full & candidate_ids) <= narrowed
+
+    def test_entities_meeting_confidence_candidate_not_qualifying_is_excluded(
+        self, make_kb: KbFactory
+    ) -> None:
+        """Narrowing to a candidate that doesn't itself meet the threshold
+        must not resurrect it - candidate_ids restricts scope, it doesn't
+        override the threshold check."""
+        kb = _kb(make_kb)
+        low = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(low.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.1)
+
+        narrowed = kb.backend.entities_meeting_confidence(
+            "default", "Person", 0.5, candidate_ids=frozenset({low.id})
+        )
+        assert narrowed == set()
+
+    def test_where_narrowed_min_confidence_excludes_higher_confidence_non_match(
+        self, make_kb: KbFactory
+    ) -> None:
+        """End-to-end sanity check via QueryBuilder, not a KI-037 regression
+        pin (the `_apply_confidence_trust_filters` re-intersection at
+        `builder.py` makes this outcome invariant to whether/how a backend
+        uses `candidate_ids` by construction - see the bounded-invariant
+        vectors above for tests that actually exercise the parameter): a
+        higher-confidence entity that `.where()` already excluded must not
+        reappear just because candidate_ids-based narrowing touches the SQL
+        differently than the unnarrowed path."""
+        kb = _kb(make_kb)
+        matching = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(matching.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.5)
+        nonmatching_higher_confidence = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(
+            nonmatching_higher_confidence.id,
+            "Person.name",
+            "Grace",
+            "Text",
+            TRUSTED,
+            confidence=0.99,
+        )
+
+        results = kb.query("Person").where(name="Ada").min_confidence(0.5).all()
+        assert {r.id for r in results} == {matching.id}

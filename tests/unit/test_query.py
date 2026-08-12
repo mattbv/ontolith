@@ -295,6 +295,41 @@ class TestSemanticSearch:
         assert [r.id for r in results] == [ada.id]
         kb.close()
 
+    def test_semantic_narrowed_min_confidence_excludes_lower_confidence_match(
+        self, tmp_path: Path
+    ) -> None:
+        """Branch-coverage vector, not a KI-037 regression pin: exercises the
+        `self._semantic_text is not None` disjunct of
+        `_apply_confidence_trust_filters`'s candidate_ids gate, which no
+        `.where()`-only vector reaches. Passes regardless of whether
+        candidate_ids is threaded through at all - the re-intersection in
+        `_apply_confidence_trust_filters` makes this outcome invariant to
+        that by construction (confirmed: this test still passes reverted to
+        pre-KI-037 `main`). The backend-level `TestCandidateIdsNarrowing`
+        vectors in conformance/test_confidence_trust_filters.py,
+        tests/unit/test_sqlite_backend.py, and
+        tests/unit/test_duckdb_backend.py are what actually regression-pin
+        KI-037's mechanism."""
+        kb = self._make_kb(
+            tmp_path,
+            {
+                "Ada": [1.0, 0.0, 0.0],
+                "Grace": [0.9, 0.1, 0.0],
+                "query": [1.0, 0.0, 0.0],
+            },
+        )
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        ada = kb.create_entity("Person", author=alice.id)
+        kb.assert_literal(ada.id, "Person.name", "Ada", "Text", alice.id, confidence=0.9)
+        grace = kb.create_entity("Person", author=alice.id)
+        kb.assert_literal(grace.id, "Person.name", "Grace", "Text", alice.id, confidence=0.1)
+
+        kb.reindex()
+        results = kb.query("Person").semantic("query").min_confidence(0.5).all()
+
+        assert [r.id for r in results] == [ada.id]
+        kb.close()
+
 
 class TestConfidenceAndTrustFilters:
     """Tests for QueryBuilder.min_confidence()/.trust_at_least()."""

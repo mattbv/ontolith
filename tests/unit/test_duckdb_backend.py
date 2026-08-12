@@ -1377,3 +1377,86 @@ class TestDuckDBBackend:
             "SELECT table_name FROM information_schema.tables WHERE table_name = 'vector_entity'"
         ).fetchall()
         assert len(after) == 1
+
+
+class TestCandidateIdsNarrowing:
+    """KI-037: entities_meeting_confidence/entities_meeting_trust narrow the
+    (namespace, concept) scan to an optional candidate_ids hint via
+    `IN (SELECT unnest(?))`, mirroring SQLiteBackend's json_each-based
+    equivalent (see tests/unit/test_sqlite_backend.py's identically-named
+    class). Bounded by QueryBuilder's _CANDIDATE_HINT_MAX before it ever
+    reaches this backend — an unbounded candidate set measured a severe
+    unnest() regression, which is why this backend implements the hint at
+    all only within that bound (see this method's own docstring)."""
+
+    def _seed(self, backend: DuckDBBackend, entity_id: str, *, confidence: float | None) -> None:
+        backend.put_entity(
+            Entity(
+                id=entity_id,
+                namespace="test-ns",
+                concept="Person",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                created_by="alice@test.com",
+            )
+        )
+        backend.put_assertion(
+            Assertion(
+                id=f"a-{entity_id}",
+                namespace="test-ns",
+                subject=entity_id,
+                predicate="Person.name",
+                value_kind="literal",
+                value_type="Text",
+                value="Ada",
+                author="alice@test.com",
+                confidence=confidence,
+                asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+
+    def test_entities_meeting_confidence_narrows_to_candidate_ids(
+        self, backend: DuckDBBackend
+    ) -> None:
+        self._seed(backend, "e0", confidence=0.9)
+        self._seed(backend, "e1", confidence=0.9)
+
+        assert backend.entities_meeting_confidence("test-ns", "Person", 0.5) == {"e0", "e1"}
+        narrowed = backend.entities_meeting_confidence(
+            "test-ns", "Person", 0.5, candidate_ids=frozenset({"e0"})
+        )
+        assert narrowed == {"e0"}
+
+    def test_entities_meeting_trust_narrows_to_candidate_ids(self, backend: DuckDBBackend) -> None:
+        self._seed(backend, "e0", confidence=None)
+        self._seed(backend, "e1", confidence=None)
+
+        # alice@test.com defaults to trust_level=0 (ADR-0009); min_trust=0 qualifies both.
+        assert backend.entities_meeting_trust("test-ns", "Person", 0) == {"e0", "e1"}
+        narrowed = backend.entities_meeting_trust(
+            "test-ns", "Person", 0, candidate_ids=frozenset({"e0"})
+        )
+        assert narrowed == {"e0"}
+
+    def test_entities_meeting_confidence_empty_candidate_ids_short_circuits(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """An empty (not None) candidate_ids means "nothing to narrow to" -
+        must return empty rather than falling back to the unnarrowed scan.
+        `e0` would qualify concept-wide (confidence=0.9 >= 0.5); asserting
+        it's absent here proves the empty set was actually honored."""
+        self._seed(backend, "e0", confidence=0.9)
+
+        assert (
+            backend.entities_meeting_confidence("test-ns", "Person", 0.5, candidate_ids=frozenset())
+            == set()
+        )
+
+    def test_entities_meeting_trust_empty_candidate_ids_short_circuits(
+        self, backend: DuckDBBackend
+    ) -> None:
+        self._seed(backend, "e0", confidence=None)
+
+        assert (
+            backend.entities_meeting_trust("test-ns", "Person", 0, candidate_ids=frozenset())
+            == set()
+        )

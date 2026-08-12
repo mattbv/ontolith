@@ -396,7 +396,12 @@ class StorageBackend(Protocol):
         ...
 
     def entities_meeting_confidence(
-        self, namespace: str, concept: str, threshold: float, as_of_time: datetime | None = None
+        self,
+        namespace: str,
+        concept: str,
+        threshold: float,
+        as_of_time: datetime | None = None,
+        candidate_ids: frozenset[str] | None = None,
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion at or
         above `threshold` confidence, active at `as_of_time` (or currently
@@ -417,12 +422,25 @@ class StorageBackend(Protocol):
         SPEC §10.3) is excluded even at a `t` before it was flagged —
         matching `entities_where()`'s own default (`include_flagged=False`),
         which is the only mode reachable from `QueryBuilder` and thus the
-        only one implemented here. Scoped by `(namespace, concept)` rather
-        than an explicit id list so the parameter count stays constant
-        regardless of how many entities exist — an id-list-bound query does
-        not (a SQL `IN (...)` with one placeholder per candidate hits both
-        SQLite's bound-variable limit and, on DuckDB, per-parameter bind
-        overhead, at real-world scale).
+        only one implemented here.
+
+        Always scoped by `(namespace, concept)` — this is what keeps the
+        query's parameter count constant regardless of how many entities
+        exist, unlike a mandatory id-list-bound design (a SQL `IN (...)`
+        with one placeholder per candidate hits both SQLite's
+        bound-variable limit and, on DuckDB, per-parameter bind overhead,
+        at real-world scale — see KI-028's own Fix text for why that design
+        was tried and reverted before this method first shipped).
+        `candidate_ids`, when given, is an *optional* narrowing hint on top
+        of that scope — not a replacement for it — for when the caller has
+        already narrowed to a small candidate set via `.where()`/
+        `.semantic()` (KI-028's fix otherwise forced even a single-candidate
+        `.where()` match to re-scan the entire concept; KI-037). A backend
+        MAY use it to cut real work (e.g. SQLite binds it as one
+        JSON-encoded parameter, avoiding the per-placeholder cost a literal
+        `IN (...)` would reintroduce) or ignore it and keep scanning — both
+        are correct, since the caller always re-intersects the returned set
+        against its own candidate list.
 
         Args:
             namespace: Namespace to scope the scan to
@@ -431,6 +449,9 @@ class StorageBackend(Protocol):
             as_of_time: If set, evaluate against this point in time instead
                 of current state (KI-036) — see the flagged-status caveat
                 above
+            candidate_ids: Optional narrowing hint (KI-037) — a backend may
+                use this to scope the scan below `(namespace, concept)`,
+                but is not required to
 
         Returns:
             IDs of qualifying entities (may be a superset of any candidate
@@ -444,6 +465,7 @@ class StorageBackend(Protocol):
         concept: str,
         min_trust: int,
         as_of_time: datetime | None = None,
+        candidate_ids: frozenset[str] | None = None,
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion,
         active at `as_of_time` (or currently active, if `as_of_time` is
@@ -452,8 +474,9 @@ class StorageBackend(Protocol):
         Avoids the N+1 pattern of calling assertions() + get_principal()
         once per (candidate entity, assertion) pair (QueryBuilder.
         trust_at_least(), KI-028) — one SQL round trip regardless of
-        concept size. Scoped by `(namespace, concept)` for the same reason
-        as `entities_meeting_confidence` — see its docstring.
+        concept size. Scoped by `(namespace, concept)`, with the same
+        optional `candidate_ids` narrowing hint (KI-037), for the same
+        reason as `entities_meeting_confidence` — see its docstring.
 
         `as_of_time` bitemporally scopes which *assertion* qualifies, the
         same way `entities_meeting_confidence` does (including its
@@ -476,6 +499,8 @@ class StorageBackend(Protocol):
             min_trust: Minimum principal trust level, 0-10
             as_of_time: If set, evaluate assertion existence against this
                 point in time instead of current state (KI-036)
+            candidate_ids: Optional narrowing hint (KI-037) — see
+                `entities_meeting_confidence`'s docstring
 
         Returns:
             IDs of qualifying entities (may be a superset of any candidate

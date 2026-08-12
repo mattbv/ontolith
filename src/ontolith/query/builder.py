@@ -21,6 +21,18 @@ _DEFAULT_OVERFETCH = 20
 _OVERFETCH_MULTIPLIER = 10
 _MAX_OVERFETCH = 1000
 
+_CANDIDATE_HINT_MAX = 1000
+"""Ceiling on how large a `.where()`/`.semantic()`-narrowed candidate set can
+be before it's passed down as `entities_meeting_confidence`/
+`entities_meeting_trust`'s optional `candidate_ids` hint (KI-037). Measured
+on SQLite: narrowing is a clear win through several thousand candidates
+against a 50k-entity concept, and a measured regression past ~15-25k (the
+JSON-encoded `IN`-subquery itself becomes the bottleneck) — this constant
+keeps real margin below that crossover. Matches `_MAX_OVERFETCH` so a
+`.semantic()`-narrowed set is always within range; a `.where()`-narrowed set
+on a low-selectivity predicate can still exceed it, in which case the hint
+is simply not passed (safe — see `_apply_confidence_trust_filters`)."""
+
 
 class QueryBuilder:
     """Fluent query interface for entities.
@@ -253,22 +265,50 @@ class QueryBuilder:
         property: a `WHERE id IN (...)` with one placeholder per candidate
         hits SQLite's bound-variable limit, and costs DuckDB per-parameter
         bind overhead, at real-world scale).
+
+        When `.where()`/`.semantic()` already narrowed `entities` below the
+        full concept, and that narrowed set is no larger than
+        `_CANDIDATE_HINT_MAX`, the narrowed id set is also passed down as an
+        optional `candidate_ids` hint (KI-037) — a backend MAY use it to
+        scope the scan further (SQLite does); this is always safe even if
+        ignored, since the result is re-intersected against `entities`
+        below regardless. Not passed when `entities` *is* the full concept
+        (no `.where()`/`.semantic()`, where the hint carries no benefit and
+        SQLite would pay to encode it for nothing) or when it's narrowed but
+        still large (a low-selectivity `.where()` predicate can match
+        thousands of entities — past `_CANDIDATE_HINT_MAX`, encoding the
+        hint costs more than the scan it would save; see that constant's
+        docstring for the measured crossover).
         """
         if self._min_confidence is None and self._trust_at_least is None:
             return entities
         if not entities:
             return entities
 
+        candidate_ids: frozenset[str] | None = None
+        if (self._filters or self._semantic_text is not None) and len(
+            entities
+        ) <= _CANDIDATE_HINT_MAX:
+            candidate_ids = frozenset(e.id for e in entities)
+
         qualifying_ids: set[str] | None = None
 
         if self._min_confidence is not None:
             qualifying_ids = self._backend.entities_meeting_confidence(
-                self._namespace, self._concept, self._min_confidence, as_of_time=self._as_of_time
+                self._namespace,
+                self._concept,
+                self._min_confidence,
+                as_of_time=self._as_of_time,
+                candidate_ids=candidate_ids,
             )
 
         if self._trust_at_least is not None:
             trust_ids = self._backend.entities_meeting_trust(
-                self._namespace, self._concept, self._trust_at_least, as_of_time=self._as_of_time
+                self._namespace,
+                self._concept,
+                self._trust_at_least,
+                as_of_time=self._as_of_time,
+                candidate_ids=candidate_ids,
             )
             qualifying_ids = trust_ids if qualifying_ids is None else qualifying_ids & trust_ids
 

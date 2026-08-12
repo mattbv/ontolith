@@ -155,6 +155,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shipped (see the KI-027 entry above).
 
 #### Fixed
+- **Breaking:** `StorageBackend.entities_meeting_confidence`/`entities_meeting_trust` (port
+  + both backends) gained a required `candidate_ids: frozenset[str] | None = None`
+  parameter (KI-037) — any third-party `StorageBackend` implementation must add it, since
+  `QueryBuilder` now passes it as an explicit keyword on every call (including `None`).
+- **`.min_confidence()`/`.trust_at_least()` now exploit an already-narrowed `.where()`/
+  `.semantic()` candidate set instead of always scanning the full concept (closes
+  KI-037).** `QueryBuilder` passes the new `candidate_ids` hint only when `.where()`/
+  `.semantic()` narrowed the base candidate set to at most `_CANDIDATE_HINT_MAX` (1000)
+  entities — unbounded, a low-selectivity `.where()` predicate matching thousands of
+  entities would make encoding the hint cost more than the scan it saves. Both backends
+  use the hint: SQLite binds the id set as a single JSON-encoded parameter (`json_each`)
+  rather than one placeholder per id; `DuckDBBackend` uses the equivalent `unnest()`
+  construct. Measured on the same machine, same query, same fixture, code-only diff (50k
+  entities, single-candidate `.where()` match): several times faster (absolute latency
+  is hardware-dependent; see `tests/benchmarks/test_hybrid_query.py`'s like-for-like
+  pair for a reproducible comparison rather than a point-in-time number here).
+  Bounding the hint's size, not just adding it, is what makes it a reliable win — an
+  earlier, unbounded version of the DuckDB hint measured over 100x *slower* for a
+  candidate set of a few thousand against a 10k-entity concept. New conformance vectors
+  pin the backend-agnostic contract (`(full ∩ candidate_ids) <= narrowed <= full`, which
+  holds whether or not a given backend actually narrows); backend-specific unit vectors
+  (SQLite and DuckDB) pin that both current backends' own implementations genuinely
+  narrow, including an empty-candidate-set short-circuit — all confirmed to fail without
+  the fix.
 - **`.min_confidence()`/`.trust_at_least()` now respect `.as_of()` (closes KI-036).**
   `QueryBuilder._apply_confidence_trust_filters` never read `self._as_of_time`, so
   `kb.as_of(t).query(...).min_confidence(...)`/`.trust_at_least(...)` always checked
