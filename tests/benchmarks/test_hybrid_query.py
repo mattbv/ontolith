@@ -351,10 +351,13 @@ def seeded_confidence_trust_50k_kb(seeded_confidence_trust_50k_db_path: Path) ->
 def test_bench_min_confidence_full_concept_scan_50k(
     benchmark, seeded_confidence_trust_50k_kb: Ontology
 ) -> None:
-    """No .where()/.semantic() at 50k entities — the direct comparison
-    baseline for `test_bench_min_confidence_narrowed_by_where_50k` below,
-    run in the same session/table so the win is visible without needing
-    `--benchmark-compare` against a separate historical run."""
+    """No .where()/.semantic() at 50k entities. Informational context only
+    — NOT the comparison baseline for KI-037's narrowing win, since this
+    query returns 25,000 entities where the narrowed query below returns 1;
+    the gap between them is dominated by result-set materialization cost,
+    not by candidate_ids. See
+    `test_bench_min_confidence_narrowed_by_where_50k_without_candidate_ids`
+    for the correct like-for-like comparison."""
 
     def query() -> list:
         return seeded_confidence_trust_50k_kb.query("Person").min_confidence(0.5).all()
@@ -364,15 +367,47 @@ def test_bench_min_confidence_full_concept_scan_50k(
 
 
 @pytest.mark.benchmark
+def test_bench_min_confidence_narrowed_by_where_50k_without_candidate_ids(
+    benchmark, seeded_confidence_trust_50k_kb: Ontology
+) -> None:
+    """The correct comparison baseline for
+    `test_bench_min_confidence_narrowed_by_where_50k` below: the exact same
+    query and result set (a single `.where()`-matched entity, confidence
+    -filtered), but replicating pre-KI-037 behavior exactly — calling
+    `entities_meeting_confidence` without `candidate_ids` (a full
+    `(namespace, concept)` scan) and intersecting with the `.where()` match
+    locally in Python, the way `QueryBuilder` used to. Comparing this
+    against `test_bench_min_confidence_full_concept_scan_50k` above would
+    be wrong for the same reason comparing the narrowed query against it
+    is: different result-set sizes. This is what makes the two "narrowed"
+    benchmarks here directly comparable instead."""
+
+    def query() -> list:
+        matches = seeded_confidence_trust_50k_kb.query("Person").where(name="Person 25000").all()
+        qualifying = seeded_confidence_trust_50k_kb.backend.entities_meeting_confidence(
+            "default", "Person", 0.5
+        )
+        return [e for e in matches if e.id in qualifying]
+
+    results = benchmark(query)
+    assert len(results) == 1
+
+
+@pytest.mark.benchmark
 def test_bench_min_confidence_narrowed_by_where_50k(
     benchmark, seeded_confidence_trust_50k_kb: Ontology
 ) -> None:
     """Same query as `test_bench_min_confidence_narrowed_by_where`, at 50k
     entities instead of 1k — the scale KI-037's own Fix text says is needed
-    to make the candidate_ids narrowing win visible: run alongside
-    `test_bench_min_confidence_full_concept_scan_50k`, this measured ~17x
-    faster (median 12.4ms vs 212.3ms) in the same benchmark session. Not
-    O(1): `EXPLAIN QUERY PLAN` shows SQLite still `SEARCH`es the full
+    to make the candidate_ids narrowing win visible. Compare against
+    `test_bench_min_confidence_narrowed_by_where_50k_without_candidate_ids`
+    above (same query, same result set, candidate_ids suppressed) for the
+    correct like-for-like measurement — run together on the same machine,
+    this consistently measures several times faster (absolute latency
+    varies by run/hardware, so no specific number is asserted here; do not
+    compare against `test_bench_min_confidence_full_concept_scan_50k`,
+    which returns a different-sized result set — see its docstring). Not
+    O(1) on SQLite: `EXPLAIN QUERY PLAN` shows it still `SEARCH`es the full
     `(namespace, concept)` range of the `entity` index before
     bloom-filtering against `candidate_ids` — only the assertion-side join
     is pruned to the candidate set, not the entity-side scan. A tighter

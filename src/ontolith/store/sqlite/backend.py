@@ -1682,10 +1682,7 @@ class SQLiteBackend:
             query += " AND a.status = 'active'"
 
         if candidate_ids is not None:
-            # nosec B608 — no interpolation of caller data into the SQL
-            # text; the id set is bound as a single JSON parameter, decoded
-            # by SQLite's own json_each() table-valued function.
-            query += " AND e.id IN (SELECT value FROM json_each(?))"  # nosec B608
+            query += " AND e.id IN (SELECT value FROM json_each(?))"
             params.append(json.dumps(list(candidate_ids)))
 
         cursor = self.conn.cursor()
@@ -1730,7 +1727,7 @@ class SQLiteBackend:
             query += " AND a.status = 'active'"
 
         if candidate_ids is not None:
-            query += " AND e.id IN (SELECT value FROM json_each(?))"  # nosec B608
+            query += " AND e.id IN (SELECT value FROM json_each(?))"
             params.append(json.dumps(list(candidate_ids)))
 
         cursor = self.conn.cursor()

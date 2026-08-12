@@ -1284,10 +1284,13 @@ class TestCandidateIdsNarrowing:
     """KI-037: entities_meeting_confidence/entities_meeting_trust narrow the
     (namespace, concept) scan to an optional candidate_ids hint via a
     single JSON-encoded bound parameter, rather than always scanning the
-    full concept. SQLite-specific: DuckDBBackend documents that it accepts
-    but ignores this hint instead (see its docstring) — cross-backend
-    correctness (a non-qualifying candidate is never resurrected) is
-    covered in conformance/test_confidence_trust_filters.py instead."""
+    full concept. SQLite-specific: pins the actual narrowing behavior via
+    this backend's own json_each-based implementation; DuckDBBackend's
+    identically-shaped unnest()-based implementation has its own mirror of
+    this class in tests/unit/test_duckdb_backend.py. Cross-backend
+    correctness that holds regardless of which (or whether a) narrowing
+    strategy a given backend uses lives in
+    conformance/test_confidence_trust_filters.py instead."""
 
     def _seed(self, backend: SQLiteBackend, entity_id: str, *, confidence: float | None) -> None:
         backend.put_entity(
