@@ -1197,10 +1197,14 @@ class TestSQLiteBackend:
             )
         )
 
-        results = backend.entities_where("test-ns", "Person", {"Person.employer": "org-001"})
+        results = backend.entities_where(
+            "test-ns", "Person", [("Person.employer", "eq", "org-001")]
+        )
         assert [r.id for r in results] == ["person-001"]
 
-        no_match = backend.entities_where("test-ns", "Person", {"Person.employer": "org-002"})
+        no_match = backend.entities_where(
+            "test-ns", "Person", [("Person.employer", "eq", "org-002")]
+        )
         assert no_match == []
 
     def test_contradictions_filter_by_state(self, backend: SQLiteBackend) -> None:

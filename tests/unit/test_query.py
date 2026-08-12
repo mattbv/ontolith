@@ -9,6 +9,7 @@ from ontolith import Ontology
 from ontolith.core import LookupEmbedder
 from ontolith.core.errors import ValidationError
 from ontolith.query import QueryBuilder
+from ontolith.schema import ConceptDef, PropertyDef, RelationDef, SchemaIR
 
 
 @pytest.fixture
@@ -159,6 +160,163 @@ class TestQueryBuilder:
 
         with pytest.raises(ValidationError, match="employer__name"):
             kb.query("Person").where(employer__name="Acme Corp")
+
+    def test_where_rejects_unrecognized_lookup_operator(self, kb: Ontology) -> None:
+        """Only the closed __contains/__gt/__lt/__gte/__lte set is recognized
+        (KI-039) - anything else still fails loudly, same as relation
+        traversal above."""
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.create_entity("Person", author=alice.id)
+
+        with pytest.raises(ValidationError, match="name__startswith"):
+            kb.query("Person").where(name__startswith="A")
+
+
+class TestWhereLookupOperators:
+    """KI-039: .where()'s __contains/__gt/__lt/__gte/__lte lookup operators."""
+
+    def _kb_with_numeric_schema(self, kb: Ontology) -> tuple[str, str]:
+        """Register a schema declaring Person.age as Integer, Person.name as
+        Text. Returns (admin_id, author_id)."""
+        admin = kb.create_principal(
+            "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
+        )
+        author = kb.create_principal(
+            "alice@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+        kb.apply_schema(
+            SchemaIR(
+                namespace="default",
+                version=1,
+                concepts={
+                    "Person": ConceptDef(
+                        name="Person",
+                        properties={
+                            "name": PropertyDef(name="name", value_type="Text"),
+                            "age": PropertyDef(name="age", value_type="Integer"),
+                        },
+                        relations={
+                            "employer": RelationDef(name="employer", target_concept="Organization")
+                        },
+                    ),
+                    "Organization": ConceptDef(name="Organization"),
+                },
+            ),
+            author=admin.id,
+        )
+        return admin.id, author.id
+
+    def test_contains_matches_substring(self, kb: Ontology) -> None:
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        matching = kb.create_entity("Person", author=alice.id)
+        kb.assert_literal(
+            matching.id, "Person.bio", "Compound X reduces inflammation", "Text", alice.id
+        )
+        nonmatching = kb.create_entity("Person", author=alice.id)
+        kb.assert_literal(nonmatching.id, "Person.bio", "Unrelated finding", "Text", alice.id)
+
+        results = kb.query("Person").where(bio__contains="Compound X").all()
+
+        assert {r.id for r in results} == {matching.id}
+
+    def test_contains_no_match_returns_empty(self, kb: Ontology) -> None:
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        entity = kb.create_entity("Person", author=alice.id)
+        kb.assert_literal(entity.id, "Person.bio", "Ada Lovelace", "Text", alice.id)
+
+        assert kb.query("Person").where(bio__contains="nonexistent").all() == []
+
+    def test_contains_treats_like_wildcards_literally(self, kb: Ontology) -> None:
+        """A literal `%`/`_` in the search term must not act as a SQL LIKE
+        wildcard - `%` unescaped would match anything; `_` unescaped would
+        match any single character."""
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        percent = kb.create_entity("Person", author=alice.id)
+        kb.assert_literal(percent.id, "Person.bio", "100% pure", "Text", alice.id)
+        other = kb.create_entity("Person", author=alice.id)
+        kb.assert_literal(other.id, "Person.bio", "no wildcard characters here", "Text", alice.id)
+
+        assert {r.id for r in kb.query("Person").where(bio__contains="100%").all()} == {percent.id}
+        # A bare "_" must not match "other"'s bio as an any-single-char wildcard.
+        assert kb.query("Person").where(bio__contains="_").all() == []
+
+    def test_range_operators_boundaries(self, kb: Ontology) -> None:
+        _, author = self._kb_with_numeric_schema(kb)
+        exact = kb.create_entity("Person", author=author)
+        kb.assert_literal(exact.id, "Person.age", "30", "Integer", author)
+
+        assert {r.id for r in kb.query("Person").where(age__gte=30).all()} == {exact.id}
+        assert kb.query("Person").where(age__gt=30).all() == []
+        assert {r.id for r in kb.query("Person").where(age__lte=30).all()} == {exact.id}
+        assert kb.query("Person").where(age__lt=30).all() == []
+
+    def test_range_operators_compose_as_and(self, kb: Ontology) -> None:
+        _, author = self._kb_with_numeric_schema(kb)
+        young = kb.create_entity("Person", author=author)
+        kb.assert_literal(young.id, "Person.age", "10", "Integer", author)
+        in_range = kb.create_entity("Person", author=author)
+        kb.assert_literal(in_range.id, "Person.age", "25", "Integer", author)
+        old = kb.create_entity("Person", author=author)
+        kb.assert_literal(old.id, "Person.age", "40", "Integer", author)
+
+        results = kb.query("Person").where(age__gte=20, age__lt=40).all()
+
+        assert {r.id for r in results} == {in_range.id}
+
+    def test_repeated_where_same_property_different_operator_composes(self, kb: Ontology) -> None:
+        """.where(age__gte=X).where(age__lt=Y) - separate calls, same
+        property, different operators - must AND together, not overwrite."""
+        _, author = self._kb_with_numeric_schema(kb)
+        in_range = kb.create_entity("Person", author=author)
+        kb.assert_literal(in_range.id, "Person.age", "25", "Integer", author)
+        out_of_range = kb.create_entity("Person", author=author)
+        kb.assert_literal(out_of_range.id, "Person.age", "40", "Integer", author)
+
+        results = kb.query("Person").where(age__gte=20).where(age__lt=40).all()
+
+        assert {r.id for r in results} == {in_range.id}
+
+    def test_repeated_where_same_property_same_operator_overwrites(self, kb: Ontology) -> None:
+        """Same (property, operator) pair called twice - last value wins,
+        matching plain equality's existing behavior, not AND-ed together
+        (which would be unsatisfiable for two different equality values)."""
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        ada = kb.create_entity("Person", author=alice.id)
+        kb.assert_literal(ada.id, "Person.name", "Ada", "Text", alice.id)
+        grace = kb.create_entity("Person", author=alice.id)
+        kb.assert_literal(grace.id, "Person.name", "Grace", "Text", alice.id)
+
+        results = kb.query("Person").where(name="Ada").where(name="Grace").all()
+
+        assert {r.id for r in results} == {grace.id}
+
+    def test_range_operator_rejects_non_numeric_predicate(self, kb: Ontology) -> None:
+        self._kb_with_numeric_schema(kb)
+
+        with pytest.raises(ValidationError, match="Integer or Float"):
+            kb.query("Person").where(name__gt="A")
+
+    def test_range_operator_rejects_relation_predicate(self, kb: Ontology) -> None:
+        """A relation predicate resolves to no value_type at all
+        (SchemaIR.value_type_of() returns None for a RelationDef), so it's
+        rejected the same way a non-numeric property is."""
+        self._kb_with_numeric_schema(kb)
+
+        with pytest.raises(ValidationError, match="Integer or Float"):
+            kb.query("Person").where(employer__gt="org-1")
+
+    def test_range_operator_rejects_when_no_schema_registered(self, kb: Ontology) -> None:
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.create_entity("Person", author=alice.id)
+
+        with pytest.raises(ValidationError, match="no schema is registered"):
+            kb.query("Person").where(age__gt=18)
+
+    def test_range_operator_rejects_non_numeric_value(self, kb: Ontology) -> None:
+        self._kb_with_numeric_schema(kb)
+
+        with pytest.raises(ValidationError, match="not a number"):
+            kb.query("Person").where(age__gt="not-a-number")
 
 
 class TestSemanticSearch:

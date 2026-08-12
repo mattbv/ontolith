@@ -164,6 +164,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   schema migrate` remains unimplemented — schema versioning/migration isn't built
   anywhere yet, only monotonic version numbering via `apply_schema` — forward-tracked
   as KI-048 rather than left implicit in KI-038's now-partial-resolved status.
+- `.where()` lookup operators `__contains`/`__gt`/`__lt`/`__gte`/`__lte` (closes
+  KI-039): a documented use-case example used `where(text__contains=...)` before
+  `.where()` supported any lookup-operator syntax at all — every dunder-suffixed key
+  raised `ValidationError` (KI-030). `__contains` does a substring match (`LIKE`,
+  wildcards escaped); `__gt`/`__lt`/`__gte`/`__lte` do a numeric range comparison,
+  restricted to predicates the active schema declares `Integer`/`Float` (`value_lit`
+  is always stored as `TEXT`, so an unrestricted ordering comparison would silently
+  compare `"9" > "10"` lexicographically) — a relation predicate is rejected the same
+  way, since `SchemaIR.value_type_of()` returns `None` for one. Two different
+  operators can target the same predicate (`.where(age__gte=18).where(age__lt=65)`),
+  which required changing how filters are represented internally and passed to the
+  backend.
+- **Breaking:** `StorageBackend.entities_where`'s `predicate_filters` parameter
+  changed from `dict[str, str]` to `list[tuple[str, str, Any]]` (`(predicate,
+  operator, value)` triples, KI-039) — a predicate-keyed dict couldn't represent two
+  different operators on the same predicate. Any third-party `StorageBackend`
+  implementation must update.
 
 #### Fixed
 - **Breaking:** `StorageBackend.entities_meeting_confidence`/`entities_meeting_trust` (port

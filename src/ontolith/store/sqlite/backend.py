@@ -31,10 +31,20 @@ from ontolith.store.base import DEFAULT_NAMESPACE, VECTOR_SCOPES
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
 
+_RANGE_SQL_OPERATORS = {"gt": ">", "lt": "<", "gte": ">=", "lte": "<="}
+"""entities_where() operator name -> SQL comparison operator (KI-039)."""
+
 
 def _pack_vector(vec: list[float]) -> bytes:
     """Serialize a vector for sqlite-vec's vec0 FLOAT[N] column format."""
     return struct.pack(f"{len(vec)}f", *vec)
+
+
+def _like_escape(value: str) -> str:
+    """Escape SQL LIKE wildcards so a `__contains` filter matches `value`
+    literally, not as a LIKE pattern (KI-039). Paired with `ESCAPE '\\'` in
+    the SQL and the value wrapped in `%...%` by the caller."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 def _synchronized(
@@ -1549,30 +1559,34 @@ class SQLiteBackend:
         self,
         namespace: str,
         concept: str,
-        predicate_filters: dict[str, str],
+        predicate_filters: list[tuple[str, str, Any]],
         as_of_time: datetime | None = None,
         include_flagged: bool = False,
     ) -> list[Entity]:
-        """Query entities matching all predicate=value filters in one SQL query.
+        """Query entities matching all predicate filters in one SQL query.
 
-        Uses correlated subqueries so each (predicate, value) pair hits the
+        Uses correlated subqueries so each filter hits the
         idx_assertion_pred_value/idx_assertion_pred_ref indexes instead of
-        doing one round-trip per entity. A filter matches either a literal
-        property (`value_lit`) or a relation's target entity id (`value_ref`)
-        — KI-030: relation filters like `employer="org-123"` are equality
-        checks against `value_ref`, not traversal into the target entity's
-        own properties. The two are checked via a UNION ALL of two
-        single-column point lookups rather than one `value_lit = ? OR
-        value_ref = ?` predicate — SQLite's planner doesn't reliably pick a
-        seekable plan for the latter (falls back to a full table SCAN on the
-        as_of branch; confirmed via EXPLAIN QUERY PLAN), which turned every
-        `.where()` call — not just relation filters — into an unindexed scan.
+        doing one round-trip per entity. `"eq"` matches either a literal
+        property (`value_lit`) or a relation's target entity id
+        (`value_ref`) — KI-030: relation filters like `employer="org-123"`
+        are equality checks against `value_ref`, not traversal into the
+        target entity's own properties. The two are checked via a UNION ALL
+        of two single-column point lookups rather than one `value_lit = ?
+        OR value_ref = ?` predicate — SQLite's planner doesn't reliably pick
+        a seekable plan for the latter (falls back to a full table SCAN on
+        the as_of branch; confirmed via EXPLAIN QUERY PLAN), which turned
+        every `.where()` call — not just relation filters — into an
+        unindexed scan. `"contains"`/`"gt"`/`"lt"`/`"gte"`/`"lte"` (KI-039)
+        check `value_lit` only — see this port method's own docstring for
+        why relations don't get a UNION ALL branch for those.
 
         Args:
             namespace: Namespace to query
             concept: Concept to filter by
-            predicate_filters: Dict of full_predicate → value (AND semantics);
-                value is matched against either value_lit or value_ref
+            predicate_filters: List of `(full_predicate, operator, value)`
+                triples (AND semantics) — see the port method's docstring
+                for the operator set
             as_of_time: If set, applies bitemporal filter on assertions and entity creation
             include_flagged: When as_of_time is set, whether to include
                 'flagged' assertions in the predicate match (excluded by
@@ -1582,7 +1596,7 @@ class SQLiteBackend:
             List of entities where all filters match at the given time
         """
         query = "SELECT * FROM entity WHERE namespace = ? AND concept = ?"
-        params: list[str] = [namespace, concept]
+        params: list[Any] = [namespace, concept]
 
         if as_of_time is not None:
             t_iso = as_of_time.isoformat()
@@ -1593,42 +1607,51 @@ class SQLiteBackend:
             # bandit's B608 heuristic flagging any keyword-string + variable
             # concatenation regardless of the variable's actual provenance.
             flagged_clause = "" if include_flagged else " AND status != 'flagged'"
-            for predicate, value in predicate_filters.items():
-                bitemporal_clause = (
-                    " AND asserted_at <= ?"
-                    " AND (valid_from IS NULL OR valid_from <= ?)"
-                    " AND (valid_to IS NULL OR valid_to > ?)"
-                    f"{flagged_clause}"  # nosec B608
-                )
-                # predicate/value are always bound via `?` below, never
-                # interpolated; the only interpolated piece is
-                # bitemporal_clause, itself built from hardcoded literals
-                # (see the flagged_clause justification above) - same
-                # already-justified pattern, not a new SQL injection surface.
+            match_clause = (
+                " AND asserted_at <= ?"
+                " AND (valid_from IS NULL OR valid_from <= ?)"
+                " AND (valid_to IS NULL OR valid_to > ?)"
+                f"{flagged_clause}"  # nosec B608
+            )
+            match_params = [t_iso, t_iso, t_iso]
+        else:
+            match_clause = " AND status = 'active'"
+            match_params = []
+
+        # predicate/value are always bound via `?` below, never
+        # interpolated; the only interpolated piece is match_clause, itself
+        # built from hardcoded literals (see the flagged_clause
+        # justification above) - same already-justified pattern, not a new
+        # SQL injection surface.
+        for predicate, operator, value in predicate_filters:
+            if operator == "eq":
                 query += (
                     " AND id IN ("  # nosec B608
                     "SELECT subject FROM assertion"
-                    f" WHERE predicate = ? AND value_lit = ?{bitemporal_clause}"
+                    f" WHERE predicate = ? AND value_lit = ?{match_clause}"
                     " UNION ALL "
                     "SELECT subject FROM assertion"
-                    f" WHERE predicate = ? AND value_ref = ?{bitemporal_clause}"
+                    f" WHERE predicate = ? AND value_ref = ?{match_clause}"
                     ")"
                 )
-                params.extend(
-                    [predicate, value, t_iso, t_iso, t_iso, predicate, value, t_iso, t_iso, t_iso]
-                )
-        else:
-            for predicate, value in predicate_filters.items():
+                params.extend([predicate, value, *match_params, predicate, value, *match_params])
+            elif operator == "contains":
                 query += (
-                    " AND id IN ("
+                    " AND id IN ("  # nosec B608
                     "SELECT subject FROM assertion"
-                    " WHERE predicate = ? AND value_lit = ? AND status = 'active'"
-                    " UNION ALL "
-                    "SELECT subject FROM assertion"
-                    " WHERE predicate = ? AND value_ref = ? AND status = 'active'"
+                    f" WHERE predicate = ? AND value_lit LIKE ? ESCAPE '\\'{match_clause}"
                     ")"
                 )
-                params.extend([predicate, value, predicate, value])
+                params.extend([predicate, f"%{_like_escape(value)}%", *match_params])
+            else:
+                sql_op = _RANGE_SQL_OPERATORS[operator]
+                query += (
+                    " AND id IN ("  # nosec B608
+                    "SELECT subject FROM assertion"
+                    f" WHERE predicate = ? AND CAST(value_lit AS REAL) {sql_op} ?{match_clause}"
+                    ")"
+                )
+                params.extend([predicate, value, *match_params])
 
         cursor = self.conn.cursor()
         cursor.execute(query, params)

@@ -1118,10 +1118,10 @@ class TestDuckDBBackend:
             )
         )
 
-        results = backend.entities_where("test-ns", "Person", {"Person.name": "Ada"})
+        results = backend.entities_where("test-ns", "Person", [("Person.name", "eq", "Ada")])
         assert [r.id for r in results] == ["entity-001"]
 
-        no_match = backend.entities_where("test-ns", "Person", {"Person.name": "Nobody"})
+        no_match = backend.entities_where("test-ns", "Person", [("Person.name", "eq", "Nobody")])
         assert no_match == []
 
     def test_entities_where_matches_relation_target_id(self, backend: DuckDBBackend) -> None:
@@ -1149,10 +1149,14 @@ class TestDuckDBBackend:
             )
         )
 
-        results = backend.entities_where("test-ns", "Person", {"Person.employer": "org-001"})
+        results = backend.entities_where(
+            "test-ns", "Person", [("Person.employer", "eq", "org-001")]
+        )
         assert [r.id for r in results] == ["person-001"]
 
-        no_match = backend.entities_where("test-ns", "Person", {"Person.employer": "org-002"})
+        no_match = backend.entities_where(
+            "test-ns", "Person", [("Person.employer", "eq", "org-002")]
+        )
         assert no_match == []
 
     def test_contradiction_roundtrip_and_resolution(self, backend: DuckDBBackend) -> None:
