@@ -8,6 +8,7 @@ from typer.testing import CliRunner
 
 from ontolith import Ontology
 from ontolith.interfaces.cli import app
+from ontolith.schema import ConceptDef, PropertyDef, RelationDef, SchemaIR
 
 runner = CliRunner()
 
@@ -997,3 +998,80 @@ class TestNamespaceList:
         result = runner.invoke(app, ["--db", str(temp_db), "namespace", "list"])
         assert result.exit_code == 0
         assert "default" in result.output
+
+
+class TestSchemaShow:
+    """KI-038: `ontolith schema show` - previously the only primary
+    interface (SDK/REST/MCP all could) with no way to inspect a registered
+    schema at all."""
+
+    def test_no_schema_registered_prints_message(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.close()
+
+        result = runner.invoke(app, ["--db", str(temp_db), "schema", "show"])
+        assert result.exit_code == 0
+        assert "No schema registered" in result.output
+
+    def test_shows_properties_and_relations(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        admin = kb.create_principal(
+            "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
+        )
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Organization": ConceptDef(
+                    name="Organization",
+                    properties={"name": PropertyDef(name="name", value_type="Text")},
+                ),
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={"name": PropertyDef(name="name", value_type="Text", required=True)},
+                    relations={
+                        "employer": RelationDef(
+                            name="employer",
+                            target_concept="Organization",
+                            temporality="time_varying",
+                        )
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(schema, author=admin.id)
+        kb.close()
+
+        result = runner.invoke(app, ["--db", str(temp_db), "schema", "show"])
+        assert result.exit_code == 0
+        assert "namespace=default  version=1" in result.output
+        assert "Organization" in result.output
+        assert "Person" in result.output
+        assert "name: Text" in result.output
+        assert "required=True" in result.output
+        assert "employer -> Organization" in result.output
+        assert "temporality=time_varying" in result.output
+
+    def test_namespace_option_targets_a_different_namespace(self, temp_db: Path) -> None:
+        """This project is single-namespace throughout (ADR-0015), so a
+        namespace with no schema is the only other case reachable - proves
+        --namespace is actually threaded through rather than hardcoded to
+        the default."""
+        kb = Ontology.connect(temp_db)
+        admin = kb.create_principal(
+            "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
+        )
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={"Person": ConceptDef(name="Person")},
+        )
+        kb.apply_schema(schema, author=admin.id)
+        kb.close()
+
+        result = runner.invoke(
+            app, ["--db", str(temp_db), "schema", "show", "--namespace", "other"]
+        )
+        assert result.exit_code == 0
+        assert "No schema registered for namespace 'other'" in result.output
+        assert "Person" not in result.output

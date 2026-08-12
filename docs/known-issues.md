@@ -777,10 +777,10 @@ Docstrings on both port methods were rewritten: `(namespace, concept)` is still 
 
 ---
 
-## KI-038 — CLI has no `schema` command
+## KI-038 — CLI has no `schema` command (partially resolved — `show` done, `migrate` still open)
 
 **Severity:** Architecture gap — SPEC-normative CLI surface is entirely unimplemented
-**Milestone target:** Backlog
+**Milestone target:** M3 for `show` (resolved in `feat(cli): add schema show command (KI-038)`); `migrate` remains Backlog
 **SPEC reference:** SPEC §14.2 (`ontolith schema {show|migrate}`)
 
 ### Description
@@ -789,7 +789,9 @@ Docstrings on both port methods were rewritten: `(namespace, concept)` is still 
 
 ### Fix
 
-Add `ontolith schema show [--namespace]` printing concepts/properties/relations (mirroring MCP's `ontolith.schema`/REST's `GET /schema` output, now that KI-029 closed the relations gap there too). `ontolith schema migrate` is a larger, separate piece of work (schema versioning/migration isn't implemented anywhere yet) — split into its own issue if `show` lands first.
+Added `ontolith schema show [--namespace]` (new `schema_app` sub-app, matching every other CLI sub-command's `_kb()`/try-except-finally shape), printing `namespace=... version=...` followed by each concept's properties (`name: value_type  cardinality=...  temporality=...  required=...`) and relations (`name -> target_concept  cardinality=...  temporality=...  required=...  inverse=...`) — mirroring MCP's `ontolith.schema`/REST's `GET /schema` output field-for-field (both already fixed by KI-029 to include relations). A namespace with no registered schema prints a plain message rather than an empty/error output, matching other read-path commands' "nothing found" convention elsewhere in the CLI.
+
+`ontolith schema migrate` remains unresolved — it's a larger, separate piece of work (schema versioning/migration isn't implemented anywhere yet, only monotonic version numbering via `apply_schema`) and was out of scope for this pass, as this KI's own Fix text anticipated. This entry stays open (not marked RESOLVED) for that half.
 
 ---
 
