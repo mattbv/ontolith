@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from ontolith import Ontology
-from ontolith.core import LookupEmbedder
+from ontolith.core import FixedClock, LookupEmbedder
 from ontolith.core.errors import ValidationError
 from ontolith.query import QueryBuilder
 from ontolith.schema import ConceptDef, PropertyDef, RelationDef, SchemaIR
@@ -176,8 +176,8 @@ class TestWhereLookupOperators:
     """KI-039: .where()'s __contains/__gt/__lt/__gte/__lte lookup operators."""
 
     def _kb_with_numeric_schema(self, kb: Ontology) -> tuple[str, str]:
-        """Register a schema declaring Person.age as Integer, Person.name as
-        Text. Returns (admin_id, author_id)."""
+        """Register a schema declaring Person.age as Integer, Person.score
+        as Float, Person.name as Text. Returns (admin_id, author_id)."""
         admin = kb.create_principal(
             "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
         )
@@ -194,6 +194,7 @@ class TestWhereLookupOperators:
                         properties={
                             "name": PropertyDef(name="name", value_type="Text"),
                             "age": PropertyDef(name="age", value_type="Integer"),
+                            "score": PropertyDef(name="score", value_type="Float"),
                         },
                         relations={
                             "employer": RelationDef(name="employer", target_concept="Organization")
@@ -317,6 +318,111 @@ class TestWhereLookupOperators:
 
         with pytest.raises(ValidationError, match="not a number"):
             kb.query("Person").where(age__gt="not-a-number")
+
+    def test_range_operator_rejects_bool_value(self, kb: Ontology) -> None:
+        """bool is a subclass of int - float(True) == 1.0 would otherwise
+        silently accept a boolean as a real numeric filter."""
+        self._kb_with_numeric_schema(kb)
+
+        with pytest.raises(ValidationError, match="not a number"):
+            kb.query("Person").where(age__gt=True)
+
+    def test_range_operator_works_on_float_typed_predicate(self, kb: Ontology) -> None:
+        _, author = self._kb_with_numeric_schema(kb)
+        entity = kb.create_entity("Person", author=author)
+        kb.assert_literal(entity.id, "Person.score", "3.7", "Float", author)
+
+        results = kb.query("Person").where(score__gt=3.5).all()
+
+        assert {r.id for r in results} == {entity.id}
+
+    def test_range_operator_accepts_negative_and_decimal_values(self, kb: Ontology) -> None:
+        _, author = self._kb_with_numeric_schema(kb)
+        entity = kb.create_entity("Person", author=author)
+        kb.assert_literal(entity.id, "Person.score", "-2.5", "Float", author)
+
+        assert {r.id for r in kb.query("Person").where(score__lt=-2.0).all()} == {entity.id}
+        assert kb.query("Person").where(score__gt=-2.0).all() == []
+
+    def test_contains_rejects_non_string_value(self, kb: Ontology) -> None:
+        """Unlike range operators, .where(x__contains=...) had no eager
+        value validation at all - a non-str value used to reach the
+        storage adapter's LIKE-escaping code and raise a bare
+        AttributeError there instead of a clear ValidationError here."""
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.create_entity("Person", author=alice.id)
+
+        with pytest.raises(ValidationError, match="requires a string value"):
+            kb.query("Person").where(bio__contains=5)
+
+    def test_leading_dunder_key_with_empty_property_name_is_rejected(self, kb: Ontology) -> None:
+        """.where(__contains="x") has an empty property name after splitting
+        off the operator suffix - silently accepting it would resolve to
+        predicate "Person." and match nothing, the exact silent-unreachable
+        -predicate shape KI-030 exists to eliminate."""
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.create_entity("Person", author=alice.id)
+
+        with pytest.raises(ValidationError, match="__contains"):
+            kb.query("Person").where(**{"__contains": "x"})
+
+    def test_range_operator_validates_against_schema_effective_at_as_of_time(
+        self, tmp_path: Path
+    ) -> None:
+        """.as_of(t).query(...).where(age__gt=...) must validate against the
+        schema effective at t (SPEC §11.4, KI-019's get_schema_at()), not
+        today's - a predicate retyped since t must be judged by what it was
+        declared at t. Uses a FixedClock (not wall-clock time) so the two
+        apply_schema() calls land at deterministic, distinct instants."""
+        clock = FixedClock("2025-01-01T00:00:00Z")
+        kb = Ontology.connect(tmp_path / "as_of_schema.db", clock=clock)
+        admin = kb.create_principal(
+            "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
+        )
+        author = kb.create_principal(
+            "alice@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+        kb.apply_schema(
+            SchemaIR(
+                namespace="default",
+                version=1,
+                concepts={
+                    "Person": ConceptDef(
+                        name="Person",
+                        properties={"age": PropertyDef(name="age", value_type="Text")},
+                    ),
+                },
+            ),
+            author=admin.id,
+        )
+        before_retype = clock.now()
+        clock.advance(days=1)
+
+        kb.apply_schema(
+            SchemaIR(
+                namespace="default",
+                version=2,
+                concepts={
+                    "Person": ConceptDef(
+                        name="Person",
+                        properties={"age": PropertyDef(name="age", value_type="Integer")},
+                    ),
+                },
+            ),
+            author=admin.id,
+        )
+
+        # At `before_retype`, Person.age was still declared Text - a range
+        # filter must be rejected against that historical schema, even
+        # though it would succeed against today's (Integer) schema.
+        with pytest.raises(ValidationError, match="Integer or Float"):
+            kb.as_of(before_retype).query("Person").where(age__gt=18)
+
+        # Sanity check: the same filter against current state (post-retype) succeeds.
+        entity = kb.create_entity("Person", author=author.id)
+        kb.assert_literal(entity.id, "Person.age", "25", "Integer", author.id)
+        assert {r.id for r in kb.query("Person").where(age__gt=18).all()} == {entity.id}
+        kb.close()
 
 
 class TestSemanticSearch:

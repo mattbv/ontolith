@@ -181,6 +181,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator, value)` triples, KI-039) — a predicate-keyed dict couldn't represent two
   different operators on the same predicate. Any third-party `StorageBackend`
   implementation must update.
+- Review found `__contains` genuinely wasn't identical across backends as first
+  shipped: SQLite's `LIKE` is case-insensitive by default, DuckDB's is not, so the
+  same filter matched different result sets per backend. `SQLiteBackend` now sets
+  `PRAGMA case_sensitive_like = ON` at connection time to agree with DuckDB's
+  default. `.where(x__contains=<non-str>)`/`.where(x__gt=True)` now raise
+  `ValidationError` eagerly instead of a bare `AttributeError` (the former) or
+  silently accepting a bool as numeric (the latter, since `bool` is an `int`
+  subclass). A leading-dunder key with an empty property name (`.where(__contains=
+  "x")`) is now rejected instead of silently compiling to an unmatchable predicate —
+  the exact KI-030 failure shape. Range-operator schema validation now resolves via
+  `get_schema_at()` under `.as_of()` (SPEC §11.4) instead of always today's schema.
+  ADR-0027 was amended (traversal remains deferred) and `docs/Ontolith_SPEC.md`
+  §11.1 plus the REST/MCP/CLI filter docs, which had drifted to claim equality-only,
+  were corrected. Filed separately, not fixed here: nothing validates that a
+  literal's stored content actually parses as its declared `value_type` (KI-031 only
+  checks the type token) — SQLite's `CAST` silently returns `0.0` for non-numeric
+  stored text under a range filter where DuckDB's `TRY_CAST` excludes the row
+  instead, a real, tracked cross-backend divergence (KI-049).
 
 #### Fixed
 - **Breaking:** `StorageBackend.entities_meeting_confidence`/`entities_meeting_trust` (port

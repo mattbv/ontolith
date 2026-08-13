@@ -823,6 +823,10 @@ New conformance vectors (`conformance/test_where_lookup_operators.py`, cross-bac
 
 `docs/Ontolith_UseCases_and_Interfaces.md` §4.3's example was restored to `where(text__contains="Compound X")`, since the caveat it carried since KI-030/ADR-0027 no longer applies.
 
+**Review found and this fix now closes**: `__contains` was genuinely not identical across backends as first shipped — SQLite's `LIKE` is case-insensitive by default, DuckDB's is not, so the same `.where(name__contains="ada")` call matched different result sets per backend. `SQLiteBackend` now sets `PRAGMA case_sensitive_like = ON` at connection time to match DuckDB's default rather than the reverse. `.where(x__contains=<non-str>)` and `.where(x__gt=True)` (bool is a subclass of `int`, so `float(True) == 1.0` would otherwise silently accept it) now raise `ValidationError` eagerly instead of a bare `AttributeError` leaking from inside the storage adapter for the former. A leading-dunder key with an empty property name (e.g. `.where(__contains="x")`) is now rejected instead of silently compiling to an unmatchable `"Concept."` predicate — the exact KI-030 failure shape. `_coerce_range_value` now resolves the schema via `get_schema_at()` when `.as_of()` is pinned, not always today's schema (SPEC §11.4) — a predicate retyped since `t` is judged by what it was declared at `t`. ADR-0027 was amended (not superseded — multi-hop traversal remains deferred and its rationale still holds) to record that the lookup-operators half of its deferral is resolved; `docs/Ontolith_SPEC.md` §11.1 and the REST/MCP/CLI filter docs (which had drifted to claim equality-only, since all three splat caller filters straight into `.where()`) were corrected to match.
+
+**Review found and filed separately, not fixed here**: nothing validates that a literal's stored *content* actually parses as its predicate's declared `value_type` (KI-031 only checks the type *token* matches) — `CAST(value_lit AS REAL)` on a non-numeric stored value therefore returns `0.0` on SQLite (wrong, silent) rather than excluding the row; DuckDB uses `TRY_CAST` instead of `CAST` specifically to avoid the alternative failure mode (a raw `duckdb.ConversionException` escaping through the port, violating SPEC §16), but that only prevents the crash, not the underlying cross-backend divergence in which rows match. Filed as **KI-049**.
+
 ---
 
 ## KI-040 — Nothing validates that a predicate's declared kind (property vs. relation) matches how it's written or filtered
@@ -987,6 +991,24 @@ KI-038 added `ontolith schema show` but explicitly left `ontolith schema migrate
 ### Fix
 
 Needs a design decision before implementation, not just a CLI command: what does "migrate" mean here — applying a new `SchemaIR` version is already possible via `apply_schema`, so `ontolith schema migrate` most plausibly means either (a) a thin CLI wrapper around `apply_schema` reading a YAML/class-DSL file from disk (the smallest useful slice, no new domain logic), or (b) something that also handles property renames/type changes against existing assertion data (a substantially larger scope touching append-only semantics — renaming a predicate doesn't rewrite historical assertions, so old and new predicate names would coexist, which needs its own ADR). Scope this to (a) first if picked up, and record the (a)/(b) boundary decision as an ADR rather than deciding it implicitly inside a CLI PR.
+
+---
+
+## KI-049 — A predicate's declared `value_type` token is checked at write time (KI-031), but the literal's actual string content is never validated to match it
+
+**Severity:** Architecture gap — declared schema constraints can silently diverge from stored data
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §4 (`value_type` is a core type); Implementation Plan §4.3 ("validate at edges")
+
+### Description
+
+KI-031 made `_require_known_predicate` (`src/ontolith/ontology.py`) reject a literal write whose caller-supplied `value_type` *token* doesn't match the schema's declared `value_type` for that predicate (e.g. writing `value_type="Text"` against a predicate declared `Integer`). It does not — and never has — validated that `value` itself is actually well-formed for that type. `kb.assert_literal(entity.id, "Person.age", "unknown", "Integer", author)` succeeds today: `value_type="Integer"` matches the schema's declaration, so the token check passes, even though `"unknown"` is not a valid integer. The same gap exists for `Date`/`DateTime`/`URI`/`JSON` — nothing parses `value` against its claimed format.
+
+Found during KI-039's review: `.where()`'s new `__gt`/`__lt`/`__gte`/`__lte` range operators trust a predicate's declared `value_type` (via `SchemaIR.value_type_of()`) to decide whether `CAST(value_lit AS REAL/DOUBLE)` is safe, but "declared numeric" and "actually stored as parseable numeric text" are different guarantees — this gap is what lets them diverge. Also reachable via schema evolution: a property declared `Text` in schema v1, retyped to `Integer` in v2 (nothing re-validates or migrates existing rows written under v1 — see KI-048's own note that no migration/backfill mechanism exists at all).
+
+### Fix
+
+`_require_known_predicate` (or a new validator called from the same write paths: `assert_literal`, `propose`, `_replay_proposal_operations`) needs to parse `value` against the schema-declared `value_type` and reject on mismatch — `int()`/`float()` for `Integer`/`Float`, `datetime.fromisoformat()` (or equivalent) for `Date`/`DateTime`, a URI parser for `URI`, `json.loads()` for `JSON`. Needs a decision on `Boolean` (accept `"true"`/`"false"` case-insensitively? `"1"`/`"0"`?) and on whether this applies retroactively to already-stored data (it can't, without a migration mechanism — KI-048) or only to new writes going forward. Conformance vectors should cover each `value_type`'s accept/reject boundary, plus confirm `.where()`'s range operators (KI-039) correctly exclude/behave once this closes the gap that currently makes `TRY_CAST`/silent-zero-coercion necessary as a defensive fallback in `entities_where()`.
 
 ---
 

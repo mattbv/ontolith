@@ -180,9 +180,13 @@ class QueryIn(BaseModel):
     """
 
     concept: str
-    # Property/relation name -> value (equality only). A relation filter matches
-    # the relation's target entity id. Double-underscore keys (e.g. "employer__name")
-    # are not supported and return a 400 validation_error (ADR-0027, KI-030).
+    # Property/relation name -> value (equality), or property__op -> value using a
+    # closed set of lookup-operator suffixes (KI-039): __contains (substring),
+    # __gt/__lt/__gte/__lte (numeric range, schema-declared Integer/Float properties
+    # only). A relation filter (bare key, no suffix) matches the relation's target
+    # entity id. Multi-hop double-underscore keys (e.g. "employer__name") and any
+    # suffix outside the closed operator set are still not supported and return a
+    # 400 validation_error (ADR-0027, KI-030).
     filters: dict[str, str] | None = None
     semantic: str | None = None
     min_confidence: float | None = None

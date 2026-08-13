@@ -1,8 +1,8 @@
 # ADR-0027: Defer Multi-Hop Relation Traversal and Lookup Operators in `QueryBuilder.where()`
 
-**Status**: Accepted
+**Status**: Accepted (amended — see Amendment below)
 
-**Date**: 2026-08-03
+**Date**: 2026-08-03 (amended 2026-08-12 — lookup operators implemented, KI-039)
 
 **Deciders**: Ontolith Core Team
 
@@ -50,6 +50,34 @@ deferred per this ADR. `docs/Ontolith_PRD.md`'s equivalent example and
 `docs/Ontolith_UseCases_and_Interfaces.md` §4.3's `__contains` example were both updated to
 their working equality-based form.
 
+## Amendment (2026-08-12): Lookup operators implemented (KI-039)
+
+**What changed**: the "lookup operators" half of this ADR's deferral is superseded.
+`.where()` now recognizes a closed set of five dunder-suffixed lookup operators —
+`__contains` (substring match, `value_lit` only) and `__gt`/`__lt`/`__gte`/`__lte`
+(numeric range, restricted to predicates the active schema declares `Integer` or
+`Float`) — implemented in `fix/ki-039-where-lookup-operators`. `docs/known-issues.md`
+KI-039 is marked resolved; `docs/Ontolith_UseCases_and_Interfaces.md` §4.3's example
+was restored to `where(text__contains="Compound X")`.
+
+**What has NOT changed**: multi-hop relation traversal (`employer__name=`) remains
+deferred, unimplemented, and still rejected with `ValidationError` — this ADR's
+Decision, Rationale (the join/cardinality/bitemporal design surface), and
+Alternatives Considered all still hold for that half. A dunder key is now routed one
+of three ways: a recognized operator suffix (implemented), a second `__` in the
+remaining prefix (still rejected — that shape is what multi-hop traversal would use),
+or an unrecognized suffix (still rejected). `ValidationError`'s message was updated to
+name the actual closed operator set rather than claiming, as it did before this
+amendment, that no dunder syntax of any kind works.
+
+**Why amend rather than supersede**: only one of the two deferred features
+(lookup operators) shipped; the traversal half of the original decision, its
+rationale, and its alternatives-considered analysis are all still the current,
+correct record — writing a new ADR to replace this one whole would either duplicate
+that unchanged material or leave it undocumented. SPEC §11.1 and `docs/Ontolith_SPEC.md`
+should be updated to reflect that lookup operators are no longer deferred, in the same
+pass that resolves KI-039 (tracked there, not repeated here).
+
 ## Rationale
 
 **Why defer rather than implement now:** Multi-hop traversal requires joining through a
@@ -83,11 +111,11 @@ ADR, currently isn't meant to) honor.
   KI-039, rather than a bare rejection with no further context.
 
 **Negative / follow-ups:**
-- Multi-hop traversal and lookup operators remain unimplemented. If/when either is
-  prioritized, it needs its own design pass (see Rationale) and should supersede or amend
-  this ADR rather than being bolted onto the equality-filter code path.
-- KI-039 (lookup operators, e.g. `__contains`) is tracked separately in
-  `docs/known-issues.md` and not resolved by this ADR.
+- Multi-hop traversal remains unimplemented. If/when it's prioritized, it needs its own
+  design pass (see Rationale) and should further amend this ADR rather than being bolted
+  onto the equality-filter code path.
+- Lookup operators (KI-039) were implemented per the 2026-08-12 Amendment above — no
+  longer an open follow-up.
 
 ## Alternatives Considered
 
@@ -105,6 +133,6 @@ unfiltered query rather than an obviously-empty one.
 ## References
 
 - SPEC §11.1 (Query builder, normative shape)
-- `docs/known-issues.md` KI-030 (resolved), KI-039 (lookup operators, open)
+- `docs/known-issues.md` KI-030 (resolved), KI-039 (lookup operators, resolved 2026-08-12)
 - `src/ontolith/query/builder.py` (`QueryBuilder.where()`, `_qualified_filters()`)
 - `src/ontolith/store/{sqlite,duckdb}/backend.py` (`entities_where()`)

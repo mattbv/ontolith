@@ -183,11 +183,16 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         Args:
             concept: Concept name to query (e.g. "Person")
             token: Bearer token identifying the calling principal (ADR-0014)
-            filters: Optional dict of property/relation name → value — a
-                relation filter matches the relation's target entity id
-                (e.g. {"employer": "org-123"}). Double-underscore keys (e.g.
-                "employer__name") are not supported and raise a
-                validation_error (ADR-0027, KI-030).
+            filters: Optional dict of property/relation name → value
+                (equality) — a relation filter matches the relation's
+                target entity id (e.g. {"employer": "org-123"}) — or
+                property__op → value using a closed set of lookup-operator
+                suffixes (KI-039): __contains (substring), __gt/__lt/__gte/
+                __lte (numeric range, schema-declared Integer/Float
+                properties only), e.g. {"age__gte": 18}. Multi-hop
+                double-underscore keys (e.g. "employer__name") and any
+                suffix outside this closed operator set are not supported
+                and raise a validation_error (ADR-0027, KI-030).
             namespace: Namespace to query (default: "default")
 
         Returns:

@@ -385,15 +385,29 @@ class StorageBackend(Protocol):
 
         - `"eq"`: equality. Matches either a literal property (`value_lit`)
           or a relation's target entity id (`value_ref`) — KI-030.
-        - `"contains"`: substring match against `value_lit` only (KI-039) —
-          relations have no defined substring semantics, so this operator
-          never matches against `value_ref`.
+        - `"contains"`: case-sensitive substring match against `value_lit`
+          only (KI-039) — relations have no defined substring semantics, so
+          this operator never matches against `value_ref`. Case-sensitive
+          on both backends by construction: SQLite's `LIKE` is
+          case-insensitive by default and DuckDB's is not, so
+          `SQLiteBackend` explicitly sets `PRAGMA case_sensitive_like = ON`
+          at connection time to make the two agree — a conformant
+          third-party backend implementing this port must match that
+          behavior, not SQLite's un-pragma'd default.
         - `"gt"`/`"lt"`/`"gte"`/`"lte"`: numeric range against `value_lit`
-          only (KI-039), via `CAST(value_lit AS REAL)`. Callers (in
-          practice, only `QueryBuilder`) are responsible for restricting
-          this to predicates known to hold numeric text — see
-          `QueryBuilder._RANGE_VALUE_TYPES`'s docstring for why the backend
-          itself doesn't validate that.
+          only (KI-039) — a numeric cast (`CAST`/`TRY_CAST`, exact type
+          backend-specific — see e.g. `DuckDBBackend`'s docstring for why
+          `DOUBLE` not `REAL`). Callers (in practice, only `QueryBuilder`)
+          are responsible for restricting this to predicates *declared*
+          numeric — see `_RANGE_VALUE_TYPES` in `ontolith.query.builder`'s
+          docstring for why the backend itself doesn't validate that. A
+          backend is NOT responsible for validating that already-stored
+          `value_lit` content actually parses as a number for a predicate
+          declared numeric (KI-049) — implementations should fail safe
+          (exclude the row) rather than raise for a value that doesn't
+          parse, the way `TRY_CAST` does; letting a raw conversion
+          exception escape through this port violates SPEC §16's error
+          taxonomy.
 
         Args:
             namespace: Namespace to query

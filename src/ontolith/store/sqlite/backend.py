@@ -98,6 +98,13 @@ class SQLiteBackend:
         self.conn = sqlite3.connect(str(self.path), isolation_level=None, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        # entities_where()'s __contains filter (KI-039) uses LIKE; SQLite's
+        # default LIKE is ASCII-case-insensitive, DuckDB's is case-sensitive
+        # — without this, the same .where(x__contains=...) call would
+        # silently return different result sets per backend. Case-sensitive
+        # matches DuckDB's default and is the less surprising choice for a
+        # substring filter (matches Python's own `in` semantics).
+        self.conn.execute("PRAGMA case_sensitive_like = ON")
         # SPEC §12.1 MUST: default backend uses WAL mode — readers don't
         # block behind writers, which matters for a long-lived MCP server
         # process handling concurrent tool calls. No-op (falls back to a
@@ -1619,10 +1626,12 @@ class SQLiteBackend:
             match_params = []
 
         # predicate/value are always bound via `?` below, never
-        # interpolated; the only interpolated piece is match_clause, itself
-        # built from hardcoded literals (see the flagged_clause
-        # justification above) - same already-justified pattern, not a new
-        # SQL injection surface.
+        # interpolated; the two interpolated pieces are match_clause (built
+        # from hardcoded literals, see the flagged_clause justification
+        # above) and, for range operators, sql_op — a lookup into the
+        # closed, module-level _RANGE_SQL_OPERATORS dict, never the
+        # caller's raw operator string. Same already-justified pattern, not
+        # a new SQL injection surface.
         for predicate, operator, value in predicate_filters:
             if operator == "eq":
                 query += (
@@ -1644,6 +1653,15 @@ class SQLiteBackend:
                 )
                 params.extend([predicate, f"%{_like_escape(value)}%", *match_params])
             else:
+                # QueryBuilder only validates the predicate's *declared*
+                # value_type is Integer/Float, never that already-stored
+                # value_lit content actually parses as one (KI-049).
+                # SQLite has no TRY_CAST (unlike DuckDB's equivalent
+                # branch): CAST('unknown' AS REAL) silently returns 0.0
+                # rather than erroring or excluding the row — a known,
+                # tracked gap, not something this fix can close without
+                # write-time content validation (KI-049), which is a
+                # materially different, larger scope than this operator.
                 sql_op = _RANGE_SQL_OPERATORS[operator]
                 query += (
                     " AND id IN ("  # nosec B608

@@ -1568,10 +1568,12 @@ class DuckDBBackend:
             match_params = []
 
         # predicate/value are always bound via `?` below, never
-        # interpolated; the only interpolated piece is match_clause, itself
-        # built from hardcoded literals (see the flagged_clause
-        # justification above) - same already-justified pattern, not a new
-        # SQL injection surface.
+        # interpolated; the two interpolated pieces are match_clause (built
+        # from hardcoded literals, see the flagged_clause justification
+        # above) and, for range operators, sql_op — a lookup into the
+        # closed, module-level _RANGE_SQL_OPERATORS dict, never the
+        # caller's raw operator string. Same already-justified pattern, not
+        # a new SQL injection surface.
         for predicate, operator, value in predicate_filters:
             if operator == "eq":
                 query += (
@@ -1593,11 +1595,20 @@ class DuckDBBackend:
                 )
                 params.extend([predicate, f"%{_like_escape(value)}%", *match_params])
             else:
+                # TRY_CAST, not CAST: QueryBuilder only validates the
+                # predicate's *declared* value_type is Integer/Float, never
+                # that already-stored value_lit content actually parses as
+                # one (KI-049) — a row that doesn't CAST would otherwise
+                # raise duckdb.ConversionException uncaught through this
+                # port. TRY_CAST returns NULL instead, and NULL compared
+                # with any of >/</>=/<= is never true, so the row is simply
+                # excluded rather than erroring.
                 sql_op = _RANGE_SQL_OPERATORS[operator]
                 query += (
                     " AND id IN ("  # nosec B608
                     "SELECT subject FROM assertion"
-                    f" WHERE predicate = ? AND CAST(value_lit AS DOUBLE) {sql_op} ?{match_clause}"
+                    f" WHERE predicate = ? AND TRY_CAST(value_lit AS DOUBLE) {sql_op} ?"
+                    f"{match_clause}"
                     ")"
                 )
                 params.extend([predicate, value, *match_params])

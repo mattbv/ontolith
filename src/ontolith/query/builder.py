@@ -124,6 +124,8 @@ class QueryBuilder:
             prop, operator = self._parse_filter_key(key)
             if operator in _RANGE_OPERATORS:
                 value = self._coerce_range_value(prop, operator, value)
+            elif operator == "contains" and not isinstance(value, str):
+                raise ValidationError(f"where({prop}__contains={value!r}) requires a string value")
             self._filters[(prop, operator)] = value
         return self
 
@@ -132,13 +134,15 @@ class QueryBuilder:
 
         No `__` means plain equality (`"eq"`). A recognized lookup-operator
         suffix (see `_LOOKUP_OPERATORS`) splits the key into the property
-        and that operator. Anything else — an unrecognized suffix, or more
-        than one `__` in the key (multi-hop relation traversal) — raises.
+        and that operator. Anything else — an unrecognized suffix, more than
+        one `__` in the key (multi-hop relation traversal), or an empty
+        property name (a key that IS just the operator suffix, e.g.
+        `__contains`) — raises.
         """
         if "__" not in key:
             return key, "eq"
         prop, _, suffix = key.rpartition("__")
-        if suffix not in _LOOKUP_OPERATORS or "__" in prop:
+        if suffix not in _LOOKUP_OPERATORS or "__" in prop or not prop:
             raise ValidationError(
                 f"where({key}=...) is not supported: recognized lookup operators are "
                 f"{sorted(_LOOKUP_OPERATORS)} (KI-039); relation traversal (e.g. "
@@ -151,14 +155,25 @@ class QueryBuilder:
     def _coerce_range_value(self, prop: str, operator: str, value: Any) -> float:
         """Validate and convert a `__gt`/`__lt`/`__gte`/`__lte` value (KI-039).
 
+        Validates against the schema effective at `.as_of()`'s pinned time,
+        not today's, when this query is bitemporally pinned (SPEC §11.4) —
+        a predicate retyped since `t` must be judged by what it was
+        declared at `t`, the same way `AsOfView.schema()` already resolves
+        (KI-019).
+
         Raises:
-            ValidationError: No schema is registered for this namespace,
-                the predicate isn't declared in it, it's declared with a
-                non-`Integer`/`Float` value_type (including relations,
-                which have none), or `value` doesn't parse as a number.
+            ValidationError: No schema was registered (as of the relevant
+                time) for this namespace, the predicate isn't declared in
+                it, it's declared with a non-`Integer`/`Float` value_type
+                (including relations, which have none), or `value` doesn't
+                parse as a number.
         """
         qualified = f"{self._concept}.{prop}"
-        schema = self._backend.get_schema(self._namespace)
+        schema = (
+            self._backend.get_schema_at(self._namespace, self._as_of_time)
+            if self._as_of_time is not None
+            else self._backend.get_schema(self._namespace)
+        )
         value_type = schema.value_type_of(qualified) if schema is not None else None
         if value_type not in _RANGE_VALUE_TYPES:
             detail = (
@@ -170,6 +185,10 @@ class QueryBuilder:
                 f"where({prop}__{operator}=...) requires {qualified!r} to be declared "
                 f"Integer or Float in the active schema (KI-039) — {detail}."
             )
+        # bool is a subclass of int, so float(True) == 1.0 would otherwise
+        # silently accept a boolean as if it were a real numeric filter.
+        if isinstance(value, bool):
+            raise ValidationError(f"where({prop}__{operator}={value!r}) is not a number")
         try:
             return float(value)
         except (TypeError, ValueError) as exc:

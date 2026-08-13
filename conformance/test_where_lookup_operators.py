@@ -2,10 +2,17 @@
 
 `.where()` accepts a closed set of dunder-suffixed lookup operators on top
 of plain equality: `__contains` (substring, SQLite `LIKE ESCAPE`/DuckDB
-`LIKE ESCAPE`) and `__gt`/`__lt`/`__gte`/`__lte` (numeric range, via
-`CAST(value_lit AS REAL)` on SQLite and `CAST(value_lit AS DOUBLE)` on
-DuckDB). This file proves both backends implement every operator
-identically, since tests/unit/test_query.py only ever exercises SQLite
+`LIKE ESCAPE`, case-sensitive on both — SQLite's default is case
+-insensitive, so `SQLiteBackend` explicitly sets `PRAGMA
+case_sensitive_like = ON` to match DuckDB's default rather than the other
+way around) and `__gt`/`__lt`/`__gte`/`__lte` (numeric range, via
+`CAST(value_lit AS REAL)` on SQLite — SQLite has no `TRY_CAST` — and
+`TRY_CAST(value_lit AS DOUBLE)` on DuckDB, which is why a range filter
+against a non-numeric *stored* value (KI-049) is excluded on DuckDB but
+silently treated as `0.0` on SQLite: a real, currently-unresolved
+cross-backend divergence, not something this file papers over). This file
+proves both backends implement every operator identically where they in
+fact do, since tests/unit/test_query.py only ever exercises SQLite
 directly (Ontology.connect() always builds a SQLiteBackend).
 """
 
@@ -81,6 +88,21 @@ class TestContains:
 
         assert kb.query("Person").where(name__contains="nonexistent").all() == []
 
+    def test_case_sensitive_on_both_backends(self, make_kb: KbFactory) -> None:
+        """SQLite's LIKE is case-insensitive by default, DuckDB's is not -
+        without SQLiteBackend explicitly forcing case-sensitivity, the same
+        .where(x__contains=...) call would silently return different
+        result sets per backend."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Lovelace", "Text", AUTHOR)
+
+        assert {r.id for r in kb.query("Person").where(name__contains="Lovelace").all()} == {
+            entity.id
+        }
+        assert kb.query("Person").where(name__contains="lovelace").all() == []
+        assert kb.query("Person").where(name__contains="LOVELACE").all() == []
+
 
 class TestRangeOperators:
     def test_gt_lt_gte_lte_boundaries(self, make_kb: KbFactory) -> None:
@@ -119,3 +141,62 @@ class TestRangeOperators:
         results = kb.query("Person").where(age__gte=20).where(age__lt=40).all()
 
         assert {r.id for r in results} == {in_range.id}
+
+    def test_composes_with_contains_in_a_single_call(self, make_kb: KbFactory) -> None:
+        """Three-way single-call composition: a range operator and a
+        __contains operator on different predicates, plus a plain equality
+        filter, all AND together."""
+        kb = _kb(make_kb)
+        matching = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(matching.id, "Person.name", "Ada Lovelace", "Text", AUTHOR)
+        kb.assert_literal(matching.id, "Person.age", "30", "Integer", AUTHOR)
+
+        wrong_age = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(wrong_age.id, "Person.name", "Ada Lovelace", "Text", AUTHOR)
+        kb.assert_literal(wrong_age.id, "Person.age", "10", "Integer", AUTHOR)
+
+        wrong_name = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(wrong_name.id, "Person.name", "Grace Hopper", "Text", AUTHOR)
+        kb.assert_literal(wrong_name.id, "Person.age", "30", "Integer", AUTHOR)
+
+        results = kb.query("Person").where(name__contains="Lovelace", age__gte=20, age__lt=40).all()
+
+        assert {r.id for r in results} == {matching.id}
+
+
+class TestAsOfWithLookupOperators:
+    """KI-039 review finding: .as_of() must apply to __contains/range
+    filters the same way it already does to plain equality - both the
+    bitemporal window on which assertion qualifies, and (for range
+    operators specifically) which schema version validates the predicate
+    (SPEC §11.4, KI-019's get_schema_at())."""
+
+    def test_contains_respects_as_of_window(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        first = kb.assert_literal(entity.id, "Person.name", "Ada Lovelace", "Text", AUTHOR)
+        before_retraction = clock.now()
+
+        clock.advance(days=1)
+        kb.retract(first.id, AUTHOR)
+
+        assert kb.query("Person").where(name__contains="Lovelace").all() == []
+        results = kb.as_of(before_retraction).query("Person").where(name__contains="Lovelace").all()
+        assert {r.id for r in results} == {entity.id}
+
+    def test_range_operator_respects_as_of_window(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        first = kb.assert_literal(entity.id, "Person.age", "30", "Integer", AUTHOR)
+        before_retraction = clock.now()
+
+        clock.advance(days=1)
+        kb.retract(first.id, AUTHOR)
+
+        assert kb.query("Person").where(age__gt=20).all() == []
+        results = kb.as_of(before_retraction).query("Person").where(age__gt=20).all()
+        assert {r.id for r in results} == {entity.id}
