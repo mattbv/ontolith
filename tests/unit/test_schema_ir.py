@@ -2,6 +2,7 @@
 
 import pytest
 
+from ontolith.core.errors import SchemaError
 from ontolith.schema import ConceptDef, PropertyDef, RelationDef, SchemaIR
 
 
@@ -277,6 +278,30 @@ class TestKindOf:
 
     def test_malformed_predicate_returns_none(self) -> None:
         assert self._schema().kind_of("NoDotHere") is None
+
+
+class TestPropertyRelationNameCollision:
+    """ConceptDef rejects a field name declared as both a property and a
+    relation (KI-040) - _resolve_field checks properties first, so an
+    unrejected collision would make the relation half permanently
+    unreachable (every ref write to that name would fail the kind
+    check it could never satisfy)."""
+
+    def test_collision_raises(self) -> None:
+        with pytest.raises(SchemaError, match="employer"):
+            ConceptDef(
+                name="Person",
+                properties={"employer": PropertyDef(name="employer", value_type="Text")},
+                relations={"employer": RelationDef(name="employer", target_concept="Organization")},
+            )
+
+    def test_no_collision_is_fine(self) -> None:
+        concept = ConceptDef(
+            name="Person",
+            properties={"name": PropertyDef(name="name", value_type="Text")},
+            relations={"employer": RelationDef(name="employer", target_concept="Organization")},
+        )
+        assert concept.properties.keys().isdisjoint(concept.relations.keys())
 
 
 class TestHasPredicate:

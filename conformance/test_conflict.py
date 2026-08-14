@@ -636,7 +636,7 @@ class TestValueTypeMismatchRejected:
         assertion = kb.assert_literal(entity.id, "Person.age", "42", "Integer", AUTHOR)
         assert assertion.value_type == "Integer"
 
-    def test_relation_declared_predicate_has_no_value_type_to_mismatch(
+    def test_literal_under_relation_predicate_is_a_kind_error_not_a_value_type_error(
         self, make_kb: KbFactory
     ) -> None:
         """A predicate declared as a relation has no PropertyDef.value_type
@@ -722,6 +722,22 @@ class TestPredicateKindMismatch:
 
         with pytest.raises(ValidationError, match="declared a relation"):
             kb.propose(entity.id, "Person.employer", "Acme Corp", "Text", AUTHOR)
+
+    def test_rejected_propose_leaves_no_proposal_row(self, make_kb: KbFactory) -> None:
+        """The kind check runs before any Proposal is constructed or
+        persisted - a rejected propose()/propose_ref() must leave no
+        trace, the same way an unknown-predicate or value_type-mismatch
+        rejection already does."""
+        kb = self._kb_with_property_and_relation(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        target = kb.create_entity("Organization", author=AUTHOR)
+
+        with pytest.raises(ValidationError):
+            kb.propose(entity.id, "Person.employer", "Acme Corp", "Text", AUTHOR)
+        with pytest.raises(ValidationError):
+            kb.propose_ref(entity.id, "Person.name", target.id, AUTHOR)
+
+        assert kb.proposals(state=None) == []
 
     def test_propose_ref_against_property_predicate_raises(self, make_kb: KbFactory) -> None:
         kb = self._kb_with_property_and_relation(make_kb)

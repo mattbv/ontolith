@@ -423,7 +423,7 @@ class Ontology:
         predicate: str,
         value_type: str | None = None,
         *,
-        expected_kind: Literal["property", "relation"] | None = None,
+        expected_kind: Literal["property", "relation"],
     ) -> None:
         """Reject an unknown predicate at write time (SPEC §4) rather than
         silently defaulting its temporality/cardinality to static/single.
@@ -433,15 +433,20 @@ class Ontology:
         (KI-031) — e.g. writing `value_type="Text"` against a predicate
         declared `Integer`.
 
-        When `expected_kind` is given, also reject a predicate-kind
-        mismatch (KI-040) — a literal write (`assert_literal`/`propose`,
+        `expected_kind` (required, KI-040) rejects a predicate-kind
+        mismatch — a literal write (`assert_literal`/`propose`,
         `expected_kind="property"`) against a schema-declared relation
         predicate, or a ref write (`assert_ref`/`propose_ref`,
         `expected_kind="relation"`) against a schema-declared property
-        predicate. Passed explicitly by each call site rather than inferred
-        from whether `value_type` is set, so the two checks stay
-        independently reasoned about even though every current caller
-        happens to pass both together.
+        predicate. Required rather than defaulted to `None`, and kept
+        independent of `value_type` rather than inferred from whether it's
+        set, so a future fifth write path can't silently skip the kind
+        check by omitting the keyword — `value_type` is only ever set by
+        the two literal-write call sites and never by the two ref-write
+        ones, so the two parameters happen to correlate today, but they
+        answer different questions (what shape is the value vs. what kind
+        is the predicate) and a required, explicit `expected_kind` keeps
+        that true by construction, not by accident.
 
         No-op when no schema is registered for the namespace yet — a
         schema-less namespace has nothing to validate a predicate against.
@@ -462,14 +467,23 @@ class Ontology:
                     f"schema {schema.namespace!r} version {schema.version}, but this "
                     f"write supplies value_type={value_type!r}"
                 )
-        if expected_kind is not None:
-            actual_kind = schema.kind_of(predicate)
-            if actual_kind is not None and actual_kind != expected_kind:
-                raise ValidationError(
-                    f"Predicate {predicate!r} is declared a {actual_kind} in schema "
-                    f"{schema.namespace!r} version {schema.version}, but this write is "
-                    f"a {expected_kind} assertion"
-                )
+        actual_kind = schema.kind_of(predicate)
+        if actual_kind is not None and actual_kind != expected_kind:
+            wrong_call = (
+                "assert_literal/propose"
+                if expected_kind == "property"
+                else "assert_ref/propose_ref"
+            )
+            right_call = (
+                "assert_ref/propose_ref"
+                if expected_kind == "property"
+                else "assert_literal/propose"
+            )
+            raise ValidationError(
+                f"Predicate {predicate!r} is declared a {actual_kind} in schema "
+                f"{schema.namespace!r} version {schema.version}, but {wrong_call} "
+                f"asserts a {expected_kind}. Use {right_call} instead."
+            )
 
     def _retraction_valid_to(self, assertion_id: str, now: datetime) -> str | None:
         """Compute valid_to for a retraction.
@@ -1393,6 +1407,16 @@ class Ontology:
         for each operation's predicate, never trusted from the payload's
         stored snapshot (`TestAcceptProposalReResolvesTemporality`) — the
         schema may have changed between proposal creation and replay.
+        `_require_known_predicate`'s validations (unknown-predicate,
+        `value_type` mismatch KI-031, predicate-kind mismatch KI-040) are
+        deliberately NOT re-run here, unlike temporality — the original
+        `propose`/`propose_ref` call already ran them once; re-running them
+        at replay time is `resubmit`'s own documented precedent to skip
+        (see its docstring), not something this method decides on its own.
+        A schema change between submission and replay (e.g. a property
+        redeclared a relation) can therefore let a now-mismatched write
+        through unchecked — a narrow, pre-existing gap shared with KI-031,
+        not new to KI-040.
 
         ``extra_retracting_party``: the accepting reviewer, when called from
         `accept_proposal` (KI-033) — a `retract` operation's contradiction
