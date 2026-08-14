@@ -829,10 +829,10 @@ New conformance vectors (`conformance/test_where_lookup_operators.py`, cross-bac
 
 ---
 
-## KI-040 — Nothing validates that a predicate's declared kind (property vs. relation) matches how it's written or filtered
+## KI-040 — Nothing validates that a predicate's declared kind (property vs. relation) matches how it's written or filtered ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — a narrow, currently-theoretical write-time/read-time consistency gap
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved in `fix(ontology): reject predicate-kind mismatches at write time (KI-040)`
 **SPEC reference:** SPEC §4 (Schema — properties and relations are distinct declaration kinds)
 
 ### Description
@@ -843,7 +843,11 @@ This was surfaced during KI-030's review: `entities_where()`'s `value_lit`/`valu
 
 ### Fix
 
-Add a kind check to `_require_known_predicate` (or a new dedicated check in `assert_literal`/`assert_ref`) that rejects a literal assertion against a schema-declared relation predicate, and vice versa, with a clear `ValidationError`. Once that guarantee holds, `entities_where()` could optionally be tightened to select `value_lit` vs. `value_ref` based on the predicate's declared kind (resolved via schema) rather than matching both unconditionally — removing the union entirely for the common case and only falling back to it for callers without a registered schema (where kind can't be known in advance).
+New `SchemaIR.kind_of(predicate) -> Literal["property", "relation"] | None`, mirroring `value_type_of`'s existing shape (returns `None` for an unresolvable predicate — schema-less namespace or undeclared field). `Ontology._require_known_predicate` gained an `expected_kind` keyword-only parameter; when given, it rejects a kind mismatch with a clear `ValidationError` naming the declared kind and the kind the write actually is. `assert_literal`/`propose` pass `expected_kind="property"`; `assert_ref`/`propose_ref` pass `expected_kind="relation"`. `expected_kind` is passed explicitly by each call site rather than inferred from whether `value_type` is set (which would have worked today, since every literal caller happens to pass both together) — keeping the two checks independently reasoned about rather than coupling them through an incidental correlation. No-op for a schema-less namespace, matching `_require_known_predicate`'s existing precedent for the unknown-predicate and value_type checks. `_replay_proposal_operations` (the shared path behind `accept_proposal`/`resubmit`) deliberately does not re-run `_require_known_predicate` at all — pre-existing precedent this fix inherits unchanged, documented at `resubmit`'s own docstring.
+
+A pre-existing conformance test (`TestValueTypeMismatchRejected::test_relation_declared_predicate_has_no_value_type_to_mismatch`) had itself pinned the gap as "deliberately out-of-scope (KI-040)" and asserted the old, now-incorrect behavior (a literal write under a relation-declared predicate silently succeeding) — updated to assert the new `ValidationError` instead, plus a new `TestPredicateKindMismatch` class (10 cases across both backends) covering all four write paths, the matching-kind regression guard, and the no-schema-registered permissive case. Fixing this also surfaced a **real, pre-existing bug** in two unrelated tests (`TestValidityWindowWriteAPI::test_assert_ref_explicit_window_persisted`/`test_propose_ref_reviewed_explicit_window_survives_replay`): both called `assert_ref`/`propose_ref` against `Person.employer`, a property-declared (not relation-declared) predicate in `test_conflict.py`'s shared `_kb()` schema — silently permitted before this fix, now correctly rejected. `_kb()` gained a genuine `Person.manager -> Person` relation for these tests to target instead. New unit vectors (`tests/unit/test_schema_ir.py::TestKindOf`) cover `kind_of()` directly. All new/changed vectors confirmed to fail without the fix.
+
+`entities_where()`'s optional follow-up — selecting `value_lit` vs. `value_ref` per-filter based on the predicate's declared kind, rather than always matching both via `UNION ALL` — was evaluated and deliberately not done: the Fix text itself framed it as optional, and once the write-time guarantee holds, the union is provably redundant-but-harmless (no schema ever describes a predicate as both kinds, and no write can create a mixed-kind predicate anymore), not a live correctness gap needing its own tracked follow-up.
 
 ---
 

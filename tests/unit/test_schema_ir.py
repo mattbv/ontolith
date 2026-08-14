@@ -245,6 +245,40 @@ class TestValueTypeOf:
         assert self._schema().value_type_of("NoDotHere") is None
 
 
+class TestKindOf:
+    """SchemaIR.kind_of() — write-time predicate-kind validation (KI-040)."""
+
+    def _schema(self) -> SchemaIR:
+        return SchemaIR(
+            namespace="test",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "name": PropertyDef(name="name", value_type="Text"),
+                    },
+                    relations={
+                        "employer": RelationDef(name="employer", target_concept="Organization"),
+                    },
+                ),
+                "Organization": ConceptDef(name="Organization"),
+            },
+        )
+
+    def test_property_resolves_to_property(self) -> None:
+        assert self._schema().kind_of("Person.name") == "property"
+
+    def test_relation_resolves_to_relation(self) -> None:
+        assert self._schema().kind_of("Person.employer") == "relation"
+
+    def test_unknown_predicate_returns_none(self) -> None:
+        assert self._schema().kind_of("Person.unknown_field") is None
+
+    def test_malformed_predicate_returns_none(self) -> None:
+        assert self._schema().kind_of("NoDotHere") is None
+
+
 class TestHasPredicate:
     """SchemaIR.has_predicate() — write-time unknown-predicate validation."""
 

@@ -169,6 +169,23 @@ class SchemaIR(BaseModel):
         field = self._resolve_field(predicate)
         return field.value_type if isinstance(field, PropertyDef) else None
 
+    def kind_of(self, predicate: str) -> Literal["property", "relation"] | None:
+        """Resolve whether a predicate is declared a property or a relation
+        (SPEC §4, KI-040).
+
+        Args:
+            predicate: Dotted predicate, e.g. "Person.name" or "Person.employer"
+
+        Returns:
+            `"property"` or `"relation"`, or `None` if the predicate is
+            unresolvable (schema-less namespace, or not declared in this
+            schema version).
+        """
+        field = self._resolve_field(predicate)
+        if field is None:
+            return None
+        return "property" if isinstance(field, PropertyDef) else "relation"
+
     def to_json(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
         return self.model_dump()

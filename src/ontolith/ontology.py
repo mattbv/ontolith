@@ -418,18 +418,30 @@ class Ontology:
         schema = self.backend.get_schema(self.namespace)
         return schema.cardinality_of(predicate) if schema is not None else "single"
 
-    def _require_known_predicate(self, predicate: str, value_type: str | None = None) -> None:
+    def _require_known_predicate(
+        self,
+        predicate: str,
+        value_type: str | None = None,
+        *,
+        expected_kind: Literal["property", "relation"] | None = None,
+    ) -> None:
         """Reject an unknown predicate at write time (SPEC §4) rather than
         silently defaulting its temporality/cardinality to static/single.
 
         When `value_type` is given (literal write paths only), also reject a
         mismatch against the schema-declared `PropertyDef.value_type`
         (KI-031) — e.g. writing `value_type="Text"` against a predicate
-        declared `Integer`. No check is performed when the predicate
-        resolves to a relation (relations have no value_type;
-        SchemaIR.value_type_of returns None) — a caller asserting a literal
-        against a relation-declared predicate is a predicate-kind mismatch,
-        tracked separately as KI-040, not this.
+        declared `Integer`.
+
+        When `expected_kind` is given, also reject a predicate-kind
+        mismatch (KI-040) — a literal write (`assert_literal`/`propose`,
+        `expected_kind="property"`) against a schema-declared relation
+        predicate, or a ref write (`assert_ref`/`propose_ref`,
+        `expected_kind="relation"`) against a schema-declared property
+        predicate. Passed explicitly by each call site rather than inferred
+        from whether `value_type` is set, so the two checks stay
+        independently reasoned about even though every current caller
+        happens to pass both together.
 
         No-op when no schema is registered for the namespace yet — a
         schema-less namespace has nothing to validate a predicate against.
@@ -449,6 +461,14 @@ class Ontology:
                     f"Predicate {predicate!r} is declared value_type={declared!r} in "
                     f"schema {schema.namespace!r} version {schema.version}, but this "
                     f"write supplies value_type={value_type!r}"
+                )
+        if expected_kind is not None:
+            actual_kind = schema.kind_of(predicate)
+            if actual_kind is not None and actual_kind != expected_kind:
+                raise ValidationError(
+                    f"Predicate {predicate!r} is declared a {actual_kind} in schema "
+                    f"{schema.namespace!r} version {schema.version}, but this write is "
+                    f"a {expected_kind} assertion"
                 )
 
     def _retraction_valid_to(self, assertion_id: str, now: datetime) -> str | None:
@@ -554,11 +574,12 @@ class Ontology:
 
         Raises:
             ValidationError: predicate is not declared in the active schema,
-                or value_type does not match the schema-declared value_type
-                for predicate (KI-031)
+                value_type does not match the schema-declared value_type
+                for predicate (KI-031), or predicate is declared a relation
+                rather than a property (KI-040)
         """
         self._check_direct_write_capability(author, acting_as)
-        self._require_known_predicate(predicate, value_type)
+        self._require_known_predicate(predicate, value_type, expected_kind="property")
         temporality = self._resolve_temporality(predicate)
 
         assertion = Assertion(
@@ -621,9 +642,14 @@ class Ontology:
 
         Returns:
             Assertion as persisted (status/supersedes reflect conflict routing)
+
+        Raises:
+            ValidationError: predicate is not declared in the active
+                schema, or predicate is declared a property rather than a
+                relation (KI-040)
         """
         self._check_direct_write_capability(author, acting_as)
-        self._require_known_predicate(predicate)
+        self._require_known_predicate(predicate, expected_kind="relation")
         temporality = self._resolve_temporality(predicate)
 
         assertion = Assertion(
@@ -820,13 +846,14 @@ class Ontology:
             AuthError: author or acting_as is not a known principal
             CapabilityError: delegation is unauthorized
             ValidationError: author is ai-kind and model is not provided,
-                predicate is not declared in the active schema, or
-                value_type does not match the schema-declared value_type
-                for predicate (KI-031)
+                predicate is not declared in the active schema, value_type
+                does not match the schema-declared value_type for predicate
+                (KI-031), or predicate is declared a relation rather than a
+                property (KI-040)
         """
         principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
-        self._require_known_predicate(predicate, value_type)
+        self._require_known_predicate(predicate, value_type, expected_kind="property")
         delegating = self._resolve_delegation(principal, author, acting_as)
         temporality = self._resolve_temporality(predicate)
 
@@ -944,12 +971,13 @@ class Ontology:
         Raises:
             AuthError: author or acting_as is not a known principal
             CapabilityError: delegation is unauthorized
-            ValidationError: author is ai-kind and model is not provided, or
-                predicate is not declared in the active schema
+            ValidationError: author is ai-kind and model is not provided,
+                predicate is not declared in the active schema, or predicate
+                is declared a property rather than a relation (KI-040)
         """
         principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
-        self._require_known_predicate(predicate)
+        self._require_known_predicate(predicate, expected_kind="relation")
         delegating = self._resolve_delegation(principal, author, acting_as)
         temporality = self._resolve_temporality(predicate)
 

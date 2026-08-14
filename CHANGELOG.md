@@ -201,6 +201,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead, a real, tracked cross-backend divergence (KI-049).
 
 #### Fixed
+- **`assert_literal`/`assert_ref`/`propose`/`propose_ref` now reject a predicate-kind
+  mismatch (closes KI-040):** nothing previously stopped a literal write against a
+  schema-declared relation predicate, or a ref write against a schema-declared
+  property predicate — `assert_literal(subj, "Person.employer", "Acme Corp", "Text",
+  ...)` silently succeeded even when `Person.employer` was declared a relation. New
+  `SchemaIR.kind_of(predicate)` resolves the declared kind; `_require_known_predicate`
+  gained an `expected_kind` parameter, passed explicitly by each call site (not
+  inferred from `value_type`'s presence, to keep the two checks independently
+  reasoned about) and raises `ValidationError` on mismatch. No-op for a schema-less
+  namespace, matching this method's existing precedent. Fixing this surfaced a real
+  pre-existing bug in two unrelated conformance tests that had been writing `assert_ref`
+  against a property-declared predicate, silently permitted before this fix.
 - **Breaking:** `StorageBackend.entities_meeting_confidence`/`entities_meeting_trust` (port
   + both backends) gained a required `candidate_ids: frozenset[str] | None = None`
   parameter (KI-037) — any third-party `StorageBackend` implementation must add it, since
