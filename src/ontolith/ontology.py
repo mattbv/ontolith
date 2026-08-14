@@ -418,18 +418,35 @@ class Ontology:
         schema = self.backend.get_schema(self.namespace)
         return schema.cardinality_of(predicate) if schema is not None else "single"
 
-    def _require_known_predicate(self, predicate: str, value_type: str | None = None) -> None:
+    def _require_known_predicate(
+        self,
+        predicate: str,
+        value_type: str | None = None,
+        *,
+        expected_kind: Literal["property", "relation"],
+    ) -> None:
         """Reject an unknown predicate at write time (SPEC §4) rather than
         silently defaulting its temporality/cardinality to static/single.
 
         When `value_type` is given (literal write paths only), also reject a
         mismatch against the schema-declared `PropertyDef.value_type`
         (KI-031) — e.g. writing `value_type="Text"` against a predicate
-        declared `Integer`. No check is performed when the predicate
-        resolves to a relation (relations have no value_type;
-        SchemaIR.value_type_of returns None) — a caller asserting a literal
-        against a relation-declared predicate is a predicate-kind mismatch,
-        tracked separately as KI-040, not this.
+        declared `Integer`.
+
+        `expected_kind` (required, KI-040) rejects a predicate-kind
+        mismatch — a literal write (`assert_literal`/`propose`,
+        `expected_kind="property"`) against a schema-declared relation
+        predicate, or a ref write (`assert_ref`/`propose_ref`,
+        `expected_kind="relation"`) against a schema-declared property
+        predicate. Required rather than defaulted to `None`, and kept
+        independent of `value_type` rather than inferred from whether it's
+        set, so a future fifth write path can't silently skip the kind
+        check by omitting the keyword — `value_type` is only ever set by
+        the two literal-write call sites and never by the two ref-write
+        ones, so the two parameters happen to correlate today, but they
+        answer different questions (what shape is the value vs. what kind
+        is the predicate) and a required, explicit `expected_kind` keeps
+        that true by construction, not by accident.
 
         No-op when no schema is registered for the namespace yet — a
         schema-less namespace has nothing to validate a predicate against.
@@ -450,6 +467,23 @@ class Ontology:
                     f"schema {schema.namespace!r} version {schema.version}, but this "
                     f"write supplies value_type={value_type!r}"
                 )
+        actual_kind = schema.kind_of(predicate)
+        if actual_kind is not None and actual_kind != expected_kind:
+            wrong_call = (
+                "assert_literal/propose"
+                if expected_kind == "property"
+                else "assert_ref/propose_ref"
+            )
+            right_call = (
+                "assert_ref/propose_ref"
+                if expected_kind == "property"
+                else "assert_literal/propose"
+            )
+            raise ValidationError(
+                f"Predicate {predicate!r} is declared a {actual_kind} in schema "
+                f"{schema.namespace!r} version {schema.version}, but {wrong_call} "
+                f"asserts a {expected_kind}. Use {right_call} instead."
+            )
 
     def _retraction_valid_to(self, assertion_id: str, now: datetime) -> str | None:
         """Compute valid_to for a retraction.
@@ -554,11 +588,12 @@ class Ontology:
 
         Raises:
             ValidationError: predicate is not declared in the active schema,
-                or value_type does not match the schema-declared value_type
-                for predicate (KI-031)
+                value_type does not match the schema-declared value_type
+                for predicate (KI-031), or predicate is declared a relation
+                rather than a property (KI-040)
         """
         self._check_direct_write_capability(author, acting_as)
-        self._require_known_predicate(predicate, value_type)
+        self._require_known_predicate(predicate, value_type, expected_kind="property")
         temporality = self._resolve_temporality(predicate)
 
         assertion = Assertion(
@@ -621,9 +656,14 @@ class Ontology:
 
         Returns:
             Assertion as persisted (status/supersedes reflect conflict routing)
+
+        Raises:
+            ValidationError: predicate is not declared in the active
+                schema, or predicate is declared a property rather than a
+                relation (KI-040)
         """
         self._check_direct_write_capability(author, acting_as)
-        self._require_known_predicate(predicate)
+        self._require_known_predicate(predicate, expected_kind="relation")
         temporality = self._resolve_temporality(predicate)
 
         assertion = Assertion(
@@ -820,13 +860,14 @@ class Ontology:
             AuthError: author or acting_as is not a known principal
             CapabilityError: delegation is unauthorized
             ValidationError: author is ai-kind and model is not provided,
-                predicate is not declared in the active schema, or
-                value_type does not match the schema-declared value_type
-                for predicate (KI-031)
+                predicate is not declared in the active schema, value_type
+                does not match the schema-declared value_type for predicate
+                (KI-031), or predicate is declared a relation rather than a
+                property (KI-040)
         """
         principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
-        self._require_known_predicate(predicate, value_type)
+        self._require_known_predicate(predicate, value_type, expected_kind="property")
         delegating = self._resolve_delegation(principal, author, acting_as)
         temporality = self._resolve_temporality(predicate)
 
@@ -944,12 +985,13 @@ class Ontology:
         Raises:
             AuthError: author or acting_as is not a known principal
             CapabilityError: delegation is unauthorized
-            ValidationError: author is ai-kind and model is not provided, or
-                predicate is not declared in the active schema
+            ValidationError: author is ai-kind and model is not provided,
+                predicate is not declared in the active schema, or predicate
+                is declared a property rather than a relation (KI-040)
         """
         principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
-        self._require_known_predicate(predicate)
+        self._require_known_predicate(predicate, expected_kind="relation")
         delegating = self._resolve_delegation(principal, author, acting_as)
         temporality = self._resolve_temporality(predicate)
 
@@ -1365,6 +1407,16 @@ class Ontology:
         for each operation's predicate, never trusted from the payload's
         stored snapshot (`TestAcceptProposalReResolvesTemporality`) — the
         schema may have changed between proposal creation and replay.
+        `_require_known_predicate`'s validations (unknown-predicate,
+        `value_type` mismatch KI-031, predicate-kind mismatch KI-040) are
+        deliberately NOT re-run here, unlike temporality — the original
+        `propose`/`propose_ref` call already ran them once; re-running them
+        at replay time is `resubmit`'s own documented precedent to skip
+        (see its docstring), not something this method decides on its own.
+        A schema change between submission and replay (e.g. a property
+        redeclared a relation) can therefore let a now-mismatched write
+        through unchecked — a narrow, pre-existing gap shared with KI-031,
+        not new to KI-040.
 
         ``extra_retracting_party``: the accepting reviewer, when called from
         `accept_proposal` (KI-033) — a `retract` operation's contradiction

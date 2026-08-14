@@ -61,7 +61,11 @@ def _kb(make_kb: KbFactory) -> Ontology:
     kb.create_principal(ADMIN, kind="human", auth_method="oidc", default_capability="admin")
     # Person.employer is declared time_varying so conflict routing (schema-derived
     # per SPEC §10.1) exercises supersession; Person.name defaults to static.
-    # Person.phone is static + cardinality="many" (ADR-0017).
+    # Person.phone is static + cardinality="many" (ADR-0017). Person.manager is a
+    # relation (not a property) so assert_ref/propose_ref tests have a
+    # genuinely relation-declared predicate to target (KI-040's kind check
+    # rejects a ref write against a property-declared predicate like
+    # employer/name).
     schema = SchemaIR(
         namespace="default",
         version=1,
@@ -74,6 +78,9 @@ def _kb(make_kb: KbFactory) -> Ontology:
                         name="employer", value_type="Text", temporality="time_varying"
                     ),
                     "phone": PropertyDef(name="phone", value_type="Text", cardinality="many"),
+                },
+                relations={
+                    "manager": RelationDef(name="manager", target_concept="Person"),
                 },
             ),
         },
@@ -629,14 +636,18 @@ class TestValueTypeMismatchRejected:
         assertion = kb.assert_literal(entity.id, "Person.age", "42", "Integer", AUTHOR)
         assert assertion.value_type == "Integer"
 
-    def test_relation_declared_predicate_has_no_value_type_to_mismatch(
+    def test_literal_under_relation_predicate_is_a_kind_error_not_a_value_type_error(
         self, make_kb: KbFactory
     ) -> None:
         """A predicate declared as a relation has no PropertyDef.value_type
-        to compare against, so a literal assertion under it is permitted
-        regardless of the caller-supplied value_type — a schema-declared-kind
-        mismatch is a distinct, deliberately out-of-scope gap (KI-040), not
-        this check's concern."""
+        to compare against — value_type_of() returns None for it, so the
+        value_type-mismatch check above is a no-op here specifically.
+        That's not a gap anymore, though: a literal assertion under a
+        relation-declared predicate is now rejected by a dedicated kind
+        check instead (KI-040), exercised in TestPredicateKindMismatch
+        below — this test only pins that the two checks are independent
+        (a literal under a relation predicate is caught by the kind check,
+        not misattributed to a "value_type mismatch" error)."""
         clock = FixedClock(T0)
         ids = FixedIdProvider(["p-0", "e-1", "e-2", "a-1"])
         kb = make_kb(clock, ids)
@@ -658,8 +669,112 @@ class TestValueTypeMismatchRejected:
         kb.apply_schema(schema, author=ADMIN)
         entity = kb.create_entity("Person", author=AUTHOR)
 
+        with pytest.raises(ValidationError, match="declared a relation") as exc_info:
+            kb.assert_literal(entity.id, "Person.employer", "Acme Corp", "Text", AUTHOR)
+        assert "value_type" not in str(exc_info.value)
+
+
+class TestPredicateKindMismatch:
+    """KI-040: a write's kind (literal vs. ref) must match the predicate's
+    schema-declared kind (property vs. relation)."""
+
+    def _kb_with_property_and_relation(self, make_kb: KbFactory) -> Ontology:
+        clock = FixedClock(T0)
+        ids = FixedIdProvider([f"id-{i}" for i in range(20)])
+        kb = make_kb(clock, ids)
+        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+        kb.create_principal(ADMIN, kind="human", auth_method="oidc", default_capability="admin")
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={"name": PropertyDef(name="name", value_type="Text")},
+                    relations={
+                        "employer": RelationDef(name="employer", target_concept="Organization"),
+                    },
+                ),
+                "Organization": ConceptDef(name="Organization"),
+            },
+        )
+        kb.apply_schema(schema, author=ADMIN)
+        return kb
+
+    def test_assert_literal_against_relation_predicate_raises(self, make_kb: KbFactory) -> None:
+        kb = self._kb_with_property_and_relation(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+
+        with pytest.raises(ValidationError, match="declared a relation"):
+            kb.assert_literal(entity.id, "Person.employer", "Acme Corp", "Text", AUTHOR)
+
+    def test_assert_ref_against_property_predicate_raises(self, make_kb: KbFactory) -> None:
+        kb = self._kb_with_property_and_relation(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        target = kb.create_entity("Organization", author=AUTHOR)
+
+        with pytest.raises(ValidationError, match="declared a property"):
+            kb.assert_ref(entity.id, "Person.name", target.id, AUTHOR)
+
+    def test_propose_against_relation_predicate_raises(self, make_kb: KbFactory) -> None:
+        kb = self._kb_with_property_and_relation(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+
+        with pytest.raises(ValidationError, match="declared a relation"):
+            kb.propose(entity.id, "Person.employer", "Acme Corp", "Text", AUTHOR)
+
+    def test_rejected_propose_leaves_no_proposal_row(self, make_kb: KbFactory) -> None:
+        """The kind check runs before any Proposal is constructed or
+        persisted - a rejected propose()/propose_ref() must leave no
+        trace, the same way an unknown-predicate or value_type-mismatch
+        rejection already does."""
+        kb = self._kb_with_property_and_relation(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        target = kb.create_entity("Organization", author=AUTHOR)
+
+        with pytest.raises(ValidationError):
+            kb.propose(entity.id, "Person.employer", "Acme Corp", "Text", AUTHOR)
+        with pytest.raises(ValidationError):
+            kb.propose_ref(entity.id, "Person.name", target.id, AUTHOR)
+
+        assert kb.proposals(state=None) == []
+
+    def test_propose_ref_against_property_predicate_raises(self, make_kb: KbFactory) -> None:
+        kb = self._kb_with_property_and_relation(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        target = kb.create_entity("Organization", author=AUTHOR)
+
+        with pytest.raises(ValidationError, match="declared a property"):
+            kb.propose_ref(entity.id, "Person.name", target.id, AUTHOR)
+
+    def test_matching_kind_still_succeeds(self, make_kb: KbFactory) -> None:
+        """Regression guard: the kind check must not reject correctly
+        -kinded writes."""
+        kb = self._kb_with_property_and_relation(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        target = kb.create_entity("Organization", author=AUTHOR)
+
+        literal = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        assert literal.value == "Ada"
+        ref = kb.assert_ref(entity.id, "Person.employer", target.id, AUTHOR)
+        assert ref.value == target.id
+
+    def test_permitted_without_a_registered_schema(self, make_kb: KbFactory) -> None:
+        """No schema in the namespace: nothing to validate kind against, so
+        any predicate/write-kind combination is accepted - matching the
+        existing no-schema precedent for value_type/unknown-predicate
+        checks."""
+        clock = FixedClock(T0)
+        ids = FixedIdProvider(["p-0", "e-1", "e-2", "a-1"])
+        kb = make_kb(clock, ids)
+        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+        entity = kb.create_entity("Person", author=AUTHOR)
+        target = kb.create_entity("Organization", author=AUTHOR)
+
         assertion = kb.assert_literal(entity.id, "Person.employer", "Acme Corp", "Text", AUTHOR)
         assert assertion.value == "Acme Corp"
+        ref = kb.assert_ref(entity.id, "Person.name", target.id, AUTHOR)
+        assert ref.value == target.id
 
 
 # ===========================================================================
@@ -697,7 +812,7 @@ class TestValidityWindowWriteAPI:
         entity = kb.create_entity("Person", author=AUTHOR)
         target = kb.create_entity("Person", author=AUTHOR)
         assertion = kb.assert_ref(
-            entity.id, "Person.employer", target.id, AUTHOR, valid_from=T0, valid_to=T1
+            entity.id, "Person.manager", target.id, AUTHOR, valid_from=T0, valid_to=T1
         )
         assert assertion.valid_from == T0
         assert assertion.valid_to == T1
@@ -716,7 +831,7 @@ class TestValidityWindowWriteAPI:
         target = kb.create_entity("Person", author=AUTHOR)
         proposal, decision = kb.propose_ref(
             entity.id,
-            "Person.employer",
+            "Person.manager",
             target.id,
             "bot@example.com",
             model="test-model-v1",
@@ -726,7 +841,7 @@ class TestValidityWindowWriteAPI:
         assert proposal.state == "require_review"
         kb.accept_proposal(proposal.id, "reviewer@example.com")
 
-        [assertion] = kb.assertions(subject=entity.id, predicate="Person.employer", status=None)
+        [assertion] = kb.assertions(subject=entity.id, predicate="Person.manager", status=None)
         assert assertion.valid_from == T0
         assert assertion.valid_to == T1
 

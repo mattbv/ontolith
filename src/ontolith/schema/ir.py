@@ -72,6 +72,30 @@ class ConceptDef(BaseModel):
 
     model_config = {"frozen": True}
 
+    @model_validator(mode="after")
+    def validate_no_property_relation_name_collision(self) -> "ConceptDef":
+        """Reject a field name declared in both `properties` and
+        `relations` on the same concept (KI-040).
+
+        `SchemaIR._resolve_field` checks `properties` before `relations`,
+        so an unrejected collision would silently make `kind_of()`
+        (and `value_type_of`/`temporality_of`/`cardinality_of`) always
+        resolve to the property, making the relation half permanently
+        unreachable — every ref write to that name would be rejected as a
+        kind mismatch it could never satisfy. Not reachable via the class
+        DSL or the LinkML front-end today (both keep properties/relations
+        in one namespace), only via a hand-built `SchemaIR`.
+        """
+        collisions = self.properties.keys() & self.relations.keys()
+        if collisions:
+            from ontolith.core.errors import SchemaError
+
+            raise SchemaError(
+                f"Concept {self.name!r} declares {sorted(collisions)} as both a "
+                "property and a relation — a field name must be one or the other"
+            )
+        return self
+
 
 class SchemaIR(BaseModel):
     """Complete schema definition in Internal Representation.
@@ -164,10 +188,28 @@ class SchemaIR(BaseModel):
         Returns:
             The declared value_type, or None if the predicate is
             unresolvable or resolves to a RelationDef — relations have no
-            value_type (predicate-kind mismatches are KI-040, not this).
+            value_type. Use `kind_of()` to check a predicate's kind
+            directly (KI-040) rather than inferring it from a `None` here.
         """
         field = self._resolve_field(predicate)
         return field.value_type if isinstance(field, PropertyDef) else None
+
+    def kind_of(self, predicate: str) -> Literal["property", "relation"] | None:
+        """Resolve whether a predicate is declared a property or a relation
+        (SPEC §4, KI-040).
+
+        Args:
+            predicate: Dotted predicate, e.g. "Person.name" or "Person.employer"
+
+        Returns:
+            `"property"` or `"relation"`, or `None` if the predicate is
+            unresolvable (schema-less namespace, or not declared in this
+            schema version).
+        """
+        field = self._resolve_field(predicate)
+        if field is None:
+            return None
+        return "property" if isinstance(field, PropertyDef) else "relation"
 
     def to_json(self) -> dict[str, Any]:
         """Serialize to JSON-compatible dict."""
