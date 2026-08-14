@@ -1197,10 +1197,14 @@ class TestSQLiteBackend:
             )
         )
 
-        results = backend.entities_where("test-ns", "Person", {"Person.employer": "org-001"})
+        results = backend.entities_where(
+            "test-ns", "Person", [("Person.employer", "eq", "org-001")]
+        )
         assert [r.id for r in results] == ["person-001"]
 
-        no_match = backend.entities_where("test-ns", "Person", {"Person.employer": "org-002"})
+        no_match = backend.entities_where(
+            "test-ns", "Person", [("Person.employer", "eq", "org-002")]
+        )
         assert no_match == []
 
     def test_contradictions_filter_by_state(self, backend: SQLiteBackend) -> None:
@@ -1278,6 +1282,52 @@ class TestSQLiteBackend:
         """enable_load_extension is toggled back off after loading sqlite-vec (supply-chain hygiene)."""
         with pytest.raises(sqlite3.OperationalError, match="not authorized"):
             backend.conn.load_extension("vec0")
+
+    def test_case_sensitive_like_pragma_is_set(self, backend: SQLiteBackend) -> None:
+        """PRAGMA case_sensitive_like = ON is set at connection time (KI-039)
+        so entities_where()'s __contains operator matches DuckDB's
+        case-sensitive LIKE default, rather than SQLite's own
+        case-insensitive one."""
+        # PRAGMA case_sensitive_like has no query form reporting the
+        # current setting - it's write-only - so this asserts the effect
+        # instead: 'Ada' LIKE 'ada' would match if case-insensitive.
+        assert backend.conn.execute("SELECT 'Ada' LIKE 'ada'").fetchone()[0] == 0
+
+    def test_range_operator_on_non_numeric_stored_value(self, backend: SQLiteBackend) -> None:
+        """KI-049: nothing validates that value_lit's actual content
+        parses as the predicate's declared value_type - a row with
+        non-numeric text stored against a nominally-numeric predicate
+        CASTs to 0.0 on SQLite (no TRY_CAST available), a documented,
+        tracked divergence from DuckDB's TRY_CAST-based exclusion (see
+        the DuckDB backend's own equivalent test)."""
+        backend.put_entity(
+            Entity(
+                id="e0",
+                namespace="test-ns",
+                concept="Person",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                created_by="alice@test.com",
+            )
+        )
+        backend.put_assertion(
+            Assertion(
+                id="a0",
+                namespace="test-ns",
+                subject="e0",
+                predicate="Person.age",
+                value_kind="literal",
+                value_type="Integer",
+                value="unknown",
+                author="alice@test.com",
+                asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+
+        matches_below = backend.entities_where("test-ns", "Person", [("Person.age", "lt", 10.0)])
+        assert [e.id for e in matches_below] == ["e0"]
+
+        matches_above = backend.entities_where("test-ns", "Person", [("Person.age", "gt", 10.0)])
+        assert matches_above == []
 
 
 class TestCandidateIdsNarrowing:

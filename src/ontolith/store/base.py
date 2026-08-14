@@ -11,7 +11,7 @@ The dependency rule prevents domain logic from importing concrete adapters.
 
 from contextlib import AbstractContextManager
 from datetime import datetime
-from typing import Protocol
+from typing import Any, Protocol
 
 from ontolith.core import Assertion, AssertionEvent, Entity, Namespace
 from ontolith.govern.contradiction import Contradiction
@@ -371,21 +371,49 @@ class StorageBackend(Protocol):
         self,
         namespace: str,
         concept: str,
-        predicate_filters: dict[str, str],
+        predicate_filters: list[tuple[str, str, Any]],
         as_of_time: datetime | None = None,
         include_flagged: bool = False,
     ) -> list[Entity]:
-        """Query entities matching all predicate=value filters in one SQL query.
+        """Query entities matching all predicate filters in one SQL query.
 
         Avoids the N+1 pattern of entities() + per-entity assertions() calls.
-        Each filter is (full_predicate, value); ALL must match (AND semantics).
-        A filter matches either a literal property (value_lit) or a
-        relation's target entity id (value_ref) — KI-030.
+        Each filter is `(full_predicate, operator, value)`; ALL must match
+        (AND semantics) — a list, not a dict, since two different operators
+        can target the same predicate (e.g. an `age` range needs both a
+        `"gte"` and a `"lt"` filter). `operator` is one of:
+
+        - `"eq"`: equality. Matches either a literal property (`value_lit`)
+          or a relation's target entity id (`value_ref`) — KI-030.
+        - `"contains"`: case-sensitive substring match against `value_lit`
+          only (KI-039) — relations have no defined substring semantics, so
+          this operator never matches against `value_ref`. Case-sensitive
+          on both backends by construction: SQLite's `LIKE` is
+          case-insensitive by default and DuckDB's is not, so
+          `SQLiteBackend` explicitly sets `PRAGMA case_sensitive_like = ON`
+          at connection time to make the two agree — a conformant
+          third-party backend implementing this port must match that
+          behavior, not SQLite's un-pragma'd default.
+        - `"gt"`/`"lt"`/`"gte"`/`"lte"`: numeric range against `value_lit`
+          only (KI-039) — a numeric cast (`CAST`/`TRY_CAST`, exact type
+          backend-specific — see e.g. `DuckDBBackend`'s docstring for why
+          `DOUBLE` not `REAL`). Callers (in practice, only `QueryBuilder`)
+          are responsible for restricting this to predicates *declared*
+          numeric — see `_RANGE_VALUE_TYPES` in `ontolith.query.builder`'s
+          docstring for why the backend itself doesn't validate that. A
+          backend is NOT responsible for validating that already-stored
+          `value_lit` content actually parses as a number for a predicate
+          declared numeric (KI-049) — implementations should fail safe
+          (exclude the row) rather than raise for a value that doesn't
+          parse, the way `TRY_CAST` does; letting a raw conversion
+          exception escape through this port violates SPEC §16's error
+          taxonomy.
 
         Args:
             namespace: Namespace to query
             concept: Concept to filter by
-            predicate_filters: Dict of full_predicate → value
+            predicate_filters: List of `(full_predicate, operator, value)`
+                triples (KI-039)
             as_of_time: If set, applies bitemporal filter on assertions and entity creation
             include_flagged: When as_of_time is set, whether to include
                 'flagged' assertions in the predicate match (excluded by default)

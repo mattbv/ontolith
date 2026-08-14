@@ -795,21 +795,37 @@ Added `ontolith schema show [--namespace]` (new `schema_app` sub-app, matching e
 
 ---
 
-## KI-039 — `QueryBuilder.where()` has no lookup-operator syntax (e.g. `__contains`), despite a documented example using one
+## KI-039 — `QueryBuilder.where()` has no lookup-operator syntax (e.g. `__contains`), despite a documented example using one ✓ RESOLVED (M3)
 
 **Severity:** Documentation/DX gap — a documented use-case example used a filter shape the code never implemented
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved in `feat(query): add __contains/__gt/__lt/__gte/__lte lookup operators to .where() (KI-039)`
 **SPEC reference:** N/A — not covered by SPEC §11.1's normative shape; only appeared in a worked example
 
 ### Description
 
 `docs/Ontolith_UseCases_and_Interfaces.md` §4.3 used `kb.query(Claim).where(text__contains="Compound X")` to illustrate a substring/lookup-style filter. `.where()` has never supported any lookup-operator syntax — only bare equality — so this example was exactly as broken as KI-030's `employer__name` traversal example: a double-underscore key that (pre-KI-030) silently compiled into an unreachable predicate and matched nothing, and (post-KI-030) now raises `ValidationError` instead, same as any other dunder key.
 
-Surfaced while fixing KI-030 and drafting ADR-0027, which defers both traversal and lookup operators as a single scope decision; the use-case doc was corrected to an equivalent equality-based example in the same pass, but implementing `__contains` (or any other operator) itself is out of scope for that fix.
+Surfaced while fixing KI-030 and drafting ADR-0027, which defers both traversal and lookup operators as a single scope decision; the use-case doc was corrected to an equivalent equality-based example in the same pass, but implementing `__contains` (or any other operator) itself was out of scope for that fix.
 
 ### Fix
 
-If prioritized: extend `.where()`'s key parsing to recognize a closed set of lookup-operator suffixes (`__contains`, `__gt`, `__lt`, etc. — Django-style), resolve the operator against the appropriate SQL predicate per backend (`LIKE` for `__contains`, etc.), and update `ValidationError`'s dunder-rejection message to no longer claim *all* dunder keys are relation traversal once a real operator syntax exists. Needs its own design pass on which operators are worth supporting and how they compose with `value_ref`-typed (relation) predicates, where substring/comparison operators arguably don't make sense at all.
+`.where()` now recognizes a closed set of five lookup-operator suffixes: `__contains` (substring match) and `__gt`/`__lt`/`__gte`/`__lte` (numeric range). Multi-hop relation traversal (a hypothetical `employer__name=`, ADR-0027) and any dunder suffix outside this set are still rejected with `ValidationError`, unchanged from KI-030.
+
+Design decisions this needed, per the Fix text's own open questions:
+
+- **How operators compose with relations**: they don't. `__contains`/range operators only ever check `value_lit`, never `value_ref` — plain equality keeps its existing dual-branch (`value_lit` OR `value_ref`) behavior, matching KI-030. This falls out for free for range operators: `SchemaIR.value_type_of()` returns `None` for a `RelationDef` (relations have no `value_type`), and range operators require a schema-declared `Integer`/`Float` value_type (see next point), so a relation predicate is rejected the same way a `Text`-typed property is — no special-case code needed.
+- **Numeric correctness**: `value_lit` is always stored as `TEXT` (SPEC §12.2), so `"9" > "10"` lexicographically but not numerically. Rather than silently produce wrong comparisons, `__gt`/`__lt`/`__gte`/`__lte` are restricted to predicates the active schema declares `Integer` or `Float` — `QueryBuilder` validates this eagerly (at `.where()` call time, via `SchemaIR.value_type_of()`) and raises `ValidationError` otherwise (no schema registered, predicate undeclared, non-numeric value_type, or a value that doesn't parse as a number). The backend then safely does `CAST(value_lit AS REAL)` (SQLite) / `CAST(value_lit AS DOUBLE)` (DuckDB — this module's own header comment already notes DuckDB's `REAL` is 4-byte single precision, unlike SQLite's always-8-byte `REAL`, which would silently round values).
+- **Multiple operators on the same predicate** (e.g. an age range needs both `age__gte` and `age__lt`): `StorageBackend.entities_where`'s `predicate_filters` parameter changed from `dict[str, str]` (predicate → value) to `list[tuple[str, str, Any]]` (`(predicate, operator, value)` triples) — a dict keyed by predicate alone couldn't represent two different operators targeting the same predicate. **Breaking** change to the `StorageBackend` Protocol; any third-party implementation must update. `QueryBuilder._filters` is similarly now keyed by `(property, operator)` rather than bare property, so `.where(age__gte=18).where(age__lt=65)` composes as AND while `.where(name="Ada").where(name="Grace")` still overwrites (last value wins), matching equality's pre-existing behavior.
+
+Both backends' `entities_where()` were refactored from duplicated as_of/non-as_of branches into a single loop building each filter's SQL fragment by operator — a side effect that also removed pre-existing code duplication, not just added new operator branches. `__contains` uses a parameterized `LIKE ... ESCAPE '\'` with `%`/`_`/`\` escaped in the search term, so a literal `%` or `_` in a search value can't act as an unintended wildcard.
+
+New conformance vectors (`conformance/test_where_lookup_operators.py`, cross-backend) prove both backends implement every operator identically, including that numeric comparison is genuinely numeric (`"9" > "10"` lexicographically, `9 < 10` correctly under `__gt`) and that LIKE wildcards are escaped. Unit vectors (`tests/unit/test_query.py`) cover operator composition, the schema-validation error paths, and that the still-rejected cases (relation traversal, unrecognized suffixes) keep failing loudly. All new/updated vectors confirmed to fail without the fix (reverted the four touched `src/` files to pre-KI-039 `main` and reran).
+
+`docs/Ontolith_UseCases_and_Interfaces.md` §4.3's example was restored to `where(text__contains="Compound X")`, since the caveat it carried since KI-030/ADR-0027 no longer applies.
+
+**Review found and this fix now closes**: `__contains` was genuinely not identical across backends as first shipped — SQLite's `LIKE` is case-insensitive by default, DuckDB's is not, so the same `.where(name__contains="ada")` call matched different result sets per backend. `SQLiteBackend` now sets `PRAGMA case_sensitive_like = ON` at connection time to match DuckDB's default rather than the reverse. `.where(x__contains=<non-str>)` and `.where(x__gt=True)` (bool is a subclass of `int`, so `float(True) == 1.0` would otherwise silently accept it) now raise `ValidationError` eagerly instead of a bare `AttributeError` leaking from inside the storage adapter for the former. A leading-dunder key with an empty property name (e.g. `.where(__contains="x")`) is now rejected instead of silently compiling to an unmatchable `"Concept."` predicate — the exact KI-030 failure shape. `_coerce_range_value` now resolves the schema via `get_schema_at()` when `.as_of()` is pinned, not always today's schema (SPEC §11.4) — a predicate retyped since `t` is judged by what it was declared at `t`. ADR-0027 was amended (not superseded — multi-hop traversal remains deferred and its rationale still holds) to record that the lookup-operators half of its deferral is resolved; `docs/Ontolith_SPEC.md` §11.1 and the REST/MCP/CLI filter docs (which had drifted to claim equality-only, since all three splat caller filters straight into `.where()`) were corrected to match.
+
+**Review found and filed separately, not fixed here**: nothing validates that a literal's stored *content* actually parses as its predicate's declared `value_type` (KI-031 only checks the type *token* matches) — `CAST(value_lit AS REAL)` on a non-numeric stored value therefore returns `0.0` on SQLite (wrong, silent) rather than excluding the row; DuckDB uses `TRY_CAST` instead of `CAST` specifically to avoid the alternative failure mode (a raw `duckdb.ConversionException` escaping through the port, violating SPEC §16), but that only prevents the crash, not the underlying cross-backend divergence in which rows match. Filed as **KI-049**.
 
 ---
 
@@ -975,6 +991,24 @@ KI-038 added `ontolith schema show` but explicitly left `ontolith schema migrate
 ### Fix
 
 Needs a design decision before implementation, not just a CLI command: what does "migrate" mean here — applying a new `SchemaIR` version is already possible via `apply_schema`, so `ontolith schema migrate` most plausibly means either (a) a thin CLI wrapper around `apply_schema` reading a YAML/class-DSL file from disk (the smallest useful slice, no new domain logic), or (b) something that also handles property renames/type changes against existing assertion data (a substantially larger scope touching append-only semantics — renaming a predicate doesn't rewrite historical assertions, so old and new predicate names would coexist, which needs its own ADR). Scope this to (a) first if picked up, and record the (a)/(b) boundary decision as an ADR rather than deciding it implicitly inside a CLI PR.
+
+---
+
+## KI-049 — A predicate's declared `value_type` token is checked at write time (KI-031), but the literal's actual string content is never validated to match it
+
+**Severity:** Architecture gap — declared schema constraints can silently diverge from stored data
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §4 (`value_type` is a core type); Implementation Plan §4.3 ("validate at edges")
+
+### Description
+
+KI-031 made `_require_known_predicate` (`src/ontolith/ontology.py`) reject a literal write whose caller-supplied `value_type` *token* doesn't match the schema's declared `value_type` for that predicate (e.g. writing `value_type="Text"` against a predicate declared `Integer`). It does not — and never has — validated that `value` itself is actually well-formed for that type. `kb.assert_literal(entity.id, "Person.age", "unknown", "Integer", author)` succeeds today: `value_type="Integer"` matches the schema's declaration, so the token check passes, even though `"unknown"` is not a valid integer. The same gap exists for `Date`/`DateTime`/`URI`/`JSON` — nothing parses `value` against its claimed format.
+
+Found during KI-039's review: `.where()`'s new `__gt`/`__lt`/`__gte`/`__lte` range operators trust a predicate's declared `value_type` (via `SchemaIR.value_type_of()`) to decide whether `CAST(value_lit AS REAL/DOUBLE)` is safe, but "declared numeric" and "actually stored as parseable numeric text" are different guarantees — this gap is what lets them diverge. Also reachable via schema evolution: a property declared `Text` in schema v1, retyped to `Integer` in v2 (nothing re-validates or migrates existing rows written under v1 — see KI-048's own note that no migration/backfill mechanism exists at all).
+
+### Fix
+
+`_require_known_predicate` (or a new validator called from the same write paths: `assert_literal`, `propose`, `_replay_proposal_operations`) needs to parse `value` against the schema-declared `value_type` and reject on mismatch — `int()`/`float()` for `Integer`/`Float`, `datetime.fromisoformat()` (or equivalent) for `Date`/`DateTime`, a URI parser for `URI`, `json.loads()` for `JSON`. Needs a decision on `Boolean` (accept `"true"`/`"false"` case-insensitively? `"1"`/`"0"`?) and on whether this applies retroactively to already-stored data (it can't, without a migration mechanism — KI-048) or only to new writes going forward. Conformance vectors should cover each `value_type`'s accept/reject boundary, plus confirm `.where()`'s range operators (KI-039) correctly exclude/behave once this closes the gap that currently makes `TRY_CAST`/silent-zero-coercion necessary as a defensive fallback in `entities_where()`.
 
 ---
 

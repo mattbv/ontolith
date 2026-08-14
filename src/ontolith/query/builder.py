@@ -21,6 +21,20 @@ _DEFAULT_OVERFETCH = 20
 _OVERFETCH_MULTIPLIER = 10
 _MAX_OVERFETCH = 1000
 
+_LOOKUP_OPERATORS = frozenset({"contains", "gt", "lt", "gte", "lte"})
+_RANGE_OPERATORS = frozenset({"gt", "lt", "gte", "lte"})
+_RANGE_VALUE_TYPES = frozenset({"Integer", "Float"})
+"""value_type_of() results .where()'s __gt/__lt/__gte/__lte accept (KI-039).
+value_lit is always stored as TEXT (SPEC §12.2), so an ordering comparison
+needs CAST(value_lit AS REAL) — correct for Integer/Float, silently wrong
+for anything else (a Text-typed predicate would compare nonsense; a
+Date-typed one happens to sort correctly as a string today, but not as a
+number, which isn't worth the inconsistency of special-casing). Restricting
+to this set means a predicate the schema doesn't declare, declares as
+non-numeric, or resolves to a relation (SchemaIR.value_type_of() returns
+None for a RelationDef) all fail loudly via ValidationError instead of
+silently producing a wrong or nonsensical comparison."""
+
 _CANDIDATE_HINT_MAX = 1000
 """Ceiling on how large a `.where()`/`.semantic()`-narrowed candidate set can
 be before it's passed down as `entities_meeting_confidence`/
@@ -64,7 +78,7 @@ class QueryBuilder:
         self._backend = backend
         self._namespace = namespace
         self._concept = concept
-        self._filters: dict[str, Any] = {}
+        self._filters: dict[tuple[str, str], Any] = {}
         self._as_of_time = as_of_time
         self._embedder = embedder
         self._semantic_text: str | None = None
@@ -75,37 +89,110 @@ class QueryBuilder:
     def where(self, **kwargs: Any) -> "QueryBuilder":
         """Add filters to the query.
 
-        Filters are equality checks against the concept's own predicates —
-        both literal properties (`name="Ada Lovelace"`) and relations, where
-        the value is compared against the relation's target entity id
-        (`employer="org-123"`). Double-underscore ("dunder") filter keys are
-        NOT supported — neither multi-hop traversal through a related
-        entity's own properties (a hypothetical `employer__name=`, ADR-0027)
-        nor lookup operators (a hypothetical `text__contains=`, KI-039). Such
-        keys never matched anything (KI-030) and are now rejected outright
-        instead of silently compiling into an unreachable predicate.
+        Plain keys are equality checks against the concept's own predicates
+        — both literal properties (`name="Ada Lovelace"`) and relations,
+        where the value is compared against the relation's target entity id
+        (`employer="org-123"`). A closed set of double-underscore ("dunder")
+        lookup-operator suffixes is also recognized (KI-039):
+        `__contains` (substring match, literal properties only) and
+        `__gt`/`__lt`/`__gte`/`__lte` (numeric range, restricted to
+        predicates the active schema declares `Integer` or `Float` — see
+        `_RANGE_VALUE_TYPES`'s docstring for why). Calling `.where()` more
+        than once with the same key AND the same operator overwrites the
+        earlier value (last call wins), matching plain equality's existing
+        behavior; different operators on the same property compose as AND
+        (e.g. `.where(age__gte=18, age__lt=65)`). Multi-hop relation
+        traversal (a hypothetical `employer__name=`, ADR-0027) and any
+        dunder suffix outside this closed operator set are still rejected
+        outright — they never matched anything before KI-030 fixed that.
 
         Args:
-            **kwargs: Property/relation filters as keyword arguments
+            **kwargs: Property/relation filters as keyword arguments,
+                optionally suffixed with a recognized lookup operator
 
         Returns:
             Self for chaining
 
         Raises:
-            ValidationError: A filter key contains "__" (neither
-                nested-traversal nor lookup-operator syntax is implemented).
+            ValidationError: A filter key uses relation-traversal or an
+                unrecognized dunder suffix, or a `__gt`/`__lt`/`__gte`/
+                `__lte` filter targets a non-numeric (or relation, or
+                undeclared) predicate, or its value doesn't parse as a
+                number.
         """
-        for key in kwargs:
-            if "__" in key:
-                raise ValidationError(
-                    f"where({key}=...) is not supported: double-underscore filter keys "
-                    "are not implemented — neither relation traversal (e.g. "
-                    "employer__name, ADR-0027) nor lookup operators (e.g. "
-                    "text__contains, KI-039). Filter on this concept's own properties "
-                    "or a relation's target id directly with equality (e.g. employer=<id>)."
-                )
-        self._filters.update(kwargs)
+        for key, value in kwargs.items():
+            prop, operator = self._parse_filter_key(key)
+            if operator in _RANGE_OPERATORS:
+                value = self._coerce_range_value(prop, operator, value)
+            elif operator == "contains" and not isinstance(value, str):
+                raise ValidationError(f"where({prop}__contains={value!r}) requires a string value")
+            self._filters[(prop, operator)] = value
         return self
+
+    def _parse_filter_key(self, key: str) -> tuple[str, str]:
+        """Split a `.where()` kwarg key into `(property, operator)` (KI-039).
+
+        No `__` means plain equality (`"eq"`). A recognized lookup-operator
+        suffix (see `_LOOKUP_OPERATORS`) splits the key into the property
+        and that operator. Anything else — an unrecognized suffix, more than
+        one `__` in the key (multi-hop relation traversal), or an empty
+        property name (a key that IS just the operator suffix, e.g.
+        `__contains`) — raises.
+        """
+        if "__" not in key:
+            return key, "eq"
+        prop, _, suffix = key.rpartition("__")
+        if suffix not in _LOOKUP_OPERATORS or "__" in prop or not prop:
+            raise ValidationError(
+                f"where({key}=...) is not supported: recognized lookup operators are "
+                f"{sorted(_LOOKUP_OPERATORS)} (KI-039); relation traversal (e.g. "
+                "employer__name, ADR-0027) is still not implemented. Filter on this "
+                "concept's own properties or a relation's target id directly with "
+                "equality (e.g. employer=<id>)."
+            )
+        return prop, suffix
+
+    def _coerce_range_value(self, prop: str, operator: str, value: Any) -> float:
+        """Validate and convert a `__gt`/`__lt`/`__gte`/`__lte` value (KI-039).
+
+        Validates against the schema effective at `.as_of()`'s pinned time,
+        not today's, when this query is bitemporally pinned (SPEC §11.4) —
+        a predicate retyped since `t` must be judged by what it was
+        declared at `t`, the same way `AsOfView.schema()` already resolves
+        (KI-019).
+
+        Raises:
+            ValidationError: No schema was registered (as of the relevant
+                time) for this namespace, the predicate isn't declared in
+                it, it's declared with a non-`Integer`/`Float` value_type
+                (including relations, which have none), or `value` doesn't
+                parse as a number.
+        """
+        qualified = f"{self._concept}.{prop}"
+        schema = (
+            self._backend.get_schema_at(self._namespace, self._as_of_time)
+            if self._as_of_time is not None
+            else self._backend.get_schema(self._namespace)
+        )
+        value_type = schema.value_type_of(qualified) if schema is not None else None
+        if value_type not in _RANGE_VALUE_TYPES:
+            detail = (
+                "no schema is registered for this namespace"
+                if schema is None
+                else f"got value_type={value_type!r}"
+            )
+            raise ValidationError(
+                f"where({prop}__{operator}=...) requires {qualified!r} to be declared "
+                f"Integer or Float in the active schema (KI-039) — {detail}."
+            )
+        # bool is a subclass of int, so float(True) == 1.0 would otherwise
+        # silently accept a boolean as if it were a real numeric filter.
+        if isinstance(value, bool):
+            raise ValidationError(f"where({prop}__{operator}={value!r}) is not a number")
+        try:
+            return float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(f"where({prop}__{operator}={value!r}) is not a number") from exc
 
     def semantic(self, text: str) -> "QueryBuilder":
         """Rank results by vector similarity to `text` (SPEC §11.3).
@@ -204,9 +291,18 @@ class QueryBuilder:
             as_of_time=self._as_of_time,
         )
 
-    def _qualified_filters(self) -> dict[str, str]:
-        """Push .where() filters to backend as full predicates: "name" -> "Concept.name"."""
-        return {f"{self._concept}.{key}": value for key, value in self._filters.items()}
+    def _qualified_filters(self) -> list[tuple[str, str, Any]]:
+        """Push .where() filters to the backend as `(full_predicate, operator,
+        value)` triples: `("name", "eq")` -> `("Concept.name", "eq", ...)`.
+
+        A list, not a dict (KI-039): two different operators can target the
+        same predicate (e.g. `age__gte` and `age__lt`), which a
+        predicate-keyed dict couldn't represent.
+        """
+        return [
+            (f"{self._concept}.{prop}", operator, value)
+            for (prop, operator), value in self._filters.items()
+        ]
 
     def _semantic_candidates(self) -> list[Entity]:
         """Vector-search-first ranking, optionally intersected with .where().

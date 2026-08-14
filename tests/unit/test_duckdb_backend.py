@@ -1118,10 +1118,10 @@ class TestDuckDBBackend:
             )
         )
 
-        results = backend.entities_where("test-ns", "Person", {"Person.name": "Ada"})
+        results = backend.entities_where("test-ns", "Person", [("Person.name", "eq", "Ada")])
         assert [r.id for r in results] == ["entity-001"]
 
-        no_match = backend.entities_where("test-ns", "Person", {"Person.name": "Nobody"})
+        no_match = backend.entities_where("test-ns", "Person", [("Person.name", "eq", "Nobody")])
         assert no_match == []
 
     def test_entities_where_matches_relation_target_id(self, backend: DuckDBBackend) -> None:
@@ -1149,10 +1149,14 @@ class TestDuckDBBackend:
             )
         )
 
-        results = backend.entities_where("test-ns", "Person", {"Person.employer": "org-001"})
+        results = backend.entities_where(
+            "test-ns", "Person", [("Person.employer", "eq", "org-001")]
+        )
         assert [r.id for r in results] == ["person-001"]
 
-        no_match = backend.entities_where("test-ns", "Person", {"Person.employer": "org-002"})
+        no_match = backend.entities_where(
+            "test-ns", "Person", [("Person.employer", "eq", "org-002")]
+        )
         assert no_match == []
 
     def test_contradiction_roundtrip_and_resolution(self, backend: DuckDBBackend) -> None:
@@ -1377,6 +1381,78 @@ class TestDuckDBBackend:
             "SELECT table_name FROM information_schema.tables WHERE table_name = 'vector_entity'"
         ).fetchall()
         assert len(after) == 1
+
+    def test_contains_is_case_sensitive(self, backend: DuckDBBackend) -> None:
+        """DuckDB's LIKE is case-sensitive by default (unlike SQLite's,
+        which SQLiteBackend explicitly overrides with PRAGMA
+        case_sensitive_like = ON to match - see that backend's equivalent
+        test) - this pins that DuckDB needs no override to already agree."""
+        backend.put_entity(
+            Entity(
+                id="e0",
+                namespace="test-ns",
+                concept="Person",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                created_by="alice@test.com",
+            )
+        )
+        backend.put_assertion(
+            Assertion(
+                id="a0",
+                namespace="test-ns",
+                subject="e0",
+                predicate="Person.name",
+                value_kind="literal",
+                value_type="Text",
+                value="Lovelace",
+                author="alice@test.com",
+                asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+
+        matches = backend.entities_where("test-ns", "Person", [("Person.name", "contains", "Love")])
+        assert [e.id for e in matches] == ["e0"]
+
+        no_match = backend.entities_where(
+            "test-ns", "Person", [("Person.name", "contains", "love")]
+        )
+        assert no_match == []
+
+    def test_range_operator_on_non_numeric_stored_value(self, backend: DuckDBBackend) -> None:
+        """KI-049: nothing validates that value_lit's actual content
+        parses as the predicate's declared value_type - a row with
+        non-numeric text stored against a nominally-numeric predicate is
+        excluded via TRY_CAST (NULL, never matches any comparison), unlike
+        SQLite's plain CAST, which silently coerces to 0.0 (see that
+        backend's equivalent test - a documented, tracked divergence)."""
+        backend.put_entity(
+            Entity(
+                id="e0",
+                namespace="test-ns",
+                concept="Person",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                created_by="alice@test.com",
+            )
+        )
+        backend.put_assertion(
+            Assertion(
+                id="a0",
+                namespace="test-ns",
+                subject="e0",
+                predicate="Person.age",
+                value_kind="literal",
+                value_type="Integer",
+                value="unknown",
+                author="alice@test.com",
+                asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+
+        matches_below = backend.entities_where("test-ns", "Person", [("Person.age", "lt", 10.0)])
+        assert matches_below == []
+
+        matches_above = backend.entities_where("test-ns", "Person", [("Person.age", "gt", 10.0)])
+        assert matches_above == []
 
 
 class TestCandidateIdsNarrowing:

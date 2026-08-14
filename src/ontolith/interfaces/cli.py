@@ -293,7 +293,12 @@ def query_entities(
     concept: Annotated[str, typer.Argument(help="Concept to query (e.g. Person).")],
     where: Annotated[
         list[str] | None,
-        typer.Option("--where", help="Equality filter as KEY=VALUE (repeatable)."),
+        typer.Option(
+            "--where",
+            help="Filter as KEY=VALUE (repeatable). KEY may be a bare property/relation "
+            "name (equality) or use a __contains/__gt/__lt/__gte/__lte suffix (KI-039), "
+            "e.g. --where age__gte=18.",
+        ),
     ] = None,
 ) -> None:
     """Query entities by concept and optional property filters."""

@@ -364,8 +364,12 @@ kb.query(Person) \
   .limit(20)
 ```
 Multi-hop traversal through a related entity's own properties (e.g. a hypothetical
-`employer__name=` filter) is **deferred** — `.where()` supports equality on the queried
-concept's own literal properties and relation-target ids only (ADR-0027).
+`employer__name=` filter) is **deferred** (ADR-0027). `.where()` supports equality on the
+queried concept's own literal properties and relation-target ids, plus a closed set of
+lookup-operator suffixes against literal properties only — `__contains` (substring) and
+`__gt`/`__lt`/`__gte`/`__lte` (numeric range, restricted to schema-declared `Integer`/
+`Float` predicates) — e.g. `where(age__gte=18, name__contains="Ada")` (KI-039, ADR-0027
+amendment).
 
 ### 11.2 Symbolic semantics
 - Filters compile to predicate lookups over `active` assertions (or the `as_of` snapshot).
