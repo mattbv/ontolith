@@ -140,6 +140,7 @@ _EXPECTED: dict[str, frozenset[str]] = {
             "Exporter",
             "Reasoner",
             "Validator",
+            "ValidatorKbView",
             "Connector",
         }
     ),

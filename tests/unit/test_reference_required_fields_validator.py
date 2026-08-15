@@ -8,6 +8,7 @@ import pytest
 from ontolith import Ontology
 from ontolith.plugins.reference.required_fields_validator import RequiredFieldsValidator
 from ontolith.plugins.views import ReadOnlyView, WriteView
+from ontolith.schema import ConceptDef, PropertyDef, RelationDef, SchemaIR
 
 PLUGIN_PRINCIPAL = "required-fields-validator"
 
@@ -83,6 +84,79 @@ class TestCustomConfig:
         assert len(violations) == 2
         assert "'name'" in violations[0] or "'name'" in violations[1]
         assert "'birthdate'" in violations[0] or "'birthdate'" in violations[1]
+
+
+class TestFromSchema:
+    """KI-041: RequiredFieldsValidator.from_schema() derives required_predicates
+    from a SchemaIR's own PropertyDef.required/RelationDef.required, instead
+    of a hand-maintained mapping."""
+
+    def test_required_properties_and_relations_collected(self) -> None:
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "name": PropertyDef(name="name", value_type="Text", required=True),
+                        "nickname": PropertyDef(name="nickname", value_type="Text", required=False),
+                    },
+                    relations={
+                        "employer": RelationDef(
+                            name="employer", target_concept="Organization", required=True
+                        ),
+                    },
+                ),
+                "Organization": ConceptDef(name="Organization"),
+            },
+        )
+
+        validator = RequiredFieldsValidator.from_schema(schema)
+
+        assert validator._required == {"Person": ("employer", "name")}
+
+    def test_concept_with_no_required_fields_is_absent(self) -> None:
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Organization": ConceptDef(
+                    name="Organization",
+                    properties={
+                        "name": PropertyDef(name="name", value_type="Text", required=False),
+                    },
+                ),
+            },
+        )
+
+        validator = RequiredFieldsValidator.from_schema(schema)
+
+        assert validator._required == {}
+
+    def test_derived_validator_flags_missing_required_field(self, kb: Ontology) -> None:
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "name": PropertyDef(name="name", value_type="Text", required=True),
+                        "email": PropertyDef(name="email", value_type="Text", required=True),
+                    },
+                ),
+            },
+        )
+        validator = RequiredFieldsValidator.from_schema(schema)
+
+        write_view = WriteView(kb, PLUGIN_PRINCIPAL)
+        entity = write_view.create_entity("Person", natural_key="ada")
+        write_view.propose(entity.id, "Person.name", "Ada Lovelace", "Text")
+        [assertion] = write_view.assertions(predicate="Person.name")
+
+        violations = validator.validate(assertion, ReadOnlyView(kb, PLUGIN_PRINCIPAL))
+        assert violations == ["Person 'ada' missing required predicate 'email'"]
 
 
 class TestNoEntityRecord:

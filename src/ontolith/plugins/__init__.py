@@ -6,10 +6,20 @@ Public surface for plugin authors and hosts:
 - PluginRegistry/LoadedPlugin — discovery and least-privilege loading
 - Importer/Exporter/Reasoner/Validator/Connector — protocol interfaces a
   plugin implements (SPEC §13.2)
+- ValidatorKbView — the structural read view Validator.validate()'s `kb`
+  parameter accepts (KI-042, ADR-0029); useful for precisely typing a
+  custom Validator's own `validate()` signature
 """
 
 from ontolith.plugins.manifest import PluginCapabilities, PluginKind, PluginManifest
-from ontolith.plugins.ports import Connector, Exporter, Importer, Reasoner, Validator
+from ontolith.plugins.ports import (
+    Connector,
+    Exporter,
+    Importer,
+    Reasoner,
+    Validator,
+    ValidatorKbView,
+)
 from ontolith.plugins.registry import LoadedPlugin, PluginRegistry
 from ontolith.plugins.views import ReadOnlyView, WriteView
 
@@ -25,5 +35,6 @@ __all__ = [
     "Exporter",
     "Reasoner",
     "Validator",
+    "ValidatorKbView",
     "Connector",
 ]
