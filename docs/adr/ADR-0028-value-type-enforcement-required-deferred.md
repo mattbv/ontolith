@@ -1,9 +1,9 @@
 # ADR-0028: `value_type` Enforced at Core Write Time; `required` Stays Out of Core
 
 **Status**: Accepted
-**Date**: 2026-08-04
+**Date**: 2026-08-04 (amended 2026-08-15 — KI-041/KI-042 resolved)
 **Deciders**: Ontolith Core Team
-**Related**: SPEC §4 (Schema), SPEC §13.2 (Validator plugins), ADR-0017 (Cardinality-Aware Conflict Routing), KI-010 (reference plugins), KI-031, KI-040, KI-041, KI-042
+**Related**: SPEC §4 (Schema), SPEC §13.2 (Validator plugins), ADR-0017 (Cardinality-Aware Conflict Routing), ADR-0029 (Validator invocation — resolves KI-041/KI-042), KI-010 (reference plugins), KI-031, KI-040, KI-041, KI-042
 
 ---
 
@@ -53,6 +53,15 @@ Surfaced during a whole-project milestone audit (2026-07-29, KI-031): the projec
 - **Enforcement is submission-time only, not schema-lifetime.** `_require_known_predicate`'s value_type check runs when `assert_literal`/`propose` is first called; it is deliberately *not* re-run when a proposal is later replayed (`accept_proposal`/`resubmit` — see `ontology.py`'s existing documented precedent that `_require_known_predicate` is not re-run at replay, matching how the unknown-predicate check already behaves). Two concrete gaps this leaves: (a) a proposal submitted against a schema-less namespace, followed by `apply_schema` before the proposal is accepted, replays unvalidated; (b) a proposal submitted while a predicate is declared `Text`, followed by a schema change to `Integer` before acceptance, commits the stale type. Both are accepted as consistent with existing replay-trust precedent, not new risk introduced by this ADR — but this ADR closes *mismatch at submission*, not *drift across schema evolution*, and should not be read as a stronger guarantee than that.
 - The check is case-sensitive exact-string equality against the schema's declared `Literal` value (e.g. `value_type="text"` now raises against a schema declaring `"Text"`) — a second, minor behavior change bundled with the main one. A `value_type` value outside SPEC §4's closed set (e.g. `"Foo"`) is still accepted without error whenever no schema is registered for the namespace, same as before.
 - The predicate-kind mismatch this ADR explicitly declines to close (asserting a literal against a schema-declared relation, or vice versa) was tracked as KI-040 and has since been resolved (`SchemaIR.kind_of()` + `_require_known_predicate`'s `expected_kind` parameter) — this bullet is kept for historical context (this ADR's own scope boundary never changed), not as an open item.
+
+## Amendment (2026-08-15): KI-041/KI-042 Resolved
+
+Context points 1–2 above, and the Consequences bullet on line 52, describe the state as of this ADR's original writing (2026-08-04) — accurate then, no longer accurate now, kept unedited as the historical record. As of ADR-0029:
+
+- `RequiredFieldsValidator` **now can** read `PropertyDef.required`/`RelationDef.required`, via a new `from_schema(schema: SchemaIR)` classmethod (KI-041) — the hand-maintained `required_predicates` constructor argument still exists and is still the default, but a deployment can derive it from the schema instead.
+- `Ontology` **now does** invoke registered `Validator`s (KI-042) — a new `validators` constructor parameter runs them synchronously per-assertion at every commit point, and a separate `completeness_validators` parameter runs whole-entity-completeness validators like `RequiredFieldsValidator` specifically at `accept_proposal` time. See ADR-0029 for the full design and why the two are split.
+
+This ADR's own Decision (`required` stays out of *core*) is unchanged and still the accurate answer to the question this ADR actually decided — ADR-0029 doesn't move `required` enforcement into core, it makes the validator-layer path SPEC §4 already pointed at actually reachable.
 
 ## Alternatives Considered
 

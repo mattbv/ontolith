@@ -113,7 +113,17 @@ class ValidatorKbView(Protocol):
 
 
 class Validator(Protocol):
-    """Validates an assertion against custom rules through a read-only KB view."""
+    """Validates an assertion against custom rules through a read-only KB view.
+
+    `assertion` is the thing under validation when a Validator is invoked
+    per-assertion (e.g. via `Ontology.validators` — KI-042, ADR-0029). A
+    Validator invoked for whole-entity completeness instead (e.g. via
+    `Ontology.completeness_validators`) receives an `assertion` that is
+    only a *subject* stand-in — implementations with that shape (like
+    `RequiredFieldsValidator`) should read `assertion.subject` and re-query
+    `kb` for current state, and must not rely on `assertion`'s other
+    fields describing anything currently true or just-committed.
+    """
 
     def validate(self, assertion: Assertion, kb: ValidatorKbView) -> list[str]:
         """Return a list of validation error messages, empty if `assertion` is valid."""

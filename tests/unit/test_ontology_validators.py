@@ -19,6 +19,7 @@ from ontolith import Ontology
 from ontolith.core import Assertion, FixedClock, SequentialIdProvider
 from ontolith.core.errors import ValidationError
 from ontolith.govern import AutoAccept, Decision, RequireReview
+from ontolith.govern.proposal import Proposal
 from ontolith.plugins.reference.required_fields_validator import RequiredFieldsValidator
 
 REJECT_VALUE = "REJECT-ME"
@@ -214,6 +215,50 @@ class TestPerAssertionValidatorsAcceptProposalReplay:
         assert len(kb.assertions(subject=entity.id)) == 1
         kb.close()
 
+    def test_accept_proposal_replay_runs_validators_on_assert_ref_ops_too(self) -> None:
+        validator = _RejectMarkerValue()
+        kb = _connect(validators=[validator])
+        kb.create_principal("bob", kind="human", default_capability="propose")
+        kb.create_principal("carol", kind="human", default_capability="review")
+        person = kb.create_entity("Person", author="bob")
+
+        proposal, decision = kb.propose_ref(
+            person.id, "Person.employer", REJECT_VALUE, author="bob"
+        )
+        assert isinstance(decision, RequireReview)
+
+        with pytest.raises(ValidationError, match="marker value rejected"):
+            kb.accept_proposal(proposal.id, reviewer="carol")
+
+        assert kb.assertions(subject=person.id) == []
+        kb.close()
+
+
+class TestEmptyValidatorLists:
+    def test_no_validators_configured_is_a_no_op(self) -> None:
+        kb = _connect()  # validators/completeness_validators both default to None
+        kb.create_principal("alice", kind="human", default_capability="write")
+        entity = kb.create_entity("Person", author="alice")
+
+        kb.assert_literal(entity.id, "Person.name", "Ada Lovelace", "Text", author="alice")
+
+        assert len(kb.assertions(subject=entity.id)) == 1
+        kb.close()
+
+    def test_explicit_empty_lists_are_a_no_op(self) -> None:
+        kb = _connect(validators=[], completeness_validators=[])
+        kb.create_principal("bob", kind="human", default_capability="propose")
+        kb.create_principal("carol", kind="human", default_capability="review")
+        entity = kb.create_entity("Person", author="bob")
+
+        proposal, _decision = kb.propose(
+            entity.id, "Person.name", "Ada Lovelace", "Text", author="bob"
+        )
+        kb.accept_proposal(proposal.id, reviewer="carol")
+
+        assert len(kb.assertions(subject=entity.id)) == 1
+        kb.close()
+
 
 class TestCompletenessValidatorsAcceptProposalOnly:
     def test_accept_proposal_rejects_incomplete_entity(self) -> None:
@@ -283,15 +328,100 @@ class TestCompletenessValidatorsAcceptProposalOnly:
         assert len(kb.assertions(subject=entity.id)) == 1
         kb.close()
 
+    def test_retract_via_accept_proposal_re_triggers_completeness_failure(self) -> None:
+        """A retract op is the one thing that can *reduce* completeness -
+        accept_proposal's completeness check must see it too, not just
+        assert_literal/assert_ref ops (found in review)."""
+        rfv = RequiredFieldsValidator({"Person": ("name",)})
+        kb = _connect(completeness_validators=[rfv])
+        kb.create_principal("alice", kind="human", default_capability="write")
+        kb.create_principal("bob", kind="human", default_capability="propose")
+        kb.create_principal("carol", kind="human", default_capability="review")
+        entity = kb.create_entity("Person", author="alice", natural_key="ada")
+        # Direct write bypasses completeness_validators (by design) - entity
+        # starts out complete.
+        kb.assert_literal(entity.id, "Person.name", "Ada Lovelace", "Text", author="alice")
+        [name_assertion] = kb.assertions(subject=entity.id, predicate="Person.name")
+
+        proposal, decision = kb.retract(name_assertion.id, author="bob")
+        assert isinstance(decision, RequireReview)
+
+        with pytest.raises(ValidationError, match="missing required predicate 'name'"):
+            kb.accept_proposal(proposal.id, reviewer="carol")
+
+        # Rolled back: the retraction never took effect.
+        assert kb.assertions(subject=entity.id, predicate="Person.name") == [name_assertion]
+        kb.close()
+
+    def test_completeness_validator_checks_each_subject_independently(self) -> None:
+        """A proposal touching two different subjects must not let one
+        entity's completeness (or incompleteness) leak into the other's
+        check."""
+        rfv = RequiredFieldsValidator({"Person": ("name",)})
+        kb = _connect(completeness_validators=[rfv])
+        kb.create_principal("alice", kind="human", default_capability="write")
+        kb.create_principal("bob", kind="human", default_capability="propose")
+        kb.create_principal("carol", kind="human", default_capability="review")
+        already_complete = kb.create_entity("Person", author="alice", natural_key="alpha")
+        kb.assert_literal(
+            already_complete.id, "Person.name", "Alpha Person", "Text", author="alice"
+        )
+        still_incomplete = kb.create_entity("Person", author="alice", natural_key="beta")
+
+        now = kb.clock.now()
+
+        def _email_op(subject: str) -> dict[str, object]:
+            return {
+                "kind": "assert_literal",
+                "subject": subject,
+                "predicate": "Person.email",
+                "value": "person@example.com",
+                "value_type": "Text",
+                "temporality": "static",
+                "confidence": None,
+                "source": None,
+                "rationale": None,
+                "model": None,
+                "valid_from": None,
+                "valid_to": None,
+            }
+
+        # propose()/propose_ref() only ever create single-operation
+        # proposals - a multi-subject proposal is hand-built here to reach
+        # this shape at all.
+        proposal = Proposal(
+            id=kb.id_provider.next(),
+            namespace=kb.namespace,
+            author="bob",
+            state="require_review",
+            created_at=now,
+            payload={
+                "operations": [
+                    _email_op(already_complete.id),
+                    _email_op(still_incomplete.id),
+                ]
+            },
+        )
+        kb.backend.put_proposal(proposal)
+
+        with pytest.raises(ValidationError) as exc_info:
+            kb.accept_proposal(proposal.id, reviewer="carol")
+
+        assert "'beta' missing required predicate 'name'" in str(exc_info.value)
+        assert "'alpha'" not in str(exc_info.value)
+        kb.close()
+
 
 class TestResubmitAutoAccept:
     def test_resubmit_auto_accept_runs_validators_but_not_completeness_validators(self) -> None:
-        rejecting = _RejectMarkerValue()
-        rfv = RequiredFieldsValidator({"Person": ()})  # never itself objects
+        seen = _RejectMarkerValue()  # always allows; records what it saw
+        # Always objects - if resubmit's auto-accept branch ran this, the
+        # assertion below the resubmit call would never be reached.
+        always_objects = _AlwaysPasses("completeness validator should not run here")
         kb = _connect(
             policy=_ReviewThenAutoAccept(),
-            validators=[rejecting],
-            completeness_validators=[rfv],
+            validators=[seen],
+            completeness_validators=[always_objects],
         )
         kb.create_principal("bob", kind="human", default_capability="propose")
         kb.create_principal("carol", kind="human", default_capability="review")
@@ -304,8 +434,11 @@ class TestResubmitAutoAccept:
         kb.request_changes(proposal.id, reviewer="carol", reason="please double-check")
 
         proposal, decision = kb.resubmit(proposal.id, author="bob")
+
         assert isinstance(decision, AutoAccept)
         assert len(kb.assertions(subject=entity.id)) == 1
+        assert seen.seen  # the per-assertion validators list WAS consulted
+        assert not always_objects.called  # the completeness list was NOT
         kb.close()
 
     def test_resubmit_auto_accept_validator_rejection_rolls_back(self) -> None:
@@ -324,4 +457,9 @@ class TestResubmitAutoAccept:
             kb.resubmit(proposal.id, author="bob")
 
         assert kb.assertions(subject=entity.id) == []
+        # Rolled back: the "auto_accepted" state write inside the same
+        # transaction is undone too, not just the assertion.
+        reloaded = kb.backend.get_proposal(proposal.id)
+        assert reloaded is not None
+        assert reloaded.state == "changes_requested"
         kb.close()

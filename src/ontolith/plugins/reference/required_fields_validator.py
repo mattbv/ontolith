@@ -64,13 +64,19 @@ class RequiredFieldsValidator:
             the resulting mapping (equivalent to an empty tuple).
         """
         required: dict[str, tuple[str, ...]] = {}
-        for concept_name, concept in schema.concepts.items():
+        for concept in schema.concepts.values():
             fields = sorted(
                 [name for name, prop in concept.properties.items() if prop.required]
                 + [name for name, rel in concept.relations.items() if rel.required]
             )
             if fields:
-                required[concept_name] = tuple(fields)
+                # Keyed by concept.name, not the schema.concepts dict key -
+                # validate() looks up self._required[entity.concept], and
+                # entity.concept is set from ConceptDef.name, not from
+                # whatever key a hand-built SchemaIR happened to store it
+                # under (the class DSL/YAML front-ends always keep these
+                # in sync, but a hand-built SchemaIR isn't required to).
+                required[concept.name] = tuple(fields)
         return cls(required)
 
     def validate(self, assertion: Assertion, kb: ValidatorKbView) -> list[str]:

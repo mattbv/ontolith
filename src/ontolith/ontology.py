@@ -534,8 +534,13 @@ class Ontology:
         operations — so a registered Validator sees every write regardless
         of which path it took, not just the direct-write ones. Each
         Validator receives `self` as `kb` (see `ValidatorKbView`), so it can
-        read current KB state but not write.
+        read current KB state but not write. `assertion` here is always the
+        actual about-to-commit assertion (pre-conflict-routing) — contrast
+        `_run_completeness_validators`, whose `assertion` argument is only
+        a subject stand-in.
         """
+        if not self.validators:
+            return
         errors = [
             msg for validator in self.validators for msg in validator.validate(assertion, self)
         ]
@@ -551,6 +556,16 @@ class Ontology:
         auto-accept path, which (like `propose`/`propose_ref`'s auto-accept)
         bypasses human review, and not direct writes, which have no
         multi-operation batch boundary to check completeness against.
+
+        Each validator receives one representative `Assertion` per distinct
+        subject (the first entry in `applied` for that subject) — only its
+        `.subject` is contractually meaningful here; the rest of that
+        assertion's fields describe whichever operation happened to be
+        first for that subject in this proposal; not the entity's current
+        state (query `kb` for that). It may also be a retracted assertion's
+        pre-retraction snapshot (see `_replay_proposal_operations`'s
+        `retract` branch) — `.status`/`.value` on it reflect neither "what
+        just committed" nor "what's now active".
         """
         if not self.completeness_validators:
             return
@@ -564,7 +579,7 @@ class Ontology:
             for msg in validator.validate(representative, self)
         ]
         if errors:
-            raise ValidationError(f"Validator rejected assertion: {'; '.join(errors)}")
+            raise ValidationError(f"Completeness validator rejected entity: {'; '.join(errors)}")
 
     def _retraction_valid_to(self, assertion_id: str, now: datetime) -> str | None:
         """Compute valid_to for a retraction.
@@ -1523,11 +1538,17 @@ class Ontology:
         author/delegate, already covered by `proposal.author`/`acting_as`.
 
         Returns:
-            The assertions applied by any assert_literal/assert_ref ops, in
-            payload order (empty for a retract-only proposal) — used by
-            `accept_proposal` to run `self.completeness_validators` once per
-            distinct subject after all of this proposal's writes have
-            landed (KI-041).
+            The assertions touched by this proposal's operations, in
+            payload order — for assert_literal/assert_ref ops, the assertion
+            as persisted; for retract ops, the (now-retracted) target
+            assertion, included because retraction is the one operation
+            that can *reduce* an entity's completeness (an assert can only
+            ever improve it). Used by `accept_proposal` to run
+            `self.completeness_validators` once per distinct subject after
+            all of this proposal's writes have landed (KI-041) — only
+            `.subject` is contractually meaningful for that use, not the
+            other fields (a retract entry's `status`/`value` reflect the
+            assertion as it was before this op retracted it).
         """
         applied: list[Assertion] = []
         for op in proposal.payload.get("operations", []):
@@ -1591,12 +1612,25 @@ class Ontology:
                 self._reject_retract_if_party_to_contradiction(
                     op["assertion_id"], retracting_parties
                 )
+                retracted = self.backend.get_assertion(op["assertion_id"])
+                assert retracted is not None  # append-only; targeted by an existing proposal op
                 self.backend.set_assertion_status(
                     op["assertion_id"],
                     "retracted",
                     valid_to=self._retraction_valid_to(op["assertion_id"], now),
                 )
                 self._record_assertion_event(op["assertion_id"], proposal.author, "retracted", now)
+                # Retraction is the one operation that can *reduce*
+                # completeness (an assert can only ever improve it) - its
+                # subject must be checked too, or accept_proposal could
+                # retract an entity's only assertion for a required
+                # predicate without completeness_validators ever noticing
+                # (found in review). Only `.subject` is used downstream
+                # (accept_proposal dedups `applied` by subject before
+                # running completeness_validators) - the retracted
+                # assertion's other fields (status, value, ...) are not
+                # contractually meaningful here.
+                applied.append(retracted)
             else:
                 raise ValidationError(f"Unknown operation kind in proposal payload: {op['kind']}")
         return applied
