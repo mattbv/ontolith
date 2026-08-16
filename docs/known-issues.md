@@ -851,10 +851,10 @@ A pre-existing conformance test (`TestValueTypeMismatchRejected::test_relation_d
 
 ---
 
-## KI-041 — `RequiredFieldsValidator` doesn't read the schema's `PropertyDef.required`/`RelationDef.required`
+## KI-041 — `RequiredFieldsValidator` doesn't read the schema's `PropertyDef.required`/`RelationDef.required` ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — a schema author's `required=True` declaration has no observable effect anywhere, including in the one plugin whose job description matches it
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved via ADR-0029, alongside KI-042
 **SPEC reference:** SPEC §4 (`required` — validator-backed, §13), §13.2 (Validator protocol)
 
 ### Description
@@ -865,14 +865,16 @@ Surfaced during KI-031's review (2026-08-04): ADR-0028's first draft justified d
 
 ### Fix
 
-Give `RequiredFieldsValidator` an option (or a sibling `Validator`, or a classmethod constructor) to derive its `required_predicates` from a `SchemaIR` — iterating each concept's properties/relations and collecting the ones with `required=True` — rather than requiring a hand-maintained, schema-independent mapping. Needs KI-042 (validators aren't invoked anywhere yet) resolved first, or alongside, for this to have any observable effect.
+`RequiredFieldsValidator.from_schema(schema: SchemaIR)` — a new classmethod that scans every concept's `properties`/`relations` for `required=True` and collects their bare field names into a `required_predicates` mapping, so a schema's own declaration drives the check instead of a hand-maintained, independently drifting one. `RequiredFieldsValidator(...)`'s existing constructor and its small worked-example default (`{"Person": ("name",)}`) are unchanged — `from_schema()` is an alternative constructor, not a replacement.
+
+This has an observable effect end to end only combined with KI-042's resolution (ADR-0029): a deployment wires `Ontology(completeness_validators=[RequiredFieldsValidator.from_schema(schema)])`, and `accept_proposal` runs it. New tests: `tests/unit/test_reference_required_fields_validator.py::TestFromSchema` covers the derivation itself (properties, relations, `required=False` fields excluded, concepts with no required fields absent from the resulting mapping); `tests/unit/test_ontology_validators.py` covers the end-to-end path through `accept_proposal`.
 
 ---
 
-## KI-042 — No code path invokes registered `Validator` plugins; `Validator.validate()` is unreachable
+## KI-042 — No code path invokes registered `Validator` plugins; `Validator.validate()` is unreachable ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — an entire plugin protocol category (`Validator`) is wired to nothing
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved via ADR-0029
 **SPEC reference:** SPEC §13.2 (Validator protocol)
 
 ### Description
@@ -883,7 +885,14 @@ Surfaced during KI-031's review (2026-08-04) — ADR-0028's first draft describe
 
 ### Fix
 
-Decide and record (ADR) where in the write path registered validators should run — candidates include: synchronously inside `assert_literal`/`assert_ref`/`propose`/`propose_ref` before commit (blocking, consistent with policy evaluation's placement); asynchronously as a post-commit hook (non-blocking, but then a `Validator` can only flag, not prevent); or only at `accept_proposal` time for the governed path (leaving direct writes unchecked, which may or may not be intended). Whichever shape is chosen, it needs to compose with KI-041 (deriving `required_predicates` from schema) to make schema-declared `required` mean anything end to end.
+ADR-0029 records the decision and the structural conflict that shaped it: a single "run validators synchronously at write time" mechanism cannot serve both single-assertion validators and `RequiredFieldsValidator`'s whole-entity-completeness shape (see KI-041's own description — an entity built up one assertion at a time is incomplete by construction until its last write). Resolved with two separate, independently configured `Ontology` constructor parameters:
+
+- **`validators: Sequence[Validator]`** — per-assertion, synchronous, blocking, run immediately before an assertion commits, at *every* point one actually does: `assert_literal`, `assert_ref`, `propose`/`propose_ref`'s auto-accept branch, and `_replay_proposal_operations` (shared by `accept_proposal` and `resubmit`'s auto-accept branch) — so a proposal that went through review isn't silently exempt just because it skipped the auto-accept branch. A failing validator raises `ValidationError`, aborting the write.
+- **`completeness_validators: Sequence[Validator]`** — whole-entity, run once per distinct subject touched by an accepted proposal's operations, only from `accept_proposal`, after all of that proposal's writes have landed in the same transaction. This is where `RequiredFieldsValidator`/`RequiredFieldsValidator.from_schema()` (KI-041) is meant to be wired. Not run on direct writes or any auto-accept path (`propose`/`propose_ref`/`resubmit`) — those bypass human review, an explicit, accepted scope limitation (see ADR-0029's Consequences), not an oversight. A proposal's `retract` operations count as "touching" their target's subject too (review found the initial version silently excluded them, which would have let a retraction make an entity incomplete again with `accept_proposal` never noticing) — only that subject's `.subject` is contractually meaningful in the completeness path, documented directly on the `Validator` protocol.
+
+`Validator.validate()`'s `kb` parameter type widened from the concrete `ReadOnlyView` to a new minimal structural `ValidatorKbView` Protocol (`plugins/ports.py`) — needed because `Ontology` passes itself (not a `ReadOnlyView`) as `kb` for validators registered this way (trusted the same way `PolicyStrategy` already is, ADR-0018 — not sandboxed, since these are deployment-configured, not `PluginRegistry`-loaded third-party plugins), and typing `Ontology`'s own constructor parameters against the concrete `Validator` protocol without a runtime circular import needed the same structural-Protocol technique `govern/policy.py`'s `KbView` already uses (KI-017, ADR-0025) — `ontology.py` imports `Validator`'s type under `TYPE_CHECKING` only. `PluginRegistry`-loaded validators are untouched by this fix and still have no automatic invocation point of their own (recorded as an explicit follow-up in ADR-0029, not a new KI). SPEC §13.2's literal `kb: ReadOnlyView` signature is deliberately left unmatched, mirroring ADR-0025's identical, already-accepted precedent for `PolicyStrategy`.
+
+New tests: `tests/unit/test_ontology_validators.py` covers both lists across all five commit points (direct writes, auto-accept, reviewed accept_proposal, resubmit's auto-accept correctly running `validators` but never `completeness_validators` — the initial version of this test used a vacuously-passing double and wouldn't have caught a regression, fixed after review to use an always-objecting one), a validator rejecting a write correctly rolling back the transaction (including the proposal state reverting on `resubmit`'s auto-accept), multiple validators/multiple error messages aggregating into one `ValidationError`, a `retract` op correctly re-triggering a completeness failure, a multi-subject proposal (hand-built, since `propose`/`propose_ref` only ever create single-operation proposals) checking each subject independently, and the `assert_ref` branch of proposal replay exercised with a validator configured.
 
 ---
 

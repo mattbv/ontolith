@@ -4,9 +4,10 @@ The Ontology class is the primary API surface for users. It wraps the storage
 backend and provides high-level methods for entities, assertions, and queries.
 """
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from ontolith.core import (
     Assertion,
@@ -36,6 +37,9 @@ from ontolith.identity import Principal, PrincipalCredential, min_capability
 from ontolith.query import QueryBuilder
 from ontolith.schema import SchemaIR
 from ontolith.store.base import DEFAULT_NAMESPACE, StorageBackend
+
+if TYPE_CHECKING:
+    from ontolith.plugins.ports import Validator
 
 
 class AsOfView:
@@ -127,6 +131,8 @@ class Ontology:
         id_provider: IdProvider | None = None,
         policy: PolicyStrategy | None = None,
         embedder: Embedder | None = None,
+        validators: Sequence["Validator"] | None = None,
+        completeness_validators: Sequence["Validator"] | None = None,
     ) -> None:
         """Initialize Ontology with a storage backend.
 
@@ -139,6 +145,27 @@ class Ontology:
                 as an open-core extension point for proprietary strategies.
             embedder: Embedder for .semantic() queries and reindex() (defaults
                 to HashingEmbedder — ADR-0020).
+            validators: Per-assertion Validators (SPEC §13.2, KI-042,
+                ADR-0029), run synchronously and blocking at every point an
+                assertion actually commits — assert_literal, assert_ref,
+                propose/propose_ref's auto-accept path, and
+                accept_proposal/resubmit's replay of a reviewed proposal's
+                operations. A failing Validator raises ValidationError and
+                aborts the write. Each Validator receives the `Ontology`
+                itself as `kb` (trusted the same way `policy` is — see
+                `ValidatorKbView`), not a capability-scoped view. Not
+                suitable for whole-entity-completeness checks (e.g.
+                `RequiredFieldsValidator`) — use `completeness_validators`
+                for those (ADR-0029's Rationale explains why).
+            completeness_validators: Validators run once per distinct
+                subject touched by an accepted proposal's operations, after
+                all of that proposal's writes have landed inside the same
+                transaction (`accept_proposal` only — never direct writes
+                or propose/propose_ref's auto-accept path, ADR-0029). This
+                is the shape whole-entity-completeness checks like
+                `RequiredFieldsValidator` need: an entity is incomplete by
+                construction after every write but its last, so it cannot
+                be gated per-assertion.
         """
         self.backend = backend
         self.clock = clock or SystemClock()
@@ -146,6 +173,10 @@ class Ontology:
         self.policy = policy or ThresholdPolicy()
         self.embedder = embedder or HashingEmbedder()
         self.namespace = DEFAULT_NAMESPACE  # For M1, single namespace
+        self.validators: Sequence[Validator] = list(validators) if validators else []
+        self.completeness_validators: Sequence[Validator] = (
+            list(completeness_validators) if completeness_validators else []
+        )
 
     @classmethod
     def connect(
@@ -156,6 +187,8 @@ class Ontology:
         id_provider: IdProvider | None = None,
         policy: PolicyStrategy | None = None,
         embedder: Embedder | None = None,
+        validators: Sequence["Validator"] | None = None,
+        completeness_validators: Sequence["Validator"] | None = None,
     ) -> "Ontology":
         """Connect to a knowledge base.
 
@@ -166,6 +199,10 @@ class Ontology:
             policy: Optional policy strategy (defaults to ThresholdPolicy —
                 ADR-0018)
             embedder: Optional Embedder (defaults to HashingEmbedder)
+            validators: Per-assertion Validators — see `__init__` (KI-042,
+                ADR-0029)
+            completeness_validators: Whole-entity-completeness Validators —
+                see `__init__` (KI-041, ADR-0029)
 
         Returns:
             Ontology instance connected to the database
@@ -180,6 +217,8 @@ class Ontology:
             id_provider=id_provider,
             policy=policy,
             embedder=embedder,
+            validators=validators,
+            completeness_validators=completeness_validators,
         )
 
     def create_principal(
@@ -485,6 +524,63 @@ class Ontology:
                 f"asserts a {expected_kind}. Use {right_call} instead."
             )
 
+    def _run_validators(self, assertion: Assertion) -> None:
+        """Run `self.validators` against a single about-to-commit assertion
+        (SPEC §13.2, KI-042, ADR-0029) and raise if any reject it.
+
+        Called at every point an assertion actually commits: assert_literal,
+        assert_ref, propose/propose_ref's auto-accept path, and
+        accept_proposal/resubmit's replay of a reviewed proposal's
+        operations — so a registered Validator sees every write regardless
+        of which path it took, not just the direct-write ones. Each
+        Validator receives `self` as `kb` (see `ValidatorKbView`), so it can
+        read current KB state but not write. `assertion` here is always the
+        actual about-to-commit assertion (pre-conflict-routing) — contrast
+        `_run_completeness_validators`, whose `assertion` argument is only
+        a subject stand-in.
+        """
+        if not self.validators:
+            return
+        errors = [
+            msg for validator in self.validators for msg in validator.validate(assertion, self)
+        ]
+        if errors:
+            raise ValidationError(f"Validator rejected assertion: {'; '.join(errors)}")
+
+    def _run_completeness_validators(self, applied: list[Assertion]) -> None:
+        """Run `self.completeness_validators` once per distinct subject
+        touched by `applied` (KI-041, ADR-0029), after all of the writes
+        that produced them have landed in the same transaction.
+
+        Only called from `accept_proposal` — not `resubmit`'s own
+        auto-accept path, which (like `propose`/`propose_ref`'s auto-accept)
+        bypasses human review, and not direct writes, which have no
+        multi-operation batch boundary to check completeness against.
+
+        Each validator receives one representative `Assertion` per distinct
+        subject (the first entry in `applied` for that subject) — only its
+        `.subject` is contractually meaningful here; the rest of that
+        assertion's fields describe whichever operation happened to be
+        first for that subject in this proposal; not the entity's current
+        state (query `kb` for that). It may also be a retracted assertion's
+        pre-retraction snapshot (see `_replay_proposal_operations`'s
+        `retract` branch) — `.status`/`.value` on it reflect neither "what
+        just committed" nor "what's now active".
+        """
+        if not self.completeness_validators:
+            return
+        by_subject: dict[str, Assertion] = {}
+        for assertion in applied:
+            by_subject.setdefault(assertion.subject, assertion)
+        errors = [
+            msg
+            for representative in by_subject.values()
+            for validator in self.completeness_validators
+            for msg in validator.validate(representative, self)
+        ]
+        if errors:
+            raise ValidationError(f"Completeness validator rejected entity: {'; '.join(errors)}")
+
     def _retraction_valid_to(self, assertion_id: str, now: datetime) -> str | None:
         """Compute valid_to for a retraction.
 
@@ -589,8 +685,9 @@ class Ontology:
         Raises:
             ValidationError: predicate is not declared in the active schema,
                 value_type does not match the schema-declared value_type
-                for predicate (KI-031), or predicate is declared a relation
-                rather than a property (KI-040)
+                for predicate (KI-031), predicate is declared a relation
+                rather than a property (KI-040), or a registered
+                `Validator` rejects the assertion (KI-042)
         """
         self._check_direct_write_capability(author, acting_as)
         self._require_known_predicate(predicate, value_type, expected_kind="property")
@@ -615,6 +712,7 @@ class Ontology:
             valid_to=valid_to,
         )
 
+        self._run_validators(assertion)
         with self.backend.transaction():
             return self._apply_with_conflict_routing(assertion, temporality)
 
@@ -659,8 +757,9 @@ class Ontology:
 
         Raises:
             ValidationError: predicate is not declared in the active
-                schema, or predicate is declared a property rather than a
-                relation (KI-040)
+                schema, predicate is declared a property rather than a
+                relation (KI-040), or a registered `Validator` rejects the
+                assertion (KI-042)
         """
         self._check_direct_write_capability(author, acting_as)
         self._require_known_predicate(predicate, expected_kind="relation")
@@ -683,6 +782,7 @@ class Ontology:
             valid_to=valid_to,
         )
 
+        self._run_validators(assertion)
         with self.backend.transaction():
             return self._apply_with_conflict_routing(assertion, temporality)
 
@@ -862,8 +962,9 @@ class Ontology:
             ValidationError: author is ai-kind and model is not provided,
                 predicate is not declared in the active schema, value_type
                 does not match the schema-declared value_type for predicate
-                (KI-031), or predicate is declared a relation rather than a
-                property (KI-040)
+                (KI-031), predicate is declared a relation rather than a
+                property (KI-040), or (on auto-accept) a registered
+                `Validator` rejects the assertion (KI-042)
         """
         principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
@@ -934,6 +1035,7 @@ class Ontology:
             valid_from=valid_from,
             valid_to=valid_to,
         )
+        self._run_validators(assertion)
         accepted = proposal.model_copy(
             update={"state": "auto_accepted", "decided_at": now, "policy_reason": decision.reason}
         )
@@ -986,8 +1088,10 @@ class Ontology:
             AuthError: author or acting_as is not a known principal
             CapabilityError: delegation is unauthorized
             ValidationError: author is ai-kind and model is not provided,
-                predicate is not declared in the active schema, or predicate
-                is declared a property rather than a relation (KI-040)
+                predicate is not declared in the active schema, predicate
+                is declared a property rather than a relation (KI-040), or
+                (on auto-accept) a registered `Validator` rejects the
+                assertion (KI-042)
         """
         principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
@@ -1052,6 +1156,7 @@ class Ontology:
             valid_from=valid_from,
             valid_to=valid_to,
         )
+        self._run_validators(assertion)
         accepted = proposal.model_copy(
             update={"state": "auto_accepted", "decided_at": now, "policy_reason": decision.reason}
         )
@@ -1398,7 +1503,7 @@ class Ontology:
 
     def _replay_proposal_operations(
         self, proposal: Proposal, now: datetime, *, extra_retracting_party: str | None = None
-    ) -> None:
+    ) -> list[Assertion]:
         """Apply a proposal's staged operations through SPEC §10 conflict
         routing. Shared by `accept_proposal` and `resubmit` (KI-027) — MUST
         be called inside an open `backend.transaction()`.
@@ -1416,7 +1521,11 @@ class Ontology:
         A schema change between submission and replay (e.g. a property
         redeclared a relation) can therefore let a now-mismatched write
         through unchecked — a narrow, pre-existing gap shared with KI-031,
-        not new to KI-040.
+        not new to KI-040. `self.validators` (KI-042, ADR-0029), by
+        contrast, IS re-run here for each assert_literal/assert_ref op —
+        every commit point runs the same per-assertion Validators, so a
+        proposal that went through review isn't exempt from them just
+        because it skipped `propose`/`propose_ref`'s own auto-accept check.
 
         ``extra_retracting_party``: the accepting reviewer, when called from
         `accept_proposal` (KI-033) — a `retract` operation's contradiction
@@ -1427,7 +1536,21 @@ class Ontology:
         principal's retract proposal. `resubmit` passes nothing extra —
         its caller is already required to be the proposal's own
         author/delegate, already covered by `proposal.author`/`acting_as`.
+
+        Returns:
+            The assertions touched by this proposal's operations, in
+            payload order — for assert_literal/assert_ref ops, the assertion
+            as persisted; for retract ops, the (now-retracted) target
+            assertion, included because retraction is the one operation
+            that can *reduce* an entity's completeness (an assert can only
+            ever improve it). Used by `accept_proposal` to run
+            `self.completeness_validators` once per distinct subject after
+            all of this proposal's writes have landed (KI-041) — only
+            `.subject` is contractually meaningful for that use, not the
+            other fields (a retract entry's `status`/`value` reflect the
+            assertion as it was before this op retracted it).
         """
+        applied: list[Assertion] = []
         for op in proposal.payload.get("operations", []):
             if op["kind"] == "assert_literal":
                 assertion = Assertion(
@@ -1449,8 +1572,11 @@ class Ontology:
                     valid_from=self._parse_window(op, "valid_from"),
                     valid_to=self._parse_window(op, "valid_to"),
                 )
-                self._apply_with_conflict_routing(
-                    assertion, self._resolve_temporality(op["predicate"])
+                self._run_validators(assertion)
+                applied.append(
+                    self._apply_with_conflict_routing(
+                        assertion, self._resolve_temporality(op["predicate"])
+                    )
                 )
             elif op["kind"] == "assert_ref":
                 ref_assertion = Assertion(
@@ -1471,8 +1597,11 @@ class Ontology:
                     valid_from=self._parse_window(op, "valid_from"),
                     valid_to=self._parse_window(op, "valid_to"),
                 )
-                self._apply_with_conflict_routing(
-                    ref_assertion, self._resolve_temporality(op["predicate"])
+                self._run_validators(ref_assertion)
+                applied.append(
+                    self._apply_with_conflict_routing(
+                        ref_assertion, self._resolve_temporality(op["predicate"])
+                    )
                 )
             elif op["kind"] == "retract":
                 retracting_parties = {proposal.author} | (
@@ -1483,14 +1612,28 @@ class Ontology:
                 self._reject_retract_if_party_to_contradiction(
                     op["assertion_id"], retracting_parties
                 )
+                retracted = self.backend.get_assertion(op["assertion_id"])
+                assert retracted is not None  # append-only; targeted by an existing proposal op
                 self.backend.set_assertion_status(
                     op["assertion_id"],
                     "retracted",
                     valid_to=self._retraction_valid_to(op["assertion_id"], now),
                 )
                 self._record_assertion_event(op["assertion_id"], proposal.author, "retracted", now)
+                # Retraction is the one operation that can *reduce*
+                # completeness (an assert can only ever improve it) - its
+                # subject must be checked too, or accept_proposal could
+                # retract an entity's only assertion for a required
+                # predicate without completeness_validators ever noticing
+                # (found in review). Only `.subject` is used downstream
+                # (accept_proposal dedups `applied` by subject before
+                # running completeness_validators) - the retracted
+                # assertion's other fields (status, value, ...) are not
+                # contractually meaningful here.
+                applied.append(retracted)
             else:
                 raise ValidationError(f"Unknown operation kind in proposal payload: {op['kind']}")
+        return applied
 
     def accept_proposal(self, proposal_id: str, reviewer: str) -> Proposal:
         """Accept a pending proposal, replaying its operations (SPEC §9).
@@ -1501,6 +1644,12 @@ class Ontology:
         write, not before it — a TOCTOU gap otherwise), both shared with
         `reject_proposal`/`request_changes`. Operations are replayed
         through SPEC §10 conflict routing inside the same transaction.
+        `self.completeness_validators` (KI-041, ADR-0029) then run once per
+        distinct subject the replayed operations touched — the one point
+        in the write path where a whole-entity-completeness check like
+        `RequiredFieldsValidator` is structurally meaningful, since this is
+        after every operation in the proposal (which may span several
+        assertions on the same entity) has landed, not mid-construction.
 
         Args:
             proposal_id: ID of the proposal to accept
@@ -1519,7 +1668,8 @@ class Ontology:
                 reviewer* is party to (KI-033)
             ValidationError: proposal is not pending review (including when
                 a concurrent transition already moved it out of that state,
-                KI-035)
+                KI-035); or a registered `Validator`/`completeness_validator`
+                rejects one of the replayed assertions (KI-042/KI-041)
         """
         self._require_reviewer_principal(reviewer)
 
@@ -1527,7 +1677,10 @@ class Ontology:
 
         with self.backend.transaction():
             proposal = self._require_pending_proposal(proposal_id, reviewer)
-            self._replay_proposal_operations(proposal, now, extra_retracting_party=reviewer)
+            applied = self._replay_proposal_operations(
+                proposal, now, extra_retracting_party=reviewer
+            )
+            self._run_completeness_validators(applied)
             self.backend.update_proposal_state(proposal_id, "accepted", now.isoformat())
             self.backend.put_proposal_event(
                 ProposalEvent(
@@ -1659,7 +1812,10 @@ class Ontology:
         deliberately not re-run — the original submission's shape is
         trusted, matching `accept_proposal`'s existing precedent — but
         temporality is re-resolved dynamically at replay time on
-        auto-accept (see `_replay_proposal_operations`).
+        auto-accept (see `_replay_proposal_operations`), which also runs
+        `self.validators` per-assertion (KI-042). `self.completeness_validators`
+        deliberately do NOT run here even on auto-accept — ADR-0029 confines
+        that check to `accept_proposal`'s human-reviewed path.
 
         The initial `author`/state validation below runs before policy
         evaluation (needed to construct the `resubmitted` object policy
@@ -1705,7 +1861,9 @@ class Ontology:
                 party at `retract()`'s own auto-accept time otherwise
             ValidationError: proposal is not awaiting resubmission (including
                 when a concurrent transition already moved it out of that
-                state between the optimistic check and the write, KI-035)
+                state between the optimistic check and the write, KI-035);
+                or, on auto-accept, a registered `Validator` rejects one of
+                the replayed assertions (KI-042)
         """
         caller = self._get_principal_or_raise(author)
         proposal = self.backend.get_proposal(proposal_id)
@@ -1770,6 +1928,11 @@ class Ontology:
                 self.backend.update_proposal_state(
                     proposal_id, "auto_accepted", now.isoformat(), decision.reason
                 )
+                # self.validators still run per-assertion inside the replay
+                # (KI-042); self.completeness_validators deliberately do
+                # not run here — this branch, like propose/propose_ref's
+                # auto-accept, bypasses human review, and ADR-0029 confines
+                # completeness checks to accept_proposal only.
                 self._replay_proposal_operations(result, now)
 
             self.backend.put_proposal_event(

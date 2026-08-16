@@ -199,6 +199,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks the type token) — SQLite's `CAST` silently returns `0.0` for non-numeric
   stored text under a range filter where DuckDB's `TRY_CAST` excludes the row
   instead, a real, tracked cross-backend divergence (KI-049).
+- Registered `Validator` plugins (SPEC §13.2) are now actually invoked — previously
+  `.validate()` had zero call sites anywhere outside the protocol/plugin definitions
+  themselves (closes KI-042). `Ontology`/`Ontology.connect` gain two new constructor
+  parameters: `validators` (per-assertion, synchronous, blocking — runs at every point
+  an assertion actually commits: `assert_literal`, `assert_ref`, `propose`/
+  `propose_ref`'s auto-accept path, and `accept_proposal`/`resubmit`'s replay of a
+  proposal's operations) and `completeness_validators` (whole-entity, run once per
+  distinct subject touched by an accepted proposal's operations, `accept_proposal`
+  only — never direct writes or any auto-accept path). The two-list split exists
+  because a single per-assertion invocation point cannot serve whole-entity-completeness
+  checks: an entity built up one assertion at a time is incomplete by construction until
+  its last write (see ADR-0029). `RequiredFieldsValidator` gains a
+  `from_schema(schema: SchemaIR)` classmethod (closes KI-041) that derives its
+  `required_predicates` from the schema's own `PropertyDef.required`/
+  `RelationDef.required` declarations instead of a hand-maintained, independently
+  drifting mapping — wire it via `completeness_validators=[RequiredFieldsValidator.
+  from_schema(schema)]` for schema-declared `required` fields to actually be enforced.
+  `Validator.validate()`'s `kb` parameter type widened from the concrete `ReadOnlyView`
+  to a new minimal structural `ValidatorKbView` Protocol (`plugins/ports.py`, exported
+  from `ontolith.plugins`), since `Ontology`-registered validators receive the live
+  `Ontology` instance itself as `kb` (trusted the same way `PolicyStrategy` already is,
+  not sandboxed) rather than a capability-scoped view; `PluginRegistry`-loaded
+  validators are unaffected and still have no automatic invocation point of their own —
+  recorded as an explicit follow-up in ADR-0029, not a new KI.
 
 #### Fixed
 - **`assert_literal`/`assert_ref`/`propose`/`propose_ref` now reject a predicate-kind
