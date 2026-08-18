@@ -16,7 +16,7 @@ from conformance.conftest import KbFactory
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
 from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
-from ontolith.govern import AutoAccept, Decision, PolicyStrategy
+from ontolith.govern import AutoAccept, Decision, PolicyStrategy, RequireReview
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 
@@ -409,20 +409,27 @@ class TestRetractContradictionGuard:
         with pytest.raises(CapabilityError, match="party to"):
             kb.retract(ada_id, REVIEWER)
 
-    def test_neutral_write_capability_party_is_blocked_by_capability_floor(
-        self, make_kb: KbFactory
-    ) -> None:
+    def test_neutral_write_capability_party_is_routed_to_review(self, make_kb: KbFactory) -> None:
         """A principal with no stake in either disputed value (not an
         author/delegate of any member) clears the party guard above, but
-        `write` capability alone is no longer enough to retract a flagged
-        contradiction member (KI-043) — retracting one side of a dispute is
-        a smaller-grained way of adjudicating it, the same reason
-        resolve_contradiction() itself requires review/admin. Renamed from
+        `write` capability alone is no longer enough to auto-accept a
+        retraction of a flagged contradiction member (KI-043) —
+        retracting one side of a dispute is a smaller-grained way of
+        adjudicating it, the same reason resolve_contradiction() itself
+        requires review/admin. Rather than a hard error with no path
+        forward, this routes to review — a review-capable, non-AI
+        principal can then accept it (ADR-0030's fix for an inversion an
+        earlier version of this check had: a write-capability principal
+        was left worse off than a merely propose-capability one, whose
+        retraction already went through review normally). Renamed from
         `test_neutral_third_party_can_still_retract_flagged_member`, which
         pinned the pre-KI-043 behavior this test now supersedes."""
         kb = _kb(make_kb)
         kb.create_principal(
             "dave@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+        kb.create_principal(
+            "erin@example.com", kind="human", auth_method="oidc", default_capability="review"
         )
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE)
@@ -430,10 +437,15 @@ class TestRetractContradictionGuard:
         flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
         ada_id = next(a.id for a in flagged if a.author == HUMAN_WRITE)
 
-        with pytest.raises(CapabilityError, match="review/admin capability"):
-            kb.retract(ada_id, "dave@example.com")
+        proposal, decision = kb.retract(ada_id, "dave@example.com")
 
+        assert isinstance(decision, RequireReview)
         assert kb.backend.get_assertion(ada_id).status == "flagged"  # type: ignore[union-attr]
+
+        # A neutral, review-capable, non-AI principal can accept it -
+        # KI-043 raises the floor, it doesn't remove retract() as a path.
+        kb.accept_proposal(proposal.id, "erin@example.com")
+        assert kb.backend.get_assertion(ada_id).status == "retracted"  # type: ignore[union-attr]
 
     def test_neutral_review_capability_party_can_still_retract(self, make_kb: KbFactory) -> None:
         """A neutral principal (no stake in either disputed value) who also
@@ -457,7 +469,7 @@ class TestRetractContradictionGuard:
     def test_ai_principal_cannot_retract_flagged_member_even_with_review_capability(
         self, make_kb: KbFactory
     ) -> None:
-        """An AI principal is blocked regardless of its configured
+        """An AI principal is routed to review regardless of its configured
         capability, mirroring resolve_contradiction()'s own AI block
         (SPEC §10.3, ADR-0003) — capability alone isn't the whole floor.
 
@@ -474,16 +486,22 @@ class TestRetractContradictionGuard:
             owner=REVIEWER,
             default_capability="review",
         )
+        kb.create_principal(
+            "erin@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE)
         kb.propose(entity.id, "Person.name", "Ava", "Text", REVIEWER)
         flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
         ada_id = next(a.id for a in flagged if a.author == HUMAN_WRITE)
 
-        with pytest.raises(CapabilityError, match="AI principal"):
-            kb.retract(ada_id, "frank-ai")
+        proposal, decision = kb.retract(ada_id, "frank-ai")
 
+        assert isinstance(decision, RequireReview)
         assert kb.backend.get_assertion(ada_id).status == "flagged"  # type: ignore[union-attr]
+
+        kb.accept_proposal(proposal.id, "erin@example.com")
+        assert kb.backend.get_assertion(ada_id).status == "retracted"  # type: ignore[union-attr]
 
     def test_delegation_attenuates_capability_floor_for_retract(self, make_kb: KbFactory) -> None:
         """A review-capable principal delegating through a write-only
@@ -511,10 +529,11 @@ class TestRetractContradictionGuard:
         ada_id = next(a.id for a in flagged if a.author == HUMAN_WRITE)
 
         # grace (write) acting on behalf of henry (review): effective
-        # capability is min(write, review) = write, still below the floor.
-        with pytest.raises(CapabilityError, match="review/admin capability"):
-            kb.retract(ada_id, "grace@example.com", acting_as="henry@example.com")
+        # capability is min(write, review) = write, still below the floor
+        # -> routed to review rather than auto-accepted.
+        proposal, decision = kb.retract(ada_id, "grace@example.com", acting_as="henry@example.com")
 
+        assert isinstance(decision, RequireReview)
         assert kb.backend.get_assertion(ada_id).status == "flagged"  # type: ignore[union-attr]
 
     def test_flagged_status_without_open_contradiction_is_unaffected(
