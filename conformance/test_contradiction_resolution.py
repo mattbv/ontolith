@@ -16,6 +16,7 @@ from conformance.conftest import KbFactory
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
 from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
+from ontolith.govern import AutoAccept, Decision, PolicyStrategy
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 
@@ -24,10 +25,28 @@ REVIEWER = "bob@example.com"
 NON_REVIEWER = "carol@example.com"
 
 
-def _kb(make_kb: KbFactory) -> Ontology:
+class _AlwaysAutoAccept:
+    """PolicyStrategy test double that auto-accepts unconditionally,
+    including for AI-kind authors ThresholdPolicy would always send to
+    review — used to reach KI-043's AI-kind check in
+    `_require_capability_to_retract_flagged_member`, which is otherwise
+    unreachable under the default ThresholdPolicy (an AI author's retract
+    never auto-accepts in the first place, so that defensive check never
+    runs). Deployments are free to plug in a PolicyStrategy this permissive
+    (ADR-0006 names PolicyStrategy as an open-core extension point); this
+    double exists to prove Ontology itself still enforces the floor even
+    then, not to imply ThresholdPolicy behaves this way."""
+
+    def evaluate(
+        self, proposal: object, principal: object, kb: object, acting_as: object = None
+    ) -> Decision:
+        return AutoAccept("test double: always auto-accepts")
+
+
+def _kb(make_kb: KbFactory, *, policy: PolicyStrategy | None = None) -> Ontology:
     clock = FixedClock(T0)
     ids = FixedIdProvider([f"id-{i}" for i in range(30)])
-    kb = make_kb(clock, ids)
+    kb = make_kb(clock, ids, policy=policy)
     kb.create_principal(HUMAN_WRITE, kind="human", auth_method="oidc", default_capability="write")
     kb.create_principal(REVIEWER, kind="human", auth_method="oidc", default_capability="review")
     kb.create_principal(
@@ -169,10 +188,11 @@ class TestResolveContradiction:
         own earlier retract(), KI-033/KI-034) needs no further write -
         re-retracting it is a status no-op and must not record a second,
         resolver-misattributed `retracted` event as if the resolver had
-        just done it (found in KI-034's review)."""
+        just done it (found in KI-034's review). dave needs review
+        capability, not just write, to retract a flagged member (KI-043)."""
         kb = _kb(make_kb)
         kb.create_principal(
-            "dave@example.com", kind="human", auth_method="oidc", default_capability="write"
+            "dave@example.com", kind="human", auth_method="oidc", default_capability="review"
         )
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, ada_id, ava_id = _open_contradiction(kb, entity.id)
@@ -389,9 +409,17 @@ class TestRetractContradictionGuard:
         with pytest.raises(CapabilityError, match="party to"):
             kb.retract(ada_id, REVIEWER)
 
-    def test_neutral_third_party_can_still_retract_flagged_member(self, make_kb: KbFactory) -> None:
+    def test_neutral_write_capability_party_is_blocked_by_capability_floor(
+        self, make_kb: KbFactory
+    ) -> None:
         """A principal with no stake in either disputed value (not an
-        author/delegate of any member) is unaffected by this guard."""
+        author/delegate of any member) clears the party guard above, but
+        `write` capability alone is no longer enough to retract a flagged
+        contradiction member (KI-043) — retracting one side of a dispute is
+        a smaller-grained way of adjudicating it, the same reason
+        resolve_contradiction() itself requires review/admin. Renamed from
+        `test_neutral_third_party_can_still_retract_flagged_member`, which
+        pinned the pre-KI-043 behavior this test now supersedes."""
         kb = _kb(make_kb)
         kb.create_principal(
             "dave@example.com", kind="human", auth_method="oidc", default_capability="write"
@@ -402,9 +430,92 @@ class TestRetractContradictionGuard:
         flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
         ada_id = next(a.id for a in flagged if a.author == HUMAN_WRITE)
 
-        kb.retract(ada_id, "dave@example.com")
+        with pytest.raises(CapabilityError, match="review/admin capability"):
+            kb.retract(ada_id, "dave@example.com")
+
+        assert kb.backend.get_assertion(ada_id).status == "flagged"  # type: ignore[union-attr]
+
+    def test_neutral_review_capability_party_can_still_retract(self, make_kb: KbFactory) -> None:
+        """A neutral principal (no stake in either disputed value) who also
+        meets resolve_contradiction()'s own review/admin floor can still
+        retract a flagged member directly — KI-043 raises the floor, it
+        doesn't remove retract() as a path."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "erin@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ava", "Text", REVIEWER)
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        ada_id = next(a.id for a in flagged if a.author == HUMAN_WRITE)
+
+        kb.retract(ada_id, "erin@example.com")
 
         assert kb.backend.get_assertion(ada_id).status == "retracted"  # type: ignore[union-attr]
+
+    def test_ai_principal_cannot_retract_flagged_member_even_with_review_capability(
+        self, make_kb: KbFactory
+    ) -> None:
+        """An AI principal is blocked regardless of its configured
+        capability, mirroring resolve_contradiction()'s own AI block
+        (SPEC §10.3, ADR-0003) — capability alone isn't the whole floor.
+
+        Uses a permissive test-double policy (_AlwaysAutoAccept) because
+        the default ThresholdPolicy already sends every AI-authored
+        proposal to review (never auto-accept) — this test exists to prove
+        Ontology's own KI-043 check is a real backstop, not just something
+        ThresholdPolicy happens to make redundant."""
+        kb = _kb(make_kb, policy=_AlwaysAutoAccept())
+        kb.create_principal(
+            "frank-ai",
+            kind="ai",
+            auth_method="workload",
+            owner=REVIEWER,
+            default_capability="review",
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ava", "Text", REVIEWER)
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        ada_id = next(a.id for a in flagged if a.author == HUMAN_WRITE)
+
+        with pytest.raises(CapabilityError, match="AI principal"):
+            kb.retract(ada_id, "frank-ai")
+
+        assert kb.backend.get_assertion(ada_id).status == "flagged"  # type: ignore[union-attr]
+
+    def test_delegation_attenuates_capability_floor_for_retract(self, make_kb: KbFactory) -> None:
+        """A review-capable principal delegating through a write-only
+        principal gets the *lower* of the two, mirroring
+        `_check_direct_write_capability`'s existing delegation-attenuation
+        (SPEC §8.4) — the floor can't be laundered by picking whichever of
+        the pair happens to qualify. Both grace and henry are neutral
+        (authors of neither disputed value) so this isolates the capability
+        check from the separate party-to-contradiction guard above."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "henry@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        kb.create_principal(
+            "grace@example.com",
+            kind="human",
+            auth_method="oidc",
+            owner="henry@example.com",
+            default_capability="write",
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ava", "Text", REVIEWER)
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        ada_id = next(a.id for a in flagged if a.author == HUMAN_WRITE)
+
+        # grace (write) acting on behalf of henry (review): effective
+        # capability is min(write, review) = write, still below the floor.
+        with pytest.raises(CapabilityError, match="review/admin capability"):
+            kb.retract(ada_id, "grace@example.com", acting_as="henry@example.com")
+
+        assert kb.backend.get_assertion(ada_id).status == "flagged"  # type: ignore[union-attr]
 
     def test_flagged_status_without_open_contradiction_is_unaffected(
         self, make_kb: KbFactory
@@ -534,7 +645,13 @@ class TestRetractedIsTerminalAcrossExtension:
     ) -> None:
         kb = _kb(make_kb)
         kb.create_principal(
-            "dave@example.com", kind="human", auth_method="oidc", default_capability="write"
+            # review capability, not just write - retracting a flagged
+            # contradiction member requires it now (KI-043); dave remains
+            # neutral (party to neither disputed value).
+            "dave@example.com",
+            kind="human",
+            auth_method="oidc",
+            default_capability="review",
         )
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, ada_id, ava_id = _open_contradiction(kb, entity.id)
@@ -563,7 +680,11 @@ class TestRetractedIsTerminalAcrossExtension:
         once belonged to was extended."""
         kb = _kb(make_kb)
         kb.create_principal(
-            "dave@example.com", kind="human", auth_method="oidc", default_capability="write"
+            # review capability (KI-043) - see the previous test's comment.
+            "dave@example.com",
+            kind="human",
+            auth_method="oidc",
+            default_capability="review",
         )
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         _, ada_id, _ = _open_contradiction(kb, entity.id)
@@ -582,7 +703,11 @@ class TestRetractedIsTerminalAcrossExtension:
         contradiction's own member_ids - only its status stops changing."""
         kb = _kb(make_kb)
         kb.create_principal(
-            "dave@example.com", kind="human", auth_method="oidc", default_capability="write"
+            # review capability (KI-043) - see the earlier comment above.
+            "dave@example.com",
+            kind="human",
+            auth_method="oidc",
+            default_capability="review",
         )
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, ada_id, _ = _open_contradiction(kb, entity.id)
@@ -605,7 +730,11 @@ class TestRetractedIsTerminalAcrossExtension:
         all)."""
         kb = _kb(make_kb)
         kb.create_principal(
-            "dave@example.com", kind="human", auth_method="oidc", default_capability="write"
+            # review capability (KI-043) - see the earlier comment above.
+            "dave@example.com",
+            kind="human",
+            auth_method="oidc",
+            default_capability="review",
         )
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         a = kb.assert_literal(entity.id, "Person.born", "1815", "Text", HUMAN_WRITE)

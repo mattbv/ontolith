@@ -896,10 +896,10 @@ New tests: `tests/unit/test_ontology_validators.py` covers both lists across all
 
 ---
 
-## KI-043 — `retract()` lets any `write`-capability principal unilaterally shrink an open contradiction, unlike `resolve_contradiction()`
+## KI-043 — `retract()` lets any `write`-capability principal unilaterally shrink an open contradiction, unlike `resolve_contradiction()` ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — a review-grade governance action (disturbing a disputed static fact) is reachable at a lower capability floor through a different method
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved via ADR-0030
 **SPEC reference:** SPEC §10.3 (contradiction resolution — routed to review, not auto-resolved)
 
 ### Description
@@ -910,7 +910,13 @@ Found during KI-033's review (2026-08-05): the party-to-contradiction check that
 
 ### Fix
 
-Decide (ADR) whether retracting a `flagged` contradiction member should require the same `review`/`admin` + non-AI floor `resolve_contradiction()` enforces, rather than the ordinary `write` floor every other retraction uses — and if so, add that check to `_reject_retract_if_party_to_contradiction` (or a sibling capability gate) alongside the existing party check, updating the now-misleadingly-named "neutral third party" test above to reflect the new floor.
+ADR-0030: retracting a `flagged` member of an open contradiction now requires the same `review`/`admin` + non-AI floor `resolve_contradiction()` enforces. New `Ontology._require_capability_to_retract_flagged_member(assertion_id, principal, delegating)`, a sibling to `_reject_retract_if_party_to_contradiction` (not merged into it — the two guards need different actor sets; see the ADR's Rationale), no-ops for an ordinary (non-contradiction-member) retraction and otherwise raises `CapabilityError` for an AI-kind principal or effective capability (delegation-attenuated per SPEC §8.4, mirroring `_check_direct_write_capability`) below `review`.
+
+Called from `retract()`'s own auto-accept branch and from `_replay_proposal_operations`'s `retract` branch only when reached via `resubmit`'s auto-accept (not `accept_proposal`, whose accepting reviewer already satisfies this floor via the pre-existing `_require_reviewer_principal` — re-checking there would be redundant).
+
+`conformance/test_contradiction_resolution.py::TestRetractContradictionGuard::test_neutral_third_party_can_still_retract_flagged_member` renamed to `test_neutral_write_capability_party_is_blocked_by_capability_floor` and rewritten to assert the new `CapabilityError`; new sibling tests cover a neutral `review`-capability party still succeeding, an AI-kind principal being blocked even with `review` capability (via a test-double `PolicyStrategy`, since the default `ThresholdPolicy` already routes every AI-authored proposal to review before this check would ever run), and delegation attenuation. Five other pre-existing tests in this file that used a `write`-only neutral principal purely as retract() setup (not testing the capability floor itself) were updated to a `review`-capability principal so they keep exercising what they were actually about.
+
+**Breaking:** a deployment automating retraction of flagged contradiction members with only `write`-capability principals will now see `CapabilityError` for that specific case — ordinary (non-contradiction) retraction is unaffected. Flagged in CHANGELOG per ADR-0019's policy despite no public signature change, since it's a behavior-level break.
 
 ---
 

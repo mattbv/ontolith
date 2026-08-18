@@ -225,6 +225,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorded as an explicit follow-up in ADR-0029, not a new KI.
 
 #### Fixed
+- **Breaking:** `retract()` now requires the same `review`/`admin` capability + non-AI
+  floor `resolve_contradiction()` already enforces when the target is a `flagged`
+  member of an open contradiction (closes KI-043) — previously any `write`-capability
+  principal (party to neither disputed value) could retract one side of a dispute
+  outright, reaching close to the same effective outcome as `resolve_contradiction()`
+  at a materially lower floor. Ordinary retraction (target not a flagged contradiction
+  member) is unaffected — still just `write`. New `Ontology.
+  _require_capability_to_retract_flagged_member`, a sibling to the existing
+  party-to-contradiction guard (KI-033); delegation attenuates the effective capability
+  (`min(principal, delegating)`, SPEC §8.4) same as direct writes. See ADR-0030.
 - **`assert_literal`/`assert_ref`/`propose`/`propose_ref` now reject a predicate-kind
   mismatch (closes KI-040):** nothing previously stopped a literal write against a
   schema-declared relation predicate, or a ref write against a schema-declared

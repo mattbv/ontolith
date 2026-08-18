@@ -1224,6 +1224,79 @@ class Ontology:
                     "resolve_contradiction() instead"
                 )
 
+    def _require_capability_to_retract_flagged_member(
+        self, assertion_id: str, principal: Principal, delegating: Principal | None
+    ) -> None:
+        """Require the same review/admin + non-AI floor `resolve_contradiction()`
+        enforces before letting `principal` retract a flagged contradiction
+        member (KI-043).
+
+        Retraction ordinarily needs only `write` capability — but
+        retracting one side of a disputed static fact is, in effect, a
+        smaller-grained way of adjudicating the dispute (it leaves the
+        contradiction open with one member gone rather than picking a
+        winner), the same reason `resolve_contradiction()` itself requires
+        `review`/`admin` and blocks AI resolvers (SPEC §10.3). Before this
+        check, any `write`-capability principal (human or service) could
+        reach that same effective outcome through `retract()` at a lower
+        floor than `resolve_contradiction()` requires, an inconsistency
+        this closes (`conformance/test_contradiction_resolution.py`'s
+        `TestRetractContradictionGuard` pinned this as intentional-for-now
+        until now).
+
+        No-op when the target isn't currently a flagged member of an open
+        contradiction — an ordinary retraction (or one whose contradiction
+        has since resolved) is unaffected; only `write` capability is
+        needed for those, same as before.
+
+        Effective capability mirrors `_check_direct_write_capability`'s
+        delegation-attenuation: min(principal, delegating) when delegating
+        (SPEC §8.4) — a `write`-capability principal can't launder this
+        floor by delegating to/from a `review`-capability one either way.
+        AI-kind is checked on `principal` only (the acting party), matching
+        `_check_direct_write_capability`'s own precedent — ADR-0003 already
+        treats an AI's accountable owner, not the AI itself, as the
+        eligible actor once delegation is involved.
+
+        Not called for `accept_proposal`'s replay of a retract op — the
+        accepting reviewer there already satisfies this exact floor via
+        `_require_reviewer_principal`, so re-checking would be redundant.
+        Called for `retract()`'s own auto-accept path and for `resubmit`'s
+        auto-accept path (see their respective call sites), the two shapes
+        where a retraction can land without any independent reviewer
+        having been capability-gated first.
+
+        Raises:
+            CapabilityError: `principal` is AI-kind, or effective capability
+                (after delegation attenuation) is below `review`
+        """
+        target = self.backend.get_assertion(assertion_id)
+        if target is None or target.status != "flagged":
+            return
+        contradiction = self.backend.get_open_contradiction(
+            self.namespace, target.subject, target.predicate
+        )
+        if contradiction is None or assertion_id not in contradiction.member_ids:
+            return
+        if principal.kind == "ai":
+            raise CapabilityError(
+                f"Cannot retract assertion {assertion_id!r}: it is a flagged member of open "
+                f"contradiction {contradiction.id!r} — AI principal {principal.id!r} cannot "
+                "retract a disputed static fact, same floor as resolve_contradiction() "
+                "(SPEC §10.3, KI-043)"
+            )
+        capability: str = principal.default_capability
+        if delegating is not None:
+            capability = min_capability(capability, delegating.default_capability)
+        if capability not in ("review", "admin"):
+            raise CapabilityError(
+                f"Cannot retract assertion {assertion_id!r}: it is a flagged member of open "
+                f"contradiction {contradiction.id!r} — retracting a disputed static fact "
+                f"requires review/admin capability, same floor as resolve_contradiction() "
+                f"(SPEC §10.3, KI-043), not just write — use resolve_contradiction() or have a "
+                "review-capable principal accept a retract proposal instead"
+            )
+
     def retract(
         self,
         assertion_id: str,
@@ -1240,7 +1313,10 @@ class Ontology:
             CapabilityError: assertion is a flagged member of an open
                 contradiction the retracting principal is a party to
                 (author or delegate of any member, KI-033) — use
-                resolve_contradiction() instead
+                resolve_contradiction() instead; or (on auto-accept) the
+                assertion is a flagged member of an open contradiction and
+                the retracting principal lacks the review/admin + non-AI
+                floor resolve_contradiction() itself requires (KI-043)
 
         Returns:
             (Proposal, Decision) tuple
@@ -1277,6 +1353,7 @@ class Ontology:
         retracting_parties = {author} | ({acting_as} if acting_as is not None else set())
         with self.backend.transaction():
             self._reject_retract_if_party_to_contradiction(assertion_id, retracting_parties)
+            self._require_capability_to_retract_flagged_member(assertion_id, principal, delegating)
             self.backend.put_proposal(accepted)
             self.backend.set_assertion_status(
                 assertion_id, "retracted", valid_to=self._retraction_valid_to(assertion_id, now)
@@ -1536,6 +1613,11 @@ class Ontology:
         principal's retract proposal. `resubmit` passes nothing extra —
         its caller is already required to be the proposal's own
         author/delegate, already covered by `proposal.author`/`acting_as`.
+        Whether ``extra_retracting_party`` is set also decides whether a
+        `retract` op runs `_require_capability_to_retract_flagged_member`
+        (KI-043): only when it's unset (`resubmit`'s auto-accept branch),
+        since `accept_proposal`'s reviewer already satisfies that floor via
+        `_require_reviewer_principal` and re-checking would be redundant.
 
         Returns:
             The assertions touched by this proposal's operations, in
@@ -1612,6 +1694,27 @@ class Ontology:
                 self._reject_retract_if_party_to_contradiction(
                     op["assertion_id"], retracting_parties
                 )
+                if extra_retracting_party is None:
+                    # Called from resubmit's auto-accept branch, not
+                    # accept_proposal (which passes extra_retracting_party
+                    # =reviewer) - a reviewer there already satisfies this
+                    # exact floor via _require_reviewer_principal, so only
+                    # the no-reviewer-involved auto-accept case needs this
+                    # check (KI-043). proposal.author's own capability, not
+                    # the *original submitter's* claimed one, is what
+                    # decides here - fetched fresh rather than re-running
+                    # _resolve_delegation, matching this method's existing
+                    # precedent of trusting the original submission's shape
+                    # (see this method's own docstring).
+                    author_principal = self._get_principal_or_raise(proposal.author)
+                    delegating_principal = (
+                        self.backend.get_principal(proposal.acting_as)
+                        if proposal.acting_as is not None
+                        else None
+                    )
+                    self._require_capability_to_retract_flagged_member(
+                        op["assertion_id"], author_principal, delegating_principal
+                    )
                 retracted = self.backend.get_assertion(op["assertion_id"])
                 assert retracted is not None  # append-only; targeted by an existing proposal op
                 self.backend.set_assertion_status(
@@ -1858,7 +1961,11 @@ class Ontology:
                 `accept_proposal` (KI-033), though only reachable here if
                 the author's effective capability/trust has risen since the
                 original submission, since that same guard already blocks a
-                party at `retract()`'s own auto-accept time otherwise
+                party at `retract()`'s own auto-accept time otherwise; or,
+                on auto-accept, a staged retract operation targets a flagged
+                contradiction member and the proposal's author/delegate
+                lacks the review/admin + non-AI floor `resolve_contradiction()`
+                requires (KI-043)
             ValidationError: proposal is not awaiting resubmission (including
                 when a concurrent transition already moved it out of that
                 state between the optimistic check and the write, KI-035);
