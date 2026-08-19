@@ -409,7 +409,9 @@ class TestRetractContradictionGuard:
         with pytest.raises(CapabilityError, match="party to"):
             kb.retract(ada_id, REVIEWER)
 
-    def test_neutral_write_capability_party_is_routed_to_review(self, make_kb: KbFactory) -> None:
+    def test_neutral_write_capability_principal_is_routed_to_review(
+        self, make_kb: KbFactory
+    ) -> None:
         """A principal with no stake in either disputed value (not an
         author/delegate of any member) clears the party guard above, but
         `write` capability alone is no longer enough to auto-accept a
@@ -447,7 +449,9 @@ class TestRetractContradictionGuard:
         kb.accept_proposal(proposal.id, "erin@example.com")
         assert kb.backend.get_assertion(ada_id).status == "retracted"  # type: ignore[union-attr]
 
-    def test_neutral_review_capability_party_can_still_retract(self, make_kb: KbFactory) -> None:
+    def test_neutral_review_capability_principal_can_still_retract(
+        self, make_kb: KbFactory
+    ) -> None:
         """A neutral principal (no stake in either disputed value) who also
         meets resolve_contradiction()'s own review/admin floor can still
         retract a flagged member directly — KI-043 raises the floor, it
@@ -466,7 +470,7 @@ class TestRetractContradictionGuard:
 
         assert kb.backend.get_assertion(ada_id).status == "retracted"  # type: ignore[union-attr]
 
-    def test_ai_principal_cannot_retract_flagged_member_even_with_review_capability(
+    def test_ai_principal_is_routed_to_review_even_with_review_capability(
         self, make_kb: KbFactory
     ) -> None:
         """An AI principal is routed to review regardless of its configured

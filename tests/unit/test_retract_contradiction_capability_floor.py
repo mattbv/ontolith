@@ -96,6 +96,45 @@ class TestResubmitAutoAcceptCapabilityFloor:
         assert kb.backend.get_assertion(ada_id).status == "retracted"  # type: ignore[union-attr]
         kb.close()
 
+    def test_resubmit_auto_accept_blocks_a_party_immediately(self) -> None:
+        """A party to the contradiction reaching resubmit's own auto-accept
+        branch must be blocked immediately (KI-033), not routed to review
+        - routing them instead would defer an already-certain rejection
+        (the party guard also fires, unconditionally, inside
+        accept_proposal's replay) into a permanently-stuck pending
+        proposal, exactly the failure mode a second review pass found
+        resubmit() was missing relative to retract() itself."""
+        kb = _connect()
+        kb.create_principal("alice", kind="human", default_capability="write")
+        kb.create_principal("wendy", kind="human", default_capability="write")
+        kb.create_principal("carol", kind="human", default_capability="review")
+        entity = kb.create_entity("Person", author="alice")
+        _open_contradiction(kb, entity.id, "alice", "wendy")
+        ava_id = next(
+            a.id
+            for a in kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+            if a.author == "wendy"
+        )
+
+        # alice authored "Ada" - a party to the contradiction - trying to
+        # retract the opposing "Ava" member. First policy evaluation
+        # always requires review (the test-double policy is call-count
+        # based, independent of alice's own write capability).
+        proposal, decision = kb.retract(ava_id, "alice")
+        assert isinstance(decision, RequireReview)
+        kb.request_changes(proposal.id, reviewer="carol", reason="double-check")
+
+        # Second evaluation would auto-accept - the party guard must
+        # still catch alice immediately here, not route to review.
+        with pytest.raises(CapabilityError, match="party to"):
+            kb.resubmit(proposal.id, author="alice")
+
+        assert kb.backend.get_assertion(ava_id).status == "flagged"  # type: ignore[union-attr]
+        reloaded = kb.backend.get_proposal(proposal.id)
+        assert reloaded is not None
+        assert reloaded.state == "changes_requested"
+        kb.close()
+
     def test_resubmit_auto_accept_allowed_for_review_capable_author(self) -> None:
         kb = _connect()
         kb.create_principal("alice", kind="human", default_capability="write")

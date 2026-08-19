@@ -1271,12 +1271,14 @@ class Ontology:
     def _retract_op_review_override(
         self, proposal: Proposal, principal: Principal, delegating: Principal | None
     ) -> RequireReview | None:
-        """If `proposal` stages a `retract` op targeting a flagged
-        contradiction member and `principal` (+`delegating`) doesn't meet
-        `_meets_retract_contradiction_floor`, return a `RequireReview`
+        """If `proposal` stages any `retract` op targeting a flagged
+        contradiction member `principal` (+`delegating`) doesn't meet
+        `_meets_retract_contradiction_floor` for, return a `RequireReview`
         decision to use INSTEAD of evaluating `self.policy` — otherwise
         None, meaning the caller should evaluate policy normally
-        (KI-043, ADR-0030).
+        (KI-043, ADR-0030). Checks every retract op in the payload, not
+        just the first — today every proposal this codebase constructs has
+        exactly one operation, so this only matters if that ever changes.
 
         This is the fix for an inversion an earlier version of this check
         had: raising `CapabilityError` after an auto-accept-eligible
@@ -1308,20 +1310,20 @@ class Ontology:
         `resubmit`'s own docstring on policy evaluation staying outside
         the transaction).
         """
-        retract_op = next(
-            (op for op in proposal.payload.get("operations", []) if op["kind"] == "retract"), None
+        retract_ops = (
+            op for op in proposal.payload.get("operations", []) if op["kind"] == "retract"
         )
-        if retract_op is None:
-            return None
-        if self._open_contradiction_if_flagged_member(retract_op["assertion_id"]) is None:
-            return None
-        if self._meets_retract_contradiction_floor(principal, delegating):
-            return None
-        return RequireReview(
-            reviewers=[],
-            reason="Retracting a flagged contradiction member requires review/admin "
-            "capability, same floor as resolve_contradiction() (SPEC §10.3, KI-043)",
-        )
+        for op in retract_ops:
+            if self._open_contradiction_if_flagged_member(op["assertion_id"]) is None:
+                continue
+            if self._meets_retract_contradiction_floor(principal, delegating):
+                continue
+            return RequireReview(
+                reviewers=[],
+                reason="Retracting a flagged contradiction member requires review/admin "
+                "capability, same floor as resolve_contradiction() (SPEC §10.3, KI-043)",
+            )
+        return None
 
     def _require_capability_to_retract_flagged_member(
         self, assertion_id: str, principal: Principal, delegating: Principal | None
@@ -1438,6 +1440,7 @@ class Ontology:
         # comment for the replay caveat (KI-017, ADR-0025).
         kb_view = self.as_of(now)
         decision = self.policy.evaluate(proposal, principal, kb_view, acting_as=delegating)
+        retracting_parties = {author} | ({acting_as} if acting_as is not None else set())
         if isinstance(decision, AutoAccept):
             # Only a proposal self.policy would otherwise auto-accept
             # needs the party/capability-floor checks at submission time
@@ -1445,7 +1448,6 @@ class Ontology:
             # reasons defers both to accept_proposal (KI-033's original
             # behavior, preserved: see
             # test_party_via_accept_proposal_is_also_blocked).
-            retracting_parties = {author} | ({acting_as} if acting_as is not None else set())
             self._reject_retract_if_party_to_contradiction(assertion_id, retracting_parties)
             review_override = self._retract_op_review_override(proposal, principal, delegating)
             if review_override is not None:
@@ -1458,7 +1460,6 @@ class Ontology:
         accepted = proposal.model_copy(
             update={"state": "auto_accepted", "decided_at": now, "policy_reason": decision.reason}
         )
-        retracting_parties = {author} | ({acting_as} if acting_as is not None else set())
         with self.backend.transaction():
             self._reject_retract_if_party_to_contradiction(assertion_id, retracting_parties)
             self._require_capability_to_retract_flagged_member(assertion_id, principal, delegating)
@@ -2120,13 +2121,27 @@ class Ontology:
         kb_view = self.as_of(now)
         decision = self.policy.evaluate(resubmitted, principal, kb_view, acting_as=delegating)
         if isinstance(decision, AutoAccept):
-            # KI-043/ADR-0030: same review-routing check retract() runs,
-            # and for the same reason only within the would-auto-accept
-            # branch — a staged retract op that's already headed to review
-            # for unrelated policy reasons doesn't need this check at all,
-            # matching how the party guard (checked inside
-            # _replay_proposal_operations, only reached on this same
-            # branch) has always worked.
+            # KI-033/KI-043/ADR-0030: same two checks retract() runs, in
+            # the same order, and for the same reason only within the
+            # would-auto-accept branch — a staged retract op that's
+            # already headed to review for unrelated policy reasons
+            # doesn't need either check at all, matching how the party
+            # guard (checked inside _replay_proposal_operations, only
+            # reached on this same branch) has always worked. The party
+            # guard MUST run first: a party is blocked unconditionally
+            # regardless of capability, and routing them to review instead
+            # would only defer an already-certain rejection (the party
+            # guard also runs, unconditionally, inside accept_proposal's
+            # replay) into a silently-doomed pending proposal — exactly
+            # what review found missing here relative to retract() itself.
+            retracting_parties = {proposal.author} | (
+                {proposal.acting_as} if proposal.acting_as is not None else set()
+            )
+            for op in resubmitted.payload.get("operations", []):
+                if op["kind"] == "retract":
+                    self._reject_retract_if_party_to_contradiction(
+                        op["assertion_id"], retracting_parties
+                    )
             review_override = self._retract_op_review_override(resubmitted, principal, delegating)
             if review_override is not None:
                 decision = review_override
