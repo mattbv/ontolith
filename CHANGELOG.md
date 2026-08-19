@@ -225,6 +225,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorded as an explicit follow-up in ADR-0029, not a new KI.
 
 #### Fixed
+- **Breaking:** `resolve_contradiction()` now rejects an already-`retracted` winner
+  candidate with `ValidationError` instead of reactivating it to `active` with a closed
+  `valid_to` (closes KI-044) — that combination is one no other write path in this
+  codebase produces. Mirrors the existing "winner not a member" check exactly (same
+  exception type, same validation loop, before any write). Retraction was already
+  terminal for the party-to-contradiction guard (KI-033) and conflict-routing extension
+  (KI-034); this closes the third and last place it needed enforcing. A resolver who
+  wants a retracted value active again must submit it as a new assertion instead. See
+  ADR-0031.
 - **Breaking:** `retract()`/`resubmit()` now route to review, instead of auto-accepting,
   when the target is a `flagged` member of an open contradiction and the retracting
   principal doesn't meet the same `review`/`admin` capability + non-AI floor

@@ -258,6 +258,53 @@ class TestResolveContradictionGuards:
         with pytest.raises(ValidationError, match="is not a member"):
             kb.resolve_contradiction(contradiction_id, "not-a-real-assertion", REVIEWER)
 
+    def test_already_retracted_winner_raises_validation_error(self, make_kb: KbFactory) -> None:
+        """Retraction is terminal for winner selection too (KI-044,
+        ADR-0031, extending KI-033/KI-034's same principle) - picking an
+        already-retracted member as winner must not reactivate it to
+        `active` with a closed `valid_to`, a combination nothing else in
+        this codebase produces."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        contradiction_id, ada_id, ava_id = _open_contradiction(kb, entity.id)
+        # REVIEWER is neutral (party to neither Ada nor Ava) and already
+        # review-capable, so this retraction auto-accepts directly.
+        kb.retract(ava_id, REVIEWER)
+        assert kb.backend.get_assertion(ava_id).status == "retracted"  # type: ignore[union-attr]
+
+        with pytest.raises(ValidationError, match="already retracted"):
+            kb.resolve_contradiction(contradiction_id, ava_id, REVIEWER)
+
+        # Rejected before any write - nothing about the contradiction or
+        # its members changed.
+        assert kb.backend.get_assertion(ava_id).status == "retracted"  # type: ignore[union-attr]
+        assert kb.backend.get_assertion(ada_id).status == "flagged"  # type: ignore[union-attr]
+        contradiction = kb.backend.get_contradiction(contradiction_id)
+        assert contradiction is not None
+        assert contradiction.state == "open"
+
+    def test_still_flagged_winner_unaffected_by_retracted_winner_check(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A contradiction with one already-retracted member (e.g. via a
+        neutral third party's earlier retract(), KI-033) can still be
+        resolved normally by picking the still-`flagged` member as
+        winner - KI-044's check only rejects the winner candidate itself
+        being retracted, not a contradiction merely containing a retracted
+        loser (that shape is already covered by
+        TestResolveContradiction::test_no_duplicate_retracted_event_for_an_already_retracted_loser)."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        contradiction_id, ada_id, ava_id = _open_contradiction(kb, entity.id)
+        kb.retract(ava_id, REVIEWER)
+        assert kb.backend.get_assertion(ava_id).status == "retracted"  # type: ignore[union-attr]
+
+        resolved = kb.resolve_contradiction(contradiction_id, ada_id, REVIEWER)
+
+        assert resolved.state == "resolved"
+        assert kb.backend.get_assertion(ada_id).status == "active"  # type: ignore[union-attr]
+        assert kb.backend.get_assertion(ava_id).status == "retracted"  # type: ignore[union-attr]
+
     def test_already_resolved_contradiction_raises(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)

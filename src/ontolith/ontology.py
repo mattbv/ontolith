@@ -2308,8 +2308,12 @@ class Ontology:
                 indicates data corruption, not a benign gap)
             CapabilityError: resolver lacks review/admin capability, is
                 AI-kind, or is the author/delegate of any member assertion
-            ValidationError: contradiction is not open, or winner_assertion_id
-                is not one of its members
+            ValidationError: contradiction is not open, winner_assertion_id
+                is not one of its members, or winner_assertion_id was
+                already retracted — retraction is terminal (KI-044,
+                ADR-0031), same as it already is for conflict-routing
+                extension (KI-034) and party-to-contradiction retraction
+                (KI-033)
         """
         resolver_principal = self.backend.get_principal(resolver)
         if resolver_principal is None:
@@ -2354,6 +2358,18 @@ class Ontology:
                     raise CapabilityError(
                         f"Principal {resolver!r} cannot resolve a contradiction they are "
                         f"party to (author or delegate of member assertion {member_id!r})"
+                    )
+                if member_id == winner_assertion_id and member.status == "retracted":
+                    # KI-044: retraction is terminal for winner selection
+                    # too, not just for conflict-routing extension (KI-034)
+                    # and party-to-contradiction retraction (KI-033) —
+                    # reactivating an already-retracted member would leave
+                    # it `active` with a closed `valid_to`, a combination
+                    # nothing else in this codebase produces (see ADR-0031).
+                    raise ValidationError(
+                        f"Assertion {winner_assertion_id!r} was already retracted and cannot "
+                        "be selected as the winner of contradiction "
+                        f"{contradiction_id!r} — retraction is terminal"
                     )
 
             for member_id in contradiction.member_ids:

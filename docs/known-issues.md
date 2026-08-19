@@ -924,10 +924,10 @@ Called from `retract()`'s own would-auto-accept branch and `resubmit()`'s own wo
 
 ---
 
-## KI-044 — `resolve_contradiction()` can pick an already-`retracted` member as the winner, reactivating it to `active`
+## KI-044 — `resolve_contradiction()` can pick an already-`retracted` member as the winner, reactivating it to `active` ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — a governed lifecycle action produces a semantically odd result (an `active` assertion with a closed `valid_to` window) for a state combination that didn't used to persist long enough to reach it
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved via ADR-0031
 **SPEC reference:** SPEC §10.3 (contradiction resolution — winner reactivation)
 
 ### Description
@@ -938,7 +938,11 @@ Found during KI-034's review (2026-08-05).
 
 ### Fix
 
-Decide (ADR) whether `resolve_contradiction()`'s winner-eligibility check should exclude members whose current status is already `retracted` (raising `ValidationError`, mirroring the existing "winner not a member" check) — treating retraction as final for winner selection too, not just for conflict-routing extension (KI-034) and party-to-contradiction retraction (KI-033). Add a conformance vector pinning whichever behavior is chosen.
+ADR-0031: `resolve_contradiction()`'s winner-eligibility check now excludes members whose current status is already `retracted`, raising `ValidationError` — the same exception type as the existing "winner not a member" check, checked in the same membership-validation loop, before any write. Retraction is now terminal for winner selection too, closing the third and last place (after KI-033's party-to-contradiction guard and KI-034's conflict-routing extension) that principle needed enforcing. A resolver who wants a retracted value active again has no reactivation path via `resolve_contradiction()` — they must submit it as a new assertion, which flows back through ordinary SPEC §10 conflict routing.
+
+New conformance vectors in `conformance/test_contradiction_resolution.py` pin: picking an already-retracted member as winner raises `ValidationError`; the rejection runs before any write (loser/winner statuses and the contradiction's `open` state are all unchanged); and picking a still-`flagged` member remains unaffected by the new check.
+
+**Breaking:** a resolver who was relying on picking an already-retracted member to reactivate it now gets `ValidationError` instead. Flagged in CHANGELOG per ADR-0019's policy despite no public signature change, matching KI-043's precedent for this class of behavior-level break.
 
 ---
 
