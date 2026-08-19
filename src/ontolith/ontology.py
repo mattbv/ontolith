@@ -31,7 +31,7 @@ from ontolith.core.errors import (
 from ontolith.govern import AutoAccept, ThresholdPolicy
 from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, route
 from ontolith.govern.contradiction import Contradiction
-from ontolith.govern.policy import Decision, PolicyStrategy, Reject
+from ontolith.govern.policy import Decision, PolicyStrategy, Reject, RequireReview
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import Principal, PrincipalCredential, min_capability
 from ontolith.query import QueryBuilder
@@ -1224,6 +1224,160 @@ class Ontology:
                     "resolve_contradiction() instead"
                 )
 
+    def _open_contradiction_if_flagged_member(self, assertion_id: str) -> Contradiction | None:
+        """Return the open Contradiction `assertion_id` is a currently-flagged
+        member of, or None otherwise (KI-043) — an ordinary retraction (target
+        not flagged, or its contradiction has since resolved) gets None.
+
+        Shared by `retract()`/`resubmit()`'s optimistic pre-check (decides
+        whether to route to review instead of evaluating `self.policy`) and
+        `_require_capability_to_retract_flagged_member`'s authoritative,
+        in-transaction recheck — the same read, used twice for the same
+        TOCTOU-safety reason `_reject_retract_if_party_to_contradiction`'s
+        own docstring explains.
+        """
+        target = self.backend.get_assertion(assertion_id)
+        if target is None or target.status != "flagged":
+            return None
+        contradiction = self.backend.get_open_contradiction(
+            self.namespace, target.subject, target.predicate
+        )
+        if contradiction is None or assertion_id not in contradiction.member_ids:
+            return None
+        return contradiction
+
+    def _meets_retract_contradiction_floor(
+        self, principal: Principal, delegating: Principal | None
+    ) -> bool:
+        """Whether `principal` (+`delegating`, if any) meets the review/admin
+        + non-AI floor `resolve_contradiction()` requires (KI-043).
+
+        Effective capability mirrors `_check_direct_write_capability`'s
+        delegation-attenuation: min(principal, delegating) when delegating
+        (SPEC §8.4) — a `write`-capability principal can't launder this
+        floor by delegating to/from a `review`-capability one either way.
+        AI-kind is checked on `principal` only (the acting party), matching
+        `_check_direct_write_capability`'s own precedent — ADR-0003 already
+        treats an AI's accountable owner, not the AI itself, as the
+        eligible actor once delegation is involved.
+        """
+        if principal.kind == "ai":
+            return False
+        capability: str = principal.default_capability
+        if delegating is not None:
+            capability = min_capability(capability, delegating.default_capability)
+        return capability in ("review", "admin")
+
+    def _retract_op_review_override(
+        self, proposal: Proposal, principal: Principal, delegating: Principal | None
+    ) -> RequireReview | None:
+        """If `proposal` stages any `retract` op targeting a flagged
+        contradiction member `principal` (+`delegating`) doesn't meet
+        `_meets_retract_contradiction_floor` for, return a `RequireReview`
+        decision to use INSTEAD of evaluating `self.policy` — otherwise
+        None, meaning the caller should evaluate policy normally
+        (KI-043, ADR-0030). Checks every retract op in the payload, not
+        just the first — today every proposal this codebase constructs has
+        exactly one operation, so this only matters if that ever changes.
+
+        This is the fix for an inversion an earlier version of this check
+        had: raising `CapabilityError` after an auto-accept-eligible
+        `write`-capability principal's decision was already computed left
+        that principal with *no* path forward (their own retraction is
+        blocked, and they have no way to get a proposal into the review
+        queue either — `ThresholdPolicy` auto-accepts `write` and above
+        unconditionally). Meanwhile a lower, merely-`propose`-capability
+        principal sailed through via ordinary review. Routing to review
+        instead — mirroring how an AI-authored proposal already always
+        requires review under `ThresholdPolicy`, rather than being
+        rejected outright — gives every principal the same two outcomes
+        regardless of capability: auto-accept if they meet the floor,
+        queue for review (where any `review`-capable, non-AI principal
+        can accept it) if they don't. Ordinary (non-contradiction-member)
+        retraction is unaffected — this only intercepts the specific
+        payload shape SPEC §10.3's contradiction-adjudication floor cares
+        about.
+
+        Called from `retract()` and `resubmit()`, both *before* evaluating
+        `self.policy` and before opening a transaction — optimistic, like
+        the read `_reject_retract_if_party_to_contradiction`/
+        `_require_capability_to_retract_flagged_member` perform again,
+        authoritatively, once inside the transaction. A contradiction that
+        opens concurrently between this call and the transaction is not
+        caught here — that narrow race is what the in-transaction
+        `CapabilityError` raise remains for (an accepted, pre-existing
+        class of race this project already tolerates elsewhere, e.g.
+        `resubmit`'s own docstring on policy evaluation staying outside
+        the transaction).
+        """
+        retract_ops = (
+            op for op in proposal.payload.get("operations", []) if op["kind"] == "retract"
+        )
+        for op in retract_ops:
+            if self._open_contradiction_if_flagged_member(op["assertion_id"]) is None:
+                continue
+            if self._meets_retract_contradiction_floor(principal, delegating):
+                continue
+            return RequireReview(
+                reviewers=[],
+                reason="Retracting a flagged contradiction member requires review/admin "
+                "capability, same floor as resolve_contradiction() (SPEC §10.3, KI-043)",
+            )
+        return None
+
+    def _require_capability_to_retract_flagged_member(
+        self, assertion_id: str, principal: Principal, delegating: Principal | None
+    ) -> None:
+        """Authoritative, in-transaction backstop for
+        `_retract_op_review_override`'s optimistic pre-check (KI-043):
+        raises if `assertion_id` is (as of right now, inside the write
+        transaction) a flagged member of an open contradiction and
+        `principal` doesn't meet `_meets_retract_contradiction_floor`.
+
+        In the common case this never fires — the pre-check in
+        `retract()`/`resubmit()` already routed a below-floor principal to
+        review before a transaction was ever opened for them. It only
+        fires for the narrow race the pre-check's docstring describes: a
+        contradiction that opened concurrently after the pre-check ran but
+        before this transaction started. There is no way to "route to
+        review" once inside an already-auto-accepting transaction, so this
+        raises `CapabilityError` and rolls back rather than silently
+        letting the write land.
+
+        No-op when the target isn't currently a flagged member of an open
+        contradiction — an ordinary retraction is unaffected.
+
+        Not called for `accept_proposal`'s replay of a retract op — the
+        accepting reviewer there already satisfies this exact floor via
+        `_require_reviewer_principal`, so re-checking would be redundant.
+        Called for `retract()`'s own auto-accept path and for `resubmit`'s
+        auto-accept path (see their respective call sites).
+
+        Raises:
+            CapabilityError: `principal` is AI-kind, or effective capability
+                (after delegation attenuation) is below `review`
+        """
+        contradiction = self._open_contradiction_if_flagged_member(assertion_id)
+        if contradiction is None:
+            return
+        if self._meets_retract_contradiction_floor(principal, delegating):
+            return
+        if principal.kind == "ai":
+            raise CapabilityError(
+                f"Cannot retract assertion {assertion_id!r}: it is a flagged member of open "
+                f"contradiction {contradiction.id!r} — AI principal {principal.id!r} cannot "
+                "retract a disputed static fact, same floor as resolve_contradiction() "
+                "(SPEC §10.3, KI-043)"
+            )
+        raise CapabilityError(
+            f"Cannot retract assertion {assertion_id!r}: it is a flagged member of open "
+            f"contradiction {contradiction.id!r} — retracting a disputed static fact "
+            f"requires review/admin capability, same floor as resolve_contradiction() "
+            f"(SPEC §10.3, KI-043), not just write. This is an unusual race (a contradiction "
+            "opened concurrently after this write was already decided) — retry, or have a "
+            "review-capable principal accept a retract proposal instead."
+        )
+
     def retract(
         self,
         assertion_id: str,
@@ -1236,11 +1390,31 @@ class Ontology:
         When ``acting_as`` is set the retraction is made on behalf of another
         principal (delegation, ADR-0003).
 
+        If ``self.policy`` would auto-accept and ``assertion_id`` is
+        currently a flagged member of an open contradiction, two further
+        checks apply before the write actually lands: the retracting
+        principal must not be a party to the contradiction (KI-033), and
+        must meet ``resolve_contradiction()``'s own review/admin + non-AI
+        floor (KI-043, ADR-0030) — if the latter fails, this routes to
+        review instead of raising, so even a ``write``-capability
+        principal below that floor has a real path forward (a
+        ``review``-capable, non-AI principal can accept the resulting
+        proposal via ``accept_proposal()``). A proposal ``self.policy``
+        was already going to send to review for its own reasons skips
+        both checks here entirely — matching how the party guard has
+        always worked, they're deferred to ``accept_proposal()``, which
+        re-checks both (the party check unconditionally; the capability
+        floor only for the narrow, no-reviewer-involved paths that need
+        it — see ``_replay_proposal_operations``'s docstring).
+
         Raises:
-            CapabilityError: assertion is a flagged member of an open
-                contradiction the retracting principal is a party to
-                (author or delegate of any member, KI-033) — use
-                resolve_contradiction() instead
+            CapabilityError: ``self.policy`` would auto-accept and the
+                assertion is a flagged member of an open contradiction the
+                retracting principal is a party to (author or delegate of
+                any member, KI-033) — use resolve_contradiction() instead;
+                or, in the narrow race where a contradiction opens
+                concurrently between this call's checks and the write
+                transaction, the same review/admin + non-AI floor (KI-043)
 
         Returns:
             (Proposal, Decision) tuple
@@ -1266,6 +1440,18 @@ class Ontology:
         # comment for the replay caveat (KI-017, ADR-0025).
         kb_view = self.as_of(now)
         decision = self.policy.evaluate(proposal, principal, kb_view, acting_as=delegating)
+        retracting_parties = {author} | ({acting_as} if acting_as is not None else set())
+        if isinstance(decision, AutoAccept):
+            # Only a proposal self.policy would otherwise auto-accept
+            # needs the party/capability-floor checks at submission time
+            # at all - one already headed to review for unrelated policy
+            # reasons defers both to accept_proposal (KI-033's original
+            # behavior, preserved: see
+            # test_party_via_accept_proposal_is_also_blocked).
+            self._reject_retract_if_party_to_contradiction(assertion_id, retracting_parties)
+            review_override = self._retract_op_review_override(proposal, principal, delegating)
+            if review_override is not None:
+                decision = review_override
         finalized = self._finalize_non_accepted_decision(proposal, decision, now)
         if finalized is not None:
             return finalized
@@ -1274,9 +1460,9 @@ class Ontology:
         accepted = proposal.model_copy(
             update={"state": "auto_accepted", "decided_at": now, "policy_reason": decision.reason}
         )
-        retracting_parties = {author} | ({acting_as} if acting_as is not None else set())
         with self.backend.transaction():
             self._reject_retract_if_party_to_contradiction(assertion_id, retracting_parties)
+            self._require_capability_to_retract_flagged_member(assertion_id, principal, delegating)
             self.backend.put_proposal(accepted)
             self.backend.set_assertion_status(
                 assertion_id, "retracted", valid_to=self._retraction_valid_to(assertion_id, now)
@@ -1502,7 +1688,12 @@ class Ontology:
         return proposal
 
     def _replay_proposal_operations(
-        self, proposal: Proposal, now: datetime, *, extra_retracting_party: str | None = None
+        self,
+        proposal: Proposal,
+        now: datetime,
+        *,
+        extra_retracting_party: str | None = None,
+        retracting_principal: tuple[Principal, Principal | None] | None = None,
     ) -> list[Assertion]:
         """Apply a proposal's staged operations through SPEC §10 conflict
         routing. Shared by `accept_proposal` and `resubmit` (KI-027) — MUST
@@ -1536,6 +1727,21 @@ class Ontology:
         principal's retract proposal. `resubmit` passes nothing extra —
         its caller is already required to be the proposal's own
         author/delegate, already covered by `proposal.author`/`acting_as`.
+        Whether ``extra_retracting_party`` is set also decides whether a
+        `retract` op runs `_require_capability_to_retract_flagged_member`
+        (KI-043): only when it's unset (`resubmit`'s auto-accept branch),
+        since `accept_proposal`'s reviewer already satisfies that floor via
+        `_require_reviewer_principal` and re-checking would be redundant.
+        In the non-race case `resubmit` will already have routed a
+        below-floor author to review before ever reaching this replay (see
+        `_retract_op_review_override`) — this method's own check is the
+        race-only backstop. ``retracting_principal``, required in that
+        case, is `resubmit`'s already-resolved ``(principal, delegating)``
+        pair — passed through rather than re-derived here so a `None`
+        delegating-principal lookup can't silently be read as "no
+        delegation" instead of the fail-loud `_resolve_delegation` already
+        ran at submission time (a fail-open gap review found in an earlier
+        version of this fix).
 
         Returns:
             The assertions touched by this proposal's operations, in
@@ -1612,6 +1818,19 @@ class Ontology:
                 self._reject_retract_if_party_to_contradiction(
                     op["assertion_id"], retracting_parties
                 )
+                if extra_retracting_party is None:
+                    # Called from resubmit's auto-accept branch, not
+                    # accept_proposal (which passes extra_retracting_party
+                    # =reviewer) - a reviewer there already satisfies this
+                    # exact floor via _require_reviewer_principal, so only
+                    # the no-reviewer-involved auto-accept case needs this
+                    # check (KI-043) - race-only backstop, see this
+                    # method's own docstring.
+                    assert retracting_principal is not None
+                    author_principal, delegating_principal = retracting_principal
+                    self._require_capability_to_retract_flagged_member(
+                        op["assertion_id"], author_principal, delegating_principal
+                    )
                 retracted = self.backend.get_assertion(op["assertion_id"])
                 assert retracted is not None  # append-only; targeted by an existing proposal op
                 self.backend.set_assertion_status(
@@ -1838,6 +2057,12 @@ class Ontology:
         (`decided_at` stays `None`, `created_at` stays the original
         submission time).
 
+        If the staged operation is a `retract` targeting a flagged
+        contradiction member and the author/delegate doesn't meet
+        `resolve_contradiction()`'s own review/admin + non-AI floor, this
+        routes back to review instead of evaluating `self.policy` at all —
+        same as `retract()`'s own submission-time check (KI-043, ADR-0030).
+
         Args:
             proposal_id: ID of the proposal to resubmit
             author: Principal ID resubmitting (must be the proposal's own
@@ -1858,7 +2083,12 @@ class Ontology:
                 `accept_proposal` (KI-033), though only reachable here if
                 the author's effective capability/trust has risen since the
                 original submission, since that same guard already blocks a
-                party at `retract()`'s own auto-accept time otherwise
+                party at `retract()`'s own auto-accept time otherwise; or,
+                in the narrow race where a contradiction opens concurrently
+                between this call's review-routing check and the write
+                transaction, the same review/admin + non-AI floor a staged
+                retract op needs (KI-043) — the non-race case routes to
+                review instead of raising (see above)
             ValidationError: proposal is not awaiting resubmission (including
                 when a concurrent transition already moved it out of that
                 state between the optimistic check and the write, KI-035);
@@ -1890,6 +2120,31 @@ class Ontology:
         resubmitted = proposal.model_copy(update={"state": "submitted", "decided_at": None})
         kb_view = self.as_of(now)
         decision = self.policy.evaluate(resubmitted, principal, kb_view, acting_as=delegating)
+        if isinstance(decision, AutoAccept):
+            # KI-033/KI-043/ADR-0030: same two checks retract() runs, in
+            # the same order, and for the same reason only within the
+            # would-auto-accept branch — a staged retract op that's
+            # already headed to review for unrelated policy reasons
+            # doesn't need either check at all, matching how the party
+            # guard (checked inside _replay_proposal_operations, only
+            # reached on this same branch) has always worked. The party
+            # guard MUST run first: a party is blocked unconditionally
+            # regardless of capability, and routing them to review instead
+            # would only defer an already-certain rejection (the party
+            # guard also runs, unconditionally, inside accept_proposal's
+            # replay) into a silently-doomed pending proposal — exactly
+            # what review found missing here relative to retract() itself.
+            retracting_parties = {proposal.author} | (
+                {proposal.acting_as} if proposal.acting_as is not None else set()
+            )
+            for op in resubmitted.payload.get("operations", []):
+                if op["kind"] == "retract":
+                    self._reject_retract_if_party_to_contradiction(
+                        op["assertion_id"], retracting_parties
+                    )
+            review_override = self._retract_op_review_override(resubmitted, principal, delegating)
+            if review_override is not None:
+                decision = review_override
 
         with self.backend.transaction():
             # KI-035: authoritative re-check, fresh, first thing inside the
@@ -1933,7 +2188,12 @@ class Ontology:
                 # not run here — this branch, like propose/propose_ref's
                 # auto-accept, bypasses human review, and ADR-0029 confines
                 # completeness checks to accept_proposal only.
-                self._replay_proposal_operations(result, now)
+                # retracting_principal: the race-only KI-043 backstop (see
+                # _replay_proposal_operations' docstring) needs principal/
+                # delegating already resolved above, not re-derived.
+                self._replay_proposal_operations(
+                    result, now, retracting_principal=(principal, delegating)
+                )
 
             self.backend.put_proposal_event(
                 ProposalEvent(
