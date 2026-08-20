@@ -17,6 +17,7 @@ from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
 from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
 from ontolith.govern import AutoAccept, Decision, PolicyStrategy, RequireReview
+from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
 
@@ -262,8 +263,9 @@ class TestResolveContradictionGuards:
         """Retraction is terminal for winner selection too (KI-044,
         ADR-0031, extending KI-033/KI-034's same principle) - picking an
         already-retracted member as winner must not reactivate it to
-        `active` with a closed `valid_to`, a combination nothing else in
-        this codebase produces."""
+        `active` with a closed `valid_to`, silently undoing the
+        retraction's close of that window with no new write recording it
+        reopened."""
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         contradiction_id, ada_id, ava_id = _open_contradiction(kb, entity.id)
@@ -304,6 +306,123 @@ class TestResolveContradictionGuards:
         assert resolved.state == "resolved"
         assert kb.backend.get_assertion(ada_id).status == "active"  # type: ignore[union-attr]
         assert kb.backend.get_assertion(ava_id).status == "retracted"  # type: ignore[union-attr]
+
+    def test_already_superseded_winner_raises_validation_error(self, make_kb: KbFactory) -> None:
+        """Supersession is terminal for winner selection too (ADR-0031,
+        found in review to be needed alongside `retracted` - not covered
+        by the first version of this fix). flag_contradiction() accepts a
+        superseded assertion as a member by design (its own docstring:
+        "a flagged/superseded assertion must still be resolvable here"),
+        so resolve_contradiction() must reject it as winner the same way
+        it rejects a retracted one."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
+        )
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "employer": PropertyDef(
+                            name="employer", value_type="Text", temporality="time_varying"
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(schema, author="admin@example.com")
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        old = kb.assert_literal(entity.id, "Person.employer", "Acme", "Text", HUMAN_WRITE)
+        new = kb.assert_literal(entity.id, "Person.employer", "Globex", "Text", HUMAN_WRITE)
+        assert kb.backend.get_assertion(old.id).status == "superseded"  # type: ignore[union-attr]
+
+        contradiction, _action = kb.flag_contradiction(old.id, new.id, REVIEWER)
+        # flag_contradiction() accepts a superseded assertion by design but
+        # never re-flags it - its status stays `superseded`.
+        assert kb.backend.get_assertion(old.id).status == "superseded"  # type: ignore[union-attr]
+
+        with pytest.raises(ValidationError, match="already superseded"):
+            kb.resolve_contradiction(contradiction.id, old.id, REVIEWER)
+
+    def test_party_guard_takes_precedence_over_terminal_winner_check(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A resolver who is both a party to the contradiction AND picks a
+        terminal-status (retracted/superseded) winner always sees the
+        party CapabilityError, never the terminal-status ValidationError -
+        deterministic regardless of contradiction.member_ids' iteration
+        order (ADR-0031's fix for an earlier, order-dependent version of
+        this check, found in review)."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "frank@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        kb.create_principal(
+            "grace@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        # Ava (the terminal-status winner candidate) is proposed FIRST and
+        # Ada (frank's own, making frank a party) SECOND, so the loop
+        # reaches the winner before the party violation - proving the
+        # party check still wins even then (the loop only *captures* the
+        # winner as it passes; it doesn't check its status until the
+        # whole loop has passed with no party violation).
+        kb.propose(entity.id, "Person.name", "Ava", "Text", REVIEWER)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", "frank@example.com")
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        ava_id = next(a.id for a in flagged if a.author == REVIEWER)
+        contradiction = kb.backend.get_open_contradiction("default", entity.id, "Person.name")
+        assert contradiction is not None
+        assert contradiction.member_ids[0] == ava_id  # winner listed first
+
+        kb.retract(ava_id, "grace@example.com")
+        assert kb.backend.get_assertion(ava_id).status == "retracted"  # type: ignore[union-attr]
+
+        with pytest.raises(CapabilityError, match="party to"):
+            kb.resolve_contradiction(contradiction.id, ava_id, "frank@example.com")
+
+    def test_all_members_terminal_stays_open_with_fresh_assertion_as_escape_hatch(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A contradiction whose every member ends up retracted has no
+        eligible winner and stays `open` indefinitely - an accepted,
+        documented consequence (ADR-0031), not a true dead end: a fresh
+        assertion for the intended value joins the same open contradiction
+        as a new `flagged` member and resolves normally."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "grace@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        contradiction_id, ada_id, ava_id = _open_contradiction(kb, entity.id)
+        kb.retract(ada_id, "grace@example.com")
+        kb.retract(ava_id, "grace@example.com")
+        assert kb.backend.get_assertion(ada_id).status == "retracted"  # type: ignore[union-attr]
+        assert kb.backend.get_assertion(ava_id).status == "retracted"  # type: ignore[union-attr]
+
+        with pytest.raises(ValidationError, match="already retracted"):
+            kb.resolve_contradiction(contradiction_id, ada_id, REVIEWER)
+        contradiction = kb.backend.get_contradiction(contradiction_id)
+        assert contradiction is not None
+        assert contradiction.state == "open"
+
+        kb.propose(entity.id, "Person.name", "Aida", "Text", HUMAN_WRITE)
+        aida_id = next(
+            a.id
+            for a in kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+            if a.value == "Aida"
+        )
+        contradiction = kb.backend.get_contradiction(contradiction_id)
+        assert contradiction is not None
+        assert aida_id in contradiction.member_ids
+
+        resolved = kb.resolve_contradiction(contradiction_id, aida_id, REVIEWER)
+
+        assert resolved.state == "resolved"
+        assert kb.backend.get_assertion(aida_id).status == "active"  # type: ignore[union-attr]
 
     def test_already_resolved_contradiction_raises(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)

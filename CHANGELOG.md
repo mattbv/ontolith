@@ -225,15 +225,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorded as an explicit follow-up in ADR-0029, not a new KI.
 
 #### Fixed
-- **Breaking:** `resolve_contradiction()` now rejects an already-`retracted` winner
-  candidate with `ValidationError` instead of reactivating it to `active` with a closed
-  `valid_to` (closes KI-044) — that combination is one no other write path in this
-  codebase produces. Mirrors the existing "winner not a member" check exactly (same
-  exception type, same validation loop, before any write). Retraction was already
-  terminal for the party-to-contradiction guard (KI-033) and conflict-routing extension
-  (KI-034); this closes the third and last place it needed enforcing. A resolver who
-  wants a retracted value active again must submit it as a new assertion instead. See
-  ADR-0031.
+- **Breaking:** `resolve_contradiction()` now rejects a winner candidate whose status is
+  already `retracted` **or `superseded`** with `ValidationError` instead of reactivating
+  it to `active` with a closed `valid_to` (closes KI-044) — that combination silently
+  undoes a governance action's close of the assertion's validity window with no new
+  write recording it reopened. Mirrors the existing "winner not a member" check exactly
+  (same exception type, same validation loop, before any write, checked only after the
+  party-to-contradiction guard has cleared for every member so error precedence is
+  deterministic). Also closes a related gap: extending an open contradiction previously
+  un-terminalized a `superseded` member back to `flagged` (the KI-034 fix only ever
+  covered `retracted`) — `_apply_with_conflict_routing`'s extension branch now skips
+  both. Retraction was already terminal for the party-to-contradiction guard (KI-033),
+  conflict-routing extension (KI-034, `retracted` only), and `flag_contradiction()`'s own
+  re-flag guard (already both); this makes it consistently terminal everywhere. A
+  resolver who wants a terminal value active again must submit it as a new assertion
+  instead. A contradiction whose every member ends up terminal now stays permanently
+  `open` (documented, not fixed, in ADR-0031). See ADR-0031.
 - **Breaking:** `retract()`/`resubmit()` now route to review, instead of auto-accepting,
   when the target is a `flagged` member of an open contradiction and the retracting
   principal doesn't meet the same `review`/`admin` capability + non-AI floor
