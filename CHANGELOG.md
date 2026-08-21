@@ -239,8 +239,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   conflict-routing extension (KI-034, `retracted` only), and `flag_contradiction()`'s own
   re-flag guard (already both); this makes it consistently terminal everywhere. A
   resolver who wants a terminal value active again must submit it as a new assertion
-  instead. A contradiction whose every member ends up terminal now stays permanently
-  `open` (documented, not fixed, in ADR-0031). See ADR-0031.
+  instead — for a `time_varying` predicate this means `flag_contradiction()` specifically,
+  not a bare re-assert (which comes back `active` and never rejoins the contradiction; the
+  bare-reassert shortcut only ever applies to `static` predicates). `resolve_contradiction()`'s
+  own loser loop also now skips a `superseded` loser the same way it already skipped a
+  `retracted` one, instead of overwriting it to `retracted` and misattributing a second
+  event to the resolver. A contradiction whose every member ends up terminal now stays
+  permanently `open` (documented, not fixed, in ADR-0031); `flag_contradiction()` itself
+  can also create a brand-new contradiction whose only two members are already both
+  terminal, filed separately as KI-050. See ADR-0031.
 - **Breaking:** `retract()`/`resubmit()` now route to review, instead of auto-accepting,
   when the target is a `flagged` member of an open contradiction and the retracting
   principal doesn't meet the same `review`/`admin` capability + non-AI floor
