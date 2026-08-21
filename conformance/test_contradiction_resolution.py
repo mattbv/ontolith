@@ -434,13 +434,15 @@ class TestResolveContradictionGuards:
     def test_all_members_terminal_stays_open_with_fresh_assertion_as_escape_hatch(
         self, make_kb: KbFactory
     ) -> None:
-        """A contradiction whose every member ends up retracted has no
-        eligible winner and stays `open` indefinitely - an accepted,
-        documented consequence (ADR-0031), not a true dead end for a
-        `static` predicate (all contradictions can only arise on `static`
-        predicates in the first place, SPEC §10.1): a fresh assertion for
-        the intended value joins the same open contradiction as a new
-        `flagged` member and resolves normally. See
+        """A contradiction whose every existing member ends up retracted
+        has no eligible winner until a fresh assertion lands - an
+        accepted, documented consequence (ADR-0031), not a true dead end
+        for a `static` predicate (contradictions *auto-detected by
+        conflict routing* can only arise on `static` predicates in the
+        first place, SPEC §10.1 - though flag_contradiction() itself can
+        still open one on any predicate, see the next test): a fresh
+        assertion for the intended value joins the same open contradiction
+        as a new `flagged` member and resolves normally. See
         test_time_varying_predicate_has_no_bare_reassert_escape_hatch for
         the different, `flag_contradiction()`-only story a `superseded`
         member's own `time_varying` predicate leaves behind (found in
@@ -525,9 +527,9 @@ class TestResolveContradictionGuards:
         assert kb.backend.get_assertion(globex.id).status == "retracted"  # type: ignore[union-attr]
         # Both members are now terminal (superseded, retracted) - neither
         # is an eligible winner.
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="already superseded"):
             kb.resolve_contradiction(contradiction.id, acme.id, "grace@example.com")
-        with pytest.raises(ValidationError):
+        with pytest.raises(ValidationError, match="already retracted"):
             kb.resolve_contradiction(contradiction.id, globex.id, "grace@example.com")
 
         # A bare re-assert does NOT rejoin the contradiction - it comes
