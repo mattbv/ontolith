@@ -1484,11 +1484,20 @@ class Ontology:
             self.namespace, assertion.subject, assertion.predicate
         )
 
-        # If a contradiction is already open, all existing assertions for this
-        # (subject, predicate) are flagged — no active ones exist. Any new
-        # incoming assertion must be added to the same contradiction. Any
-        # member already `retracted` is the one exception (KI-034) — see the
-        # Contradict branch below.
+        # This shortcut only ever applies to a `static` incoming write —
+        # for a `time_varying` one, an open contradiction here doesn't
+        # short-circuit into Contradict at all, and the else branch below
+        # can produce an `active` result even while this (subject,
+        # predicate)'s contradiction stays open (ADR-0031 found this:
+        # every existing member terminal means no `active` assertion to
+        # conflict/supersede against, so a fresh `time_varying` write
+        # routes to Activate — see `flag_contradiction()` for the actual
+        # way to bring it into the still-open contradiction). For a
+        # `static` write, though, every existing member of an open
+        # contradiction is normally `flagged` — `retracted` and
+        # `superseded` are the two exceptions (KI-034, ADR-0031) — and any
+        # new incoming assertion must be added to the same contradiction.
+        # See the Contradict branch below.
         if open_contradiction is not None and temporality == "static":
             all_member_ids = list(dict.fromkeys(open_contradiction.member_ids + [assertion.id]))
             result: ConflictResult = Contradict(
@@ -1533,17 +1542,22 @@ class Ontology:
         elif isinstance(result, Contradict):
             for mid in result.member_ids:
                 if mid != assertion.id:
-                    # KI-034: `retracted` is a terminal status (SPEC §5) —
-                    # extending an already-open contradiction must never flip
-                    # a member that's since been legitimately retracted
-                    # (e.g. by a neutral party via retract(), KI-033) back
-                    # to `flagged`. Its id is deliberately left in the
+                    # KI-034/KI-044: `retracted` and `superseded` are both
+                    # terminal statuses (SPEC §5, ADR-0031) — extending an
+                    # already-open contradiction must never flip a member
+                    # that's since been legitimately retracted (e.g. by a
+                    # neutral party via retract(), KI-033) or superseded
+                    # (e.g. a schema change made its predicate time_varying
+                    # after it was named in flag_contradiction(), which
+                    # accepts a superseded assertion by design) back to
+                    # `flagged`. Its id is deliberately left in the
                     # contradiction's member_ids — that list isn't audit-only,
                     # it's also the eligibility set resolve_contradiction()
                     # and _reject_retract_if_party_to_contradiction() scan
-                    # (KI-044 tracks resolve_contradiction() itself still
-                    # being able to pick a retracted member as winner) —
-                    # only this method's own re-flagging write is skipped.
+                    # (ADR-0031 closed resolve_contradiction()'s own gap —
+                    # it can no longer pick a retracted/superseded member as
+                    # winner) — only this method's own re-flagging write is
+                    # skipped.
                     existing_member = self.backend.get_assertion(mid)
                     if existing_member is None:
                         # Assertions are append-only and never deleted (SPEC
@@ -1558,7 +1572,7 @@ class Ontology:
                             f"Assertion {mid!r}, a member of contradiction "
                             f"{result.existing_contradiction_id!r}, could not be found"
                         )
-                    if existing_member.status == "retracted":
+                    if existing_member.status in ("retracted", "superseded"):
                         continue
                     # Extending an already-open contradiction re-flags members
                     # that are already flagged (idempotent status write) — only
@@ -2308,8 +2322,17 @@ class Ontology:
                 indicates data corruption, not a benign gap)
             CapabilityError: resolver lacks review/admin capability, is
                 AI-kind, or is the author/delegate of any member assertion
-            ValidationError: contradiction is not open, or winner_assertion_id
-                is not one of its members
+            ValidationError: contradiction is not open, winner_assertion_id
+                is not one of its members, or winner_assertion_id is
+                already `retracted`/`superseded` — both are terminal for
+                winner selection (KI-044, ADR-0031), same as they already
+                are for conflict-routing extension (KI-034) and
+                party-to-contradiction retraction (KI-033). Checked only
+                after every member has cleared the party-to-contradiction
+                check above, so a resolver who is both a party AND picks a
+                terminal-status winner always sees the `CapabilityError`,
+                never this one — order-independent, not member-order-
+                dependent.
         """
         resolver_principal = self.backend.get_principal(resolver)
         if resolver_principal is None:
@@ -2340,6 +2363,7 @@ class Ontology:
                     f"Assertion {winner_assertion_id} is not a member of "
                     f"contradiction {contradiction_id}"
                 )
+            winner: Assertion | None = None
             for member_id in contradiction.member_ids:
                 member = self.backend.get_assertion(member_id)
                 if member is None:
@@ -2355,17 +2379,45 @@ class Ontology:
                         f"Principal {resolver!r} cannot resolve a contradiction they are "
                         f"party to (author or delegate of member assertion {member_id!r})"
                     )
+                if member_id == winner_assertion_id:
+                    winner = member
+            assert winner is not None  # membership already checked above
+
+            # KI-044/ADR-0031: `retracted` AND `superseded` are both
+            # terminal for winner selection, matching the same pair
+            # `flag_contradiction()`'s own re-flag guard and (below,
+            # `_apply_with_conflict_routing`'s extension branch) already
+            # treat as terminal — reactivating either would leave the
+            # winner `active` with a `valid_to` a governance action (not
+            # the author) closed, silently undoing that close rather than
+            # reflecting a fact whose validity the author ever declared
+            # ended (see ADR-0031's Rationale for why that distinction
+            # matters). Checked only after the full party loop above, so
+            # this can never fire ahead of a `CapabilityError` for a
+            # resolver who is also a party — precedence is deterministic,
+            # not dependent on `contradiction.member_ids`' iteration order.
+            if winner.status in ("retracted", "superseded"):
+                raise ValidationError(
+                    f"Assertion {winner_assertion_id!r} is already {winner.status} and cannot "
+                    "be selected as the winner of contradiction "
+                    f"{contradiction_id!r} — retraction/supersession is terminal"
+                )
 
             for member_id in contradiction.member_ids:
                 if member_id != winner_assertion_id:
                     # A loser already `retracted` (KI-034 — e.g. a neutral
-                    # third party's own earlier retract()) needs no further
-                    # write: re-retracting is a no-op status-wise, and
-                    # writing it anyway would record a second, misattributed
-                    # `retracted` event as if the resolver had just done it.
+                    # third party's own earlier retract()) or `superseded`
+                    # (ADR-0031 — e.g. named via flag_contradiction(), which
+                    # accepts a superseded assertion by design) needs no
+                    # further write: re-retracting a retracted loser is a
+                    # no-op status-wise, and overwriting a superseded loser
+                    # to `retracted` would misrepresent how it actually
+                    # became terminal — either way, writing it anyway would
+                    # record a second, misattributed `retracted` event as if
+                    # the resolver had just done it.
                     loser = self.backend.get_assertion(member_id)
                     assert loser is not None  # already resolved via the loop above
-                    if loser.status == "retracted":
+                    if loser.status in ("retracted", "superseded"):
                         continue
                     self.backend.set_assertion_status(
                         member_id, "retracted", valid_to=self._retraction_valid_to(member_id, now)

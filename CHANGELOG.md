@@ -225,6 +225,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorded as an explicit follow-up in ADR-0029, not a new KI.
 
 #### Fixed
+- **Breaking:** `resolve_contradiction()` now rejects a winner candidate whose status is
+  already `retracted` **or `superseded`** with `ValidationError` instead of reactivating
+  it to `active` with a closed `valid_to` (closes KI-044) — that combination silently
+  undoes a governance action's close of the assertion's validity window with no new
+  write recording it reopened. Mirrors the existing "winner not a member" check exactly
+  (same exception type, same validation loop, before any write, checked only after the
+  party-to-contradiction guard has cleared for every member so error precedence is
+  deterministic). Also closes a related gap: extending an open contradiction previously
+  un-terminalized a `superseded` member back to `flagged` (the KI-034 fix only ever
+  covered `retracted`) — `_apply_with_conflict_routing`'s extension branch now skips
+  both, and `resolve_contradiction()`'s own loser loop does the same instead of
+  overwriting a `superseded` loser to `retracted` and misattributing a second event to
+  the resolver. Retraction/supersession is now terminal everywhere `resolve_contradiction()`
+  and its feeder write paths are concerned (party-to-contradiction guard KI-033,
+  conflict-routing extension KI-034, `flag_contradiction()`'s own re-flag guard, and now
+  the winner/loser checks here) — except `retract()` itself, which still doesn't
+  recognize a `superseded` member as governed the way it does a `flagged` one, filed
+  separately as KI-051. A resolver who wants a terminal value active again must submit
+  it as a new assertion instead — for a `time_varying` predicate this means
+  `flag_contradiction()` specifically, not a bare re-assert (which comes back `active`
+  and never rejoins the contradiction; the bare-reassert shortcut only ever applies to
+  `static` predicates). A contradiction whose every *existing* member ends up terminal
+  has no eligible winner until one more assertion lands (not a permanent dead end — see
+  ADR-0031 for the two-mechanism escape hatch); `flag_contradiction()` can also open a
+  brand-new contradiction with no eligible winner among its two founding members from
+  the start, filed separately as KI-050. See ADR-0031.
 - **Breaking:** `retract()`/`resubmit()` now route to review, instead of auto-accepting,
   when the target is a `flagged` member of an open contradiction and the retracting
   principal doesn't meet the same `review`/`admin` capability + non-AI floor
