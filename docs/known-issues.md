@@ -725,7 +725,7 @@ The primary bug lives in `Ontology._apply_with_conflict_routing`'s own "extend a
 
 `_require_reviewer` split into `_require_reviewer_principal(reviewer)` (auth/capability/AI-kind checks — depend only on the reviewer's own identity, safe to run once before the transaction opens) and `_require_pending_proposal(proposal_id, reviewer)` (re-reads the proposal fresh and checks self-review + state — MUST run inside the transaction, immediately before the write). `accept_proposal`/`reject_proposal`/`request_changes` all now call `_require_pending_proposal` as the first thing inside their `with self.backend.transaction():` block, mirroring `resolve_contradiction`'s own KI-026 fix. `resubmit` keeps its original author/state checks before policy evaluation (needed to construct the object policy evaluates against) as an optimistic fast-fail, but adds a second, authoritative re-read-and-recheck as the first thing inside its own transaction, before `_finalize_non_accepted_decision`/the auto-accept write — so a proposal a concurrent call already moved out of `changes_requested` is detected and rejected rather than double-processed. New conformance vectors in `conformance/test_review_workflow.py::TestProposalTransitionTOCTOU`, one per method: a `_RacingClock` test double (subclasses `FixedClock`) fires a one-shot side effect the first time `.now()` is called — for `accept_proposal`/`reject_proposal`/`request_changes` that's the exact point right before the write transaction opens; `resubmit` calls it slightly earlier (before policy evaluation, itself before the transaction), a marginally wider window but still inside the same gap the fix closes — running a real, complete sibling transition as if it had just won the race, deterministically simulating the TOCTOU window without needing real threads. All four confirmed to fail without the fix (reverted `ontology.py` locally and re-ran). `resubmit`'s in-transaction re-check closes the race on the proposal's *state* only, not on the `kb_view` its policy decision was evaluated against outside the transaction — a pre-existing, deliberate tradeoff (per this KI's own Fix text) shared by `propose`/`propose_ref`/`retract`, not something newly closed here.
 
-Review found the identical TOCTOU shape in `flag_contradiction()` (reads two assertions and any existing open contradiction before its transaction, filed separately as KI-045) and that `DuckDBBackend` has no equivalent of `SQLiteBackend`'s KI-023 lock, so this fix's serialization guarantee is airtight only for SQLite today (filed as KI-046) — neither expanded into this fix's scope.
+Review found the identical TOCTOU shape in `flag_contradiction()` (reads two assertions and any existing open contradiction before its transaction, filed separately as KI-045, since resolved) and that `DuckDBBackend` has no equivalent of `SQLiteBackend`'s KI-023 lock, so this fix's serialization guarantee is airtight only for SQLite today (filed as KI-046) — neither expanded into this fix's scope.
 
 ---
 
@@ -952,10 +952,10 @@ A contradiction whose every *existing* member ends up `retracted`/`superseded` h
 
 ---
 
-## KI-045 — `flag_contradiction()` reads its target assertions and any existing open contradiction before opening its write transaction (TOCTOU)
+## KI-045 — `flag_contradiction()` reads its target assertions and any existing open contradiction before opening its write transaction (TOCTOU) ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — same bug shape as KI-035, on a method KI-035 didn't touch
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved in `fix(ontology): close flag_contradiction()'s TOCTOU race (KI-045)`
 **SPEC reference:** SPEC §9.1 (proposal state machine); SPEC §10.3 (contradiction resolution)
 
 ### Description
@@ -969,7 +969,9 @@ Found during KI-035's review (2026-08-05) — KI-035 itself scopes to the four p
 
 ### Fix
 
-Mechanically identical to KI-035's fix: move the assertion/contradiction reads and the terminal-status/existing-contradiction decisions to the first statements inside `flag_contradiction()`'s own `with self.backend.transaction():` block, re-reading fresh rather than trusting the pre-transaction snapshot. Add a conformance vector using the same `_RacingClock` technique KI-035 introduced (`conformance/test_review_workflow.py`).
+Mechanically identical to KI-035's fix: the assertion reads, the subject/predicate check, and the existing-open-contradiction lookup all moved to the first statements inside `flag_contradiction()`'s own `with self.backend.transaction():` block, re-read fresh rather than trusted from the pre-transaction snapshot. Only the principal/capability check stays outside the transaction (pure identity check, doesn't race the way contradiction/assertion state does).
+
+New conformance vectors in `conformance/test_contradiction_resolution.py::TestFlagContradictionTOCTOU`, using the same `_RacingClock` technique KI-035 introduced (`conformance/test_review_workflow.py`, redefined locally in this file matching its own self-contained style): a concurrent `retract()` landing in the gap is no longer resurrected to `flagged`; a concurrent `resolve_contradiction()` closing the only existing open contradiction in the gap is no longer extended (the call correctly starts a *new* contradiction instead, since its own fresh read sees the old one is no longer open). Both vectors confirmed to fail without the fix (reverted locally and re-run to verify).
 
 ---
 

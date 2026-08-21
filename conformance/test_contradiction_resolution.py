@@ -8,6 +8,7 @@ Resolution is append-only: only status/state fields mutate, nothing is deleted.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 import pytest
@@ -42,6 +43,35 @@ class _AlwaysAutoAccept:
         self, proposal: object, principal: object, kb: object, acting_as: object = None
     ) -> Decision:
         return AutoAccept("test double: always auto-accepts")
+
+
+class _RacingClock(FixedClock):
+    """Test clock double simulating the KI-045 TOCTOU race deterministically,
+    without real threads - same technique
+    conformance/test_review_workflow.py's `_RacingClock` uses for KI-035.
+
+    `.now()` fires a one-shot side effect (`racer`) directly against the
+    backend the *first* time it's called, then behaves like a normal
+    `FixedClock`. `flag_contradiction()` calls `self.clock.now()` exactly
+    once, as the last statement before opening its write transaction -
+    right between the (fixed, KI-045) fresh reads that now happen inside
+    that transaction and the pre-transaction identity/capability check
+    that still happens before it. Swapping `kb.clock` for one of these
+    right before calling `flag_contradiction()` makes `racer` fire at
+    that point, simulating "another transition won the race and
+    committed first" without any actual concurrency.
+    """
+
+    def __init__(self, fixed_time: datetime, racer: Callable[[], None]) -> None:
+        super().__init__(fixed_time)
+        self._racer = racer
+        self._fired = False
+
+    def now(self) -> datetime:
+        if not self._fired:
+            self._fired = True
+            self._racer()
+        return super().now()
 
 
 def _kb(make_kb: KbFactory, *, policy: PolicyStrategy | None = None) -> Ontology:
@@ -1141,3 +1171,81 @@ class TestRetractedIsTerminalAcrossExtension:
 
         assert kb.backend.get_assertion(a.id).status == "retracted"  # type: ignore[union-attr]
         assert kb.backend.get_assertion(b.id).status == "flagged"  # type: ignore[union-attr]
+
+
+# ===========================================================================
+# flag_contradiction() TOCTOU (KI-045)
+# ===========================================================================
+
+
+class TestFlagContradictionTOCTOU:
+    """flag_contradiction() reads both target assertions and any existing
+    open contradiction for their (subject, predicate) - all before opening
+    its write transaction. `_RacingClock` simulates a genuine concurrent
+    actor deterministically (same technique as KI-035's
+    TestProposalTransitionTOCTOU in conformance/test_review_workflow.py):
+    it fires a one-shot side effect the moment `.now()` is called, right
+    where the fresh, in-transaction reads (KI-045's fix) now happen instead
+    of before them. The method under test must act on what its own fresh
+    read sees, not a stale pre-transaction snapshot."""
+
+    def test_flag_contradiction_loses_race_to_concurrent_retract(self, make_kb: KbFactory) -> None:
+        """A concurrent retract() landing in the gap must not be resurrected
+        back to `flagged` by this call's own terminal-status guard (KI-034)
+        - that guard only works if it's checking a fresh read."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        # Same target value on both refs -> corroboration, not conflict, so
+        # both start out `active` and independent of each other (matches
+        # test_explicit_flag_records_flagging_principal's own setup above).
+        a = kb.assert_ref(entity.id, "Person.employer", entity.id, HUMAN_WRITE)
+        b = kb.assert_ref(entity.id, "Person.employer", entity.id, HUMAN_WRITE)
+
+        def racer() -> None:
+            kb.retract(a.id, HUMAN_WRITE)
+
+        kb.clock = _RacingClock(T0, racer)
+        contradiction, action = kb.flag_contradiction(a.id, b.id, REVIEWER)
+
+        assert action == "created"
+        assert a.id in contradiction.member_ids
+        assert b.id in contradiction.member_ids
+        # a was retracted by the racer before this call's own read of it -
+        # must not have been resurrected to flagged.
+        assert kb.backend.get_assertion(a.id).status == "retracted"  # type: ignore[union-attr]
+        assert kb.backend.get_assertion(b.id).status == "flagged"  # type: ignore[union-attr]
+
+    def test_flag_contradiction_loses_race_to_concurrent_resolve(self, make_kb: KbFactory) -> None:
+        """A concurrent resolve_contradiction() closing the only existing
+        open contradiction for this (subject, predicate) in the gap must
+        not be extended by this call - its own fresh read must see it's no
+        longer open and start a new one instead."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        contradiction_id, ada_id, ava_id = _open_contradiction(kb, entity.id)
+
+        def racer() -> None:
+            kb.resolve_contradiction(contradiction_id, ada_id, REVIEWER)
+
+        kb.clock = _RacingClock(T0, racer)
+        contradiction, action = kb.flag_contradiction(ada_id, ava_id, REVIEWER)
+
+        # The racer's resolution itself stands, untouched by this call -
+        # still resolved, and its member_ids weren't appended to (the two
+        # ids this call also names were already there).
+        original = kb.backend.get_contradiction(contradiction_id)
+        assert original is not None
+        assert original.state == "resolved"
+        assert original.member_ids == [ada_id, ava_id]
+        # ada_id ends up `flagged` again here - correctly so: this call
+        # explicitly named it in a brand-new flag_contradiction(), which is
+        # deliberate dispute-reopening via an explicit call, not a bug.
+        # The bug this test guards against is specifically about *which*
+        # contradiction absorbs that flag - see the assertions below.
+
+        # This call must not have extended the now-resolved contradiction -
+        # its own fresh read of "is there an open contradiction here"
+        # correctly saw none, so it started a new one instead.
+        assert action == "created"
+        assert contradiction.id != contradiction_id
+        assert contradiction.state == "open"
