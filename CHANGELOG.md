@@ -237,10 +237,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Mechanically identical to KI-035's fix for the four proposal-transition methods: the
   reads and the decisions built on them now happen as the first statements inside the
   transaction, re-read fresh; only the principal/capability check stays outside (pure
-  identity, not state that races). New conformance vectors
-  (`TestFlagContradictionTOCTOU`) simulate both races deterministically via the same
-  `_RacingClock` test double KI-035 introduced, without real threads — confirmed to
-  fail without the fix.
+  identity, not state that races — verified no code path mutates a principal's
+  capability after creation). New conformance vectors (`TestFlagContradictionTOCTOU`)
+  simulate three races deterministically via the same `_RacingClock` test double KI-035
+  introduced, without real threads: a concurrent `retract()`, a concurrent
+  `resolve_contradiction()` closing the contradiction being extended, and a concurrent
+  `flag_contradiction()` opening a competing contradiction for the same
+  `(subject, predicate)` — all three confirmed to fail without the fix.
 - **Breaking:** `resolve_contradiction()` now rejects a winner candidate whose status is
   already `retracted` **or `superseded`** with `ValidationError` instead of reactivating
   it to `active` with a closed `valid_to` (closes KI-044) — that combination silently

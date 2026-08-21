@@ -1219,33 +1219,76 @@ class TestFlagContradictionTOCTOU:
         """A concurrent resolve_contradiction() closing the only existing
         open contradiction for this (subject, predicate) in the gap must
         not be extended by this call - its own fresh read must see it's no
-        longer open and start a new one instead."""
+        longer open and start a new one instead.
+
+        Uses two non-member assertions (c, d) rather than reusing the
+        original contradiction's own members - found in review to matter:
+        reusing existing members makes `merged = dedup(existing.member_ids
+        + [a, b])` a no-op regardless of whether the fix works, so the
+        member_ids assertion alone can't tell buggy from fixed. c/d
+        genuinely joining (or not) member_ids is what's discriminating."""
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
-        contradiction_id, ada_id, ava_id = _open_contradiction(kb, entity.id)
+        # Same target on every ref -> corroboration, not conflict (matches
+        # test_explicit_flag_records_flagging_principal's own pattern) -
+        # a/b/c/d all start out independently `active`.
+        a = kb.assert_ref(entity.id, "Person.employer", entity.id, HUMAN_WRITE)
+        b = kb.assert_ref(entity.id, "Person.employer", entity.id, HUMAN_WRITE)
+        c = kb.assert_ref(entity.id, "Person.employer", entity.id, HUMAN_WRITE)
+        d = kb.assert_ref(entity.id, "Person.employer", entity.id, HUMAN_WRITE)
+        original, _action = kb.flag_contradiction(a.id, b.id, REVIEWER)
 
         def racer() -> None:
-            kb.resolve_contradiction(contradiction_id, ada_id, REVIEWER)
+            kb.resolve_contradiction(original.id, a.id, REVIEWER)
 
         kb.clock = _RacingClock(T0, racer)
-        contradiction, action = kb.flag_contradiction(ada_id, ava_id, REVIEWER)
+        contradiction, action = kb.flag_contradiction(c.id, d.id, REVIEWER)
 
-        # The racer's resolution itself stands, untouched by this call -
-        # still resolved, and its member_ids weren't appended to (the two
-        # ids this call also names were already there).
-        original = kb.backend.get_contradiction(contradiction_id)
-        assert original is not None
-        assert original.state == "resolved"
-        assert original.member_ids == [ada_id, ava_id]
-        # ada_id ends up `flagged` again here - correctly so: this call
-        # explicitly named it in a brand-new flag_contradiction(), which is
-        # deliberate dispute-reopening via an explicit call, not a bug.
-        # The bug this test guards against is specifically about *which*
-        # contradiction absorbs that flag - see the assertions below.
+        # The racer's resolution stands, genuinely untouched by this call -
+        # still resolved, member_ids still just [a, b].
+        resolved = kb.backend.get_contradiction(original.id)
+        assert resolved is not None
+        assert resolved.state == "resolved"
+        assert resolved.member_ids == [a.id, b.id]
 
-        # This call must not have extended the now-resolved contradiction -
-        # its own fresh read of "is there an open contradiction here"
+        # c/d must not have joined the now-resolved contradiction - this
+        # call's own fresh read of "is there an open contradiction here"
         # correctly saw none, so it started a new one instead.
         assert action == "created"
-        assert contradiction.id != contradiction_id
+        assert contradiction.id != original.id
         assert contradiction.state == "open"
+        assert contradiction.member_ids == [c.id, d.id]
+        assert kb.backend.get_assertion(c.id).status == "flagged"  # type: ignore[union-attr]
+        assert kb.backend.get_assertion(d.id).status == "flagged"  # type: ignore[union-attr]
+
+    def test_flag_contradiction_loses_race_to_concurrent_flag(self, make_kb: KbFactory) -> None:
+        """A concurrent flag_contradiction() opening a *new* contradiction
+        for the same (subject, predicate) in the gap must not be missed -
+        this call's own fresh existing-contradiction read must see it and
+        extend it, not open a second, independently-open contradiction for
+        the same (subject, predicate) (found in review: the fix already
+        handles this correctly, it just wasn't pinned by a vector)."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        a = kb.assert_ref(entity.id, "Person.employer", entity.id, HUMAN_WRITE)
+        b = kb.assert_ref(entity.id, "Person.employer", entity.id, HUMAN_WRITE)
+        c = kb.assert_ref(entity.id, "Person.employer", entity.id, HUMAN_WRITE)
+        d = kb.assert_ref(entity.id, "Person.employer", entity.id, HUMAN_WRITE)
+
+        def racer() -> None:
+            kb.flag_contradiction(c.id, d.id, REVIEWER)
+
+        kb.clock = _RacingClock(T0, racer)
+        contradiction, action = kb.flag_contradiction(a.id, b.id, REVIEWER)
+
+        # Exactly one open contradiction for (entity.id, "Person.employer")
+        # must exist - this call's fresh read must have found the racer's
+        # and extended it, not raced it into a second, independently-open
+        # one that get_open_contradiction() can never see both halves of.
+        assert action == "extended"
+        open_contradiction = kb.backend.get_open_contradiction(
+            "default", entity.id, "Person.employer"
+        )
+        assert open_contradiction is not None
+        assert open_contradiction.id == contradiction.id
+        assert set(contradiction.member_ids) == {a.id, b.id, c.id, d.id}
