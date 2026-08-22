@@ -3,7 +3,7 @@
 **Status**: Accepted
 **Date**: 2026-08-19
 **Deciders**: Ontolith Core Team
-**Related**: SPEC §10.3 (contradiction resolution), KI-026 (self-resolution guard), KI-033 (retract party-to-contradiction guard), KI-034 (retracted stays terminal across extension), KI-044, KI-045 (flag_contradiction() reads status before its transaction — a race that can undo the same terminal-status guard this ADR relies on flag_contradiction() already applying correctly), KI-050 (flag_contradiction() can open a contradiction with no eligible winner among its founding members — found during this ADR's own review, filed separately), KI-051 (retract() can still overwrite a superseded member, bypassing the KI-033/KI-043 guards — found in a later review pass, filed separately)
+**Related**: SPEC §10.3 (contradiction resolution), KI-026 (self-resolution guard), KI-033 (retract party-to-contradiction guard), KI-034 (retracted stays terminal across extension), KI-044, KI-045 (flag_contradiction() reads status before its transaction — a race that could undo the same terminal-status guarantee this ADR relies on flag_contradiction() already applying correctly; since resolved), KI-050 (flag_contradiction() can open a contradiction with no eligible winner among its founding members — found during this ADR's own review, filed separately), KI-051 (retract() can still overwrite a superseded member, bypassing the KI-033/KI-043 guards — found in a later review pass, filed separately)
 
 ---
 
@@ -73,7 +73,7 @@ A resolver who wants a terminal member's value active again has no path via `res
 - SPEC §10.3 (Contradiction resolution — winner reactivation)
 - KI-033 (retract party-to-contradiction guard — first place retraction was made terminal; KI-051 tracks it not yet recognizing `superseded`)
 - KI-034 (retracted stays terminal across conflict-routing extension — second place, and the place this ADR extends to also cover `superseded`)
-- KI-045 (`flag_contradiction()`'s pre-transaction status read — a race against the same terminal-status guarantee this ADR depends on)
+- KI-045 (`flag_contradiction()`'s pre-transaction status read — a race against the same terminal-status guarantee this ADR depends on; since resolved)
 - KI-050 (`flag_contradiction()` can open a contradiction with no eligible winner among its founding members)
 - KI-051 (`retract()` can overwrite a `superseded` member, bypassing the KI-033/KI-043 guards)
 - `src/ontolith/ontology.py` (`resolve_contradiction`, `_apply_with_conflict_routing`, `flag_contradiction`, `retract`)

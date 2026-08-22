@@ -2446,6 +2446,14 @@ class Ontology:
         default queries until the contradiction is resolved. This does NOT
         resolve the contradiction — see resolve_contradiction().
 
+        The assertion/contradiction reads this decides from are taken
+        fresh inside the write transaction (KI-045) — mechanically the
+        same TOCTOU fix KI-035 applied to the four proposal-transition
+        methods — so a concurrent retract()/supersession or
+        resolve_contradiction() landing between an earlier, stale read
+        and this call's write can't be missed or acted on against
+        already-superseded state.
+
         Args:
             assertion_id_a: First conflicting assertion ID
             assertion_id_b: Second conflicting assertion ID
@@ -2467,27 +2475,48 @@ class Ontology:
         if principal.default_capability == "read":
             raise CapabilityError(f"Principal {author!r} lacks propose capability")
 
-        # get_assertion is status-agnostic: a flagged/superseded assertion
-        # must still be resolvable here, e.g. when extending an open contradiction
-        a = self.backend.get_assertion(assertion_id_a)
-        b = self.backend.get_assertion(assertion_id_b)
-        if a is None:
-            raise NotFoundError(f"Assertion not found: {assertion_id_a}")
-        if b is None:
-            raise NotFoundError(f"Assertion not found: {assertion_id_b}")
-        if a.subject != b.subject or a.predicate != b.predicate:
-            raise ValidationError(
-                "Assertions must share the same subject and predicate to contradict"
-            )
-
-        existing = self.backend.get_open_contradiction(
-            namespace=self.namespace,
-            subject=a.subject,
-            predicate=a.predicate,
-        )
-
+        # Only the principal/capability check above stays outside the
+        # transaction — identity doesn't change concurrently the way a
+        # contradiction's or assertion's state can (verified: no code path
+        # in either backend ever mutates a principal's default_capability
+        # after creation; if one is ever added, this check needs to move
+        # inside too). `now` also stays here, matching every sibling write
+        # method's own convention (`resolve_contradiction` has the
+        # identical now-outside/reads-inside shape already).
         now = self.clock.now()
         with self.backend.transaction():
+            # KI-045: the assertion reads, the subject/predicate check, and
+            # the existing-open-contradiction lookup below all read mutable
+            # state that a concurrent write can change — moved inside the
+            # transaction and re-read fresh here (not before it),
+            # mechanically identical to KI-035's fix for accept_proposal/
+            # reject_proposal/request_changes/resubmit. A stale
+            # pre-transaction read of either could otherwise let this call
+            # re-flag an assertion that's since become terminal (KI-034's
+            # own resurrection bug, reachable again via this race) or
+            # extend a contradiction a concurrent resolve_contradiction()
+            # has already closed in the gap (update_contradiction_members()
+            # has no state guard of its own).
+            #
+            # get_assertion is status-agnostic: a flagged/superseded assertion
+            # must still be resolvable here, e.g. when extending an open contradiction
+            a = self.backend.get_assertion(assertion_id_a)
+            b = self.backend.get_assertion(assertion_id_b)
+            if a is None:
+                raise NotFoundError(f"Assertion not found: {assertion_id_a}")
+            if b is None:
+                raise NotFoundError(f"Assertion not found: {assertion_id_b}")
+            if a.subject != b.subject or a.predicate != b.predicate:
+                raise ValidationError(
+                    "Assertions must share the same subject and predicate to contradict"
+                )
+
+            existing = self.backend.get_open_contradiction(
+                namespace=self.namespace,
+                subject=a.subject,
+                predicate=a.predicate,
+            )
+
             if existing is not None:
                 merged = list(dict.fromkeys(existing.member_ids + [assertion_id_a, assertion_id_b]))
                 self.backend.update_contradiction_members(existing.id, merged)
@@ -2525,6 +2554,13 @@ class Ontology:
                     self.backend.set_assertion_status(aid, "flagged")
                     self._record_assertion_event(aid, author, "flagged", now)
 
+        # This re-read happens after the transaction commits (matching
+        # resolve_contradiction's identical shape) - KI-045 closes the race
+        # on what this call *decides and writes*, not on what the returned
+        # object reflects; a write landing between commit and this read
+        # could mean the returned Contradiction is already stale by the
+        # time the caller sees it. Not new here and not addressed by this
+        # fix - same as every other write method's return-then-re-fetch.
         result = self.backend.get_contradiction(contradiction_id)
         assert result is not None
         return result, action
