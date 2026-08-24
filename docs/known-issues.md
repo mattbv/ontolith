@@ -1003,7 +1003,7 @@ New `tests/unit/test_duckdb_backend.py::TestConcurrency`, mirroring `test_sqlite
 
 ---
 
-## KI-047 — `.trust_at_least()` ignores delegation attenuation (SPEC §8.4)
+## KI-047 — `.trust_at_least()` ignores delegation attenuation (SPEC §8.4) ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — a query-time trust check can disagree with the policy engine's own trust semantics for the same assertion
 **Milestone target:** Backlog
@@ -1017,7 +1017,13 @@ Pre-existing since `.trust_at_least()` first shipped; not introduced or worsened
 
 ### Fix
 
-`entities_meeting_trust` needs a `LEFT JOIN` to a second `principal` alias on `assertion.acting_as`, and to compare `min(p.trust_level, COALESCE(delegate.trust_level, p.trust_level))` (or equivalent `CASE`) against `min_trust`, matching `govern/policy.py`'s existing formula exactly. Needs a conformance vector with a delegated assertion where the author's and delegate's trust levels straddle the threshold in both directions, and a decision on whether `QueryBuilder`'s docstrings should say "effective trust_level" instead of "trust_level" once fixed.
+`entities_meeting_trust` (both `store/sqlite/backend.py` and `store/duckdb/backend.py`) now `LEFT JOIN`s a second `principal` alias (`delegate`) on `assertion.acting_as = delegate.id`, and filters on `min(p.trust_level, COALESCE(delegate.trust_level, p.trust_level)) >= min_trust` — matching `govern/policy.py`'s `min(principal.trust_level, acting_as.trust_level)` effective-trust formula exactly (SPEC §8.4). No `acting_as IS NULL` special case is needed: `COALESCE` falls back to the author's own `trust_level` when there's no delegate, and `min(x, x) == x`, so a non-delegated assertion is scored identically to before.
+
+One cross-backend divergence, verified empirically before implementing (same pattern as KI-039's `TRY_CAST`/`CAST` split): SQLite's `min(a, b)` is the scalar two-argument form, but DuckDB's `min(a, b)` is aggregate-only and returns a list when given two scalar arguments (`duckdb min(3,5)` → `[3]`, not `3`). DuckDB's scalar two-arg minimum is `least(a, b)` (`duckdb least(3,5)` → `3`). SQLite's query uses `min(...)`; DuckDB's uses `least(...)`, with a comment cross-referencing this entry.
+
+`QueryBuilder.trust_at_least()`'s and `StorageBackend.entities_meeting_trust`'s docstrings now describe "effective trust_level" and spell out the delegation formula, rather than implying the author's raw `trust_level`. New conformance vectors (`conformance/test_confidence_trust_filters.py::TestTrustAtLeastDelegationAttenuation`) cover both attenuation directions (low-trust delegate acting as a high-trust principal, and the reverse), the inclusive threshold boundary, and confirm non-delegated assertions are unaffected by the new join.
+
+**Breaking (observable, not signature-level):** any caller relying on `.trust_at_least()` matching a delegated assertion by the author's raw `trust_level` alone will now see it filtered by the (possibly lower) effective value instead — the correct behavior per SPEC §8.4, but a behavior change for existing data with delegated assertions.
 
 ---
 
