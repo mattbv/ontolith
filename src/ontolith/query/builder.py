@@ -231,18 +231,27 @@ class QueryBuilder:
         return self
 
     def trust_at_least(self, level: int) -> "QueryBuilder":
-        """Keep only entities with at least one active assertion authored by
-        a principal whose trust_level >= `level`.
+        """Keep only entities with at least one active assertion whose
+        *effective* trust_level >= `level`.
+
+        "Effective" (KI-047): for an assertion made under delegation
+        (`acting_as` set), this is `min(author.trust_level,
+        acting_as.trust_level)` — the same effective-trust formula
+        `govern/policy.py` already uses to decide whether to auto-accept
+        that same assertion (SPEC §8.4) — not the author's raw trust_level
+        alone. For a non-delegated assertion it's simply the author's own
+        trust_level.
 
         Respects `.as_of()` (KI-036) for which assertion counts as
-        qualifying, the same way `.min_confidence()` does. `trust_level`
-        itself is always the principal's current value: no code path ever
+        qualifying, the same way `.min_confidence()` does. Each principal's
+        own trust_level is always its current value: no code path ever
         changes a principal's trust_level after creation, so there is no
         historical value to reconstruct — "as of t" and "now" are the same
-        number by construction.
+        number by construction, and the same holds for the `min()` this
+        method now takes of two such principals' trust levels.
 
         Args:
-            level: Minimum principal trust level, 0-10.
+            level: Minimum effective trust level, 0-10.
 
         Returns:
             Self for chaining

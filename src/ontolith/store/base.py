@@ -497,7 +497,18 @@ class StorageBackend(Protocol):
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion,
         active at `as_of_time` (or currently active, if `as_of_time` is
-        None), authored by a principal whose trust_level >= `min_trust`.
+        None), authored by a principal whose *effective* trust_level >=
+        `min_trust`.
+
+        "Effective" (KI-047): when the qualifying assertion was made under
+        delegation (`acting_as` set), the comparison is
+        `min(author.trust_level, acting_as.trust_level)`, not the author's
+        raw `trust_level` alone — matching `govern/policy.py`'s identical
+        formula for effective trust under delegation (SPEC §8.4: effective
+        capability/trust is `min(author, acting_as)`, never a wholesale
+        substitution). For a non-delegated assertion, this is simply the
+        author's own `trust_level`, unchanged from before this method
+        considered delegation at all.
 
         Avoids the N+1 pattern of calling assertions() + get_principal()
         once per (candidate entity, assertion) pair (QueryBuilder.
@@ -508,12 +519,14 @@ class StorageBackend(Protocol):
 
         `as_of_time` bitemporally scopes which *assertion* qualifies, the
         same way `entities_meeting_confidence` does (including its
-        flagged-status caveat) — but `trust_level` itself is always the
-        principal's current value, never a historical one (KI-036). This is
-        not an approximation: no code path updates a principal's
-        `trust_level` after creation, so "trust_level as of any t at or
-        after the principal's creation" and "trust_level now" are the same
-        value by construction (guarded by
+        flagged-status caveat) — but each individual principal's own
+        `trust_level` (author's and, if delegated, `acting_as`'s) is always
+        its current value, never a historical one (KI-036), and the `min()`
+        this method now takes of the two (KI-047) inherits that same
+        property. This is not an approximation: no code path updates a
+        principal's `trust_level` after creation, so "trust_level as of any
+        t at or after the principal's creation" and "trust_level now" are
+        the same value by construction (guarded by
         `tests/unit/test_principal_trust_immutability_invariant.py`, which
         fails the day a mutation path is added — that would mean this
         method needs real principal versioning, not this shortcut). A
