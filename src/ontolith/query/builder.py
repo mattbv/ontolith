@@ -238,9 +238,10 @@ class QueryBuilder:
         (`acting_as` set), this is `min(author.trust_level,
         acting_as.trust_level)` — the same effective-trust formula
         `govern/policy.py` already uses to decide whether to auto-accept
-        that same assertion (SPEC §8.4) — not the author's raw trust_level
-        alone. For a non-delegated assertion it's simply the author's own
-        trust_level.
+        that same assertion, by analogy with SPEC §8.4's capability rule
+        ("effective capability is min(author, acting_as)") — not the
+        author's raw trust_level alone. For a non-delegated assertion it's
+        simply the author's own trust_level.
 
         Respects `.as_of()` (KI-036) for which assertion counts as
         qualifying, the same way `.min_confidence()` does. Each principal's

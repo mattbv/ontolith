@@ -1800,12 +1800,14 @@ class DuckDBBackend:
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion,
         active at `as_of_time` (KI-036) or currently active if `as_of_time`
-        is None, authored by a principal whose *effective* trust_level >=
-        `min_trust` (KI-047) — `min(author.trust_level, acting_as.trust_level)`
-        when the assertion was made under delegation, matching
-        `govern/policy.py`'s identical formula for effective trust under
-        delegation (SPEC §8.4), or just `author.trust_level` when it wasn't.
-        `candidate_ids` narrows the scan the same way as
+        is None, whose *effective* trust_level >= `min_trust` (KI-047) —
+        `min(author.trust_level, acting_as.trust_level)` when the assertion
+        was made under delegation, matching `govern/policy.py`'s identical
+        formula for effective trust (by analogy with SPEC §8.4's capability
+        rule), or just `author.trust_level` when it wasn't. A dangling
+        `acting_as` (no resolvable delegate) falls back to `author.trust_level`
+        via `coalesce` — see `StorageBackend.entities_meeting_trust`'s
+        docstring for why. `candidate_ids` narrows the scan the same way as
         `entities_meeting_confidence` (KI-037) — see its docstring."""
         if candidate_ids is not None and not candidate_ids:
             return set()
@@ -1813,7 +1815,15 @@ class DuckDBBackend:
         # DuckDB's `min(a, b)` is aggregate-only (returns a list for two
         # scalar args, confirmed empirically) — `least(a, b)` is the
         # multi-arg scalar form SQLite's `min(a, b)` already is; see this
-        # method's SQLite counterpart for the identical formula.
+        # method's SQLite counterpart for the identical formula. The two
+        # are NOT equivalent for a NULL operand (sqlite `min(3, NULL)` is
+        # NULL, excluding the row; duckdb `least(3, NULL)` is 3, including
+        # it) — this can't fire today because `principal.trust_level` is
+        # `INTEGER NOT NULL` on both backends and `coalesce` already
+        # excludes the no-delegate case, but that NULL-freedom is exactly
+        # what this comment is pinning down: relaxing that constraint on
+        # either backend would silently diverge the two in opposite
+        # directions with no test to catch it.
         query = (
             "SELECT DISTINCT a.subject FROM assertion a"
             " JOIN entity e ON e.id = a.subject"

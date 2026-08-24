@@ -242,16 +242,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transaction span. See ADR-0032.
 - **Breaking:** `.trust_at_least()`/`entities_meeting_trust` now compare a delegated
   assertion's *effective* trust — `min(author.trust_level, acting_as.trust_level)` —
-  instead of the author's raw `trust_level` alone (closes KI-047, SPEC §8.4). Matches
-  `govern/policy.py`'s existing effective-trust formula for the same assertion; a
-  low-trust delegate acting as a high-trust principal (or vice versa) is now scored
-  consistently between policy evaluation and query-time filtering, which it previously
-  wasn't. Cross-backend divergence, verified before implementing: SQLite's `min(a, b)`
-  is the scalar two-argument form; DuckDB's `min(a, b)` is aggregate-only and returns a
-  list for two scalar args, so DuckDB's query uses `least(a, b)` instead. Non-delegated
-  assertions are unaffected. New conformance vectors
-  (`TestTrustAtLeastDelegationAttenuation`) cover both attenuation directions and the
-  inclusive threshold boundary.
+  instead of the author's raw `trust_level` alone (closes KI-047). Matches
+  `govern/policy.py`'s existing effective-trust formula for the same assertion, by
+  analogy with SPEC §8.4's capability rule; a low-trust delegate acting as a high-trust
+  principal (or vice versa) is now scored consistently between policy evaluation and
+  query-time filtering, which it previously wasn't. Cross-backend divergence, verified
+  before implementing: SQLite's `min(a, b)` is the scalar two-argument form; DuckDB's
+  `min(a, b)` is aggregate-only and returns a list for two scalar args, so DuckDB's
+  query uses `least(a, b)` instead. A dangling `acting_as` (no resolvable delegate)
+  fails open, falling back to the author's own `trust_level`, deliberately unlike
+  `_resolve_delegation`'s fail-closed behavior for the same input at write time.
+  Non-delegated assertions are unaffected. New conformance vectors
+  (`TestTrustAtLeastDelegationAttenuation`) cover both attenuation directions, the
+  inclusive threshold boundary, and the dangling-delegate fallback. See ADR-0033.
 - **`flag_contradiction()` no longer has a TOCTOU window between reading its target
   assertions/existing open contradiction and writing its decision (closes KI-045).**
   Both target assertions and any existing open contradiction for their `(subject,

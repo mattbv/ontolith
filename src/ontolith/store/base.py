@@ -495,20 +495,36 @@ class StorageBackend(Protocol):
         as_of_time: datetime | None = None,
         candidate_ids: frozenset[str] | None = None,
     ) -> set[str]:
-        """IDs of entities in `(namespace, concept)` with >=1 assertion,
-        active at `as_of_time` (or currently active, if `as_of_time` is
-        None), authored by a principal whose *effective* trust_level >=
-        `min_trust`.
+        """IDs of entities in `(namespace, concept)` with >=1 active
+        assertion, active at `as_of_time` (or currently active, if
+        `as_of_time` is None), whose *effective* trust_level >= `min_trust`.
 
         "Effective" (KI-047): when the qualifying assertion was made under
         delegation (`acting_as` set), the comparison is
         `min(author.trust_level, acting_as.trust_level)`, not the author's
-        raw `trust_level` alone — matching `govern/policy.py`'s identical
-        formula for effective trust under delegation (SPEC §8.4: effective
-        capability/trust is `min(author, acting_as)`, never a wholesale
-        substitution). For a non-delegated assertion, this is simply the
-        author's own `trust_level`, unchanged from before this method
-        considered delegation at all.
+        raw `trust_level` alone — by analogy with SPEC §8.4's capability
+        rule ("effective capability is `min(author, acting_as)`, never a
+        wholesale substitution"), the same extension `govern/policy.py`
+        already applies to trust for exactly this reason. For a
+        non-delegated assertion, this is simply the author's own
+        `trust_level`, unchanged from before this method considered
+        delegation at all.
+
+        If `acting_as` names a principal that no longer resolves (there is
+        no FK from `assertion.acting_as` to `principal.id`, so this can
+        only happen via a direct `put_assertion()` call bypassing
+        `Ontology`'s write paths, which always validate the delegate
+        exists), implementations MUST fall back to the author's own
+        `trust_level` rather than excluding the row or raising — i.e.
+        treat an unresolvable delegate the same as no delegate at all.
+        This deliberately fails *open*, unlike `govern/policy.py`'s
+        `_resolve_delegation` which fails *closed* (raises `AuthError`) for
+        the same input — policy evaluation runs once, at write time, when
+        rejecting is cheap and correct; this method runs on every query
+        against already-committed data, where excluding or erroring on a
+        row for a delegate that vanished after the assertion was accepted
+        would be a surprising, un-auditable behavior change with no
+        corresponding write.
 
         Avoids the N+1 pattern of calling assertions() + get_principal()
         once per (candidate entity, assertion) pair (QueryBuilder.
@@ -537,7 +553,7 @@ class StorageBackend(Protocol):
         Args:
             namespace: Namespace to scope the scan to
             concept: Concept to scope the scan to
-            min_trust: Minimum principal trust level, 0-10
+            min_trust: Minimum effective trust level, 0-10
             as_of_time: If set, evaluate assertion existence against this
                 point in time instead of current state (KI-036)
             candidate_ids: Optional narrowing hint (KI-037) — see

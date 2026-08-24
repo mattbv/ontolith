@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 
 from conformance.conftest import KbFactory
 from ontolith import Ontology
-from ontolith.core import FixedClock, FixedIdProvider
+from ontolith.core import Assertion, FixedClock, FixedIdProvider
 from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
@@ -265,16 +265,41 @@ class TestTrustAtLeastDelegationAttenuation:
     def test_delegation_attenuation_boundary_is_inclusive(self, make_kb: KbFactory) -> None:
         """Querying at exactly min(author, acting_as) must still match -
         same inclusive-boundary contract the non-delegated case already
-        has (test_boundary_trust_level_is_inclusive)."""
+        has (test_boundary_trust_level_is_inclusive). Uses a high-trust
+        delegate (8) acting_as a mid-trust principal (4) - the same
+        direction as test_high_trust_delegate_acting_as_low_trust_
+        principal_is_attenuated_down, and deliberately not the reverse:
+        min(4, 8) = 4 equals the *delegate's* own trust_level too, so that
+        pairing can't distinguish "reads effective trust" from "reads only
+        the delegate's raw trust_level" at this boundary - this pairing
+        can, since a pre-KI-047 implementation reading only the author's
+        (the delegate's) raw trust_level=8 would incorrectly match at 5."""
         kb = _kb(make_kb)
-        self._delegate(kb, "mid@example.com", owner=TRUSTED, trust_level=4)
-        entity = kb.create_entity("Person", author=TRUSTED)
+        low_trust_owner = "low-trust-owner@example.com"
+        kb.create_principal(
+            low_trust_owner,
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            trust_level=4,
+        )
+        self._delegate(
+            kb, "high-trust-delegate-2@example.com", owner=low_trust_owner, trust_level=8
+        )
+        entity = kb.create_entity("Person", author=low_trust_owner)
         kb.assert_literal(
-            entity.id, "Person.name", "Ada", "Text", author="mid@example.com", acting_as=TRUSTED
+            entity.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            author="high-trust-delegate-2@example.com",
+            acting_as=low_trust_owner,
         )
 
-        # min(4, 8) = 4
+        # min(8, 4) = 4
         assert {r.id for r in kb.query("Person").trust_at_least(4).all()} == {entity.id}
+        # A pre-KI-047 implementation reading only the delegate's raw
+        # trust_level=8 would incorrectly match here too.
         assert kb.query("Person").trust_at_least(5).all() == []
 
     def test_non_delegated_assertion_unaffected_by_delegation_join(
@@ -287,6 +312,36 @@ class TestTrustAtLeastDelegationAttenuation:
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=TRUSTED)
         kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED)
+
+    def test_dangling_acting_as_falls_back_to_author_trust_level(self, make_kb: KbFactory) -> None:
+        """An `acting_as` that names no existing principal (there is no FK
+        from assertion.acting_as to principal.id, so this can't happen
+        through Ontology's own write paths - _resolve_delegation always
+        validates the delegate exists first - but can via a direct
+        StorageBackend.put_assertion() call, e.g. a legacy import) must
+        fall back to the author's own trust_level rather than crashing or
+        excluding the row - StorageBackend.entities_meeting_trust's
+        docstring makes this contract explicit (KI-047 review, M-1)."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        assertion = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity.id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada",
+            author=TRUSTED,
+            acting_as="ghost@nowhere.example",
+            asserted_at=T0,
+            valid_from=T0,
+        )
+        kb.backend.put_assertion(assertion)
+
+        # Falls back to TRUSTED's own trust_level=8, not excluded/erroring.
+        assert {r.id for r in kb.query("Person").trust_at_least(8).all()} == {entity.id}
+        assert kb.query("Person").trust_at_least(9).all() == []
 
         results = kb.query("Person").trust_at_least(8).all()
         assert {r.id for r in results} == {entity.id}
