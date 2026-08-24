@@ -1,6 +1,10 @@
 """Unit tests for DuckDB storage backend (M3, ADR-0016)."""
 
 import tempfile
+import threading
+import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1536,3 +1540,303 @@ class TestCandidateIdsNarrowing:
             backend.entities_meeting_trust("test-ns", "Person", 0, candidate_ids=frozenset())
             == set()
         )
+
+
+class TestConcurrency:
+    """KI-046: the shared connection must survive genuinely concurrent access
+    from multiple threads (the shape an ASGI server's worker threadpool
+    produces), not just serial or single-threaded use. Mirrors
+    tests/unit/test_sqlite_backend.py::TestConcurrency (KI-023) exactly —
+    same test shapes, since the underlying gap and fix are identical: a
+    single shared connection object, unsafe for concurrent use without
+    external synchronization (DuckDB's own DB-API threadsafety level is 1,
+    "threads may share the module, but not connections").
+    """
+
+    N_THREADS = 8
+
+    def test_concurrent_transaction_blocks_survive_and_all_commit(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """N threads each run a full transaction() block concurrently.
+
+        Before the fix, two threads' BEGIN TRANSACTION/COMMIT calls could
+        interleave on the same connection with no serialization at all -
+        DuckDB's own threadsafety=1 guarantee provides none. With the
+        lock, each thread's transaction is fully serialized: no exception,
+        and every write survives.
+        """
+        barrier = threading.Barrier(self.N_THREADS)
+        errors: list[BaseException] = []
+
+        def worker(i: int) -> None:
+            barrier.wait()  # maximize actual concurrent contention on begin()
+            try:
+                with backend.transaction():
+                    backend.put_entity(
+                        Entity(
+                            id=f"entity-{i}",
+                            namespace="test-ns",
+                            concept="Person",
+                            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                            created_by="alice@test.com",
+                        )
+                    )
+                    backend.put_assertion(
+                        Assertion(
+                            id=f"assertion-{i}",
+                            namespace="test-ns",
+                            subject=f"entity-{i}",
+                            predicate="Person.name",
+                            value_kind="literal",
+                            value_type="Text",
+                            value=f"Person {i}",
+                            author="alice@test.com",
+                            asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+                        )
+                    )
+            except BaseException as e:  # noqa: BLE001 - captured for the assertion below
+                errors.append(e)
+
+        with ThreadPoolExecutor(max_workers=self.N_THREADS) as pool:
+            list(pool.map(worker, range(self.N_THREADS)))
+
+        assert errors == []
+        for i in range(self.N_THREADS):
+            assert backend.get_entity(f"entity-{i}") is not None
+            assert backend.get_assertion(f"assertion-{i}") is not None
+
+    def test_concurrent_non_transactional_writes_are_serialized(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """N threads each call put_entity() directly (autocommit path, no
+        explicit transaction()) concurrently - exercises the @_synchronized
+        wrapper on a standalone write, not just the begin()/commit() path.
+
+        Unlike this class's other tests, this one passes even against the
+        pre-fix code (confirmed empirically, run repeatedly, not flaky).
+        Found in review: the earlier explanation here ("doesn't hit the
+        interleaving window, which requires a multi-statement BEGIN...COMMIT
+        span") was WRONG and understated the actual pre-fix bug - see
+        test_concurrent_standalone_reads_do_not_return_corrupted_results
+        below, which demonstrates the real, worse vulnerability (silent
+        wrong data on concurrent *reads*, no exception at all) and IS
+        discriminating. The real reason THIS test specifically doesn't
+        discriminate is narrower: put_entity() is a single execute() call
+        with no follow-up fetch, and empirically DuckDB's own connection
+        object happens to guard a bare execute()-with-no-fetch internally
+        even without external locking (confirmed via a 32-thread stress
+        test: 0 errors, 0 missing/extra rows, pre-fix, repeated). Kept for
+        structural parity with test_sqlite_backend.py's equivalent test -
+        not independent proof this specific path was ever unsafe pre-fix.
+        """
+        barrier = threading.Barrier(self.N_THREADS)
+        errors: list[BaseException] = []
+
+        def worker(i: int) -> None:
+            barrier.wait()
+            try:
+                backend.put_entity(
+                    Entity(
+                        id=f"solo-entity-{i}",
+                        namespace="test-ns",
+                        concept="Person",
+                        created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                        created_by="alice@test.com",
+                    )
+                )
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        with ThreadPoolExecutor(max_workers=self.N_THREADS) as pool:
+            list(pool.map(worker, range(self.N_THREADS)))
+
+        assert errors == []
+        entities = backend.entities(namespace="test-ns", concept="Person")
+        assert {e.id for e in entities} == {f"solo-entity-{i}" for i in range(self.N_THREADS)}
+
+    def test_concurrent_standalone_reads_do_not_return_corrupted_results(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """Found in review: the actual worst pre-fix consequence of KI-046
+        wasn't a multi-statement transaction race - it was silent data
+        corruption on concurrent READS, with no exception at all. Every
+        read method in this backend is an execute()-then-fetch() pair;
+        `duckdb.DuckDBPyConnection.execute()` returns the connection
+        object itself (confirmed: `conn.execute(...) is conn`), so the
+        pending result set is *connection* state - a concurrent execute()
+        from another thread clobbers it between one thread's execute()
+        and its own fetch(). Reproduced empirically pre-fix (16 threads,
+        50 pre-seeded entities): entities() returned 0, 1, or 49 of the 50
+        rows across repeated runs, and get_entity() returned None for
+        entities that genuinely exist - both silently, no exception
+        raised, nothing an error-taxonomy mapping could ever catch. This
+        is strictly worse than what test_concurrent_transaction_blocks_
+        survive_and_all_commit demonstrates (a raised exception): wrong
+        data with no signal anything went wrong is a correctness bug a
+        caller has no way to detect.
+        """
+        n = 50
+        for i in range(n):
+            backend.put_entity(
+                Entity(
+                    id=f"read-entity-{i}",
+                    namespace="test-ns",
+                    concept="Person",
+                    created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                    created_by="alice@test.com",
+                )
+            )
+        expected_ids = {f"read-entity-{i}" for i in range(n)}
+
+        n_readers = 16
+        barrier = threading.Barrier(n_readers)
+        errors: list[BaseException] = []
+        list_results: list[set[str]] = []
+        get_results: list[bool] = []  # True if every get_entity() call found its row
+
+        def reader(i: int) -> None:
+            barrier.wait()
+            try:
+                entities = backend.entities(namespace="test-ns", concept="Person")
+                list_results.append({e.id for e in entities})
+                get_results.append(
+                    all(backend.get_entity(f"read-entity-{j}") is not None for j in range(n))
+                )
+            except BaseException as e:  # noqa: BLE001
+                errors.append(e)
+
+        with ThreadPoolExecutor(max_workers=n_readers) as pool:
+            list(pool.map(reader, range(n_readers)))
+
+        assert errors == []
+        assert all(result == expected_ids for result in list_results)
+        assert all(get_results)
+
+    @pytest.mark.parametrize(
+        "call_reader",
+        [
+            lambda backend: backend.entities_meeting_confidence("test-ns", "Person", 0.5),
+            lambda backend: backend.entities_meeting_trust("test-ns", "Person", 0),
+        ],
+        ids=["entities_meeting_confidence", "entities_meeting_trust"],
+    )
+    def test_entities_meeting_confidence_or_trust_serialized_with_open_transaction(
+        self, backend: DuckDBBackend, call_reader: Callable[[DuckDBBackend], set[str]]
+    ) -> None:
+        """entities_meeting_confidence/entities_meeting_trust must carry
+        @_synchronized like every other public method (KI-046) - a
+        concurrent call must block on an in-flight transaction rather than
+        touching the same connection while a BEGIN is still open. The
+        writer's transaction is forced to roll back after the reader
+        unblocks, so a passing assertion of `set()` proves the reader
+        waited for the lock rather than running concurrently against the
+        same connection. Parametrized over both methods - a decorator
+        missing from just one of them still leaves the suite green if only
+        the other is exercised."""
+        backend.put_entity(
+            Entity(
+                id="e0",
+                namespace="test-ns",
+                concept="Person",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                created_by="alice@test.com",
+            )
+        )
+
+        entered = threading.Event()
+        release = threading.Event()
+
+        def writer() -> None:
+            with backend.transaction():
+                backend.put_assertion(
+                    Assertion(
+                        id="a0",
+                        namespace="test-ns",
+                        subject="e0",
+                        predicate="Person.name",
+                        value_kind="literal",
+                        value_type="Text",
+                        value="Ada",
+                        author="alice@test.com",
+                        confidence=0.9,
+                        asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+                    )
+                )
+                entered.set()
+                release.wait(timeout=5)
+                raise RuntimeError("forced rollback")
+
+        result: list[set[str]] = []
+
+        def reader() -> None:
+            entered.wait(timeout=5)
+            result.append(call_reader(backend))
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            writer_future = pool.submit(writer)
+            reader_future = pool.submit(reader)
+            try:
+                assert entered.wait(timeout=5)
+                time.sleep(0.1)
+                assert not reader_future.done()  # still blocked on the writer's lock
+            finally:
+                # Always unblock the writer's release.wait(), even if an
+                # assertion above failed - otherwise ThreadPoolExecutor's
+                # __exit__ blocks for the writer's full 5s timeout on every
+                # failing run.
+                release.set()
+            with pytest.raises(RuntimeError, match="forced rollback"):
+                writer_future.result(timeout=5)
+            reader_future.result(timeout=5)
+
+        assert result == [set()]
+
+    def test_commit_failure_inside_transaction_raises_storage_error_and_frees_lock(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """Regression test for the lock double-release shape KI-023's
+        review already found once for SQLiteBackend (see ADR-0010's
+        update) - commit() releasing self._lock unconditionally (e.g. via
+        `finally`) would double-release it when commit() fails inside a
+        transaction() block, since transaction()'s except clause then
+        calls rollback(), which also releases - the second release raises
+        RuntimeError, masking the real StorageError.
+        """
+
+        class _FailingCommitConn:
+            """Delegates everything to the real connection except a COMMIT execute()."""
+
+            def __init__(self, real_conn: duckdb.DuckDBPyConnection) -> None:
+                self._real = real_conn
+
+            def execute(self, sql: str, *args: object, **kwargs: object) -> object:
+                if sql == "COMMIT":
+                    raise duckdb.Error("simulated commit failure")
+                return self._real.execute(sql, *args, **kwargs)
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._real, name)
+
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+
+        real_conn = backend.conn
+        backend.conn = _FailingCommitConn(real_conn)  # type: ignore[assignment]
+        try:
+            with pytest.raises(StorageError, match="Failed to commit transaction"):
+                with backend.transaction():
+                    backend.put_entity(entity)
+        finally:
+            backend.conn = real_conn
+
+        assert backend.get_entity("entity-001") is None  # rollback() undid the insert
+
+        # The lock must be free - acquire(blocking=False) succeeds only if so.
+        assert backend._lock.acquire(blocking=False)
+        backend._lock.release()

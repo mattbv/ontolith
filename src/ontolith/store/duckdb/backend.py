@@ -36,14 +36,26 @@ notes at each divergence point:
   rounds values like 0.95.
 - The `at` column (assertion_event, proposal_event) is quoted ("at") in DDL
   and SQL — it's a reserved word in DuckDB, unlike SQLite.
+- The shared `duckdb.DuckDBPyConnection` is serialized across threads with a
+  `threading.RLock`, the same `@_synchronized` pattern `SQLiteBackend` uses
+  for KI-023 (`ADR-0010`'s update) — DuckDB's own DB-API `threadsafety`
+  level is 1 ("threads may share the module, but not connections"), so a
+  single connection object needs the identical external synchronization
+  sqlite3 does, even though DuckDB has no same-thread check to lift in the
+  first place. Unlike SQLiteBackend, no `_in_transaction` flag is needed for
+  autocommit bookkeeping — DuckDB's own native autocommit (see the note
+  above) already makes per-write durability work without one; the lock
+  alone closes KI-046. See ADR-0032.
 """
 
 import json
-from collections.abc import Iterator
+import threading
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 
 import duckdb
 
@@ -58,12 +70,38 @@ from ontolith.store.base import DEFAULT_NAMESPACE, VECTOR_SCOPES
 _RANGE_SQL_OPERATORS = {"gt": ">", "lt": "<", "gte": ">=", "lte": "<="}
 """entities_where() operator name -> SQL comparison operator (KI-039)."""
 
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
 
 def _like_escape(value: str) -> str:
     """Escape SQL LIKE wildcards so a `__contains` filter matches `value`
     literally, not as a LIKE pattern (KI-039). Paired with `ESCAPE '\\'` in
     the SQL and the value wrapped in `%...%` by the caller."""
     return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _synchronized(
+    method: Callable[Concatenate["DuckDBBackend", _P], _R],
+) -> Callable[Concatenate["DuckDBBackend", _P], _R]:
+    """Serialize a method's connection access across threads (KI-046).
+
+    Reentrant on the calling thread: a method called from inside an active
+    ``transaction()`` block (which already holds the lock via ``begin()``)
+    re-acquires without blocking. A different thread blocks until the lock
+    is free, so the single shared connection is never touched concurrently.
+    Identical in shape to ``SQLiteBackend``'s own `_synchronized` (KI-023,
+    ADR-0010's update) — see this module's docstring for why DuckDB needs
+    the same treatment despite its different native transaction model.
+    """
+
+    @wraps(method)
+    def wrapper(self: "DuckDBBackend", *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        """Acquire self._lock, call the wrapped method, then release it."""
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return cast(Callable[Concatenate["DuckDBBackend", _P], _R], wrapper)
 
 
 class DuckDBBackend:
@@ -87,6 +125,15 @@ class DuckDBBackend:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = duckdb.connect(str(self.path))
         self._clock: Clock = clock or SystemClock()
+        # Serializes all access to self.conn across threads (KI-046): DuckDB's
+        # own DB-API threadsafety level is 1 ("threads may share the module,
+        # but not connections") — this single connection object is not safe
+        # for concurrent use without external synchronization, the same
+        # requirement SQLiteBackend's self._lock (KI-023) exists for. RLock
+        # (not Lock): begin() holds it across multiple public-method calls
+        # inside a transaction() block, each of which re-acquires it via the
+        # @_synchronized decorator.
+        self._lock = threading.RLock()
         self._create_schema()
 
     def _create_schema(self) -> None:
@@ -406,22 +453,49 @@ class DuckDBBackend:
         return dict(zip(columns, row, strict=True))
 
     def begin(self) -> None:
-        """Begin an explicit transaction."""
-        self.conn.execute("BEGIN TRANSACTION")
+        """Begin an explicit transaction.
+
+        Acquires self._lock (KI-046) — held across every subsequent
+        @_synchronized call until commit()/rollback() releases it, so no
+        other thread's operation can interleave with this transaction.
+        """
+        self._lock.acquire()
+        try:
+            self.conn.execute("BEGIN TRANSACTION")
+        except duckdb.Error as e:
+            self._lock.release()
+            raise StorageError(f"Failed to begin transaction: {e}") from e
 
     def commit(self) -> None:
-        """Commit the current explicit transaction."""
+        """Commit the current explicit transaction.
+
+        Releases self._lock only on success — mirrors SQLiteBackend's own
+        asymmetric release (KI-023, ADR-0010's update): an unconditional
+        release here would double-release the lock when transaction()'s
+        except clause calls rollback() next after a failed commit(), which
+        RLock.release() rejects with RuntimeError, masking the real
+        StorageError.
+        """
         try:
             self.conn.execute("COMMIT")
         except duckdb.Error as e:
             raise StorageError(f"Failed to commit transaction: {e}") from e
+        self._lock.release()
 
     def rollback(self) -> None:
-        """Rollback the current explicit transaction."""
+        """Rollback the current explicit transaction. Always releases self._lock.
+
+        Unlike commit(), this always resolves the transaction (successful
+        or not) — it's the terminal cleanup path, including when called
+        after a failed commit() (which deliberately did not release the
+        lock itself, see commit()'s docstring).
+        """
         try:
             self.conn.execute("ROLLBACK")
         except duckdb.Error as e:
             raise StorageError(f"Failed to rollback transaction: {e}") from e
+        finally:
+            self._lock.release()
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -440,6 +514,7 @@ class DuckDBBackend:
             self.rollback()
             raise
 
+    @_synchronized
     def put_principal(self, principal: Principal) -> None:
         """Persist a principal.
 
@@ -471,6 +546,7 @@ class DuckDBBackend:
         except duckdb.Error as e:
             raise StorageError(f"Failed to persist principal (id={principal.id}): {e}") from e
 
+    @_synchronized
     def get_principal(self, principal_id: str) -> Principal | None:
         """Retrieve a principal by ID.
 
@@ -486,6 +562,7 @@ class DuckDBBackend:
             return None
         return self._row_to_principal(self._row_to_dict(cursor, row))
 
+    @_synchronized
     def list_principals(self) -> list[Principal]:
         """List all principals (KI-022).
 
@@ -513,6 +590,7 @@ class DuckDBBackend:
             metadata=json.loads(row["metadata"]),
         )
 
+    @_synchronized
     def list_namespaces(self) -> list[Namespace]:
         """List all registered namespaces (SPEC §12.2, KI-022).
 
@@ -553,6 +631,7 @@ class DuckDBBackend:
             [namespace, self._clock.now().isoformat(), "{}"],
         )
 
+    @_synchronized
     def put_credential(self, credential: PrincipalCredential) -> None:
         """Persist a principal credential (hashed API-key token).
 
@@ -583,6 +662,7 @@ class DuckDBBackend:
         except duckdb.Error as e:
             raise StorageError(f"Failed to persist credential (id={credential.id}): {e}") from e
 
+    @_synchronized
     def get_principal_by_token_hash(self, token_hash: str) -> Principal | None:
         """Resolve a principal via a credential's token hash.
 
@@ -610,6 +690,7 @@ class DuckDBBackend:
             return None
         return self._row_to_principal(self._row_to_dict(cursor, row))
 
+    @_synchronized
     def get_credential(self, credential_id: str) -> PrincipalCredential | None:
         """Retrieve a credential by ID (never exposes the raw token or hash to callers).
 
@@ -627,6 +708,7 @@ class DuckDBBackend:
             return None
         return self._row_to_credential(self._row_to_dict(cursor, row))
 
+    @_synchronized
     def get_credentials_for_principal(self, principal_id: str) -> list[PrincipalCredential]:
         """List all credentials (active and revoked) issued to a principal.
 
@@ -658,6 +740,7 @@ class DuckDBBackend:
             revoked_at=datetime.fromisoformat(row["revoked_at"]) if row["revoked_at"] else None,
         )
 
+    @_synchronized
     def revoke_credential(self, credential_id: str, revoked_at: datetime) -> None:
         """Mark a credential as revoked. Idempotent-safe: re-revoking is a no-op update.
 
@@ -675,6 +758,7 @@ class DuckDBBackend:
         if not cursor.fetchall():
             raise StorageError(f"Credential not found: {credential_id}")
 
+    @_synchronized
     def put_entity(self, entity: Entity) -> None:
         """Persist an entity.
 
@@ -704,6 +788,7 @@ class DuckDBBackend:
         except duckdb.Error as e:
             raise StorageError(f"Failed to persist entity: {e}") from e
 
+    @_synchronized
     def put_assertion(self, assertion: Assertion) -> None:
         """Persist an assertion.
 
@@ -759,6 +844,7 @@ class DuckDBBackend:
         except duckdb.Error as e:
             raise StorageError(f"Failed to persist assertion (id={assertion.id}): {e}") from e
 
+    @_synchronized
     def get_entity(self, entity_id: str) -> Entity | None:
         """Retrieve an entity by ID.
 
@@ -783,6 +869,7 @@ class DuckDBBackend:
             created_by=d["created_by"],
         )
 
+    @_synchronized
     def assertions(
         self,
         subject: str | None = None,
@@ -889,6 +976,7 @@ class DuckDBBackend:
             metadata=json.loads(row["metadata"]),
         )
 
+    @_synchronized
     def get_assertion(self, assertion_id: str) -> Assertion | None:
         """Retrieve a single assertion by ID, regardless of status.
 
@@ -902,6 +990,7 @@ class DuckDBBackend:
         row = cursor.fetchone()
         return self._row_to_assertion(self._row_to_dict(cursor, row)) if row else None
 
+    @_synchronized
     def set_assertion_status(
         self,
         assertion_id: str,
@@ -946,6 +1035,7 @@ class DuckDBBackend:
         except duckdb.Error as e:
             raise StorageError(f"Failed to update assertion status (id={assertion_id}): {e}") from e
 
+    @_synchronized
     def put_schema(self, schema: SchemaIR) -> None:
         """Persist a schema version.
 
@@ -983,6 +1073,7 @@ class DuckDBBackend:
                 f"Failed to persist schema (namespace={schema.namespace}): {e}"
             ) from e
 
+    @_synchronized
     def get_schema(self, namespace: str, version: int | None = None) -> SchemaIR | None:
         """Retrieve a schema version.
 
@@ -1021,6 +1112,7 @@ class DuckDBBackend:
         definition = json.loads(row[0])
         return SchemaIR.from_json(definition)
 
+    @_synchronized
     def get_schema_at(self, namespace: str, at: datetime) -> SchemaIR | None:
         """Retrieve the schema version effective at a point in time (KI-019).
 
@@ -1046,6 +1138,7 @@ class DuckDBBackend:
         definition = json.loads(row[0])
         return SchemaIR.from_json(definition)
 
+    @_synchronized
     def entities(
         self,
         namespace: str | None = None,
@@ -1096,6 +1189,7 @@ class DuckDBBackend:
 
         return results
 
+    @_synchronized
     def put_proposal(self, proposal: Proposal) -> None:
         """Persist a proposal."""
         try:
@@ -1123,6 +1217,7 @@ class DuckDBBackend:
         except duckdb.Error as e:
             raise StorageError(f"Failed to persist proposal (id={proposal.id}): {e}") from e
 
+    @_synchronized
     def get_proposal(self, proposal_id: str) -> Proposal | None:
         """Retrieve a proposal by ID."""
         cursor = self.conn.execute("SELECT * FROM proposal WHERE id = ?", [proposal_id])
@@ -1146,6 +1241,7 @@ class DuckDBBackend:
             metadata=json.loads(row["metadata"]),
         )
 
+    @_synchronized
     def proposals(self, state: str | None = None) -> list[Proposal]:
         """Query proposals, optionally filtered by state (SPEC §14.1)."""
         if state is not None:
@@ -1157,6 +1253,7 @@ class DuckDBBackend:
         rows = cursor.fetchall()
         return [self._row_to_proposal(self._row_to_dict(cursor, row)) for row in rows]
 
+    @_synchronized
     def update_proposal_state(
         self,
         proposal_id: str,
@@ -1187,6 +1284,7 @@ class DuckDBBackend:
         except duckdb.Error as e:
             raise StorageError(f"Failed to update proposal (id={proposal_id}): {e}") from e
 
+    @_synchronized
     def put_proposal_event(self, event: ProposalEvent) -> None:
         """Persist a structured review-action event (SPEC §9.4)."""
         try:
@@ -1209,6 +1307,7 @@ class DuckDBBackend:
         except duckdb.Error as e:
             raise StorageError(f"Failed to persist proposal event (id={event.id}): {e}") from e
 
+    @_synchronized
     def get_proposal_events(self, proposal_id: str) -> list[ProposalEvent]:
         """Retrieve all review events for a proposal, oldest first."""
         cursor = self.conn.execute(
@@ -1228,6 +1327,7 @@ class DuckDBBackend:
             for d in (self._row_to_dict(cursor, row) for row in rows)
         ]
 
+    @_synchronized
     def put_assertion_event(self, event: AssertionEvent) -> None:
         """Persist an append-only assertion status-mutation event."""
         try:
@@ -1250,6 +1350,7 @@ class DuckDBBackend:
         except duckdb.Error as e:
             raise StorageError(f"Failed to persist assertion event (id={event.id}): {e}") from e
 
+    @_synchronized
     def get_assertion_events(self, assertion_id: str) -> list[AssertionEvent]:
         """Retrieve all status-mutation events for an assertion, oldest first."""
         cursor = self.conn.execute(
@@ -1262,6 +1363,7 @@ class DuckDBBackend:
             for d in (self._row_to_dict(cursor, row) for row in rows)
         ]
 
+    @_synchronized
     def get_assertion_events_by_successor(self, successor_id: str) -> list[AssertionEvent]:
         """Retrieve all 'superseded' events caused by a given successor assertion."""
         cursor = self.conn.execute(
@@ -1285,6 +1387,7 @@ class DuckDBBackend:
             successor_id=d["successor_id"],
         )
 
+    @_synchronized
     def put_contradiction(self, contradiction: Contradiction) -> None:
         """Persist a new contradiction."""
         try:
@@ -1332,6 +1435,7 @@ class DuckDBBackend:
             metadata=json.loads(row["metadata"]),
         )
 
+    @_synchronized
     def get_open_contradiction(
         self, namespace: str, subject: str, predicate: str
     ) -> Contradiction | None:
@@ -1347,6 +1451,7 @@ class DuckDBBackend:
         row = cursor.fetchone()
         return self._row_to_contradiction(self._row_to_dict(cursor, row)) if row else None
 
+    @_synchronized
     def update_contradiction_members(
         self,
         contradiction_id: str,
@@ -1365,12 +1470,14 @@ class DuckDBBackend:
                 f"Failed to update contradiction (id={contradiction_id}): {e}"
             ) from e
 
+    @_synchronized
     def get_contradiction(self, contradiction_id: str) -> Contradiction | None:
         """Retrieve a contradiction by ID, regardless of state."""
         cursor = self.conn.execute("SELECT * FROM contradiction WHERE id = ?", [contradiction_id])
         row = cursor.fetchone()
         return self._row_to_contradiction(self._row_to_dict(cursor, row)) if row else None
 
+    @_synchronized
     def contradictions(self, state: str | None = None) -> list[Contradiction]:
         """Query contradictions, optionally filtered by state (SPEC §14.1)."""
         if state is not None:
@@ -1385,6 +1492,7 @@ class DuckDBBackend:
         rows = cursor.fetchall()
         return [self._row_to_contradiction(self._row_to_dict(cursor, row)) for row in rows]
 
+    @_synchronized
     def resolve_contradiction(
         self,
         contradiction_id: str,
@@ -1445,6 +1553,7 @@ class DuckDBBackend:
                 f"but this scope is established at dimension {row[0]}"
             )
 
+    @_synchronized
     def vector_upsert(self, scope: str, id: str, vec: list[float]) -> None:
         """Insert or replace the embedding vector for (scope, id).
 
@@ -1468,6 +1577,7 @@ class DuckDBBackend:
         except duckdb.Error as e:
             raise StorageError(f"Failed to upsert vector (scope={scope}, id={id}): {e}") from e
 
+    @_synchronized
     def vector_search(self, scope: str, vec: list[float], k: int) -> list[tuple[str, float]]:
         """Return the k nearest ids to vec within scope, ascending distance.
 
@@ -1503,6 +1613,7 @@ class DuckDBBackend:
         ).fetchall()
         return [(r[0], r[1]) for r in rows]
 
+    @_synchronized
     def entities_where(
         self,
         namespace: str,
@@ -1628,6 +1739,7 @@ class DuckDBBackend:
             for d in (self._row_to_dict(cursor, row) for row in rows)
         ]
 
+    @_synchronized
     def entities_meeting_confidence(
         self,
         namespace: str,
@@ -1677,6 +1789,7 @@ class DuckDBBackend:
         cursor = self.conn.execute(query, params)
         return {row[0] for row in cursor.fetchall()}
 
+    @_synchronized
     def entities_meeting_trust(
         self,
         namespace: str,
@@ -1720,6 +1833,7 @@ class DuckDBBackend:
         cursor = self.conn.execute(query, params)
         return {row[0] for row in cursor.fetchall()}
 
+    @_synchronized
     def close(self) -> None:
         """Close the database connection."""
         self.conn.close()

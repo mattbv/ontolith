@@ -975,10 +975,10 @@ New conformance vectors in `conformance/test_contradiction_resolution.py::TestFl
 
 ---
 
-## KI-046 — `DuckDBBackend` has no equivalent of `SQLiteBackend`'s concurrency lock (KI-023)
+## KI-046 — `DuckDBBackend` has no equivalent of `SQLiteBackend`'s concurrency lock (KI-023) ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — backend-specific correctness gap; concurrency-dependent fixes (e.g. KI-035) are only airtight on SQLite today
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved via ADR-0032
 **SPEC reference:** Implementation Plan (conformance kit: both backends must satisfy the same guarantees)
 
 ### Description
@@ -991,7 +991,15 @@ Found during KI-035's review (2026-08-05).
 
 ### Fix
 
-Decide (ADR) whether `DuckDBBackend` needs a KI-023-equivalent lock (simplest: mirror `SQLiteBackend`'s `threading.RLock` approach) or a different concurrency story (e.g. DuckDB's own multi-connection model, if `ontolith` ever moves away from one shared connection per backend instance). Add a real, threaded regression test for `DuckDBBackend` mirroring `tests/unit/test_sqlite_backend.py`'s KI-023 coverage once decided.
+ADR-0032: `DuckDBBackend` now holds a `threading.RLock` (`self._lock`), structurally identical to `SQLiteBackend`'s — `begin()` acquires it for the full span of an explicit transaction, and every other public method (the same 40 methods `SQLiteBackend` decorates, verified name-by-name) carries the same `@_synchronized` decorator. `commit()`/`rollback()` release the lock with the same asymmetric pattern KI-023 established (`commit()` releases only on success, to avoid double-releasing when `transaction()`'s `except` clause calls `rollback()` next after a failed `commit()`).
+
+Verified before deciding, not assumed: DuckDB's Python driver reports `duckdb.threadsafety == 1` ("threads may share the module, but not connections") — the identical constraint driving `SQLiteBackend`'s own KI-023 fix, confirming the RLock mirror (rather than a hypothetical per-thread-cursor redesign) was the right call, not just the simplest one.
+
+One deliberate divergence from `SQLiteBackend`: no `_in_transaction` flag. `SQLiteBackend` needs one because it tracks whether to auto-commit a standalone write in its own `isolation_level=None` autocommit mode; `DuckDBBackend` never had this pattern since DuckDB's own native autocommit already makes standalone writes durable without one. `begin()`/`rollback()` also gained the same `try`/`except duckdb.Error → StorageError` wrapping `SQLiteBackend`'s already had (a smaller, adjacent inconsistency — DuckDB's `begin()` previously let a raw `duckdb.Error` escape uncaught — fixed alongside since this exact code was already being rewritten).
+
+New `tests/unit/test_duckdb_backend.py::TestConcurrency`, mirroring `test_sqlite_backend.py::TestConcurrency`'s shapes (real `ThreadPoolExecutor` + `threading.Barrier`/`threading.Event` contention, not mocked). Four of its five tests confirmed, by reverting the fix and rerunning, to fail against the pre-fix code. The one exception (concurrent standalone, non-transactional *writes*) does **not** independently prove pre-fix risk — confirmed by reverting and rerunning it five times, it passed every time even without the lock: `put_entity()` is a single `execute()` call with no follow-up fetch, and DuckDB's own connection object empirically guards a bare execute-with-no-fetch internally even without external locking. Kept for structural parity with `SQLiteBackend`'s equivalent test, with its docstring explicit about not being independent proof.
+
+**The worst pre-fix consequence, found in review, was not what this entry's Description above leads with — it was silent data corruption on concurrent *reads*, with no exception at all**, not merely an unguarded multi-statement transaction span. Every read method here is an `execute()`-then-`fetch()` pair; `duckdb.DuckDBPyConnection.execute()` returns the connection object itself, so the pending result set is *connection* state a concurrent `execute()` from another thread can clobber mid-read. Reproduced pre-fix: 16 concurrent readers against 50 pre-seeded entities returned as few as 0-1 of the 50 rows from `entities()` (never raising), and `get_entity()` returned `None` for entities that exist — see the new `test_concurrent_standalone_reads_do_not_return_corrupted_results`. Wrong data with no signal anything went wrong is worse than the raised-exception failure modes the other tests demonstrate, since no caller or error-taxonomy mapping could ever detect it.
 
 ---
 
