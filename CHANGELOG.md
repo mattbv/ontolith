@@ -236,7 +236,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (unlike SQLite) — DuckDB's own native autocommit already makes standalone writes
   durable without one. New threaded regression tests
   (`tests/unit/test_duckdb_backend.py::TestConcurrency`) mirror SQLite's own KI-023
-  coverage; two of the four confirmed to fail against the pre-fix code. See ADR-0032.
+  coverage; four of five confirmed to fail against the pre-fix code, including a new
+  test proving the worst pre-fix consequence: silent data corruption on concurrent
+  reads (wrong/missing rows, no exception raised at all), not just an unguarded
+  transaction span. See ADR-0032.
 - **`flag_contradiction()` no longer has a TOCTOU window between reading its target
   assertions/existing open contradiction and writing its decision (closes KI-045).**
   Both target assertions and any existing open contradiction for their `(subject,
