@@ -177,6 +177,121 @@ class TestTrustAtLeast:
         assert kb.query("Person").trust_at_least(5).all() == []
 
 
+class TestTrustAtLeastDelegationAttenuation:
+    """KI-047: `.trust_at_least()` must use *effective* trust under
+    delegation - `min(author.trust_level, acting_as.trust_level)`, matching
+    `govern/policy.py`'s identical formula (SPEC §8.4) - not the author's
+    raw trust_level alone. TRUSTED (trust_level=8) and UNTRUSTED
+    (trust_level=1) from `_kb()` play both delegation roles across these
+    tests to cover both directions the KI's own Fix text calls out."""
+
+    def _delegate(self, kb: Ontology, delegate_id: str, owner: str, trust_level: int) -> None:
+        kb.create_principal(
+            delegate_id,
+            kind="human",
+            auth_method="oidc",
+            owner=owner,
+            default_capability="write",
+            trust_level=trust_level,
+        )
+
+    def test_low_trust_delegate_acting_as_high_trust_principal_is_attenuated_down(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A low-trust delegate (trust_level=1) acting_as a high-trust
+        principal (TRUSTED, trust_level=8) must be scored at the LOWER
+        value - min(1, 8) = 1 - not laundered up to 8 by delegating."""
+        kb = _kb(make_kb)
+        self._delegate(kb, "delegate@example.com", owner=TRUSTED, trust_level=1)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(
+            entity.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            author="delegate@example.com",
+            acting_as=TRUSTED,
+        )
+
+        # Would incorrectly match at trust_at_least(5) if this method still
+        # read only the author's (delegate's) trust_level naively... but the
+        # delegate's OWN trust_level (1) is already below 5 either way, so
+        # this direction alone can't distinguish "reads raw author trust"
+        # from "reads effective trust" - see the next test for the
+        # direction that actually does distinguish them.
+        assert kb.query("Person").trust_at_least(5).all() == []
+        # Effective trust is min(1, 8) = 1, not 8 - querying at exactly the
+        # attenuated value still matches; this is the value a broken
+        # "read only acting_as's trust" implementation would also produce,
+        # but combined with the next test's opposite direction, together
+        # they pin genuine min() behavior, not either raw value alone.
+        results = kb.query("Person").trust_at_least(1).all()
+        assert {r.id for r in results} == {entity.id}
+
+    def test_high_trust_delegate_acting_as_low_trust_principal_is_attenuated_down(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A high-trust delegate (trust_level=8) acting_as a low-trust
+        principal (UNTRUSTED, trust_level=1) must be scored at the LOWER
+        value - min(8, 1) = 1 - the direction that actually distinguishes
+        "reads effective trust" from "reads only the author's own raw
+        trust_level" (which would incorrectly qualify at 8), and from
+        "reads only acting_as's trust_level" (which would coincidentally
+        also give the right answer here, but the previous test rules that
+        reading out on its own). Delegation requires author.owner ==
+        acting_as (ADR-0003), so this uses a dedicated delegate owned by
+        UNTRUSTED rather than TRUSTED itself, which has no such ownership
+        relationship to UNTRUSTED."""
+        kb = _kb(make_kb)
+        self._delegate(kb, "high-trust-delegate@example.com", owner=UNTRUSTED, trust_level=8)
+        entity = kb.create_entity("Person", author=UNTRUSTED)
+        kb.assert_literal(
+            entity.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            author="high-trust-delegate@example.com",
+            acting_as=UNTRUSTED,
+        )
+
+        # A pre-KI-047 implementation reading only the author's (the
+        # delegate's) raw trust_level=8 would incorrectly match here.
+        assert kb.query("Person").trust_at_least(5).all() == []
+        # Effective trust is min(8, 1) = 1 - querying at the attenuated
+        # value matches.
+        results = kb.query("Person").trust_at_least(1).all()
+        assert {r.id for r in results} == {entity.id}
+
+    def test_delegation_attenuation_boundary_is_inclusive(self, make_kb: KbFactory) -> None:
+        """Querying at exactly min(author, acting_as) must still match -
+        same inclusive-boundary contract the non-delegated case already
+        has (test_boundary_trust_level_is_inclusive)."""
+        kb = _kb(make_kb)
+        self._delegate(kb, "mid@example.com", owner=TRUSTED, trust_level=4)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(
+            entity.id, "Person.name", "Ada", "Text", author="mid@example.com", acting_as=TRUSTED
+        )
+
+        # min(4, 8) = 4
+        assert {r.id for r in kb.query("Person").trust_at_least(4).all()} == {entity.id}
+        assert kb.query("Person").trust_at_least(5).all() == []
+
+    def test_non_delegated_assertion_unaffected_by_delegation_join(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A plain, non-delegated assertion (acting_as=None) must still use
+        the author's own raw trust_level, unaffected by the LEFT JOIN this
+        fix adds - the join's COALESCE fallback must correctly no-op when
+        there's nothing to attenuate against."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED)
+
+        results = kb.query("Person").trust_at_least(8).all()
+        assert {r.id for r in results} == {entity.id}
+
+
 class TestConfidenceAndTrustCombined:
     def test_filters_are_independent(self, make_kb: KbFactory) -> None:
         """Neither filter requires the *same* assertion to satisfy both (ADR-0020 amendment)."""
