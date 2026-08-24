@@ -27,16 +27,18 @@
 
 Phases map to the PRD roadmap but are expressed as engineering milestones with **exit criteria** (a milestone isn't "done" until its gate passes). Build order respects the dependency chain: **core → store → identity → govern → query → interfaces → plugins**.
 
-| Milestone | Maps to | Scope | Exit criteria (gate) |
-|---|---|---|---|
-| **M0 — Foundations** | pre-0.1 | Repo, tooling, CI skeleton, ports/protocols stubbed, Clock & ID providers, ADRs 1–8 recorded, error taxonomy | Green CI on an empty-but-wired skeleton; a contributor can clone → install → test → lint in one command; `import-linter` contract active |
-| **M1 — Substrate (0.1)** | MVP | Meta-model + IR, class DSL, SQLite backend, entities/assertions (append-only), identity basics + capabilities, proposal→accept + threshold policy, basic query builder, Python SDK, CLI | Core conformance vectors pass; `examples/quickstart.py` runs end-to-end; **traversal benchmark baseline captured**; coverage gate met |
-| **M2 — Collaboration (0.2)** | collaboration | Review workflow, bitemporal time-travel, conflict (supersession + contradictions), MCP server (read/propose/flag/provenance), trust levels, delegation, LinkML-aligned YAML, first 3 reference plugins | **Full §19 conformance** incl. conflict/bitemporal/delegation vectors; property tests green; MCP exposes **no write tool** (test-enforced); LinkML round-trip golden tests pass |
-| **M3 — Extensible (0.3)** | open boundaries | Plugin registry + stable extension API, full hybrid retrieval, REST + GraphQL, one scale-out backend adapter, LinkML bridge then RDF/OWL | **Backend conformance kit passes on a 2nd backend**; plugin contract tests green; public API stability policy begins |
-| **M4 — Production (1.0)** | govern at scale | Hardened policy engine, plugin sandboxing, perf budgets met, complete docs, migration tooling | Security review passed; **performance budgets met** (§9); SemVer 1.0 API freeze; on-disk `format_version` frozen |
-| **vNext** | live commons | CRDT multi-writer, assisted conflict resolution, federation, UI, marketplace | per-feature specs |
+| Milestone | Maps to | Scope | Exit criteria (gate) | Status |
+|---|---|---|---|---|
+| **M0 — Foundations** | pre-0.1 | Repo, tooling, CI skeleton, ports/protocols stubbed, Clock & ID providers, ADRs 1–8 recorded, error taxonomy | Green CI on an empty-but-wired skeleton; a contributor can clone → install → test → lint in one command; `import-linter` contract active | ✓ Complete |
+| **M1 — Substrate (0.1)** | MVP | Meta-model + IR, class DSL, SQLite backend, entities/assertions (append-only), identity basics + capabilities, proposal→accept + threshold policy, basic query builder, Python SDK, CLI | Core conformance vectors pass; `examples/quickstart.py` runs end-to-end; **traversal benchmark baseline captured**; coverage gate met | ✓ Complete |
+| **M2 — Collaboration (0.2)** | collaboration | Review workflow, bitemporal time-travel, conflict (supersession + contradictions), MCP server (read/propose/flag/provenance), trust levels, delegation, LinkML-aligned YAML, first 3 reference plugins | **Full §19 conformance** incl. conflict/bitemporal/delegation vectors; property tests green; MCP exposes **no write tool** (test-enforced); LinkML round-trip golden tests pass | ✓ Complete |
+| **M3 — Extensible (0.3)** | open boundaries | Plugin registry + stable extension API, full hybrid retrieval, REST + GraphQL, one scale-out backend adapter, LinkML bridge then RDF/OWL | **Backend conformance kit passes on a 2nd backend**; plugin contract tests green; public API stability policy begins | Exit criteria met (2026-07-16); scope partial — REST done (ADR-0021/0022), hybrid retrieval done (KI-018), DuckDB is the 2nd conformance backend; **GraphQL and the RDF/OWL bridge not started** |
+| **M4 — Production (1.0)** | govern at scale | Hardened policy engine, plugin sandboxing, perf budgets met, complete docs, migration tooling | Security review passed; **performance budgets met** (§9); SemVer 1.0 API freeze; on-disk `format_version` frozen | Not started |
+| **vNext** | live commons | CRDT multi-writer, assisted conflict resolution, federation, UI, marketplace | per-feature specs | Not started |
 
 **Critical path:** M0 → M1 (core+store) → M2 (conflict+bitemporal+MCP). M2 is where the product becomes itself; protect its timeline. REST/GraphQL and scale-out (M3) can parallelize once the ports are stable.
+
+**Status as of 2026-08-23** (updated opportunistically, not on every change — treat as a snapshot, verify against `CHANGELOG.md`/`git log` for anything time-sensitive): M0–M2 fully complete. M3's three named exit criteria are all met, but M3's *scope* is not fully built — GraphQL and the RDF/OWL bridge remain unstarted; everything else in M3's scope column is done. `docs/known-issues.md` currently has 6 open backlog items (KI-046 through KI-051), all found during code review rather than reported — none blocking, all tracked with a proposed fix. M4 has not started.
 
 ---
 
