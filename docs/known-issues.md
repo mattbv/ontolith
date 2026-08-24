@@ -975,10 +975,10 @@ New conformance vectors in `conformance/test_contradiction_resolution.py::TestFl
 
 ---
 
-## KI-046 — `DuckDBBackend` has no equivalent of `SQLiteBackend`'s concurrency lock (KI-023)
+## KI-046 — `DuckDBBackend` has no equivalent of `SQLiteBackend`'s concurrency lock (KI-023) ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — backend-specific correctness gap; concurrency-dependent fixes (e.g. KI-035) are only airtight on SQLite today
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved via ADR-0032
 **SPEC reference:** Implementation Plan (conformance kit: both backends must satisfy the same guarantees)
 
 ### Description
@@ -991,7 +991,13 @@ Found during KI-035's review (2026-08-05).
 
 ### Fix
 
-Decide (ADR) whether `DuckDBBackend` needs a KI-023-equivalent lock (simplest: mirror `SQLiteBackend`'s `threading.RLock` approach) or a different concurrency story (e.g. DuckDB's own multi-connection model, if `ontolith` ever moves away from one shared connection per backend instance). Add a real, threaded regression test for `DuckDBBackend` mirroring `tests/unit/test_sqlite_backend.py`'s KI-023 coverage once decided.
+ADR-0032: `DuckDBBackend` now holds a `threading.RLock` (`self._lock`), structurally identical to `SQLiteBackend`'s — `begin()` acquires it for the full span of an explicit transaction, and every other public method (the same 40 methods `SQLiteBackend` decorates, verified name-by-name) carries the same `@_synchronized` decorator. `commit()`/`rollback()` release the lock with the same asymmetric pattern KI-023 established (`commit()` releases only on success, to avoid double-releasing when `transaction()`'s `except` clause calls `rollback()` next after a failed `commit()`).
+
+Verified before deciding, not assumed: DuckDB's Python driver reports `duckdb.threadsafety == 1` ("threads may share the module, but not connections") — the identical constraint driving `SQLiteBackend`'s own KI-023 fix, confirming the RLock mirror (rather than a hypothetical per-thread-cursor redesign) was the right call, not just the simplest one.
+
+One deliberate divergence from `SQLiteBackend`: no `_in_transaction` flag. `SQLiteBackend` needs one because it tracks whether to auto-commit a standalone write in its own `isolation_level=None` autocommit mode; `DuckDBBackend` never had this pattern since DuckDB's own native autocommit already makes standalone writes durable without one. `begin()`/`rollback()` also gained the same `try`/`except duckdb.Error → StorageError` wrapping `SQLiteBackend`'s already had (a smaller, adjacent inconsistency — DuckDB's `begin()` previously let a raw `duckdb.Error` escape uncaught — fixed alongside since this exact code was already being rewritten).
+
+New `tests/unit/test_duckdb_backend.py::TestConcurrency`, mirroring `test_sqlite_backend.py::TestConcurrency`'s shapes (real `ThreadPoolExecutor` + `threading.Barrier`/`threading.Event` contention, not mocked). Two of its four tests confirmed, by reverting the fix and rerunning, to fail against the pre-fix code. The third (concurrent standalone, non-transactional writes) does **not** independently prove pre-fix risk — confirmed by reverting and rerunning it five times, it passed every time even without the lock, since a single self-contained `execute()` call per thread with no held-open explicit transaction doesn't hit the interleaving window this fix actually closes. Kept for structural parity with `SQLiteBackend`'s equivalent test, with its docstring explicit about not being independent proof.
 
 ---
 
