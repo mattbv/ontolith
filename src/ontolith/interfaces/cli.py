@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 
 from ontolith import Ontology
+from ontolith.schema.linkml import from_yaml
 
 app = typer.Typer(
     name="ontolith",
@@ -19,7 +20,7 @@ entity_app = typer.Typer(help="Manage entities.", no_args_is_help=True)
 proposal_app = typer.Typer(help="Inspect and act on proposals.", no_args_is_help=True)
 contradiction_app = typer.Typer(help="Inspect contradictions.", no_args_is_help=True)
 namespace_app = typer.Typer(help="Inspect namespaces.", no_args_is_help=True)
-schema_app = typer.Typer(help="Inspect the active schema.", no_args_is_help=True)
+schema_app = typer.Typer(help="Inspect and apply the schema.", no_args_is_help=True)
 app.add_typer(principal_app, name="principal")
 app.add_typer(entity_app, name="entity")
 app.add_typer(proposal_app, name="proposal")
@@ -601,6 +602,42 @@ def schema_show(
                     f"  required={rel_def.required}"
                     f"  inverse={rel_def.inverse}"
                 )
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
+@schema_app.command("migrate")
+def schema_migrate(
+    file: Annotated[Path, typer.Argument(help="Path to a LinkML-aligned YAML schema document.")],
+    author: Annotated[
+        str, typer.Option("--author", help="Admin-capability principal applying the schema.")
+    ],
+) -> None:
+    """Apply a new schema version from a YAML file (SPEC §14.2, KI-048).
+
+    Thin wrapper around `Ontology.apply_schema`: reads a LinkML-aligned YAML
+    document (ADR-0013 dialect, `schema.linkml.from_yaml`) from `file` and
+    persists it as a new schema version. The document's own `version:`/`id:`
+    fields drive the applied namespace/version — `apply_schema`'s existing
+    strict-monotonic check (exactly `current_latest + 1`, or `1` if no
+    schema is registered yet) is unchanged by this command, so the file must
+    already declare the correct next version. Requires `--author` to hold
+    `admin` capability (SPEC §6).
+
+    Does not migrate or backfill existing assertion data written under a
+    prior schema version — applying a new version is purely additive to the
+    schema's own version history (ADR-0034); property renames/type changes
+    against already-stored data are explicitly out of scope (KI-048).
+    """
+    kb = _kb()
+    try:
+        text = file.read_text()
+        schema = from_yaml(text)
+        applied = kb.apply_schema(schema, author=author)
+        typer.echo(f"Applied schema: namespace={applied.namespace}  version={applied.version}")
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
