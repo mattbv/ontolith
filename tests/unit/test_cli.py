@@ -1139,3 +1139,155 @@ class TestSchemaShow:
         assert result.exit_code == 0
         assert "No schema registered for namespace 'other'" in result.output
         assert "Person" not in result.output
+
+
+class TestSchemaMigrate:
+    """KI-048: `ontolith schema migrate` - a thin wrapper around
+    `Ontology.apply_schema` reading a LinkML-aligned YAML file from disk
+    (ADR-0034, scope (a) only - no data migration/backfill)."""
+
+    def _admin(self, temp_db: Path) -> str:
+        kb = Ontology.connect(temp_db)
+        admin = kb.create_principal(
+            "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
+        )
+        kb.close()
+        return admin.id
+
+    def test_applies_first_version(self, temp_db: Path, tmp_path: Path) -> None:
+        admin = self._admin(temp_db)
+        schema_file = tmp_path / "schema.yaml"
+        schema_file.write_text(
+            """
+            id: default
+            version: 1
+            classes:
+              Person:
+                attributes:
+                  name:
+                    range: string
+                    required: true
+            """
+        )
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "schema", "migrate", str(schema_file), "--author", admin],
+        )
+        assert result.exit_code == 0
+        assert "Applied schema: namespace=default  version=1" in result.output
+
+        kb = Ontology.connect(temp_db)
+        ir = kb.backend.get_schema("default")
+        kb.close()
+        assert ir is not None
+        assert ir.version == 1
+        assert "Person" in ir.concepts
+        assert ir.concepts["Person"].properties["name"].required is True
+
+    def test_applies_next_version_on_top_of_existing(self, temp_db: Path, tmp_path: Path) -> None:
+        admin = self._admin(temp_db)
+        kb = Ontology.connect(temp_db)
+        kb.apply_schema(
+            SchemaIR(
+                namespace="default", version=1, concepts={"Person": ConceptDef(name="Person")}
+            ),
+            author=admin,
+        )
+        kb.close()
+
+        schema_file = tmp_path / "schema.yaml"
+        schema_file.write_text(
+            """
+            id: default
+            version: 2
+            classes:
+              Person:
+                attributes:
+                  name:
+                    range: string
+            """
+        )
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "schema", "migrate", str(schema_file), "--author", admin],
+        )
+        assert result.exit_code == 0
+        assert "version=2" in result.output
+
+    def test_wrong_version_rejected_same_as_apply_schema(
+        self, temp_db: Path, tmp_path: Path
+    ) -> None:
+        """The file's own `version:` must be the exact next version -
+        apply_schema's existing monotonic check, not auto-incremented or
+        otherwise papered over by this command (ADR-0034)."""
+        admin = self._admin(temp_db)
+        schema_file = tmp_path / "schema.yaml"
+        schema_file.write_text(
+            """
+            id: default
+            version: 5
+            classes: {}
+            """
+        )
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "schema", "migrate", str(schema_file), "--author", admin],
+        )
+        assert result.exit_code == 1
+        assert "not the next monotonic version" in result.output
+
+    def test_missing_file_reports_error(self, temp_db: Path, tmp_path: Path) -> None:
+        admin = self._admin(temp_db)
+        missing = tmp_path / "does-not-exist.yaml"
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "schema", "migrate", str(missing), "--author", admin],
+        )
+        assert result.exit_code == 1
+        assert "Error:" in result.output
+
+    def test_malformed_yaml_reports_schema_error(self, temp_db: Path, tmp_path: Path) -> None:
+        admin = self._admin(temp_db)
+        schema_file = tmp_path / "schema.yaml"
+        schema_file.write_text("not: a valid schema document, missing version")
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "schema", "migrate", str(schema_file), "--author", admin],
+        )
+        assert result.exit_code == 1
+        assert "Error:" in result.output
+
+    def test_non_admin_author_rejected(self, temp_db: Path, tmp_path: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        writer = kb.create_principal(
+            "writer@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+        kb.close()
+        schema_file = tmp_path / "schema.yaml"
+        schema_file.write_text(
+            """
+            id: default
+            version: 1
+            classes: {}
+            """
+        )
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "schema",
+                "migrate",
+                str(schema_file),
+                "--author",
+                writer.id,
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Error:" in result.output
