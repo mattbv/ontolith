@@ -138,7 +138,10 @@ deliberate v1 trade-off, not an oversight — see Consequences below.
 An entity passes `.min_confidence(t)` iff it has **at least one** active assertion with
 `confidence is not None and confidence >= t` (`None` never satisfies a numeric threshold, per
 ADR-0004). An entity passes `.trust_at_least(l)` iff it has **at least one** active assertion
-whose author has `Principal.trust_level >= l`. The two filters are independent of each other and
+whose *effective* trust_level >= `l` — **amended by ADR-0033 (KI-047)**: for an assertion made
+under delegation (`acting_as` set), this is `min(author.trust_level, acting_as.trust_level)`,
+not simply the author's own `Principal.trust_level`; see ADR-0033 for the full formula and its
+rationale. The two filters are independent of each other and
 of `.where()`/`.semantic()` — nothing requires the *same* assertion to satisfy both, or requires
 these filters to combine with `.semantic()` at all (they compose with the plain `.where()`/
 `.entities()` path too). An entity has many assertions across many predicates; inventing a notion

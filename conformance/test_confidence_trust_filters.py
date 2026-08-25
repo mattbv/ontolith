@@ -180,8 +180,9 @@ class TestTrustAtLeast:
 class TestTrustAtLeastDelegationAttenuation:
     """KI-047: `.trust_at_least()` must use *effective* trust under
     delegation - `min(author.trust_level, acting_as.trust_level)`, matching
-    `govern/policy.py`'s identical formula (SPEC §8.4) - not the author's
-    raw trust_level alone. TRUSTED (trust_level=8) and UNTRUSTED
+    `govern/policy.py`'s identical formula (an extension of SPEC §8.4's
+    capability rule that SPEC itself states for capability only) - not the
+    author's raw trust_level alone. TRUSTED (trust_level=8) and UNTRUSTED
     (trust_level=1) from `_kb()` play both delegation roles across these
     tests to cover both directions the KI's own Fix text calls out."""
 
@@ -213,12 +214,12 @@ class TestTrustAtLeastDelegationAttenuation:
             acting_as=TRUSTED,
         )
 
-        # Would incorrectly match at trust_at_least(5) if this method still
-        # read only the author's (delegate's) trust_level naively... but the
-        # delegate's OWN trust_level (1) is already below 5 either way, so
-        # this direction alone can't distinguish "reads raw author trust"
-        # from "reads effective trust" - see the next test for the
-        # direction that actually does distinguish them.
+        # The author here IS the delegate, whose own raw trust_level (1) is
+        # already below 5 - so even a pre-fix implementation reading only
+        # the author's raw trust_level agrees with this assertion. This
+        # direction alone can't distinguish "reads raw author trust" from
+        # "reads effective trust" - see the next test for the direction
+        # that actually does distinguish them.
         assert kb.query("Person").trust_at_least(5).all() == []
         # Effective trust is min(1, 8) = 1, not 8 - querying at exactly the
         # attenuated value still matches; this is the value a broken
@@ -313,6 +314,9 @@ class TestTrustAtLeastDelegationAttenuation:
         entity = kb.create_entity("Person", author=TRUSTED)
         kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED)
 
+        results = kb.query("Person").trust_at_least(8).all()
+        assert {r.id for r in results} == {entity.id}
+
     def test_dangling_acting_as_falls_back_to_author_trust_level(self, make_kb: KbFactory) -> None:
         """An `acting_as` that names no existing principal (there is no FK
         from assertion.acting_as to principal.id, so this can't happen
@@ -342,9 +346,6 @@ class TestTrustAtLeastDelegationAttenuation:
         # Falls back to TRUSTED's own trust_level=8, not excluded/erroring.
         assert {r.id for r in kb.query("Person").trust_at_least(8).all()} == {entity.id}
         assert kb.query("Person").trust_at_least(9).all() == []
-
-        results = kb.query("Person").trust_at_least(8).all()
-        assert {r.id for r in results} == {entity.id}
 
 
 class TestConfidenceAndTrustCombined:

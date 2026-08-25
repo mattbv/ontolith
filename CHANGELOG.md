@@ -225,21 +225,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorded as an explicit follow-up in ADR-0029, not a new KI.
 
 #### Fixed
-- **`DuckDBBackend` now serializes connection access across threads with a
-  `threading.RLock`, mirroring `SQLiteBackend`'s KI-023 fix (closes KI-046).**
-  DuckDB's own DB-API `threadsafety` level is 1 ("threads may share the module, but not
-  connections") — the identical constraint that drove SQLite's fix — but `DuckDBBackend`
-  had no lock and no guard of any kind, so two concurrent transitions on the same
-  connection didn't serialize. All 40 public methods now carry the same `@_synchronized`
-  decorator `SQLiteBackend` uses; `begin()`/`commit()`/`rollback()` acquire/release the
-  lock with the identical asymmetric-release pattern. No `_in_transaction` flag needed
-  (unlike SQLite) — DuckDB's own native autocommit already makes standalone writes
-  durable without one. New threaded regression tests
-  (`tests/unit/test_duckdb_backend.py::TestConcurrency`) mirror SQLite's own KI-023
-  coverage; four of five confirmed to fail against the pre-fix code, including a new
-  test proving the worst pre-fix consequence: silent data corruption on concurrent
-  reads (wrong/missing rows, no exception raised at all), not just an unguarded
-  transaction span. See ADR-0032.
 - **Breaking:** `.trust_at_least()`/`entities_meeting_trust` now compare a delegated
   assertion's *effective* trust — `min(author.trust_level, acting_as.trust_level)` —
   instead of the author's raw `trust_level` alone (closes KI-047). Matches
@@ -255,6 +240,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Non-delegated assertions are unaffected. New conformance vectors
   (`TestTrustAtLeastDelegationAttenuation`) cover both attenuation directions, the
   inclusive threshold boundary, and the dangling-delegate fallback. See ADR-0033.
+- **`DuckDBBackend` now serializes connection access across threads with a
+  `threading.RLock`, mirroring `SQLiteBackend`'s KI-023 fix (closes KI-046).**
+  DuckDB's own DB-API `threadsafety` level is 1 ("threads may share the module, but not
+  connections") — the identical constraint that drove SQLite's fix — but `DuckDBBackend`
+  had no lock and no guard of any kind, so two concurrent transitions on the same
+  connection didn't serialize. All 40 public methods now carry the same `@_synchronized`
+  decorator `SQLiteBackend` uses; `begin()`/`commit()`/`rollback()` acquire/release the
+  lock with the identical asymmetric-release pattern. No `_in_transaction` flag needed
+  (unlike SQLite) — DuckDB's own native autocommit already makes standalone writes
+  durable without one. New threaded regression tests
+  (`tests/unit/test_duckdb_backend.py::TestConcurrency`) mirror SQLite's own KI-023
+  coverage; four of five confirmed to fail against the pre-fix code, including a new
+  test proving the worst pre-fix consequence: silent data corruption on concurrent
+  reads (wrong/missing rows, no exception raised at all), not just an unguarded
+  transaction span. See ADR-0032.
 - **`flag_contradiction()` no longer has a TOCTOU window between reading its target
   assertions/existing open contradiction and writing its decision (closes KI-045).**
   Both target assertions and any existing open contradiction for their `(subject,

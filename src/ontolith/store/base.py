@@ -495,36 +495,37 @@ class StorageBackend(Protocol):
         as_of_time: datetime | None = None,
         candidate_ids: frozenset[str] | None = None,
     ) -> set[str]:
-        """IDs of entities in `(namespace, concept)` with >=1 active
-        assertion, active at `as_of_time` (or currently active, if
-        `as_of_time` is None), whose *effective* trust_level >= `min_trust`.
+        """IDs of entities in `(namespace, concept)` with >=1 assertion,
+        active at `as_of_time` (or currently active, if `as_of_time` is
+        None), whose *effective* trust_level >= `min_trust`.
 
         "Effective" (KI-047): when the qualifying assertion was made under
         delegation (`acting_as` set), the comparison is
         `min(author.trust_level, acting_as.trust_level)`, not the author's
-        raw `trust_level` alone — by analogy with SPEC §8.4's capability
-        rule ("effective capability is `min(author, acting_as)`, never a
-        wholesale substitution"), the same extension `govern/policy.py`
-        already applies to trust for exactly this reason. For a
-        non-delegated assertion, this is simply the author's own
+        raw `trust_level` alone. SPEC §8.4 states this `min()` rule for
+        *capability* only ("the effective capability for the operation is
+        `min(capability(author), capability(acting_as))`"); the trust-min
+        is `govern/policy.py`'s own conservative extension of that same
+        principle, applied here by analogy, not a separate SPEC mandate.
+        For a non-delegated assertion, this is simply the author's own
         `trust_level`, unchanged from before this method considered
         delegation at all.
 
-        If `acting_as` names a principal that no longer resolves (there is
-        no FK from `assertion.acting_as` to `principal.id`, so this can
-        only happen via a direct `put_assertion()` call bypassing
-        `Ontology`'s write paths, which always validate the delegate
-        exists), implementations MUST fall back to the author's own
-        `trust_level` rather than excluding the row or raising — i.e.
-        treat an unresolvable delegate the same as no delegate at all.
-        This deliberately fails *open*, unlike `govern/policy.py`'s
-        `_resolve_delegation` which fails *closed* (raises `AuthError`) for
-        the same input — policy evaluation runs once, at write time, when
-        rejecting is cheap and correct; this method runs on every query
+        If `acting_as` names a principal that doesn't resolve (there is no
+        FK from `assertion.acting_as` to `principal.id`, so this can only
+        happen via a direct `put_assertion()` call bypassing `Ontology`'s
+        write paths — e.g. a legacy import — since `Ontology`'s own paths
+        always validate the delegate exists before writing), implementations
+        MUST fall back to the author's own `trust_level` rather than
+        excluding the row or raising — i.e. treat an unresolvable delegate
+        the same as no delegate at all. This deliberately fails *open*,
+        unlike `govern/policy.py`'s `_resolve_delegation` which fails
+        *closed* (raises `AuthError`) for the same input — policy
+        evaluation runs once, at write time, when rejecting the write
+        outright is cheap and correct; this method runs on every query
         against already-committed data, where excluding or erroring on a
-        row for a delegate that vanished after the assertion was accepted
-        would be a surprising, un-auditable behavior change with no
-        corresponding write.
+        row for data that was already accepted would be a surprising,
+        un-auditable behavior change with no corresponding write.
 
         Avoids the N+1 pattern of calling assertions() + get_principal()
         once per (candidate entity, assertion) pair (QueryBuilder.
