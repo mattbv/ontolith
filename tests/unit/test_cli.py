@@ -1248,7 +1248,7 @@ class TestSchemaMigrate:
             ["--db", str(temp_db), "schema", "migrate", str(missing), "--author", admin],
         )
         assert result.exit_code == 1
-        assert "Error:" in result.output
+        assert "No such file or directory" in result.output
 
     def test_malformed_yaml_reports_schema_error(self, temp_db: Path, tmp_path: Path) -> None:
         admin = self._admin(temp_db)
@@ -1260,7 +1260,7 @@ class TestSchemaMigrate:
             ["--db", str(temp_db), "schema", "migrate", str(schema_file), "--author", admin],
         )
         assert result.exit_code == 1
-        assert "Error:" in result.output
+        assert "must set 'id' or 'name'" in result.output
 
     def test_non_admin_author_rejected(self, temp_db: Path, tmp_path: Path) -> None:
         kb = Ontology.connect(temp_db)
@@ -1290,4 +1290,4 @@ class TestSchemaMigrate:
             ],
         )
         assert result.exit_code == 1
-        assert "Error:" in result.output
+        assert "lacks admin capability" in result.output

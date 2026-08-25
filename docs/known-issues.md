@@ -777,10 +777,10 @@ Docstrings on both port methods were rewritten: `(namespace, concept)` is still 
 
 ---
 
-## KI-038 — CLI has no `schema` command — PARTIALLY RESOLVED (M3)
+## KI-038 — CLI has no `schema` command — ✓ RESOLVED (M3, across two entries)
 
 **Severity:** Architecture gap — SPEC-normative CLI surface is entirely unimplemented
-**Milestone target:** M3 for `show` (resolved in `feat(cli): add schema show command (KI-038)`); `migrate` forward-tracked as KI-048
+**Milestone target:** M3 for `show` (resolved in `feat(cli): add schema show command (KI-038)`); `migrate` forward-tracked as KI-048, now also resolved
 **SPEC reference:** SPEC §14.2 (`ontolith schema {show|migrate}`)
 
 ### Description
@@ -791,7 +791,7 @@ Docstrings on both port methods were rewritten: `(namespace, concept)` is still 
 
 Added `ontolith schema show [--namespace]` (new `schema_app` sub-app, matching every other CLI sub-command's `_kb()`/try-except-finally shape), printing `namespace=... version=...` followed by each concept's properties (`name: value_type  cardinality=...  temporality=...  required=...`) and relations (`name -> target_concept  cardinality=...  temporality=...  required=...  inverse=...`) — the same field set as MCP's `ontolith.schema`/REST's `GET /schema` output (both already fixed by KI-029 to include relations), though not their exact attribute order: REST's own `PropertyOut`/`RelationOut` don't even agree with each other on relation field order, so the CLI normalizes to one consistent order instead of copying either verbatim. A namespace with no registered schema prints a plain message rather than an empty/error output, matching other read-path commands' "nothing found" convention elsewhere in the CLI.
 
-`ontolith schema migrate` remains unresolved — it's a larger, separate piece of work (schema versioning/migration isn't implemented anywhere yet, only monotonic version numbering via `apply_schema`) and was out of scope for this pass, as this KI's own original Fix text anticipated ("split into its own issue if `show` lands first"). Forward-tracked as **KI-048**, matching the pattern KI-031 set for its own leftover half, rather than leaving it implicit in this entry's own partially-resolved status.
+`ontolith schema migrate` was out of scope for this pass, as this KI's own original Fix text anticipated ("split into its own issue if `show` lands first"). Forward-tracked as **KI-048**, matching the pattern KI-031 set for its own leftover half, rather than leaving it implicit in this entry's own partially-resolved status — **KI-048 has since been resolved too (ADR-0034)**, so the full `{show|migrate}` surface SPEC §14.2 names is now implemented.
 
 ---
 

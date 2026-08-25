@@ -627,6 +627,13 @@ def schema_migrate(
     already declare the correct next version. Requires `--author` to hold
     `admin` capability (SPEC §6).
 
+    `file` must contain the *complete* schema for the namespace, not a
+    delta — `apply_schema` replaces the namespace's active `SchemaIR`
+    wholesale, it does not merge the new version with the prior one. A
+    document that omits a concept the prior version declared makes that
+    concept (and its predicates) unknown to schema-validated writes going
+    forward, same as any other `apply_schema` caller.
+
     Does not migrate or backfill existing assertion data written under a
     prior schema version — applying a new version is purely additive to the
     schema's own version history (ADR-0034); property renames/type changes
