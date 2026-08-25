@@ -1029,10 +1029,10 @@ A dangling `acting_as` (no resolvable delegate — unreachable via `Ontology`'s 
 
 ---
 
-## KI-048 — CLI has no `schema migrate` command
+## KI-048 — CLI has no `schema migrate` command ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — SPEC-normative CLI surface remains partially unimplemented
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved via ADR-0034
 **SPEC reference:** SPEC §14.2 (`ontolith schema {show|migrate}`)
 
 ### Description
@@ -1041,7 +1041,11 @@ KI-038 added `ontolith schema show` but explicitly left `ontolith schema migrate
 
 ### Fix
 
-Needs a design decision before implementation, not just a CLI command: what does "migrate" mean here — applying a new `SchemaIR` version is already possible via `apply_schema`, so `ontolith schema migrate` most plausibly means either (a) a thin CLI wrapper around `apply_schema` reading a YAML/class-DSL file from disk (the smallest useful slice, no new domain logic), or (b) something that also handles property renames/type changes against existing assertion data (a substantially larger scope touching append-only semantics — renaming a predicate doesn't rewrite historical assertions, so old and new predicate names would coexist, which needs its own ADR). Scope this to (a) first if picked up, and record the (a)/(b) boundary decision as an ADR rather than deciding it implicitly inside a CLI PR.
+ADR-0034: scoped to (a) only — `ontolith schema migrate <file> --author <admin>` is a thin CLI wrapper reading a LinkML-aligned YAML document (ADR-0013 dialect) from disk and applying it via the existing governed `Ontology.apply_schema` path. No new domain logic, no new `StorageBackend` port method; `apply_schema`'s existing strict-monotonic version check is unchanged (the file must already declare the correct next version — not auto-incremented). Errors (missing file, malformed YAML, wrong version, insufficient capability) all funnel through the CLI's existing generic error handler, matching every other command's convention.
+
+Format is YAML-only, not class-DSL — there is no existing mechanism to load a `SchemaIR` from a class-DSL *file path* (`compile_schema()` takes already-imported Python classes, not a file to read), and building one would mean dynamically executing arbitrary user-supplied Python from a CLI argument, a materially riskier capability SPEC §14.2 didn't ask for. A class-DSL schema still reaches this command via the existing `compile_schema()` → `to_yaml()` round-trip.
+
+Scope (b) — actual data migration/backfill against already-stored assertions when a schema changes — remains explicitly out of scope, tracked as its own future decision per ADR-0034's Consequences section, not folded into this command.
 
 ---
 
