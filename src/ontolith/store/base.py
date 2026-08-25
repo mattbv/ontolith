@@ -497,7 +497,35 @@ class StorageBackend(Protocol):
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion,
         active at `as_of_time` (or currently active, if `as_of_time` is
-        None), authored by a principal whose trust_level >= `min_trust`.
+        None), whose *effective* trust_level >= `min_trust`.
+
+        "Effective" (KI-047): when the qualifying assertion was made under
+        delegation (`acting_as` set), the comparison is
+        `min(author.trust_level, acting_as.trust_level)`, not the author's
+        raw `trust_level` alone. SPEC §8.4 states this `min()` rule for
+        *capability* only ("the effective capability for the operation is
+        `min(capability(author), capability(acting_as))`"); the trust-min
+        is `govern/policy.py`'s own conservative extension of that same
+        principle, applied here by analogy, not a separate SPEC mandate.
+        For a non-delegated assertion, this is simply the author's own
+        `trust_level`, unchanged from before this method considered
+        delegation at all.
+
+        If `acting_as` names a principal that doesn't resolve (there is no
+        FK from `assertion.acting_as` to `principal.id`, so this can only
+        happen via a direct `put_assertion()` call bypassing `Ontology`'s
+        write paths — e.g. a legacy import — since `Ontology`'s own paths
+        always validate the delegate exists before writing), implementations
+        MUST fall back to the author's own `trust_level` rather than
+        excluding the row or raising — i.e. treat an unresolvable delegate
+        the same as no delegate at all. This deliberately fails *open*,
+        unlike `govern/policy.py`'s `_resolve_delegation` which fails
+        *closed* (raises `AuthError`) for the same input — policy
+        evaluation runs once, at write time, when rejecting the write
+        outright is cheap and correct; this method runs on every query
+        against already-committed data, where excluding or erroring on a
+        row for data that was already accepted would be a surprising,
+        un-auditable behavior change with no corresponding write.
 
         Avoids the N+1 pattern of calling assertions() + get_principal()
         once per (candidate entity, assertion) pair (QueryBuilder.
@@ -508,12 +536,14 @@ class StorageBackend(Protocol):
 
         `as_of_time` bitemporally scopes which *assertion* qualifies, the
         same way `entities_meeting_confidence` does (including its
-        flagged-status caveat) — but `trust_level` itself is always the
-        principal's current value, never a historical one (KI-036). This is
-        not an approximation: no code path updates a principal's
-        `trust_level` after creation, so "trust_level as of any t at or
-        after the principal's creation" and "trust_level now" are the same
-        value by construction (guarded by
+        flagged-status caveat) — but each individual principal's own
+        `trust_level` (author's and, if delegated, `acting_as`'s) is always
+        its current value, never a historical one (KI-036), and the `min()`
+        this method now takes of the two (KI-047) inherits that same
+        property. This is not an approximation: no code path updates a
+        principal's `trust_level` after creation, so "trust_level as of any
+        t at or after the principal's creation" and "trust_level now" are
+        the same value by construction (guarded by
         `tests/unit/test_principal_trust_immutability_invariant.py`, which
         fails the day a mutation path is added — that would mean this
         method needs real principal versioning, not this shortcut). A
@@ -524,7 +554,7 @@ class StorageBackend(Protocol):
         Args:
             namespace: Namespace to scope the scan to
             concept: Concept to scope the scan to
-            min_trust: Minimum principal trust level, 0-10
+            min_trust: Minimum effective trust level, 0-10
             as_of_time: If set, evaluate assertion existence against this
                 point in time instead of current state (KI-036)
             candidate_ids: Optional narrowing hint (KI-037) — see

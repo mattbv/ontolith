@@ -1741,8 +1741,14 @@ class SQLiteBackend:
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion,
         active at `as_of_time` (KI-036) or currently active if `as_of_time`
-        is None, authored by a principal whose current trust_level >=
-        `min_trust`. `candidate_ids` narrows the scan the same way as
+        is None, whose *effective* trust_level >= `min_trust` (KI-047) —
+        `min(author.trust_level, acting_as.trust_level)` when the assertion
+        was made under delegation, matching `govern/policy.py`'s identical
+        formula for effective trust (by analogy with SPEC §8.4's capability
+        rule), or just `author.trust_level` when it wasn't. A dangling
+        `acting_as` (no resolvable delegate) falls back to `author.trust_level`
+        via `coalesce` — see `StorageBackend.entities_meeting_trust`'s
+        docstring for why. `candidate_ids` narrows the scan the same way as
         `entities_meeting_confidence` (KI-037) — see its docstring."""
         if candidate_ids is not None and not candidate_ids:
             return set()
@@ -1751,7 +1757,9 @@ class SQLiteBackend:
             "SELECT DISTINCT a.subject FROM assertion a"
             " JOIN entity e ON e.id = a.subject"
             " JOIN principal p ON p.id = a.author"
-            " WHERE e.namespace = ? AND e.concept = ? AND p.trust_level >= ?"
+            " LEFT JOIN principal delegate ON delegate.id = a.acting_as"
+            " WHERE e.namespace = ? AND e.concept = ?"
+            " AND min(p.trust_level, coalesce(delegate.trust_level, p.trust_level)) >= ?"
         )
         params: list[Any] = [namespace, concept, min_trust]
 

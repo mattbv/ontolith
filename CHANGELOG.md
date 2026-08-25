@@ -225,6 +225,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recorded as an explicit follow-up in ADR-0029, not a new KI.
 
 #### Fixed
+- **Breaking:** `.trust_at_least()`/`entities_meeting_trust` now compare a delegated
+  assertion's *effective* trust — `min(author.trust_level, acting_as.trust_level)` —
+  instead of the author's raw `trust_level` alone (closes KI-047). Matches
+  `govern/policy.py`'s existing effective-trust formula for the same assertion, by
+  analogy with SPEC §8.4's capability rule; a low-trust delegate acting as a high-trust
+  principal (or vice versa) is now scored consistently between policy evaluation and
+  query-time filtering, which it previously wasn't. Cross-backend divergence, verified
+  before implementing: SQLite's `min(a, b)` is the scalar two-argument form; DuckDB's
+  `min(a, b)` is aggregate-only and returns a list for two scalar args, so DuckDB's
+  query uses `least(a, b)` instead. A dangling `acting_as` (no resolvable delegate)
+  fails open, falling back to the author's own `trust_level`, deliberately unlike
+  `_resolve_delegation`'s fail-closed behavior for the same input at write time.
+  Non-delegated assertions are unaffected. New conformance vectors
+  (`TestTrustAtLeastDelegationAttenuation`) cover both attenuation directions, the
+  inclusive threshold boundary, and the dangling-delegate fallback. See ADR-0033.
 - **`DuckDBBackend` now serializes connection access across threads with a
   `threading.RLock`, mirroring `SQLiteBackend`'s KI-023 fix (closes KI-046).**
   DuckDB's own DB-API `threadsafety` level is 1 ("threads may share the module, but not
