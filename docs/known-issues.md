@@ -1075,10 +1075,10 @@ Conformance vectors (`conformance/test_conflict.py::TestLiteralContentValidation
 
 ---
 
-## KI-050 — `flag_contradiction()` can create a contradiction whose two founding members are already both terminal, with no eligible winner among them
+## KI-050 — `flag_contradiction()` can create a contradiction whose two founding members are already both terminal, with no eligible winner among them ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — a `propose`-capability action can open a `Contradiction` `resolve_contradiction()` can't immediately close, requiring a follow-up write before it's resolvable at all
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved via ADR-0035
 **SPEC reference:** SPEC §10.3 (contradiction resolution — winner reactivation), §14 (MCP `ontolith.flag_contradiction`)
 
 ### Description
@@ -1093,7 +1093,13 @@ Found during KI-044/ADR-0031's second review pass (2026-08-19), while confirming
 
 ### Fix
 
-Decide (ADR) whether `flag_contradiction()` should require *at least one* of the two named assertions to be currently `active` or `flagged` (i.e., not already terminal) at creation time — raising `ValidationError` otherwise, mirroring how `resolve_contradiction()` now validates winner eligibility. Extending an *already-open* contradiction with an all-terminal pair should very likely remain permitted (that's the case ADR-0031's own design deliberately supports — naming a terminal assertion for audit/context when extending); the gap is specifically about a *brand-new* contradiction's two founding members both being terminal already. Add a conformance vector pinning whichever behavior is chosen.
+ADR-0035: `flag_contradiction()` now requires *at least one* of the two named assertions to be non-terminal (`active` or `flagged`) when opening a **new** contradiction — both already `retracted`/`superseded` raises `ValidationError`, mirroring `resolve_contradiction()`'s own winner-eligibility check (KI-044, ADR-0031). Checked right after the fresh, in-transaction reads of both assertions (KI-045), so it also covers the race scenario noted above, not just an explicit two-terminal-ids call. Placed before `id_provider.next()` so a rejected call doesn't consume an ID for a contradiction that's never persisted.
+
+Extending an *already-open* contradiction with an all-terminal pair remains permitted, unchanged — the new check only guards the `else` (create) branch, never the `if existing is not None` (extend) branch, per ADR-0031's own deliberate escape hatch.
+
+Conformance vectors (`conformance/test_contradiction_resolution.py::TestFlagContradictionRequiresEligibleWinner`): both founding members retracted, one retracted + one superseded (matching this KI's own motivating pairing), a regression guard confirming the ordinary one-terminal-one-active case still creates successfully, and confirming extension of an already-open contradiction with an all-terminal pair still succeeds.
+
+**Breaking (observable, not signature-level):** a caller relying on `flag_contradiction()` succeeding with two already-terminal assertion IDs to open a new contradiction now gets `ValidationError` instead.
 
 ---
 

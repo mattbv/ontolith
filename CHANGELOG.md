@@ -235,6 +235,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- **Breaking:** `flag_contradiction()` now rejects opening a **new** contradiction whose
+  two founding members are both already `retracted`/`superseded` (closes KI-050,
+  ADR-0035) — `resolve_contradiction()` already rejects a terminal-status winner
+  candidate (KI-044, ADR-0031), so an all-terminal pair at creation time opened a
+  contradiction with zero eligible winners, forcing a follow-up write before it could
+  ever be resolved. Mirrors `resolve_contradiction()`'s own check in mechanism
+  (`ValidationError`, not a capability gate — this is a structural validity issue, not a
+  capability shortfall) and in the terminal-status set checked. Only guards contradiction
+  *creation*; extending an *already-open* contradiction with an all-terminal pair remains
+  permitted (ADR-0031's own deliberate escape hatch for naming a terminal assertion for
+  audit/context, unchanged). Checked against the fresh, in-transaction reads KI-045
+  already established, so it also covers the race variant (a concurrent
+  retract()/supersession terminalizing both named assertions between read and write),
+  not just an explicit two-terminal-ids call.
 - **Breaking:** `assert_literal`/`propose` now reject a literal whose `value` doesn't
   actually parse as its (already token-matched, KI-031) declared `value_type` (closes
   KI-049, amends ADR-0028) — e.g. `assert_literal(..., "unknown", "Integer", ...)`
