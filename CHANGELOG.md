@@ -239,15 +239,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actually parse as its (already token-matched, KI-031) declared `value_type` (closes
   KI-049, amends ADR-0028) — e.g. `assert_literal(..., "unknown", "Integer", ...)`
   previously succeeded since `value_type="Integer"` matched the schema even though
-  `"unknown"` isn't a valid integer; now raises `ValidationError`. `int()`/`float()` for
-  `Integer`/`Float`; ISO 8601 `date.fromisoformat()`/`datetime.fromisoformat()` for
+  `"unknown"` isn't a valid integer; now raises `ValidationError`. A dedicated regex for
+  `Integer`/`Float` (not bare `int()`/`float()`, which accept underscore separators,
+  whitespace, and — for `float()` — `"inf"`/`"nan"`, none of which cast consistently
+  across both backends' KI-039 SQL paths); Python's `fromisoformat` grammar for
   `Date`/`DateTime` (`Date` rejects a string carrying a time component);
   case-insensitive `"true"`/`"false"` only for `Boolean` (not `"1"`/`"0"`, a deliberate
-  choice); `json.loads()` for `JSON`; `URI` accepts LinkML's `uriorcurie` shape (ADR-0013)
-  — a full URI or a CURIE, not a strict RFC 3986 parse. `Text` has no format to
-  validate. Enforced at submission time only, same as the token check beside it — not
-  retroactive against already-stored data (no migration mechanism, KI-048) and not
-  re-run at proposal replay, matching that check's own established precedent.
+  choice); `json.loads()` for `JSON` (rejecting the non-standard `NaN`/`Infinity`
+  constants too); `URI` accepts LinkML's `uriorcurie` shape (ADR-0013) — a full URI or a
+  CURIE, not a strict RFC 3986 parse. `Text` has no format to validate. Enforced at
+  submission time only, same as the token check beside it — not retroactive against
+  already-stored data (no migration mechanism, KI-048) and not re-run at proposal
+  replay, matching that check's own established precedent.
   `entities_where()`'s `TRY_CAST`/`CAST` defensive handling (KI-039) is unchanged and
   still necessary for pre-existing data.
 - **Breaking:** `.trust_at_least()`/`entities_meeting_trust` now compare a delegated
