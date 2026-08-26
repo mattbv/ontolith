@@ -223,6 +223,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not sandboxed) rather than a capability-scoped view; `PluginRegistry`-loaded
   validators are unaffected and still have no automatic invocation point of their own —
   recorded as an explicit follow-up in ADR-0029, not a new KI.
+- CLI `ontolith schema migrate <file> --author <admin>` (closes KI-048, ADR-0034):
+  completes the SPEC §14.2 `ontolith schema {show|migrate}` surface KI-038 left half
+  implemented. A thin wrapper reading a LinkML-aligned YAML document (ADR-0013 dialect)
+  from disk and applying it as a new schema version via the existing governed
+  `Ontology.apply_schema` — no new domain logic or port method. YAML-only, not
+  class-DSL (no existing mechanism loads a `SchemaIR` from a class-DSL *file path*
+  without dynamically executing arbitrary Python; a class-DSL schema still reaches this
+  command via the existing `compile_schema()` → `to_yaml()` round-trip). Does not
+  migrate/backfill existing assertion data against a changed schema — that remains
+  explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
 - **Breaking:** `.trust_at_least()`/`entities_meeting_trust` now compare a delegated

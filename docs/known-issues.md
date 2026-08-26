@@ -777,10 +777,10 @@ Docstrings on both port methods were rewritten: `(namespace, concept)` is still 
 
 ---
 
-## KI-038 — CLI has no `schema` command — PARTIALLY RESOLVED (M3)
+## KI-038 — CLI has no `schema` command — ✓ RESOLVED (M3, across two entries)
 
 **Severity:** Architecture gap — SPEC-normative CLI surface is entirely unimplemented
-**Milestone target:** M3 for `show` (resolved in `feat(cli): add schema show command (KI-038)`); `migrate` forward-tracked as KI-048
+**Milestone target:** M3 for `show` (resolved in `feat(cli): add schema show command (KI-038)`); `migrate` forward-tracked as KI-048, now also resolved
 **SPEC reference:** SPEC §14.2 (`ontolith schema {show|migrate}`)
 
 ### Description
@@ -791,7 +791,7 @@ Docstrings on both port methods were rewritten: `(namespace, concept)` is still 
 
 Added `ontolith schema show [--namespace]` (new `schema_app` sub-app, matching every other CLI sub-command's `_kb()`/try-except-finally shape), printing `namespace=... version=...` followed by each concept's properties (`name: value_type  cardinality=...  temporality=...  required=...`) and relations (`name -> target_concept  cardinality=...  temporality=...  required=...  inverse=...`) — the same field set as MCP's `ontolith.schema`/REST's `GET /schema` output (both already fixed by KI-029 to include relations), though not their exact attribute order: REST's own `PropertyOut`/`RelationOut` don't even agree with each other on relation field order, so the CLI normalizes to one consistent order instead of copying either verbatim. A namespace with no registered schema prints a plain message rather than an empty/error output, matching other read-path commands' "nothing found" convention elsewhere in the CLI.
 
-`ontolith schema migrate` remains unresolved — it's a larger, separate piece of work (schema versioning/migration isn't implemented anywhere yet, only monotonic version numbering via `apply_schema`) and was out of scope for this pass, as this KI's own original Fix text anticipated ("split into its own issue if `show` lands first"). Forward-tracked as **KI-048**, matching the pattern KI-031 set for its own leftover half, rather than leaving it implicit in this entry's own partially-resolved status.
+`ontolith schema migrate` was out of scope for this pass, as this KI's own original Fix text anticipated ("split into its own issue if `show` lands first"). Forward-tracked as **KI-048**, matching the pattern KI-031 set for its own leftover half, rather than leaving it implicit in this entry's own partially-resolved status — **KI-048 has since been resolved too (ADR-0034)**, so the full `{show|migrate}` surface SPEC §14.2 names is now implemented.
 
 ---
 
@@ -1029,10 +1029,10 @@ A dangling `acting_as` (no resolvable delegate — unreachable via `Ontology`'s 
 
 ---
 
-## KI-048 — CLI has no `schema migrate` command
+## KI-048 — CLI has no `schema migrate` command ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — SPEC-normative CLI surface remains partially unimplemented
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved via ADR-0034
 **SPEC reference:** SPEC §14.2 (`ontolith schema {show|migrate}`)
 
 ### Description
@@ -1041,7 +1041,11 @@ KI-038 added `ontolith schema show` but explicitly left `ontolith schema migrate
 
 ### Fix
 
-Needs a design decision before implementation, not just a CLI command: what does "migrate" mean here — applying a new `SchemaIR` version is already possible via `apply_schema`, so `ontolith schema migrate` most plausibly means either (a) a thin CLI wrapper around `apply_schema` reading a YAML/class-DSL file from disk (the smallest useful slice, no new domain logic), or (b) something that also handles property renames/type changes against existing assertion data (a substantially larger scope touching append-only semantics — renaming a predicate doesn't rewrite historical assertions, so old and new predicate names would coexist, which needs its own ADR). Scope this to (a) first if picked up, and record the (a)/(b) boundary decision as an ADR rather than deciding it implicitly inside a CLI PR.
+ADR-0034: scoped to (a) only — `ontolith schema migrate <file> --author <admin>` is a thin CLI wrapper reading a LinkML-aligned YAML document (ADR-0013 dialect) from disk and applying it via the existing governed `Ontology.apply_schema` path. No new domain logic, no new `StorageBackend` port method; `apply_schema`'s existing strict-monotonic version check is unchanged (the file must already declare the correct next version — not auto-incremented). Errors (missing file, malformed YAML, wrong version, insufficient capability) all funnel through the CLI's existing generic error handler, matching every other command's convention.
+
+Format is YAML-only, not class-DSL — there is no existing mechanism to load a `SchemaIR` from a class-DSL *file path* (`compile_schema()` takes already-imported Python classes, not a file to read), and building one would mean dynamically executing arbitrary user-supplied Python from a CLI argument, a materially riskier capability SPEC §14.2 didn't ask for. A class-DSL schema still reaches this command via the existing `compile_schema()` → `to_yaml()` round-trip.
+
+Scope (b) — actual data migration/backfill against already-stored assertions when a schema changes — remains explicitly out of scope, tracked as its own future decision per ADR-0034's Consequences section, not folded into this command.
 
 ---
 
