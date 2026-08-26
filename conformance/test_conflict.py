@@ -730,6 +730,21 @@ class TestLiteralContentValidation:
         with pytest.raises(ValidationError, match="not a valid Integer"):
             kb.assert_literal(entity.id, "Thing.count", "3.5", "Integer", AUTHOR)
 
+    def test_integer_rejects_forms_bare_int_would_silently_accept(self, make_kb: KbFactory) -> None:
+        """Python's bare int() is more lenient than the regex this method
+        actually uses (KI-049 review) - PEP-515 underscore separators,
+        surrounding whitespace, and non-ASCII decimal digits all parse
+        under int() but don't cast consistently across both backends' SQL
+        CAST/TRY_CAST paths (KI-039), so none of them are well-formed
+        Integer content here. Regression coverage for the review round
+        that tightened int()/float() to a dedicated regex - reverting to
+        bare int() would silently accept all of these."""
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        for value in ("5_000", " 42", "42 ", "\t42", "٤٢"):
+            with pytest.raises(ValidationError, match="not a valid Integer"):
+                kb.assert_literal(entity.id, "Thing.count", value, "Integer", AUTHOR)
+
     def test_float_accepts_well_formed_and_rejects_malformed(self, make_kb: KbFactory) -> None:
         kb = self._kb_with_typed_predicates(make_kb)
         entity = kb.create_entity("Thing", author=AUTHOR)
@@ -737,6 +752,16 @@ class TestLiteralContentValidation:
         assert assertion.value == "3.14"
         with pytest.raises(ValidationError, match="not a valid Float"):
             kb.assert_literal(entity.id, "Thing.ratio", "not-a-number", "Float", AUTHOR)
+
+    def test_float_rejects_forms_bare_float_would_silently_accept(self, make_kb: KbFactory) -> None:
+        """Same regression coverage as test_integer_rejects_forms_bare_int_
+        would_silently_accept, for Float: bare float() additionally accepts
+        "inf"/"nan", neither well-formed numeric content."""
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        for value in ("inf", "-inf", "nan", "Infinity", "1_000.5"):
+            with pytest.raises(ValidationError, match="not a valid Float"):
+                kb.assert_literal(entity.id, "Thing.ratio", value, "Float", AUTHOR)
 
     def test_boolean_accepts_true_false_case_insensitively_and_rejects_other_forms(
         self, make_kb: KbFactory
@@ -753,6 +778,11 @@ class TestLiteralContentValidation:
             kb.assert_literal(entity.id, "Thing.active", "1", "Boolean", AUTHOR)
         with pytest.raises(ValidationError, match="not a valid Boolean"):
             kb.assert_literal(entity.id, "Thing.active", "yes", "Boolean", AUTHOR)
+        # No surrounding-whitespace leniency either (review finding) -
+        # matches Integer/Float's exact-match regexes rather than storing
+        # "  true  " verbatim and silently failing a later equality filter.
+        with pytest.raises(ValidationError, match="not a valid Boolean"):
+            kb.assert_literal(entity.id, "Thing.active", "  true  ", "Boolean", AUTHOR)
 
     def test_date_accepts_iso_and_rejects_malformed_or_datetime(self, make_kb: KbFactory) -> None:
         kb = self._kb_with_typed_predicates(make_kb)
@@ -801,6 +831,30 @@ class TestLiteralContentValidation:
             assert assertion.value == value
         with pytest.raises(ValidationError, match="not valid JSON"):
             kb.assert_literal(entity.id, "Thing.payload", "{not valid json", "JSON", AUTHOR)
+
+    def test_json_rejects_non_standard_constants(self, make_kb: KbFactory) -> None:
+        """Python's json.loads accepts NaN/Infinity/-Infinity by default -
+        none are valid per RFC 8259, which value_type="JSON" means to match
+        (KI-049 review). Regression coverage for the review round that
+        added the parse_constant rejection - removing it would silently
+        accept all of these."""
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        for value in ("NaN", "Infinity", "-Infinity", '{"a": NaN}', "[1, Infinity, 2]"):
+            with pytest.raises(ValidationError, match="not valid JSON"):
+                kb.assert_literal(entity.id, "Thing.payload", value, "JSON", AUTHOR)
+
+    def test_oversized_value_truncated_in_error_message(self, make_kb: KbFactory) -> None:
+        """A rejected literal too large to usefully echo back is truncated
+        in the ValidationError message, not embedded in full (KI-049
+        review) - regression coverage for _value_for_error."""
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        oversized = "x" * 5000
+        with pytest.raises(ValidationError, match="not a valid Integer") as exc_info:
+            kb.assert_literal(entity.id, "Thing.count", oversized, "Integer", AUTHOR)
+        assert len(str(exc_info.value)) < len(oversized)
+        assert "chars total" in str(exc_info.value)
 
     def test_propose_also_validates_content(self, make_kb: KbFactory) -> None:
         """The content check runs at both literal-write entry points, not

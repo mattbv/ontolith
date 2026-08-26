@@ -9,7 +9,7 @@ import re
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from ontolith.core import (
     Assertion,
@@ -42,6 +42,38 @@ from ontolith.store.base import DEFAULT_NAMESPACE, StorageBackend
 
 if TYPE_CHECKING:
     from ontolith.plugins.ports import Validator
+
+
+# KI-049: ASCII-only, no whitespace/underscore-separator/unicode-digit
+# leniency - int()/float() alone accept PEP-515 underscores, surrounding
+# whitespace, and (for int()) non-ASCII decimal digits, none of which the
+# KI-039 SQL CAST/TRY_CAST paths this validation exists to back up agree on
+# across backends (verified empirically during review: e.g. SQLite casts
+# "5_000" to 0, DuckDB to 5000). float() additionally accepts "inf"/"nan",
+# neither a JSON- or SQL-numeric-cast-compatible value.
+_INTEGER_RE = re.compile(r"[+-]?[0-9]+")
+_FLOAT_RE = re.compile(r"[+-]?(?:[0-9]+\.[0-9]*|\.[0-9]+|[0-9]+)(?:[eE][+-]?[0-9]+)?")
+
+# Cap how much of an oversized literal a ValidationError message repeats
+# back - a rejected multi-MB blob shouldn't be echoed in full into an
+# exception surfaced through REST/CLI.
+_MAX_VALUE_IN_ERROR = 200
+
+
+def _value_for_error(value: str) -> str:
+    """`repr()` of `value`, truncated so an oversized literal doesn't blow
+    up a `ValidationError` message (KI-049 review)."""
+    if len(value) <= _MAX_VALUE_IN_ERROR:
+        return repr(value)
+    return f"{value[:_MAX_VALUE_IN_ERROR]!r}... ({len(value)} chars total)"
+
+
+def _reject_json_constant(token: str) -> NoReturn:
+    """`json.loads(..., parse_constant=)` hook rejecting Python's
+    non-standard `NaN`/`Infinity`/`-Infinity` extensions (KI-049 review) -
+    not valid RFC 8259 JSON, so not well-formed content for `value_type="JSON"`
+    even though the stdlib parser accepts them by default."""
+    raise ValueError(f"{token!r} is not valid JSON (RFC 8259 has no NaN/Infinity)")
 
 
 class AsOfView:
@@ -107,38 +139,6 @@ class AsOfView:
             version of this namespace's schema had been applied yet.
         """
         return self._backend.get_schema_at(self._namespace, self._as_of)
-
-
-# KI-049: ASCII-only, no whitespace/underscore-separator/unicode-digit
-# leniency - int()/float() alone accept PEP-515 underscores, surrounding
-# whitespace, and (for int()) non-ASCII decimal digits, none of which the
-# KI-039 SQL CAST/TRY_CAST paths this validation exists to back up agree on
-# across backends (verified empirically during review: e.g. SQLite casts
-# "5_000" to 0, DuckDB to 5000). float() additionally accepts "inf"/"nan",
-# neither a JSON- or SQL-numeric-cast-compatible value.
-_INTEGER_RE = re.compile(r"[+-]?[0-9]+")
-_FLOAT_RE = re.compile(r"[+-]?(?:[0-9]+\.[0-9]*|\.[0-9]+|[0-9]+)(?:[eE][+-]?[0-9]+)?")
-
-# Cap how much of an oversized literal a ValidationError message repeats
-# back - a rejected multi-MB blob shouldn't be echoed in full into an
-# exception surfaced through REST/CLI.
-_MAX_VALUE_IN_ERROR = 200
-
-
-def _value_for_error(value: str) -> str:
-    """`repr()` of `value`, truncated so an oversized literal doesn't blow
-    up a `ValidationError` message (KI-049 review)."""
-    if len(value) <= _MAX_VALUE_IN_ERROR:
-        return repr(value)
-    return f"{value[:_MAX_VALUE_IN_ERROR]!r}... ({len(value)} chars total)"
-
-
-def _reject_json_constant(token: str) -> float:
-    """`json.loads(..., parse_constant=)` hook rejecting Python's
-    non-standard `NaN`/`Infinity`/`-Infinity` extensions (KI-049 review) -
-    not valid RFC 8259 JSON, so not well-formed content for `value_type="JSON"`
-    even though the stdlib parser accepts them by default."""
-    raise ValueError(f"{token!r} is not valid JSON (RFC 8259 has no NaN/Infinity)")
 
 
 class Ontology:
@@ -598,8 +598,15 @@ class Ontology:
         elif value_type == "Boolean":
             # Case-insensitive "true"/"false" only - not "1"/"0", which
             # would blur the line with Integer (decided explicitly, not
-            # the only defensible choice - see KI-049's Fix text).
-            if value.strip().lower() not in ("true", "false"):
+            # the only defensible choice - see KI-049's Fix text). No
+            # surrounding-whitespace leniency either (unlike a bare
+            # .strip() would give), matching Integer/Float's exact-match
+            # regexes - a value with whitespace would round-trip as stored
+            # (with the whitespace) but silently fail to match a
+            # .where(predicate="true")-style equality filter later
+            # (review finding: an internal inconsistency worth avoiding,
+            # not a cross-backend divergence like Integer/Float's).
+            if value.lower() not in ("true", "false"):
                 raise ValidationError(
                     f"Value {_value_for_error(value)} is not a valid Boolean "
                     "(expected 'true' or 'false', case-insensitive)"
