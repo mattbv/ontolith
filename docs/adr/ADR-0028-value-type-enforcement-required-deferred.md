@@ -1,9 +1,9 @@
 # ADR-0028: `value_type` Enforced at Core Write Time; `required` Stays Out of Core
 
 **Status**: Accepted
-**Date**: 2026-08-04 (amended 2026-08-15 — KI-041/KI-042 resolved)
+**Date**: 2026-08-04 (amended 2026-08-15 — KI-041/KI-042 resolved; amended 2026-08-26 — KI-049 resolved)
 **Deciders**: Ontolith Core Team
-**Related**: SPEC §4 (Schema), SPEC §13.2 (Validator plugins), ADR-0017 (Cardinality-Aware Conflict Routing), ADR-0029 (Validator invocation — resolves KI-041/KI-042), KI-010 (reference plugins), KI-031, KI-040, KI-041, KI-042
+**Related**: SPEC §4 (Schema), SPEC §13.2 (Validator plugins), ADR-0013 (LinkML dialect — URI/CURIE), ADR-0017 (Cardinality-Aware Conflict Routing), ADR-0029 (Validator invocation — resolves KI-041/KI-042), KI-010 (reference plugins), KI-031, KI-039 (range operators' `TRY_CAST`/`CAST` divergence, the gap this amendment narrows), KI-040, KI-041, KI-042, KI-049
 
 ---
 
@@ -63,6 +63,23 @@ Context points 1–2 above, and the Consequences bullet on line 52, describe the
 
 This ADR's own Decision (`required` stays out of *core*) is unchanged and still the accurate answer to the question this ADR actually decided — ADR-0029 doesn't move `required` enforcement into core, it makes the validator-layer path SPEC §4 already pointed at actually reachable.
 
+## Amendment (2026-08-26): KI-049 Resolved — Literal Content Now Validated, Not Just the `value_type` Token
+
+This ADR's original Decision enforced that a write's *declared* `value_type` matches the schema's declaration for the predicate — it never validated that `value` itself is well-formed content for that type. `assert_literal(..., "unknown", "Integer", ...)` passed the token check (`value_type="Integer"` matches the schema) even though `"unknown"` is not a valid integer. Found during KI-039's review, while confirming `.where()`'s range operators could trust a predicate's declared `value_type` to decide whether a SQL numeric cast was safe — "declared numeric" and "actually stored as parseable numeric text" turned out to be different guarantees, which is exactly the gap this amendment closes for *new* writes.
+
+**Decision:** `_require_known_predicate` gains an optional `value` parameter (alongside its existing `value_type`); when both are given and the schema confirms `value_type` matches the predicate's declaration, a new `_validate_literal_value(value, value_type)` parses `value` against that type and raises `ValidationError` on a mismatch — at the same two call sites as the token check (`assert_literal`, `propose`), with the same "not re-run at replay time" precedent the token check and the KI-040 kind check already established (see this file's own `_replay_proposal_operations` docstring reference). Per-type parsing:
+
+- **Integer**/**Float**: Python's `int(value)`/`float(value)`, ValueError → rejected.
+- **Boolean**: `value.strip().lower()` must be exactly `"true"` or `"false"` — case-insensitive, but **not** `"1"`/`"0"`, a deliberate choice (asked and decided explicitly during KI-049, not the only defensible option) to avoid blurring the line with `Integer`.
+- **Date**/**DateTime**: `date.fromisoformat(value)`/`datetime.fromisoformat(value)` — ISO 8601. `Date` rejects a string carrying a time component (`fromisoformat` on `date` itself rejects it), keeping the two types' accepted formats disjoint.
+- **URI**: not a strict RFC 3986 parse — SPEC's `URI` maps to LinkML's `uriorcurie` (ADR-0013), so both a full URI (`scheme://...`) and a CURIE (`prefix:local-name`) must validate. The check only requires a non-empty segment before and after the first `:` (`value.partition(":")`), which accepts both shapes without over-constraining to one.
+- **JSON**: `json.loads(value)`, `JSONDecodeError` → rejected — any valid JSON document (object, array, string, number, bool, `null`), matching this ADR's own type table rather than restricting to objects.
+- **Text**: no format to validate — every string is well-formed Text, so it's a no-op (structurally, by never matching any of the branches above).
+
+**Not retroactive.** Exactly like the token check next to it, this only runs at submission time on new writes — it cannot and does not validate already-stored data (no migration/backfill mechanism exists, KI-048), and it is not re-run at proposal replay (`_replay_proposal_operations`), for the identical reason the token check already isn't (see that method's own docstring). A predicate whose already-stored assertions predate this fix may still contain malformed content for its declared type — `entities_where()`'s defensive `TRY_CAST`/`CAST` handling (KI-039) for the range-operator SQL cast therefore remains necessary and is **not removed** by this amendment; it now guards only pre-existing data, not an ongoing gap in new writes.
+
+New conformance vectors: `conformance/test_conflict.py::TestLiteralContentValidation` — accept/reject boundary for all eight `value_type`s (Text's being trivial, "always accepts"), both literal-write entry points, the no-schema-registered pass-through (mirrors the token check's own precedent), and the not-re-validated-at-replay guarantee.
+
 ## Alternatives Considered
 
 **Enforce `required` in core too, alongside `value_type`:** Rejected — see Rationale: it isn't just costlier, it's the wrong *shape* of check for a per-assertion write gate (an entity is necessarily incomplete immediately after `create_entity`), and SPEC §4 already assigns it to the validator layer.
@@ -80,4 +97,6 @@ This ADR's own Decision (`required` stays out of *core*) is unchanged and still 
 - `src/ontolith/ontology.py` (`_require_known_predicate`)
 - `src/ontolith/plugins/reference/required_fields_validator.py` (`RequiredFieldsValidator`, KI-010 — does not read `PropertyDef.required`, KI-041)
 - `src/ontolith/plugins/registry.py` (no invocation point for `Validator.validate()`, KI-042)
-- `docs/known-issues.md` (KI-031, KI-040, KI-041, KI-042)
+- `src/ontolith/ontology.py` (`_validate_literal_value`, KI-049)
+- ADR-0013 (LinkML dialect — `URI` maps to `uriorcurie`, the basis for this amendment's URI/CURIE acceptance rule)
+- `docs/known-issues.md` (KI-031, KI-039, KI-040, KI-041, KI-042, KI-049)
