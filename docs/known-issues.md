@@ -1049,10 +1049,10 @@ Scope (b) — actual data migration/backfill against already-stored assertions w
 
 ---
 
-## KI-049 — A predicate's declared `value_type` token is checked at write time (KI-031), but the literal's actual string content is never validated to match it
+## KI-049 — A predicate's declared `value_type` token is checked at write time (KI-031), but the literal's actual string content is never validated to match it ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — declared schema constraints can silently diverge from stored data
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved via ADR-0028's amendment
 **SPEC reference:** SPEC §4 (`value_type` is a core type); Implementation Plan §4.3 ("validate at edges")
 
 ### Description
@@ -1063,7 +1063,15 @@ Found during KI-039's review: `.where()`'s new `__gt`/`__lt`/`__gte`/`__lte` ran
 
 ### Fix
 
-`_require_known_predicate` (or a new validator called from the same write paths: `assert_literal`, `propose`, `_replay_proposal_operations`) needs to parse `value` against the schema-declared `value_type` and reject on mismatch — `int()`/`float()` for `Integer`/`Float`, `datetime.fromisoformat()` (or equivalent) for `Date`/`DateTime`, a URI parser for `URI`, `json.loads()` for `JSON`. Needs a decision on `Boolean` (accept `"true"`/`"false"` case-insensitively? `"1"`/`"0"`?) and on whether this applies retroactively to already-stored data (it can't, without a migration mechanism — KI-048) or only to new writes going forward. Conformance vectors should cover each `value_type`'s accept/reject boundary, plus confirm `.where()`'s range operators (KI-039) correctly exclude/behave once this closes the gap that currently makes `TRY_CAST`/silent-zero-coercion necessary as a defensive fallback in `entities_where()`.
+ADR-0028's 2026-08-26 amendment: `_require_known_predicate` gained an optional `value` parameter alongside its existing `value_type`, and a new `_validate_literal_value(value, value_type)` parses `value` against the schema-confirmed type — same two call sites as the token check (`assert_literal`, `propose`), same "not re-run at `_replay_proposal_operations`" precedent the token check and the KI-040 kind check already established. `int()`/`float()` for `Integer`/`Float`; `date.fromisoformat()`/`datetime.fromisoformat()` for `Date`/`DateTime` (ISO 8601; `Date` rejects a string carrying a time component); `json.loads()` for `JSON`.
+
+`Boolean` decision: case-insensitive `"true"`/`"false"` only — explicitly not `"1"`/`"0"`, to avoid blurring the line with `Integer` (asked and decided, not the only defensible choice).
+
+`URI` decision: SPEC's `URI` maps to LinkML's `uriorcurie` (ADR-0013), so both a full URI (`scheme://...`) and a CURIE (`prefix:local-name`) must validate — the check requires only a non-empty segment on both sides of the first `:`, not a strict RFC 3986 parse.
+
+Retroactivity: as anticipated, not retroactive — enforced at submission time only, same as the token check beside it (no migration mechanism exists — KI-048). `entities_where()`'s `TRY_CAST`/`CAST` defensive handling (KI-039) is **not removed** — it remains necessary for data written before this fix, even though new writes can no longer produce it.
+
+Conformance vectors (`conformance/test_conflict.py::TestLiteralContentValidation`): accept/reject boundary for all eight `value_type`s, both literal-write entry points, the no-schema-registered pass-through, and the not-re-validated-at-replay guarantee.
 
 ---
 
