@@ -5,6 +5,7 @@ backend and provides high-level methods for entities, assertions, and queries.
 """
 
 import json
+import re
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -106,6 +107,38 @@ class AsOfView:
             version of this namespace's schema had been applied yet.
         """
         return self._backend.get_schema_at(self._namespace, self._as_of)
+
+
+# KI-049: ASCII-only, no whitespace/underscore-separator/unicode-digit
+# leniency - int()/float() alone accept PEP-515 underscores, surrounding
+# whitespace, and (for int()) non-ASCII decimal digits, none of which the
+# KI-039 SQL CAST/TRY_CAST paths this validation exists to back up agree on
+# across backends (verified empirically during review: e.g. SQLite casts
+# "5_000" to 0, DuckDB to 5000). float() additionally accepts "inf"/"nan",
+# neither a JSON- or SQL-numeric-cast-compatible value.
+_INTEGER_RE = re.compile(r"[+-]?[0-9]+")
+_FLOAT_RE = re.compile(r"[+-]?(?:[0-9]+\.[0-9]*|\.[0-9]+|[0-9]+)(?:[eE][+-]?[0-9]+)?")
+
+# Cap how much of an oversized literal a ValidationError message repeats
+# back - a rejected multi-MB blob shouldn't be echoed in full into an
+# exception surfaced through REST/CLI.
+_MAX_VALUE_IN_ERROR = 200
+
+
+def _value_for_error(value: str) -> str:
+    """`repr()` of `value`, truncated so an oversized literal doesn't blow
+    up a `ValidationError` message (KI-049 review)."""
+    if len(value) <= _MAX_VALUE_IN_ERROR:
+        return repr(value)
+    return f"{value[:_MAX_VALUE_IN_ERROR]!r}... ({len(value)} chars total)"
+
+
+def _reject_json_constant(token: str) -> float:
+    """`json.loads(..., parse_constant=)` hook rejecting Python's
+    non-standard `NaN`/`Infinity`/`-Infinity` extensions (KI-049 review) -
+    not valid RFC 8259 JSON, so not well-formed content for `value_type="JSON"`
+    even though the stdlib parser accepts them by default."""
+    raise ValueError(f"{token!r} is not valid JSON (RFC 8259 has no NaN/Infinity)")
 
 
 class Ontology:
@@ -557,22 +590,18 @@ class Ontology:
         for its other checks.
         """
         if value_type == "Integer":
-            try:
-                int(value)
-            except ValueError:
-                raise ValidationError(f"Value {value!r} is not a valid Integer") from None
+            if not _INTEGER_RE.fullmatch(value):
+                raise ValidationError(f"Value {_value_for_error(value)} is not a valid Integer")
         elif value_type == "Float":
-            try:
-                float(value)
-            except ValueError:
-                raise ValidationError(f"Value {value!r} is not a valid Float") from None
+            if not _FLOAT_RE.fullmatch(value):
+                raise ValidationError(f"Value {_value_for_error(value)} is not a valid Float")
         elif value_type == "Boolean":
             # Case-insensitive "true"/"false" only - not "1"/"0", which
             # would blur the line with Integer (decided explicitly, not
             # the only defensible choice - see KI-049's Fix text).
             if value.strip().lower() not in ("true", "false"):
                 raise ValidationError(
-                    f"Value {value!r} is not a valid Boolean "
+                    f"Value {_value_for_error(value)} is not a valid Boolean "
                     "(expected 'true' or 'false', case-insensitive)"
                 )
         elif value_type == "Date":
@@ -580,14 +609,16 @@ class Ontology:
                 date.fromisoformat(value)
             except ValueError:
                 raise ValidationError(
-                    f"Value {value!r} is not a valid Date (expected ISO 8601, e.g. '2026-01-01')"
+                    f"Value {_value_for_error(value)} is not a valid Date "
+                    "(expected Python's date.fromisoformat grammar, e.g. '2026-01-01')"
                 ) from None
         elif value_type == "DateTime":
             try:
                 datetime.fromisoformat(value)
             except ValueError:
                 raise ValidationError(
-                    f"Value {value!r} is not a valid DateTime (expected ISO 8601)"
+                    f"Value {_value_for_error(value)} is not a valid DateTime "
+                    "(expected Python's datetime.fromisoformat grammar)"
                 ) from None
         elif value_type == "URI":
             # SPEC's URI maps to LinkML's `uriorcurie` (ADR-0013) - both a
@@ -598,14 +629,16 @@ class Ontology:
             prefix, sep, rest = value.partition(":")
             if not sep or not prefix or not rest:
                 raise ValidationError(
-                    f"Value {value!r} is not a valid URI or CURIE "
+                    f"Value {_value_for_error(value)} is not a valid URI or CURIE "
                     "(expected 'scheme:...' or 'prefix:local-name')"
                 )
         elif value_type == "JSON":
             try:
-                json.loads(value)
-            except json.JSONDecodeError:
-                raise ValidationError(f"Value {value!r} is not valid JSON") from None
+                json.loads(value, parse_constant=_reject_json_constant)
+            except ValueError as exc:
+                raise ValidationError(
+                    f"Value {_value_for_error(value)} is not valid JSON: {exc}"
+                ) from None
 
     def _run_validators(self, assertion: Assertion) -> None:
         """Run `self.validators` against a single about-to-commit assertion

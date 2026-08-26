@@ -827,11 +827,21 @@ class TestLiteralContentValidation:
 
     def test_content_error_not_re_raised_at_proposal_replay(self, make_kb: KbFactory) -> None:
         """Matches _require_known_predicate's other checks (KI-031, KI-040):
-        the content check runs once at propose() time, not again when the
-        accepted proposal's operations are replayed - a schema change
-        between submission and acceptance that would newly reject the
-        already-staged value does not retroactively block replay."""
-        kb = self._kb_with_typed_predicates(make_kb)
+        the content check runs once at propose() time (or not at all, if no
+        schema is registered yet), not again when the accepted proposal's
+        operations are replayed - see ADR-0028's own pre-existing
+        Consequences bullet (a): a proposal submitted against a schema-less
+        namespace, followed by apply_schema before acceptance, replays
+        unvalidated. Genuinely exercises the replay path, not a case that
+        would pass either way: the proposal below stages content that IS
+        invalid Integer content, submitted BEFORE Thing.count is declared
+        Integer, so _require_known_predicate's content check never ran for
+        it at propose() time (schema was None) - if _replay_proposal_operations
+        re-validated content (it must not), accept_proposal below would
+        raise instead of succeeding."""
+        clock = FixedClock(T0)
+        ids = FixedIdProvider([f"id-{i}" for i in range(20)])
+        kb = make_kb(clock, ids)
         low_trust_author = "low-trust@example.com"
         kb.create_principal(
             low_trust_author,
@@ -840,12 +850,40 @@ class TestLiteralContentValidation:
             default_capability="propose",
             trust_level=0,
         )
-        entity = kb.create_entity("Thing", author=AUTHOR)
-        proposal, decision = kb.propose(entity.id, "Thing.count", "42", "Integer", low_trust_author)
+        kb.create_principal(ADMIN, kind="human", auth_method="oidc", default_capability="admin")
+        entity = kb.create_entity("Thing", author=low_trust_author)
+
+        proposal, decision = kb.propose(
+            entity.id, "Thing.count", "not-an-integer", "Integer", low_trust_author
+        )
         assert decision.__class__.__name__ == "RequireReview"
 
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Thing": ConceptDef(
+                    name="Thing",
+                    properties={"count": PropertyDef(name="count", value_type="Integer")},
+                ),
+            },
+        )
+        kb.apply_schema(schema, author=ADMIN)
+
+        # A fresh assert_literal with the same malformed content is rejected
+        # now that the schema exists - proving the check is genuinely live,
+        # not just absent from this test's own setup.
+        with pytest.raises(ValidationError, match="not a valid Integer"):
+            kb.assert_literal(entity.id, "Thing.count", "not-an-integer", "Integer", ADMIN)
+
+        # But the already-staged proposal, whose content was never checked
+        # at submission time (no schema existed then), still replays
+        # unvalidated - proving _replay_proposal_operations does not
+        # re-run the content check.
         accepted = kb.accept_proposal(proposal.id, ADMIN)
         assert accepted.state == "accepted"
+        committed = kb.assertions(subject=entity.id, predicate="Thing.count")
+        assert committed[0].value == "not-an-integer"
 
 
 class TestPredicateKindMismatch:
