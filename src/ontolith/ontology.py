@@ -2593,7 +2593,11 @@ class Ontology:
             AuthError: author is not a known principal
             CapabilityError: author's capability is 'read'
             NotFoundError: either assertion id does not exist
-            ValidationError: assertions do not share subject and predicate
+            ValidationError: assertions do not share subject and predicate,
+                or (KI-050) both are already retracted/superseded and no
+                open contradiction already exists for their
+                (subject, predicate) to extend — a brand-new contradiction
+                must start with at least one eligible winner
         """
         principal = self.backend.get_principal(author)
         if principal is None:
@@ -2649,6 +2653,29 @@ class Ontology:
                 contradiction_id = existing.id
                 action = "extended"
             else:
+                # KI-050: a brand-new contradiction must start with at
+                # least one eligible winner. resolve_contradiction()
+                # already rejects a winner whose status is
+                # retracted/superseded (KI-044, ADR-0031) — so a
+                # contradiction whose two *founding* members are BOTH
+                # already terminal would open unresolvable until some
+                # later write extends it with a fresh member, forcing a
+                # caller who didn't ask for that outcome to know to work
+                # around it. This check only guards this "create" branch;
+                # extending an *already-open* contradiction with an
+                # all-terminal pair remains permitted below (ADR-0031's own
+                # deliberate escape hatch — naming a terminal assertion for
+                # audit/context when extending).
+                if a.status in ("retracted", "superseded") and b.status in (
+                    "retracted",
+                    "superseded",
+                ):
+                    raise ValidationError(
+                        f"Cannot open a new contradiction between {assertion_id_a!r} "
+                        f"(status={a.status!r}) and {assertion_id_b!r} (status={b.status!r}): "
+                        "both are already terminal, leaving no eligible winner for "
+                        "resolve_contradiction() to select"
+                    )
                 contradiction_id = self.id_provider.next()
                 self.backend.put_contradiction(
                     Contradiction(
