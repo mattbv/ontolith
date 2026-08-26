@@ -21,6 +21,7 @@ from ontolith.govern import AutoAccept, Decision, PolicyStrategy, RequireReview
 from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
+T1 = datetime(2025, 6, 1, tzinfo=UTC)
 
 HUMAN_WRITE = "alice@example.com"
 REVIEWER = "bob@example.com"
@@ -1171,6 +1172,124 @@ class TestRetractedIsTerminalAcrossExtension:
 
         assert kb.backend.get_assertion(a.id).status == "retracted"  # type: ignore[union-attr]
         assert kb.backend.get_assertion(b.id).status == "flagged"  # type: ignore[union-attr]
+
+
+# ===========================================================================
+# flag_contradiction() requires an eligible winner among a NEW
+# contradiction's founding members (KI-050)
+# ===========================================================================
+
+
+class TestFlagContradictionRequiresEligibleWinner:
+    """A brand-new contradiction must start with at least one member
+    resolve_contradiction() could actually select as winner
+    (retracted/superseded are terminal, KI-044/ADR-0031) - otherwise it
+    opens unresolvable until some later write extends it. Extending an
+    *already-open* contradiction with an all-terminal pair remains
+    permitted (ADR-0031's own deliberate escape hatch)."""
+
+    def _kb_with_non_overlapping_windows(
+        self, make_kb: KbFactory
+    ) -> tuple[Ontology, str, str, str]:
+        """Two time_varying assertions on the same predicate with
+        non-overlapping validity windows - route() coexists them via
+        Activate (SPEC §10.2), not Supersede/Contradict, so neither is
+        auto-flagged into an open contradiction the way two conflicting
+        `static`-predicate values would be. Needed so flag_contradiction()
+        below genuinely reaches its "create a NEW contradiction" branch
+        instead of extending one conflict-routing already opened.
+        Returns (kb, entity_id, first_id, second_id)."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        first = kb.assert_literal(
+            entity.id, "Person.employer", "Acme", "Text", HUMAN_WRITE, valid_from=T0, valid_to=T1
+        )
+        second = kb.assert_literal(
+            entity.id, "Person.employer", "Globex", "Text", HUMAN_WRITE, valid_from=T1
+        )
+        assert kb.backend.get_assertion(first.id).status == "active"  # type: ignore[union-attr]
+        assert kb.backend.get_assertion(second.id).status == "active"  # type: ignore[union-attr]
+        assert kb.backend.get_open_contradiction("default", entity.id, "Person.employer") is None
+        return kb, entity.id, first.id, second.id
+
+    def test_both_founding_members_retracted_raises(self, make_kb: KbFactory) -> None:
+        kb, entity_id, a_id, b_id = self._kb_with_non_overlapping_windows(make_kb)
+        kb.retract(a_id, REVIEWER)
+        kb.retract(b_id, REVIEWER)
+
+        with pytest.raises(ValidationError, match="already terminal"):
+            kb.flag_contradiction(a_id, b_id, NON_REVIEWER)
+
+        assert kb.backend.get_open_contradiction("default", entity_id, "Person.employer") is None
+
+    def test_one_retracted_one_superseded_raises(self, make_kb: KbFactory) -> None:
+        """Both terminal kinds count, not just retracted - KI-050's own
+        motivating example is exactly this pairing. Both assertions target
+        the same time_varying predicate so this exercises the eligible-
+        winner check itself, not the separate shared-subject-and-predicate
+        check."""
+        kb = _kb(make_kb)
+        admin = "admin@example.com"
+        kb.create_principal(admin, kind="human", auth_method="oidc", default_capability="admin")
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "employer": PropertyDef(
+                            name="employer", value_type="Text", temporality="time_varying"
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(schema, author=admin)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        acme = kb.assert_literal(entity.id, "Person.employer", "Acme", "Text", HUMAN_WRITE)
+        globex = kb.assert_literal(entity.id, "Person.employer", "Globex", "Text", HUMAN_WRITE)
+        kb.retract(globex.id, REVIEWER)
+        assert kb.backend.get_assertion(acme.id).status == "superseded"  # type: ignore[union-attr]
+        assert kb.backend.get_assertion(globex.id).status == "retracted"  # type: ignore[union-attr]
+
+        with pytest.raises(ValidationError, match="already terminal"):
+            kb.flag_contradiction(acme.id, globex.id, NON_REVIEWER)
+
+    def test_one_terminal_one_active_still_succeeds(self, make_kb: KbFactory) -> None:
+        """Regression guard: the new check must not reject the ordinary
+        one-terminal case flag_contradiction() has always supported
+        (test_flag_contradiction_does_not_resurrect_a_retracted_assertion
+        above already covers the resurrection half of this; this pins the
+        "still creates successfully" half explicitly)."""
+        kb, _entity_id, a_id, b_id = self._kb_with_non_overlapping_windows(make_kb)
+        kb.retract(a_id, REVIEWER)
+
+        contradiction, action = kb.flag_contradiction(a_id, b_id, NON_REVIEWER)
+
+        assert action == "created"
+        assert contradiction.state == "open"
+
+    def test_extending_open_contradiction_with_all_terminal_pair_still_succeeds(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The eligible-winner check only guards creating a NEW
+        contradiction - extending an already-open one with two terminal
+        ids remains permitted (ADR-0031's escape hatch for naming a
+        terminal assertion for audit/context). Re-naming the open
+        contradiction's own two (now-terminal) members is enough to reach
+        the "extend" branch - no third assertion needed."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        contradiction_id, ada_id, ava_id = _open_contradiction(kb, entity.id)
+        kb.retract(ada_id, REVIEWER)
+        kb.retract(ava_id, REVIEWER)
+
+        contradiction, action = kb.flag_contradiction(ada_id, ava_id, NON_REVIEWER)
+
+        assert action == "extended"
+        assert contradiction.id == contradiction_id
+        assert set(contradiction.member_ids) == {ada_id, ava_id}
 
 
 # ===========================================================================
