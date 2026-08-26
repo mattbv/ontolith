@@ -1191,13 +1191,19 @@ class TestFlagContradictionRequiresEligibleWinner:
     def _kb_with_non_overlapping_windows(
         self, make_kb: KbFactory
     ) -> tuple[Ontology, str, str, str]:
-        """Two time_varying assertions on the same predicate with
-        non-overlapping validity windows - route() coexists them via
-        Activate (SPEC §10.2), not Supersede/Contradict, so neither is
-        auto-flagged into an open contradiction the way two conflicting
-        `static`-predicate values would be. Needed so flag_contradiction()
-        below genuinely reaches its "create a NEW contradiction" branch
-        instead of extending one conflict-routing already opened.
+        """Two assertions on the same predicate with non-overlapping
+        validity windows - route() coexists them via Activate (SPEC
+        §10.1/§10.2), not Contradict/Supersede, so neither is auto-flagged
+        into an open contradiction the way two *overlapping-window* values
+        for the same predicate would be. `_kb()` applies no schema, so
+        `Person.employer` resolves to the `static` default (not
+        `time_varying`) - but `_route_static` applies the identical
+        `_windows_overlap` filter `_route_time_varying` does
+        (`govern/conflict.py`), so this holds regardless of temporality;
+        the non-overlapping windows are what matters, not the predicate's
+        declared temporality. Needed so flag_contradiction() below
+        genuinely reaches its "create a NEW contradiction" branch instead
+        of extending one conflict-routing already opened.
         Returns (kb, entity_id, first_id, second_id)."""
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
@@ -1221,6 +1227,26 @@ class TestFlagContradictionRequiresEligibleWinner:
             kb.flag_contradiction(a_id, b_id, NON_REVIEWER)
 
         assert kb.backend.get_open_contradiction("default", entity_id, "Person.employer") is None
+
+    def test_rejected_creation_does_not_consume_an_id(self, make_kb: KbFactory) -> None:
+        """The check is placed before id_provider.next() specifically so a
+        rejected call doesn't consume an ID for a contradiction that's
+        never persisted (ADR-0035) - IdProvider isn't transactional, so a
+        consumed ID would not roll back with the rest of the write. `_kb()`
+        seeds a FixedIdProvider cycling "id-0", "id-1", ... in strict
+        order (shared across every id_provider.next() call in the
+        session) - immediately-adjacent indices before/after the rejected
+        call prove nothing was consumed in between."""
+        kb, _entity_id, a_id, b_id = self._kb_with_non_overlapping_windows(make_kb)
+        kb.retract(a_id, REVIEWER)
+        kb.retract(b_id, REVIEWER)
+        before = int(kb.id_provider.next().removeprefix("id-"))
+
+        with pytest.raises(ValidationError, match="already terminal"):
+            kb.flag_contradiction(a_id, b_id, NON_REVIEWER)
+
+        after = int(kb.id_provider.next().removeprefix("id-"))
+        assert after == before + 1
 
     def test_one_retracted_one_superseded_raises(self, make_kb: KbFactory) -> None:
         """Both terminal kinds count, not just retracted - KI-050's own
@@ -1411,3 +1437,26 @@ class TestFlagContradictionTOCTOU:
         assert open_contradiction is not None
         assert open_contradiction.id == contradiction.id
         assert set(contradiction.member_ids) == {a.id, b.id, c.id, d.id}
+
+    def test_flag_contradiction_loses_race_to_concurrent_double_retract(
+        self, make_kb: KbFactory
+    ) -> None:
+        """KI-050: a concurrent retract() of BOTH named assertions in the
+        gap must be caught by the eligible-winner check reading this
+        call's own fresh, in-transaction status - not a stale
+        pre-transaction snapshot that would have seen them still active
+        and let a brand-new, zero-eligible-winner contradiction through."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        a = kb.assert_ref(entity.id, "Person.employer", entity.id, HUMAN_WRITE)
+        b = kb.assert_ref(entity.id, "Person.employer", entity.id, HUMAN_WRITE)
+
+        def racer() -> None:
+            kb.retract(a.id, HUMAN_WRITE)
+            kb.retract(b.id, HUMAN_WRITE)
+
+        kb.clock = _RacingClock(T0, racer)
+        with pytest.raises(ValidationError, match="already terminal"):
+            kb.flag_contradiction(a.id, b.id, REVIEWER)
+
+        assert kb.backend.get_open_contradiction("default", entity.id, "Person.employer") is None
