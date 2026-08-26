@@ -674,6 +674,272 @@ class TestValueTypeMismatchRejected:
         assert "value_type" not in str(exc_info.value)
 
 
+# ===========================================================================
+# Literal content validated against declared value_type (SPEC §4, KI-049)
+# ===========================================================================
+
+
+class TestLiteralContentValidation:
+    """KI-049: a literal's `value` content must actually parse as its
+    schema-declared `value_type`, not just carry a matching `value_type`
+    token (KI-031 only checks the token). Each accept/reject boundary is
+    exercised for all seven non-Text types; Text has no format to validate
+    so it's covered once, in `test_text_accepts_any_string`."""
+
+    def _kb_with_typed_predicates(self, make_kb: KbFactory) -> Ontology:
+        clock = FixedClock(T0)
+        ids = FixedIdProvider([f"id-{i}" for i in range(30)])
+        kb = make_kb(clock, ids)
+        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+        kb.create_principal(ADMIN, kind="human", auth_method="oidc", default_capability="admin")
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Thing": ConceptDef(
+                    name="Thing",
+                    properties={
+                        "label": PropertyDef(name="label", value_type="Text"),
+                        "count": PropertyDef(name="count", value_type="Integer"),
+                        "ratio": PropertyDef(name="ratio", value_type="Float"),
+                        "active": PropertyDef(name="active", value_type="Boolean"),
+                        "day": PropertyDef(name="day", value_type="Date"),
+                        "moment": PropertyDef(name="moment", value_type="DateTime"),
+                        "link": PropertyDef(name="link", value_type="URI"),
+                        "payload": PropertyDef(name="payload", value_type="JSON"),
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(schema, author=ADMIN)
+        return kb
+
+    def test_text_accepts_any_string(self, make_kb: KbFactory) -> None:
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        assertion = kb.assert_literal(entity.id, "Thing.label", "anything at all", "Text", AUTHOR)
+        assert assertion.value == "anything at all"
+
+    def test_integer_accepts_well_formed_and_rejects_malformed(self, make_kb: KbFactory) -> None:
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        assertion = kb.assert_literal(entity.id, "Thing.count", "42", "Integer", AUTHOR)
+        assert assertion.value == "42"
+        with pytest.raises(ValidationError, match="not a valid Integer"):
+            kb.assert_literal(entity.id, "Thing.count", "unknown", "Integer", AUTHOR)
+        with pytest.raises(ValidationError, match="not a valid Integer"):
+            kb.assert_literal(entity.id, "Thing.count", "3.5", "Integer", AUTHOR)
+
+    def test_integer_rejects_forms_bare_int_would_silently_accept(self, make_kb: KbFactory) -> None:
+        """Python's bare int() is more lenient than the regex this method
+        actually uses (KI-049 review) - PEP-515 underscore separators,
+        surrounding whitespace, and non-ASCII decimal digits all parse
+        under int() but don't cast consistently across both backends' SQL
+        CAST/TRY_CAST paths (KI-039), so none of them are well-formed
+        Integer content here. Regression coverage for the review round
+        that tightened int()/float() to a dedicated regex - reverting to
+        bare int() would silently accept all of these."""
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        for value in ("5_000", " 42", "42 ", "\t42", "٤٢"):
+            with pytest.raises(ValidationError, match="not a valid Integer"):
+                kb.assert_literal(entity.id, "Thing.count", value, "Integer", AUTHOR)
+
+    def test_float_accepts_well_formed_and_rejects_malformed(self, make_kb: KbFactory) -> None:
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        assertion = kb.assert_literal(entity.id, "Thing.ratio", "3.14", "Float", AUTHOR)
+        assert assertion.value == "3.14"
+        with pytest.raises(ValidationError, match="not a valid Float"):
+            kb.assert_literal(entity.id, "Thing.ratio", "not-a-number", "Float", AUTHOR)
+
+    def test_float_rejects_forms_bare_float_would_silently_accept(self, make_kb: KbFactory) -> None:
+        """Same regression coverage as test_integer_rejects_forms_bare_int_
+        would_silently_accept, for Float: bare float() additionally accepts
+        "inf"/"nan", neither well-formed numeric content."""
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        for value in ("inf", "-inf", "nan", "Infinity", "1_000.5"):
+            with pytest.raises(ValidationError, match="not a valid Float"):
+                kb.assert_literal(entity.id, "Thing.ratio", value, "Float", AUTHOR)
+
+    def test_boolean_accepts_true_false_case_insensitively_and_rejects_other_forms(
+        self, make_kb: KbFactory
+    ) -> None:
+        """Decided explicitly during KI-049 (not the only defensible
+        choice): "true"/"false" case-insensitive only - not "1"/"0", which
+        would blur the line with Integer."""
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        for value in ("true", "false", "True", "FALSE", "TrUe"):
+            assertion = kb.assert_literal(entity.id, "Thing.active", value, "Boolean", AUTHOR)
+            assert assertion.value == value
+        with pytest.raises(ValidationError, match="not a valid Boolean"):
+            kb.assert_literal(entity.id, "Thing.active", "1", "Boolean", AUTHOR)
+        with pytest.raises(ValidationError, match="not a valid Boolean"):
+            kb.assert_literal(entity.id, "Thing.active", "yes", "Boolean", AUTHOR)
+        # No surrounding-whitespace leniency either (review finding) -
+        # matches Integer/Float's exact-match regexes rather than storing
+        # "  true  " verbatim and silently failing a later equality filter.
+        with pytest.raises(ValidationError, match="not a valid Boolean"):
+            kb.assert_literal(entity.id, "Thing.active", "  true  ", "Boolean", AUTHOR)
+
+    def test_date_accepts_iso_and_rejects_malformed_or_datetime(self, make_kb: KbFactory) -> None:
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        assertion = kb.assert_literal(entity.id, "Thing.day", "2026-01-01", "Date", AUTHOR)
+        assert assertion.value == "2026-01-01"
+        with pytest.raises(ValidationError, match="not a valid Date"):
+            kb.assert_literal(entity.id, "Thing.day", "not-a-date", "Date", AUTHOR)
+        with pytest.raises(ValidationError, match="not a valid Date"):
+            kb.assert_literal(entity.id, "Thing.day", "2026-01-01T00:00:00", "Date", AUTHOR)
+
+    def test_datetime_accepts_iso_and_rejects_malformed(self, make_kb: KbFactory) -> None:
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        assertion = kb.assert_literal(
+            entity.id, "Thing.moment", "2026-01-01T12:30:00", "DateTime", AUTHOR
+        )
+        assert assertion.value == "2026-01-01T12:30:00"
+        with pytest.raises(ValidationError, match="not a valid DateTime"):
+            kb.assert_literal(entity.id, "Thing.moment", "not-a-datetime", "DateTime", AUTHOR)
+
+    def test_uri_accepts_uri_and_curie_and_rejects_bare_string(self, make_kb: KbFactory) -> None:
+        """SPEC's URI maps to LinkML's `uriorcurie` (ADR-0013) - both a
+        full URI and a compact CURIE are valid, not just a strict RFC 3986
+        URI with a real scheme."""
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        full_uri = kb.assert_literal(
+            entity.id, "Thing.link", "https://example.com/a", "URI", AUTHOR
+        )
+        assert full_uri.value == "https://example.com/a"
+        curie = kb.assert_literal(entity.id, "Thing.link", "schema:Person", "URI", AUTHOR)
+        assert curie.value == "schema:Person"
+        with pytest.raises(ValidationError, match="not a valid URI or CURIE"):
+            kb.assert_literal(entity.id, "Thing.link", "not-a-uri", "URI", AUTHOR)
+        with pytest.raises(ValidationError, match="not a valid URI or CURIE"):
+            kb.assert_literal(entity.id, "Thing.link", "://empty-prefix", "URI", AUTHOR)
+
+    def test_json_accepts_any_valid_document_and_rejects_malformed(
+        self, make_kb: KbFactory
+    ) -> None:
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        for value in ('{"a": 1}', "[1, 2, 3]", '"just a string"', "42", "true", "null"):
+            assertion = kb.assert_literal(entity.id, "Thing.payload", value, "JSON", AUTHOR)
+            assert assertion.value == value
+        with pytest.raises(ValidationError, match="not valid JSON"):
+            kb.assert_literal(entity.id, "Thing.payload", "{not valid json", "JSON", AUTHOR)
+
+    def test_json_rejects_non_standard_constants(self, make_kb: KbFactory) -> None:
+        """Python's json.loads accepts NaN/Infinity/-Infinity by default -
+        none are valid per RFC 8259, which value_type="JSON" means to match
+        (KI-049 review). Regression coverage for the review round that
+        added the parse_constant rejection - removing it would silently
+        accept all of these."""
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        for value in ("NaN", "Infinity", "-Infinity", '{"a": NaN}', "[1, Infinity, 2]"):
+            with pytest.raises(ValidationError, match="not valid JSON"):
+                kb.assert_literal(entity.id, "Thing.payload", value, "JSON", AUTHOR)
+
+    def test_oversized_value_truncated_in_error_message(self, make_kb: KbFactory) -> None:
+        """A rejected literal too large to usefully echo back is truncated
+        in the ValidationError message, not embedded in full (KI-049
+        review) - regression coverage for _value_for_error."""
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        oversized = "x" * 5000
+        with pytest.raises(ValidationError, match="not a valid Integer") as exc_info:
+            kb.assert_literal(entity.id, "Thing.count", oversized, "Integer", AUTHOR)
+        assert len(str(exc_info.value)) < len(oversized)
+        assert "chars total" in str(exc_info.value)
+
+    def test_propose_also_validates_content(self, make_kb: KbFactory) -> None:
+        """The content check runs at both literal-write entry points, not
+        just assert_literal."""
+        kb = self._kb_with_typed_predicates(make_kb)
+        entity = kb.create_entity("Thing", author=AUTHOR)
+        with pytest.raises(ValidationError, match="not a valid Integer"):
+            kb.propose(entity.id, "Thing.count", "unknown", "Integer", AUTHOR)
+
+    def test_content_validation_permitted_without_a_registered_schema(
+        self, make_kb: KbFactory
+    ) -> None:
+        """No schema in the namespace: nothing to validate content
+        against, matching the existing no-schema precedent for the
+        value_type token check (KI-031)."""
+        clock = FixedClock(T0)
+        ids = FixedIdProvider(["p-0", "e-1", "a-1"])
+        kb = make_kb(clock, ids)
+        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+        entity = kb.create_entity("Thing", author=AUTHOR)
+
+        assertion = kb.assert_literal(entity.id, "Thing.count", "not-an-integer", "Integer", AUTHOR)
+        assert assertion.value == "not-an-integer"
+
+    def test_content_error_not_re_raised_at_proposal_replay(self, make_kb: KbFactory) -> None:
+        """Matches _require_known_predicate's other checks (KI-031, KI-040):
+        the content check runs once at propose() time (or not at all, if no
+        schema is registered yet), not again when the accepted proposal's
+        operations are replayed - see ADR-0028's own pre-existing
+        Consequences bullet (a): a proposal submitted against a schema-less
+        namespace, followed by apply_schema before acceptance, replays
+        unvalidated. Genuinely exercises the replay path, not a case that
+        would pass either way: the proposal below stages content that IS
+        invalid Integer content, submitted BEFORE Thing.count is declared
+        Integer, so _require_known_predicate's content check never ran for
+        it at propose() time (schema was None) - if _replay_proposal_operations
+        re-validated content (it must not), accept_proposal below would
+        raise instead of succeeding."""
+        clock = FixedClock(T0)
+        ids = FixedIdProvider([f"id-{i}" for i in range(20)])
+        kb = make_kb(clock, ids)
+        low_trust_author = "low-trust@example.com"
+        kb.create_principal(
+            low_trust_author,
+            kind="human",
+            auth_method="oidc",
+            default_capability="propose",
+            trust_level=0,
+        )
+        kb.create_principal(ADMIN, kind="human", auth_method="oidc", default_capability="admin")
+        entity = kb.create_entity("Thing", author=low_trust_author)
+
+        proposal, decision = kb.propose(
+            entity.id, "Thing.count", "not-an-integer", "Integer", low_trust_author
+        )
+        assert decision.__class__.__name__ == "RequireReview"
+
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Thing": ConceptDef(
+                    name="Thing",
+                    properties={"count": PropertyDef(name="count", value_type="Integer")},
+                ),
+            },
+        )
+        kb.apply_schema(schema, author=ADMIN)
+
+        # A fresh assert_literal with the same malformed content is rejected
+        # now that the schema exists - proving the check is genuinely live,
+        # not just absent from this test's own setup.
+        with pytest.raises(ValidationError, match="not a valid Integer"):
+            kb.assert_literal(entity.id, "Thing.count", "not-an-integer", "Integer", ADMIN)
+
+        # But the already-staged proposal, whose content was never checked
+        # at submission time (no schema existed then), still replays
+        # unvalidated - proving _replay_proposal_operations does not
+        # re-run the content check.
+        accepted = kb.accept_proposal(proposal.id, ADMIN)
+        assert accepted.state == "accepted"
+        committed = kb.assertions(subject=entity.id, predicate="Thing.count")
+        assert committed[0].value == "not-an-integer"
+
+
 class TestPredicateKindMismatch:
     """KI-040: a write's kind (literal vs. ref) must match the predicate's
     schema-declared kind (property vs. relation)."""

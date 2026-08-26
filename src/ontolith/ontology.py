@@ -4,10 +4,12 @@ The Ontology class is the primary API surface for users. It wraps the storage
 backend and provides high-level methods for entities, assertions, and queries.
 """
 
+import json
+import re
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NoReturn
 
 from ontolith.core import (
     Assertion,
@@ -40,6 +42,38 @@ from ontolith.store.base import DEFAULT_NAMESPACE, StorageBackend
 
 if TYPE_CHECKING:
     from ontolith.plugins.ports import Validator
+
+
+# KI-049: ASCII-only, no whitespace/underscore-separator/unicode-digit
+# leniency - int()/float() alone accept PEP-515 underscores, surrounding
+# whitespace, and (for int()) non-ASCII decimal digits, none of which the
+# KI-039 SQL CAST/TRY_CAST paths this validation exists to back up agree on
+# across backends (verified empirically during review: e.g. SQLite casts
+# "5_000" to 0, DuckDB to 5000). float() additionally accepts "inf"/"nan",
+# neither a JSON- or SQL-numeric-cast-compatible value.
+_INTEGER_RE = re.compile(r"[+-]?[0-9]+")
+_FLOAT_RE = re.compile(r"[+-]?(?:[0-9]+\.[0-9]*|\.[0-9]+|[0-9]+)(?:[eE][+-]?[0-9]+)?")
+
+# Cap how much of an oversized literal a ValidationError message repeats
+# back - a rejected multi-MB blob shouldn't be echoed in full into an
+# exception surfaced through REST/CLI.
+_MAX_VALUE_IN_ERROR = 200
+
+
+def _value_for_error(value: str) -> str:
+    """`repr()` of `value`, truncated so an oversized literal doesn't blow
+    up a `ValidationError` message (KI-049 review)."""
+    if len(value) <= _MAX_VALUE_IN_ERROR:
+        return repr(value)
+    return f"{value[:_MAX_VALUE_IN_ERROR]!r}... ({len(value)} chars total)"
+
+
+def _reject_json_constant(token: str) -> NoReturn:
+    """`json.loads(..., parse_constant=)` hook rejecting Python's
+    non-standard `NaN`/`Infinity`/`-Infinity` extensions (KI-049 review) -
+    not valid RFC 8259 JSON, so not well-formed content for `value_type="JSON"`
+    even though the stdlib parser accepts them by default."""
+    raise ValueError(f"{token!r} is not valid JSON (RFC 8259 has no NaN/Infinity)")
 
 
 class AsOfView:
@@ -461,6 +495,7 @@ class Ontology:
         self,
         predicate: str,
         value_type: str | None = None,
+        value: str | None = None,
         *,
         expected_kind: Literal["property", "relation"],
     ) -> None:
@@ -470,7 +505,16 @@ class Ontology:
         When `value_type` is given (literal write paths only), also reject a
         mismatch against the schema-declared `PropertyDef.value_type`
         (KI-031) — e.g. writing `value_type="Text"` against a predicate
-        declared `Integer`.
+        declared `Integer`. When `value` is *also* given, further reject
+        content that doesn't actually parse as that declared type (KI-049)
+        — e.g. `value_type="Integer"` matching the schema, but
+        `value="unknown"` not being a valid integer — via
+        `_validate_literal_value`. `value` is accepted separately from
+        `value_type` (rather than inferring "validate content" from
+        `value_type` alone) so a caller can still run the token-mismatch
+        check without the content check when it has no `value` to check
+        against (there are none today, but this keeps the two concerns
+        independently triggerable rather than accidentally coupled).
 
         `expected_kind` (required, KI-040) rejects a predicate-kind
         mismatch — a literal write (`assert_literal`/`propose`,
@@ -506,6 +550,8 @@ class Ontology:
                     f"schema {schema.namespace!r} version {schema.version}, but this "
                     f"write supplies value_type={value_type!r}"
                 )
+            if declared is not None and value is not None:
+                self._validate_literal_value(value, declared)
         actual_kind = schema.kind_of(predicate)
         if actual_kind is not None and actual_kind != expected_kind:
             wrong_call = (
@@ -523,6 +569,83 @@ class Ontology:
                 f"{schema.namespace!r} version {schema.version}, but {wrong_call} "
                 f"asserts a {expected_kind}. Use {right_call} instead."
             )
+
+    def _validate_literal_value(self, value: str, value_type: str) -> None:
+        """Parse `value` against its schema-declared `value_type` and raise
+        `ValidationError` if it isn't well-formed content for that type
+        (KI-049, SPEC §4). Only called from `_require_known_predicate` once
+        `value_type` is already confirmed to match the schema's own
+        declaration for the predicate — `value_type` here is always one of
+        SPEC §4's closed eight (`PropertyDef.value_type` is a `Literal`),
+        never an arbitrary caller-supplied string.
+
+        `Text` has no format to validate — any string is well-formed Text,
+        so it falls through every branch below as a no-op.
+
+        Enforcement is submission-time only, exactly like the `value_type`
+        token check it sits beside — not retroactive against already-stored
+        data (no migration mechanism exists, KI-048) and not re-run at
+        proposal replay time (`_replay_proposal_operations`), matching
+        `_require_known_predicate`'s own established, documented precedent
+        for its other checks.
+        """
+        if value_type == "Integer":
+            if not _INTEGER_RE.fullmatch(value):
+                raise ValidationError(f"Value {_value_for_error(value)} is not a valid Integer")
+        elif value_type == "Float":
+            if not _FLOAT_RE.fullmatch(value):
+                raise ValidationError(f"Value {_value_for_error(value)} is not a valid Float")
+        elif value_type == "Boolean":
+            # Case-insensitive "true"/"false" only - not "1"/"0", which
+            # would blur the line with Integer (decided explicitly, not
+            # the only defensible choice - see KI-049's Fix text). No
+            # surrounding-whitespace leniency either (unlike a bare
+            # .strip() would give), matching Integer/Float's exact-match
+            # regexes - a value with whitespace would round-trip as stored
+            # (with the whitespace) but silently fail to match a
+            # .where(predicate="true")-style equality filter later
+            # (review finding: an internal inconsistency worth avoiding,
+            # not a cross-backend divergence like Integer/Float's).
+            if value.lower() not in ("true", "false"):
+                raise ValidationError(
+                    f"Value {_value_for_error(value)} is not a valid Boolean "
+                    "(expected 'true' or 'false', case-insensitive)"
+                )
+        elif value_type == "Date":
+            try:
+                date.fromisoformat(value)
+            except ValueError:
+                raise ValidationError(
+                    f"Value {_value_for_error(value)} is not a valid Date "
+                    "(expected Python's date.fromisoformat grammar, e.g. '2026-01-01')"
+                ) from None
+        elif value_type == "DateTime":
+            try:
+                datetime.fromisoformat(value)
+            except ValueError:
+                raise ValidationError(
+                    f"Value {_value_for_error(value)} is not a valid DateTime "
+                    "(expected Python's datetime.fromisoformat grammar)"
+                ) from None
+        elif value_type == "URI":
+            # SPEC's URI maps to LinkML's `uriorcurie` (ADR-0013) - both a
+            # full URI (scheme:...) and a CURIE (prefix:local-name) are
+            # valid, so this only requires a non-empty prefix and a
+            # non-empty remainder either side of the first ':', not a
+            # strict RFC 3986 scheme.
+            prefix, sep, rest = value.partition(":")
+            if not sep or not prefix or not rest:
+                raise ValidationError(
+                    f"Value {_value_for_error(value)} is not a valid URI or CURIE "
+                    "(expected 'scheme:...' or 'prefix:local-name')"
+                )
+        elif value_type == "JSON":
+            try:
+                json.loads(value, parse_constant=_reject_json_constant)
+            except ValueError as exc:
+                raise ValidationError(
+                    f"Value {_value_for_error(value)} is not valid JSON: {exc}"
+                ) from None
 
     def _run_validators(self, assertion: Assertion) -> None:
         """Run `self.validators` against a single about-to-commit assertion
@@ -685,12 +808,13 @@ class Ontology:
         Raises:
             ValidationError: predicate is not declared in the active schema,
                 value_type does not match the schema-declared value_type
-                for predicate (KI-031), predicate is declared a relation
-                rather than a property (KI-040), or a registered
+                for predicate (KI-031), value does not parse as that
+                declared value_type (KI-049), predicate is declared a
+                relation rather than a property (KI-040), or a registered
                 `Validator` rejects the assertion (KI-042)
         """
         self._check_direct_write_capability(author, acting_as)
-        self._require_known_predicate(predicate, value_type, expected_kind="property")
+        self._require_known_predicate(predicate, value_type, value, expected_kind="property")
         temporality = self._resolve_temporality(predicate)
 
         assertion = Assertion(
@@ -962,13 +1086,14 @@ class Ontology:
             ValidationError: author is ai-kind and model is not provided,
                 predicate is not declared in the active schema, value_type
                 does not match the schema-declared value_type for predicate
-                (KI-031), predicate is declared a relation rather than a
+                (KI-031), value does not parse as that declared value_type
+                (KI-049), predicate is declared a relation rather than a
                 property (KI-040), or (on auto-accept) a registered
                 `Validator` rejects the assertion (KI-042)
         """
         principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
-        self._require_known_predicate(predicate, value_type, expected_kind="property")
+        self._require_known_predicate(predicate, value_type, value, expected_kind="property")
         delegating = self._resolve_delegation(principal, author, acting_as)
         temporality = self._resolve_temporality(predicate)
 
@@ -1718,15 +1843,16 @@ class Ontology:
         stored snapshot (`TestAcceptProposalReResolvesTemporality`) — the
         schema may have changed between proposal creation and replay.
         `_require_known_predicate`'s validations (unknown-predicate,
-        `value_type` mismatch KI-031, predicate-kind mismatch KI-040) are
-        deliberately NOT re-run here, unlike temporality — the original
+        `value_type` mismatch KI-031, literal content vs. declared
+        value_type KI-049, predicate-kind mismatch KI-040) are deliberately
+        NOT re-run here, unlike temporality — the original
         `propose`/`propose_ref` call already ran them once; re-running them
         at replay time is `resubmit`'s own documented precedent to skip
         (see its docstring), not something this method decides on its own.
         A schema change between submission and replay (e.g. a property
         redeclared a relation) can therefore let a now-mismatched write
         through unchecked — a narrow, pre-existing gap shared with KI-031,
-        not new to KI-040. `self.validators` (KI-042, ADR-0029), by
+        not new to KI-040 or KI-049. `self.validators` (KI-042, ADR-0029), by
         contrast, IS re-run here for each assert_literal/assert_ref op —
         every commit point runs the same per-assertion Validators, so a
         proposal that went through review isn't exempt from them just
