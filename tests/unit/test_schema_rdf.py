@@ -29,6 +29,35 @@ class TestIriHelpers:
     def test_iri_for_entity(self) -> None:
         assert iri_for_entity("default", "e-1") == URIRef("urn:ontolith:default:entity:e-1")
 
+    def test_dotted_predicate_survives_percent_encoding(self) -> None:
+        """ "." is always left unescaped by urllib.parse.quote (RFC 3986
+        unreserved), so the "Concept.field" dotted structure survives
+        being percent-encoded as a single unit."""
+        assert iri_for_property("default", "Person.name") == URIRef(
+            "urn:ontolith:default:property:Person.name"
+        )
+
+    def test_iri_helpers_percent_encode_unsafe_characters(self) -> None:
+        """A LinkML-imported schema (schema/linkml.py::from_yaml) takes
+        names verbatim from YAML keys, which idiomatically include spaces
+        or a URL `id:` - either breaks unescaped urn:/Turtle IRI syntax.
+        Found in review: reproduced an actual rdflib serialization crash
+        on a realistic LinkML document before this fix."""
+        assert base_iri("https://example.org/ns") == "urn:ontolith:https%3A%2F%2Fexample.org%2Fns:"
+        assert iri_for_concept("default", "named thing") == URIRef(
+            "urn:ontolith:default:class:named%20thing"
+        )
+        assert iri_for_property("default", "Person.full name") == URIRef(
+            "urn:ontolith:default:property:Person.full%20name"
+        )
+        assert iri_for_entity("default", "e 1") == URIRef("urn:ontolith:default:entity:e%201")
+
+    def test_iri_helpers_percent_encode_non_ascii(self) -> None:
+        """RFC 8141 URNs are URIs and are ASCII-only - non-ASCII names
+        (valid Turtle IRIs on their own) must be percent-encoded to remain
+        valid URN syntax."""
+        assert iri_for_concept("default", "Üni") == URIRef("urn:ontolith:default:class:%C3%9Cni")
+
 
 class TestValueTypeToXsd:
     def test_maps_all_eight_value_types(self) -> None:
@@ -137,6 +166,58 @@ class TestToOwl:
         prop_iri = iri_for_property("default", "Person.name")
         assert (prop_iri, RDF.type, OWL.FunctionalProperty) in graph
 
+    def test_single_cardinality_time_varying_property_is_not_functional(self) -> None:
+        """A time_varying predicate can hold multiple simultaneously-active
+        assertions with non-overlapping validity windows (SPEC §10.2,
+        bitemporal.md - e.g. employment history) even at cardinality
+        "single" - declaring it owl:FunctionalProperty would assert a real
+        OWL inconsistency (two literals on a functional datatype property)
+        for a state this codebase's own bitemporal model considers valid.
+        Found in review."""
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "title": PropertyDef(
+                            name="title",
+                            value_type="Text",
+                            cardinality="single",
+                            temporality="time_varying",
+                        )
+                    },
+                )
+            },
+        )
+        graph = to_owl(schema)
+        prop_iri = iri_for_property("default", "Person.title")
+        assert (prop_iri, RDF.type, OWL.FunctionalProperty) not in graph
+
+    def test_single_cardinality_time_varying_relation_is_not_functional(self) -> None:
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    relations={
+                        "employer": RelationDef(
+                            name="employer",
+                            target_concept="Organization",
+                            cardinality="single",
+                            temporality="time_varying",
+                        )
+                    },
+                ),
+                "Organization": ConceptDef(name="Organization"),
+            },
+        )
+        graph = to_owl(schema)
+        rel_iri = iri_for_property("default", "Person.employer")
+        assert (rel_iri, RDF.type, OWL.FunctionalProperty) not in graph
+
     def test_many_cardinality_property_is_not_functional(self) -> None:
         schema = SchemaIR(
             namespace="default",
@@ -206,6 +287,35 @@ class TestToOwl:
         assert (employer_iri, OWL.inverseOf, employees_iri) in graph
         assert (employees_iri, OWL.inverseOf, employer_iri) in graph
 
+    def test_inverse_target_declared_object_property_even_if_not_independently_declared(
+        self,
+    ) -> None:
+        """OWL 2 DL requires a declaration axiom for every IRI used as an
+        object property - the target concept isn't required to
+        independently declare the relation back (an inverse can be a pure
+        forward reference), so the referenced IRI must still be declared
+        here or the ontology silently demotes to OWL 2 Full. Found in
+        review."""
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    relations={
+                        "employer": RelationDef(
+                            name="employer", target_concept="Organization", inverse="employees"
+                        )
+                    },
+                ),
+                # Organization does NOT declare "employees" back.
+                "Organization": ConceptDef(name="Organization"),
+            },
+        )
+        graph = to_owl(schema)
+        undeclared_inverse_iri = iri_for_property("default", "Organization.employees")
+        assert (undeclared_inverse_iri, RDF.type, OWL.ObjectProperty) in graph
+
     def test_relation_without_inverse_has_no_inverse_of_triple(self) -> None:
         schema = SchemaIR(
             namespace="default",
@@ -242,6 +352,32 @@ class TestToOwl:
                     },
                 ),
                 "Organization": ConceptDef(name="Organization"),
+            },
+        )
+        graph = to_owl(schema)
+        serialized = graph.serialize(format="turtle")
+
+        reparsed = Graph()
+        reparsed.parse(data=serialized, format="turtle")
+        assert len(reparsed) == len(graph)
+
+    def test_linkml_style_names_serialize_without_crashing(self) -> None:
+        """Regression test for a real rdflib serialization crash found in
+        review: a realistic LinkML-imported schema (URL namespace, class
+        names with spaces, per idiomatic LinkML style) previously produced
+        unescaped urn:/Turtle IRIs that rdflib's own writer rejected with a
+        bare Exception at serialize() time - not a graph-construction
+        error, so to_owl() itself appeared to succeed."""
+        from rdflib import Graph
+
+        schema = SchemaIR(
+            namespace="https://w3id.org/linkml/examples/personinfo",
+            version=1,
+            concepts={
+                "named thing": ConceptDef(
+                    name="named thing",
+                    properties={"full name": PropertyDef(name="full name", value_type="Text")},
+                )
             },
         )
         graph = to_owl(schema)

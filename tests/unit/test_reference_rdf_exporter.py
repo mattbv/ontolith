@@ -88,6 +88,24 @@ class TestExport:
         assert str(literal) == "Ada"
         assert literal.datatype == XSD.string  # type: ignore[union-attr]
 
+    def test_entities_written_counts_distinct_entities_not_assertions(self, kb: Ontology) -> None:
+        """Two assertions on the SAME entity must count as 1 entity, 2
+        assertions - entities_written and assertions_written must not be
+        indistinguishable (found in review: no prior test exercised
+        multiple assertions on one subject, so this distinction was
+        untested)."""
+        _apply_schema(kb)
+        write_view = WriteView(kb, PLUGIN_PRINCIPAL)
+        org = write_view.create_entity("Organization")
+        person = write_view.create_entity("Person")
+        write_view.propose(person.id, "Person.name", "Ada", "Text")
+        write_view.propose_ref(person.id, "Person.employer", org.id)
+
+        report = RdfExporter().export(ReadOnlyView(kb, PLUGIN_PRINCIPAL), io.StringIO())
+
+        assert report.entities_written == 1
+        assert report.assertions_written == 2
+
     def test_exports_ref_assertion_as_object_property_triple(self, kb: Ontology) -> None:
         """`org` owns no assertions of its own (only `person` does, the ref
         assertion's subject) - only its IRI appears, as the triple's
@@ -171,3 +189,39 @@ class TestExport:
             RDF.type,
             iri_for_concept("default", "Person"),
         ) in graph
+
+    def test_predicate_removed_from_schema_still_gets_declared(self, kb: Ontology) -> None:
+        """OWL 2 DL requires a declaration for every property IRI used.
+        to_owl() only declares what the CURRENT schema has, but an
+        assertion written under a since-removed predicate can still be
+        active (no migration/backfill mechanism exists, KI-048) - the
+        exporter must declare it too, or the exported ontology references
+        an undeclared property IRI. Found in review."""
+        write_view = WriteView(kb, PLUGIN_PRINCIPAL)
+        v1 = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={"nickname": PropertyDef(name="nickname", value_type="Text")},
+                )
+            },
+        )
+        kb.apply_schema(v1, author=ADMIN)
+        entity = write_view.create_entity("Person")
+        write_view.propose(entity.id, "Person.nickname", "Ace", "Text")
+
+        # v2 no longer declares "nickname" - the old assertion is still active.
+        v2 = SchemaIR(
+            namespace="default", version=2, concepts={"Person": ConceptDef(name="Person")}
+        )
+        kb.apply_schema(v2, author=ADMIN)
+
+        buf = io.StringIO()
+        RdfExporter().export(ReadOnlyView(kb, PLUGIN_PRINCIPAL), buf)
+        graph = Graph()
+        graph.parse(data=buf.getvalue(), format="turtle")
+
+        removed_predicate_iri = iri_for_property("default", "Person.nickname")
+        assert (removed_predicate_iri, RDF.type, OWL.DatatypeProperty) in graph
