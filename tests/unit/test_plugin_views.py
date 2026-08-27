@@ -73,6 +73,25 @@ class TestReadOnlyView:
         view = ReadOnlyView(kb, "plugin-x")
         assert view.principal_id == "plugin-x"
 
+    def test_schema_returns_none_when_none_applied(self, kb: Ontology) -> None:
+        view = ReadOnlyView(kb, "plugin-x")
+        assert view.schema() is None
+
+    def test_schema_returns_applied_schema(self, kb: Ontology) -> None:
+        from ontolith.schema import ConceptDef, SchemaIR
+
+        kb.create_principal("admin-x", kind="human", auth_method="oidc", default_capability="admin")
+        schema = SchemaIR(
+            namespace="default", version=1, concepts={"Person": ConceptDef(name="Person")}
+        )
+        kb.apply_schema(schema, author="admin-x")
+
+        view = ReadOnlyView(kb, "plugin-x")
+        result = view.schema()
+        assert result is not None
+        assert result.version == 1
+        assert "Person" in result.concepts
+
 
 class TestWriteView:
     @pytest.mark.parametrize("method_name", _FORBIDDEN_METHODS)
