@@ -415,7 +415,7 @@ Added a `token: str` parameter to `schema_tool`/`get_tool`/`query_tool`/`provena
 ## KI-022 — REST interface (SPEC §14.3) ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — named M3 scope item with zero implementation; all originally-deferred pieces now closed
-**Milestone target:** M3 — full SPEC §14.3 parity (`/query` offset pagination, GraphQL) remains Backlog, tracked as separate concerns, not blocked on this KI
+**Milestone target:** M3 — full SPEC §14.3 parity except `/query` offset pagination (tracked as a separate concern, not blocked on this KI); GraphQL resolved separately (ADR-0037)
 **SPEC reference:** SPEC §14.3 (REST + GraphQL), §16 (error model), §17 (security model)
 
 ### Description
@@ -443,7 +443,9 @@ GraphQL (SPEC §14.3's other named half) is untouched by this KI and remains ful
 
 **`GET /namespaces` (namespace registry): resolved (2026-07-28, ADR-0022 update).** New `Namespace` model (`ontolith.core.namespace`), `StorageBackend.list_namespaces()` port method (both backends, modeled on SPEC §12.2's own normative `namespace` table — resolving ADR-0022's own open question of table-vs-`DISTINCT` in the table's favor), `Ontology.list_namespaces()` (ungated, like `proposals()`/`contradictions()`), `GET /namespaces` (REST), and `ontolith namespace list` (CLI). Both backends idempotently register `DEFAULT_NAMESPACE` (`"default"`) at schema-creation time, and `put_schema()` idempotently registers `schema.namespace` too — otherwise a namespace with only a schema applied, no entities, would be invisible to the registry, the exact blind spot the table-over-`DISTINCT` decision was meant to close. No explicit `put_namespace`/create-namespace API was added; this project remains single-namespace throughout (ADR-0015). See ADR-0022's Update section for the full list of what's deliberately still out of scope (namespace-creation API, `Ontology.connect(namespace=...)`, per-namespace `principal_trust`/plugin isolation/read scoping, namespace-existence validation on other routes).
 
-**Still open, tracked as separate concerns (not blocked on "no backing method"):** `/query` offset pagination — `QueryBuilder` only supports `.limit()`, no `.offset()`; extending it is a `query/`+`store/` change, out of scope for "expose the existing SDK over HTTP." GraphQL (SPEC §14.3's other named half) remains fully unscoped.
+**GraphQL (SPEC §14.3's other named half): resolved separately (2026-08-27, ADR-0037).** `src/ontolith/interfaces/graphql.py` (`create_graphql_app`) — deliberately scoped to SPEC's literal wording (query/propose/review only, no direct-write or principal-admin mutations), not REST's fuller surface. See ADR-0037 for the full design.
+
+**Still open, tracked as a separate concern (not blocked on "no backing method"):** `/query` offset pagination — `QueryBuilder` only supports `.limit()`, no `.offset()`; extending it is a `query/`+`store/` change, out of scope for "expose the existing SDK over HTTP," and applies equally to both REST and GraphQL once addressed.
 
 ---
 
