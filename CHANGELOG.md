@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3) (In Progress)
 
 #### Added
+- RDF/OWL bridge, export only (SPEC §13.3, ADR-0036): `schema.rdf.to_owl(schema)`
+  translates a `SchemaIR` into an OWL ontology (`rdflib.Graph`) — concepts become
+  `owl:Class`, properties become `owl:DatatypeProperty` (XSD-typed range), relations
+  become `owl:ObjectProperty` (`owl:inverseOf` if declared), `cardinality="single"`
+  additionally typed `owl:FunctionalProperty`. New `RdfExporter` reference plugin
+  (`plugins.reference.rdf_exporter`, entry point `rdf-owl-exporter`) adds active
+  assertions as RDF instance data on top — one `rdf:type` triple per distinct entity
+  seen, one property triple per active assertion — and serializes the combined graph
+  (Turtle by default; any `rdflib` format). New `rdflib` dependency in the `interop`
+  extra, not the real `linkml`/`linkml-runtime` packages ADR-0013 already rejected for
+  the adjacent YAML bridge. Deterministic `urn:ontolith:{namespace}:...` IRI scheme, no
+  dependency on a schema's LinkML-sourced `default_prefix`/`prefixes` metadata. `from_owl`
+  (import direction) is explicitly out of scope for v1. `ReadOnlyView` gains a new
+  `schema()` method — the first reference plugin needing schema access, not just
+  entity/assertion data.
 - Class-based schema DSL compiler and `Ontology.apply_schema` (SPEC §6.2)
 - LinkML-aligned YAML schema front-end: `to_yaml`/`from_yaml`, a deliberately-scoped
   dialect subset documented in ADR-0013, with schema-level `default_range` support and
