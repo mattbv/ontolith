@@ -23,12 +23,20 @@ individuals — an entity with zero active assertions never appears in
 `kb.assertions()`'s iteration, so it's never seen here. Matches
 `JsonExporter`'s own assertion-driven scope (not an entity-driven export);
 not a new limitation this plugin introduces.
+
+Every property/relation IRI a written triple actually uses is declared its
+own `owl:DatatypeProperty`/`owl:ObjectProperty` type here too, even for a
+predicate the *current* schema no longer declares (no migration/backfill
+mechanism exists, KI-048, so an already-active assertion under a
+retyped/removed predicate is still reachable) — OWL 2 DL requires a
+declaration for every property IRI used, and `to_owl()` alone only
+declares what the current schema still has.
 """
 
 from dataclasses import dataclass
 from pathlib import Path
 
-from rdflib import RDF
+from rdflib import OWL, RDF
 from rdflib import Literal as RdfLiteral
 
 from ontolith.plugins.manifest import PluginCapabilities, PluginManifest
@@ -44,7 +52,17 @@ from ontolith.schema.rdf import (
 
 @dataclass(frozen=True)
 class RdfExportReport:
-    """Summary of a completed RDF/OWL export."""
+    """Summary of a completed RDF/OWL export.
+
+    Attributes:
+        entities_written: Distinct subjects that received an `rdf:type`
+            triple — i.e. actually resolved via `kb.get_entity()`. Not the
+            same as "distinct subjects seen": a subject whose entity
+            somehow doesn't resolve (unreachable in practice, see
+            `RdfExporter.export`'s own comment) still gets its property
+            triples written but doesn't count here.
+        assertions_written: Active assertions written as property triples.
+    """
 
     entities_written: int
     assertions_written: int
@@ -86,26 +104,43 @@ class RdfExporter:
 
         graph = to_owl(schema)
 
-        entities_seen: set[str] = set()
+        entities_typed: set[str] = set()
+        entities_probed: set[str] = set()
         assertions_written = 0
         for assertion in kb.assertions():
             subject_iri = iri_for_entity(schema.namespace, assertion.subject)
-            if assertion.subject not in entities_seen:
+            if assertion.subject not in entities_probed:
+                entities_probed.add(assertion.subject)
                 entity = kb.get_entity(assertion.subject)
+                # entity is always found in practice (assertion.subject has
+                # a real FK to entity.id) - degrades gracefully rather than
+                # raising if it somehow isn't: the rdf:type triple (and the
+                # entities_written count) is skipped, but the property
+                # triple below still gets written.
                 if entity is not None:
                     graph.add(
                         (subject_iri, RDF.type, iri_for_concept(schema.namespace, entity.concept))
                     )
-                entities_seen.add(assertion.subject)
+                    entities_typed.add(assertion.subject)
 
             predicate_iri = iri_for_property(schema.namespace, assertion.predicate)
+            # OWL 2 DL requires a declaration for every property IRI used -
+            # to_owl() only declares predicates the *current* schema still
+            # has, so a predicate a later schema migration removed (no
+            # migration/backfill mechanism exists, so an old assertion
+            # under a retyped/removed predicate can still be active) would
+            # otherwise be used here with no declaration anywhere in the
+            # graph. Declaring it here too is a no-op for the common case
+            # where it's already declared (RDF graphs are sets).
             if assertion.value_kind == "literal":
                 assert assertion.value_type is not None  # required for value_kind="literal"
+                graph.add((predicate_iri, RDF.type, OWL.DatatypeProperty))
                 datatype = value_type_to_xsd(assertion.value_type)
                 graph.add(
                     (subject_iri, predicate_iri, RdfLiteral(assertion.value, datatype=datatype))
                 )
             else:
+                graph.add((predicate_iri, RDF.type, OWL.ObjectProperty))
                 graph.add(
                     (subject_iri, predicate_iri, iri_for_entity(schema.namespace, assertion.value))
                 )
@@ -121,7 +156,7 @@ class RdfExporter:
             raise TypeError(f"Unsupported RDF export target type: {type(target).__name__}")
 
         return RdfExportReport(
-            entities_written=len(entities_seen), assertions_written=assertions_written
+            entities_written=len(entities_typed), assertions_written=assertions_written
         )
 
 

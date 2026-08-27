@@ -32,6 +32,8 @@ conformance) — left as an explicit future decision, not silently dropped.
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from rdflib import OWL, RDF, RDFS, XSD, Graph, Literal, URIRef
 
 from ontolith.schema.ir import SchemaIR
@@ -85,13 +87,27 @@ def base_iri(namespace: str) -> str:
     IRI minting simple and namespace-derived only; honoring an imported
     LinkML schema's own declared prefixes for RDF/OWL export is a
     reasonable follow-up, not implemented here.
+
+    `namespace` is percent-encoded (`urllib.parse.quote`, default safe
+    set) before being embedded - `SchemaIR.namespace`/`ConceptDef.name`/
+    `PropertyDef.name`/`RelationDef.name` are unconstrained `str` in the
+    IR (schema/ir.py has no character-set validation), and the class-DSL/
+    ULID-entity-id paths that happen to produce IRI-safe strings today
+    aren't the only way to build a `SchemaIR` - a LinkML-imported schema
+    (schema/linkml.py::from_yaml) takes names verbatim from YAML keys,
+    which idiomatically include spaces (`"named thing"`) or a URL `id:`,
+    either of which breaks unescaped `urn:` NSS/Turtle IRI syntax (found
+    in review: reproduced an actual rdflib serialization crash on a
+    realistic LinkML document). Percent-encoding every name component
+    closes this for every caller of this module's IRI helpers, not just
+    the ones already known to be safe.
     """
-    return f"urn:ontolith:{namespace}:"
+    return f"urn:ontolith:{quote(namespace, safe='')}:"
 
 
 def iri_for_concept(namespace: str, concept_name: str) -> URIRef:
     """IRI for a concept's OWL class."""
-    return URIRef(f"{base_iri(namespace)}class:{concept_name}")
+    return URIRef(f"{base_iri(namespace)}class:{quote(concept_name, safe='')}")
 
 
 def iri_for_property(namespace: str, predicate: str) -> URIRef:
@@ -101,13 +117,16 @@ def iri_for_property(namespace: str, predicate: str) -> URIRef:
     everywhere else in this codebase (`Assertion.predicate`,
     `SchemaIR.value_type_of()`, ...) - reusing it here keeps property IRIs
     directly traceable back to the predicate that produced the triple.
+    Percent-encoded as one unit (not per dotted segment) - `.` is always
+    left unescaped by `urllib.parse.quote` (RFC 3986 unreserved), so the
+    dotted structure survives encoding intact.
     """
-    return URIRef(f"{base_iri(namespace)}property:{predicate}")
+    return URIRef(f"{base_iri(namespace)}property:{quote(predicate, safe='')}")
 
 
 def iri_for_entity(namespace: str, entity_id: str) -> URIRef:
     """IRI for an entity's RDF individual."""
-    return URIRef(f"{base_iri(namespace)}entity:{entity_id}")
+    return URIRef(f"{base_iri(namespace)}entity:{quote(entity_id, safe='')}")
 
 
 def to_owl(schema: SchemaIR) -> Graph:
@@ -125,13 +144,37 @@ def to_owl(schema: SchemaIR) -> Graph:
     the graph; this is valid RDF, just not necessarily a *populated*
     property in this specific export).
 
-    `cardinality="single"` (the schema default, ADR-0017) is additionally
-    typed `owl:FunctionalProperty` — the standard OWL idiom for "at most
-    one value", requiring no cardinality-restriction blank nodes.
+    `cardinality="single"` **and** `temporality="static"` (both the schema
+    defaults, ADR-0017/SPEC §10.1) are additionally typed
+    `owl:FunctionalProperty` — the standard OWL idiom for "at most one
+    value", requiring no cardinality-restriction blank nodes.
+    `temporality="time_varying"` is deliberately excluded even when
+    `cardinality="single"`: SPEC §10.2/bitemporal.md allow multiple
+    `active` assertions on the same time_varying predicate to coexist
+    whenever their validity windows don't overlap (e.g. employment
+    history) — declaring such a property `owl:FunctionalProperty` would
+    assert a real OWL logical inconsistency (a reasoner given two
+    literals on a functional datatype property reports the ontology
+    unsatisfiable) for a state this codebase's own bitemporal model
+    considers entirely valid. This export has no representation of valid
+    time at all (see Consequences in ADR-0036) — every active assertion
+    becomes one triple regardless of its validity window — so a
+    time_varying property's cardinality genuinely isn't "at most one" in
+    the exported graph, only "at most one **currently**, `as_of` the
+    export moment" is what the KB itself would guarantee, and even that
+    isn't expressible as a static OWL axiom.
+
     `required` is NOT encoded as an `owl:minCardinality` restriction —
     consistent with ADR-0028's core stance that `required` is
     validator-backed policy, not a structural constraint this codebase
     enforces at the core/schema layer.
+
+    Every property/relation IRI referenced via `owl:inverseOf` is also
+    declared its own `owl:ObjectProperty` type, even when the target
+    concept doesn't independently declare that relation back (KI review
+    finding: OWL 2 DL requires a declaration axiom for every IRI used as
+    an object property; an undeclared `owl:inverseOf` target silently
+    demotes the ontology to OWL 2 Full, which most reasoners reject).
 
     Args:
         schema: The `SchemaIR` to translate.
@@ -163,7 +206,7 @@ def to_owl(schema: SchemaIR) -> Graph:
             graph.add((prop_iri, RDFS.domain, class_iri))
             graph.add((prop_iri, RDFS.range, value_type_to_xsd(prop.value_type)))
             graph.add((prop_iri, RDFS.label, Literal(prop.name)))
-            if prop.cardinality == "single":
+            if prop.cardinality == "single" and prop.temporality == "static":
                 graph.add((prop_iri, RDF.type, OWL.FunctionalProperty))
             if prop.description:
                 graph.add((prop_iri, RDFS.comment, Literal(prop.description)))
@@ -174,12 +217,17 @@ def to_owl(schema: SchemaIR) -> Graph:
             graph.add((rel_iri, RDFS.domain, class_iri))
             graph.add((rel_iri, RDFS.range, iri_for_concept(schema.namespace, rel.target_concept)))
             graph.add((rel_iri, RDFS.label, Literal(rel.name)))
-            if rel.cardinality == "single":
+            if rel.cardinality == "single" and rel.temporality == "static":
                 graph.add((rel_iri, RDF.type, OWL.FunctionalProperty))
             if rel.inverse:
                 inverse_iri = iri_for_property(
                     schema.namespace, f"{rel.target_concept}.{rel.inverse}"
                 )
+                # OWL 2 DL requires a declaration for every object-property
+                # IRI - the target concept isn't required to independently
+                # declare this relation back, so declare it here too
+                # (a no-op if it already is one, RDF graphs are sets).
+                graph.add((inverse_iri, RDF.type, OWL.ObjectProperty))
                 graph.add((rel_iri, OWL.inverseOf, inverse_iri))
             if rel.description:
                 graph.add((rel_iri, RDFS.comment, Literal(rel.description)))

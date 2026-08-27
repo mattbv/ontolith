@@ -55,8 +55,13 @@ class ReadOnlyView:
         data — schema is namespace-scoped, non-sensitive metadata (no
         principal-specific governance concern the way write access is),
         so this is a plain passthrough with no capability narrowing.
+        Delegates to `Ontology.schema()`, not `self._kb.backend` directly —
+        every other method on this view delegates to an `Ontology` method
+        too (this module's own docstring calls it "a safe method subset of
+        Ontology"); reaching past that to the storage port would have been
+        the only exception.
         """
-        return self._kb.backend.get_schema(self._kb.namespace)
+        return self._kb.schema()
 
     def assertions(
         self,
