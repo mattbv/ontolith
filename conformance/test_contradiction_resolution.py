@@ -16,7 +16,13 @@ import pytest
 from conformance.conftest import KbFactory
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
-from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
+from ontolith.core.errors import (
+    AuthError,
+    CapabilityError,
+    NotFoundError,
+    StorageError,
+    ValidationError,
+)
 from ontolith.govern import AutoAccept, Decision, PolicyStrategy, RequireReview
 from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 
@@ -1127,10 +1133,30 @@ class TestRetractAlreadyTerminalIdempotency:
         assert kb.backend.get_assertion_events(a.id) == events_after_first_retract
         assert kb.backend.get_assertion(a.id).status == "retracted"  # type: ignore[union-attr]
 
+    def test_retracting_unknown_assertion_id_still_attempts_the_write(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The idempotency no-op's `current is None` branch falls through
+        to attempt the write exactly as before this KI, rather than
+        silently treating an unknown id the same as an already-terminal
+        one - retract() has never validated assertion_id exists ahead of
+        this point, so a nonexistent id still surfaces as a StorageError
+        from set_assertion_status, unchanged behavior this fix preserves
+        rather than papers over."""
+        kb = _kb(make_kb)
+
+        with pytest.raises(StorageError):
+            kb.retract("nonexistent-assertion-id", HUMAN_WRITE)
+
     def test_re_retracting_does_not_widen_valid_to(self, make_kb: KbFactory) -> None:
-        """A second retract() call must not push valid_to forward either -
-        the no-op covers the whole write, not just the event."""
-        kb = _kb(make_kb, policy=_AlwaysAutoAccept())
+        """A second retract() call must not push valid_to forward either.
+        Already guaranteed independently by _retraction_valid_to (it
+        returns None, leaving valid_to untouched, once valid_to is already
+        set) rather than by this KI's own idempotency no-op specifically -
+        this is a regression guard for that existing behavior in the
+        re-retraction shape, not a test that discriminates the no-op
+        itself (see test_re_retracting_records_no_second_event for that)."""
+        kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=HUMAN_WRITE)
         a = kb.assert_literal(entity.id, "Person.born", "1815", "Text", HUMAN_WRITE)
         kb.retract(a.id, HUMAN_WRITE)

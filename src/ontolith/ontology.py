@@ -2597,10 +2597,17 @@ class Ontology:
                     # accepts a superseded assertion by design) needs no
                     # further write: re-retracting a retracted loser is a
                     # no-op status-wise, and overwriting a superseded loser
-                    # to `retracted` would misrepresent how it actually
-                    # became terminal — either way, writing it anyway would
-                    # record a second, misattributed `retracted` event as if
-                    # the resolver had just done it.
+                    # to `retracted` here would misattribute this specific
+                    # transition to the resolver, who did nothing to cause
+                    # it — this loop's skip is about *attribution* for an
+                    # automatic side effect of picking a winner, not (as an
+                    # earlier version of this comment overstated) permanently
+                    # erasing supersession from the record: the event log
+                    # only ever appends, so a *user-targeted* superseded ->
+                    # retracted transition elsewhere (e.g. an explicit
+                    # retract() call, KI-051 — deliberately NOT given this
+                    # same skip, see that method's own comment) still leaves
+                    # both events in the trail with their own actors.
                     loser = self.backend.get_assertion(member_id)
                     assert loser is not None  # already resolved via the loop above
                     if loser.status in ("retracted", "superseded"):
