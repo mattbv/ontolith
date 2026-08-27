@@ -921,6 +921,20 @@ class Ontology:
         """
         return self.backend.get_entity(entity_id)
 
+    def schema(self) -> SchemaIR | None:
+        """The current schema for this KB's namespace, or `None` if no
+        schema has been applied yet.
+
+        Mirrors `AsOfView.schema()` (`as_of()`'s bitemporal read view) but
+        for the current, unversioned view — added so `ReadOnlyView.schema()`
+        (`plugins/views.py`, ADR-0036) can delegate here instead of reaching
+        into `self.backend` directly, keeping it consistent with every
+        other `ReadOnlyView` method's own "safe method subset of `Ontology`"
+        shape (found in review — it was previously the only view method
+        bypassing `Ontology` to reach the storage port).
+        """
+        return self.backend.get_schema(self.namespace)
+
     def assertions(
         self,
         subject: str | None = None,

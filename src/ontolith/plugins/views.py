@@ -27,6 +27,7 @@ from ontolith.govern.policy import Decision
 from ontolith.govern.proposal import Proposal
 from ontolith.ontology import AsOfView, Ontology
 from ontolith.query import QueryBuilder
+from ontolith.schema import SchemaIR
 
 
 class ReadOnlyView:
@@ -44,6 +45,23 @@ class ReadOnlyView:
     def get_entity(self, entity_id: str) -> Entity | None:
         """Retrieve an entity by ID."""
         return self._kb.get_entity(entity_id)
+
+    def schema(self) -> SchemaIR | None:
+        """The current schema for this view's namespace, or `None` if no
+        schema has been applied yet.
+
+        Added for the RDF/OWL exporter (SPEC §13.3), the first reference
+        plugin needing schema access rather than just entity/assertion
+        data — schema is namespace-scoped, non-sensitive metadata (no
+        principal-specific governance concern the way write access is),
+        so this is a plain passthrough with no capability narrowing.
+        Delegates to `Ontology.schema()`, not `self._kb.backend` directly —
+        every other method on this view delegates to an `Ontology` method
+        too (this module's own docstring calls it "a safe method subset of
+        Ontology"); reaching past that to the storage port would have been
+        the only exception.
+        """
+        return self._kb.schema()
 
     def assertions(
         self,

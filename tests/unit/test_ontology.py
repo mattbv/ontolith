@@ -559,6 +559,39 @@ class TestApplySchema:
             )
 
 
+class TestSchema:
+    """Tests for Ontology.schema() (ADR-0036 - added so ReadOnlyView.schema()
+    could delegate here instead of reaching into the storage port directly)."""
+
+    def test_returns_none_when_no_schema_applied(self, kb: Ontology) -> None:
+        assert kb.schema() is None
+
+    def test_returns_current_schema(self, kb: Ontology) -> None:
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        schema = SchemaIR(
+            namespace="default", version=1, concepts={"Person": ConceptDef(name="Person")}
+        )
+        kb.apply_schema(schema, author="admin@example.com")
+
+        result = kb.schema()
+        assert result is not None
+        assert result.version == 1
+        assert "Person" in result.concepts
+
+    def test_returns_latest_version(self, kb: Ontology) -> None:
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        kb.apply_schema(
+            SchemaIR(namespace="default", version=1, concepts={}), author="admin@example.com"
+        )
+        kb.apply_schema(
+            SchemaIR(namespace="default", version=2, concepts={}), author="admin@example.com"
+        )
+
+        result = kb.schema()
+        assert result is not None
+        assert result.version == 2
+
+
 class TestAcceptProposalReResolvesTemporality:
     """accept_proposal must re-resolve temporality from the current schema at
     apply time, not trust the snapshot stored at propose time — otherwise a
