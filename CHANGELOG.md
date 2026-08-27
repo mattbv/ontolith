@@ -13,18 +13,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RDF/OWL bridge, export only (SPEC §13.3, ADR-0036): `schema.rdf.to_owl(schema)`
   translates a `SchemaIR` into an OWL ontology (`rdflib.Graph`) — concepts become
   `owl:Class`, properties become `owl:DatatypeProperty` (XSD-typed range), relations
-  become `owl:ObjectProperty` (`owl:inverseOf` if declared), `cardinality="single"`
-  additionally typed `owl:FunctionalProperty`. New `RdfExporter` reference plugin
+  become `owl:ObjectProperty` (`owl:inverseOf` if declared). `cardinality="single"` is
+  additionally typed `owl:FunctionalProperty` only when `temporality="static"` too — a
+  `time_varying` predicate can hold multiple simultaneously-active assertions with
+  non-overlapping validity windows (SPEC §10.2) even at `single` cardinality, and
+  declaring it functional unconditionally would assert a real OWL inconsistency for
+  that valid state. New `RdfExporter` reference plugin
   (`plugins.reference.rdf_exporter`, entry point `rdf-owl-exporter`) adds active
   assertions as RDF instance data on top — one `rdf:type` triple per distinct entity
   seen, one property triple per active assertion — and serializes the combined graph
-  (Turtle by default; any `rdflib` format). New `rdflib` dependency in the `interop`
-  extra, not the real `linkml`/`linkml-runtime` packages ADR-0013 already rejected for
-  the adjacent YAML bridge. Deterministic `urn:ontolith:{namespace}:...` IRI scheme, no
-  dependency on a schema's LinkML-sourced `default_prefix`/`prefixes` metadata. `from_owl`
-  (import direction) is explicitly out of scope for v1. `ReadOnlyView` gains a new
-  `schema()` method — the first reference plugin needing schema access, not just
-  entity/assertion data.
+  (Turtle by default; any `rdflib` format). Every property/relation IRI either module
+  references is declared its own `owl:DatatypeProperty`/`owl:ObjectProperty` type,
+  including an `owl:inverseOf` target the schema doesn't otherwise mention and a
+  predicate a later schema version removed but an already-active assertion still uses
+  (OWL 2 DL requires a declaration for every property IRI in use). New `rdflib`
+  dependency in the `interop` extra, not the real `linkml`/`linkml-runtime` packages
+  ADR-0013 already rejected for the adjacent YAML bridge. Deterministic,
+  percent-encoded `urn:ontolith:{namespace}:...` IRI scheme (percent-encoding closes a
+  real serialization crash on realistic LinkML-imported schema names — spaces, URL
+  namespaces, non-ASCII — found in review), no dependency on a schema's LinkML-sourced
+  `default_prefix`/`prefixes` metadata. `from_owl` (import direction) is explicitly out
+  of scope for v1, and so is any representation of valid time, confidence, or
+  provenance — every currently-active assertion becomes exactly one triple with none of
+  that context, unlike `JsonExporter`. `ReadOnlyView` gains a new `schema()` method —
+  the first reference plugin needing schema access, not just entity/assertion data.
 - Class-based schema DSL compiler and `Ontology.apply_schema` (SPEC §6.2)
 - LinkML-aligned YAML schema front-end: `to_yaml`/`from_yaml`, a deliberately-scoped
   dialect subset documented in ADR-0013, with schema-level `default_range` support and
