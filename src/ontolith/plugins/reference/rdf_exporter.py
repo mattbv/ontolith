@@ -26,11 +26,20 @@ not a new limitation this plugin introduces.
 
 Every property/relation IRI a written triple actually uses is declared its
 own `owl:DatatypeProperty`/`owl:ObjectProperty` type here too, even for a
-predicate the *current* schema no longer declares (no migration/backfill
-mechanism exists, KI-048, so an already-active assertion under a
-retyped/removed predicate is still reachable) — OWL 2 DL requires a
-declaration for every property IRI used, and `to_owl()` alone only
-declares what the current schema still has.
+predicate the *current* schema no longer declares at all (no
+migration/backfill mechanism exists, KI-048, so an already-active
+assertion under a since-removed predicate is still reachable) — OWL 2 DL
+requires a declaration for every property IRI used, and `to_owl()` alone
+only declares what the current schema still has. This does NOT make a
+*retyped* predicate (still declared, but as a relation where it used to be
+a property, or vice versa — `apply_schema` doesn't reject this) DL-valid:
+an old literal assertion under a predicate now schema-declared a relation
+still gets declared `owl:DatatypeProperty` here (from the assertion's own
+`value_kind`) alongside `owl:ObjectProperty` (from `to_owl()`'s current
+schema read), and punning between the two is itself prohibited in OWL 2
+DL. Not a regression this fix introduces — that data was already
+non-DL-valid before this fix (a literal object under a schema-declared
+`owl:ObjectProperty`) — just not fully closed by it either.
 """
 
 from dataclasses import dataclass
@@ -126,9 +135,9 @@ class RdfExporter:
             predicate_iri = iri_for_property(schema.namespace, assertion.predicate)
             # OWL 2 DL requires a declaration for every property IRI used -
             # to_owl() only declares predicates the *current* schema still
-            # has, so a predicate a later schema migration removed (no
-            # migration/backfill mechanism exists, so an old assertion
-            # under a retyped/removed predicate can still be active) would
+            # has, so a predicate a later schema migration removed entirely
+            # (no migration/backfill mechanism exists, so an old assertion
+            # under a since-removed predicate can still be active) would
             # otherwise be used here with no declaration anywhere in the
             # graph. Declaring it here too is a no-op for the common case
             # where it's already declared (RDF graphs are sets).

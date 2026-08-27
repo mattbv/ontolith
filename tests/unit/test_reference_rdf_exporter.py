@@ -45,6 +45,17 @@ def _apply_schema(kb: Ontology) -> None:
     kb.apply_schema(schema, author=ADMIN)
 
 
+class _EntitylessView(ReadOnlyView):
+    """Test double: `get_entity()` always returns None, simulating the
+    unreachable-in-practice case where an assertion's subject somehow
+    doesn't resolve (real backends enforce a FK from assertion.subject to
+    entity.id, so this can't happen through any governed write path) -
+    used to pin RdfExporter's documented graceful-degradation behavior."""
+
+    def get_entity(self, entity_id: str) -> None:  # type: ignore[override]
+        return None
+
+
 class TestExport:
     def test_no_schema_raises_value_error(self, kb: Ontology) -> None:
         view = ReadOnlyView(kb, PLUGIN_PRINCIPAL)
@@ -88,6 +99,27 @@ class TestExport:
         assert str(literal) == "Ada"
         assert literal.datatype == XSD.string  # type: ignore[union-attr]
 
+    def test_unresolvable_entity_degrades_gracefully(self, kb: Ontology) -> None:
+        """If assertion.subject somehow doesn't resolve via get_entity()
+        (unreachable in practice - see _EntitylessView's own docstring),
+        the rdf:type triple (and entities_written) is skipped, but the
+        property triple itself still gets written - not previously
+        covered by a dedicated test."""
+        _apply_schema(kb)
+        write_view = WriteView(kb, PLUGIN_PRINCIPAL)
+        entity = write_view.create_entity("Person")
+        write_view.propose(entity.id, "Person.name", "Ada", "Text")
+
+        buf = io.StringIO()
+        report = RdfExporter().export(_EntitylessView(kb, PLUGIN_PRINCIPAL), buf)
+
+        assert report == RdfExportReport(entities_written=0, assertions_written=1)
+        graph = Graph()
+        graph.parse(data=buf.getvalue(), format="turtle")
+        entity_iri = iri_for_entity("default", entity.id)
+        assert not any(graph.triples((entity_iri, RDF.type, None)))
+        assert (entity_iri, iri_for_property("default", "Person.name"), None) in graph
+
     def test_entities_written_counts_distinct_entities_not_assertions(self, kb: Ontology) -> None:
         """Two assertions on the SAME entity must count as 1 entity, 2
         assertions - entities_written and assertions_written must not be
@@ -109,9 +141,9 @@ class TestExport:
     def test_exports_ref_assertion_as_object_property_triple(self, kb: Ontology) -> None:
         """`org` owns no assertions of its own (only `person` does, the ref
         assertion's subject) - only its IRI appears, as the triple's
-        object, not counted in entities_written (which counts distinct
-        subjects seen, matching the documented "assertion-driven, not
-        entity-driven" export scope)."""
+        object, not counted in entities_written (which counts entities
+        that actually received an rdf:type triple, matching the documented
+        "assertion-driven, not entity-driven" export scope)."""
         _apply_schema(kb)
         write_view = WriteView(kb, PLUGIN_PRINCIPAL)
         org = write_view.create_entity("Organization")

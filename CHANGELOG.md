@@ -35,8 +35,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `default_prefix`/`prefixes` metadata. `from_owl` (import direction) is explicitly out
   of scope for v1, and so is any representation of valid time, confidence, or
   provenance — every currently-active assertion becomes exactly one triple with none of
-  that context, unlike `JsonExporter`. `ReadOnlyView` gains a new `schema()` method —
-  the first reference plugin needing schema access, not just entity/assertion data.
+  that context, unlike `JsonExporter`. `Ontology` and `ReadOnlyView` both gain a new
+  `schema()` method — the first reference plugin needing schema access, not just
+  entity/assertion data.
 - Class-based schema DSL compiler and `Ontology.apply_schema` (SPEC §6.2)
 - LinkML-aligned YAML schema front-end: `to_yaml`/`from_yaml`, a deliberately-scoped
   dialect subset documented in ADR-0013, with schema-level `default_range` support and
