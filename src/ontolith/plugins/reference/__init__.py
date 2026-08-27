@@ -9,6 +9,15 @@ writes end to end with working code:
 - JsonExporter (exporter, read-only): active assertions to JSON.
 - RequiredFieldsValidator (validator, read-only): a required-predicate
   business rule, the kind of check the core schema doesn't enforce.
+- RdfExporter (exporter, read-only, ADR-0036): schema + active assertions
+  as an OWL/RDF document. NOT imported below, unlike the three above —
+  its `rdflib` dependency is an optional `interop`-extra, and importing
+  this package eagerly imports every plugin listed here (Python always
+  initializes a parent package before any of its submodules, including
+  when a single plugin is loaded by name via its own entry point) — so
+  bundling it in would make `rdflib` a hard requirement for using any
+  reference plugin at all. Import it directly:
+  `from ontolith.plugins.reference.rdf_exporter import RdfExporter`.
 """
 
 from ontolith.plugins.reference.csv_importer import CsvImporter, ImportReport

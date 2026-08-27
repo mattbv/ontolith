@@ -1,0 +1,128 @@
+"""RDF/OWL exporter reference plugin (SPEC §13.3, ADR-0036).
+
+Demonstrates the Exporter protocol against a real ReadOnlyView: writes the
+active schema as an OWL ontology (`schema.rdf.to_owl`) plus every
+currently-active assertion as RDF instance data — each distinct subject
+becomes an individual typed `rdf:type` its entity's concept class, each
+literal assertion becomes a datatype-property triple (XSD-typed per
+`value_type_to_xsd`), each ref assertion becomes an object-property triple
+— into one graph, then serializes it (Turtle by default; any `rdflib`
+output format works).
+
+Deliberately NOT imported by `plugins/reference/__init__.py`, unlike the
+other reference plugins there — `rdflib` is an optional `interop`-extra
+dependency, and `reference/__init__.py`'s existing eager imports mean
+importing *any* reference plugin (including via its own entry point, which
+still initializes the parent package first) would otherwise require
+`rdflib` installed even for a deployment using only CsvImporter/JsonExporter/
+RequiredFieldsValidator. Import this module directly:
+`from ontolith.plugins.reference.rdf_exporter import RdfExporter`.
+
+Only entities that own at least one active assertion are exported as
+individuals — an entity with zero active assertions never appears in
+`kb.assertions()`'s iteration, so it's never seen here. Matches
+`JsonExporter`'s own assertion-driven scope (not an entity-driven export);
+not a new limitation this plugin introduces.
+"""
+
+from dataclasses import dataclass
+from pathlib import Path
+
+from rdflib import RDF
+from rdflib import Literal as RdfLiteral
+
+from ontolith.plugins.manifest import PluginCapabilities, PluginManifest
+from ontolith.plugins.views import ReadOnlyView
+from ontolith.schema.rdf import (
+    iri_for_concept,
+    iri_for_entity,
+    iri_for_property,
+    to_owl,
+    value_type_to_xsd,
+)
+
+
+@dataclass(frozen=True)
+class RdfExportReport:
+    """Summary of a completed RDF/OWL export."""
+
+    entities_written: int
+    assertions_written: int
+
+
+class RdfExporter:
+    """Reference Exporter plugin: serializes the schema (as OWL) and active
+    assertions (as RDF instance data) to a single RDF document."""
+
+    manifest = PluginManifest(
+        name="rdf-owl-exporter",
+        version="0.1.0",
+        kind="exporter",
+        capabilities=PluginCapabilities(filesystem=True),
+    )
+
+    def export(
+        self, kb: ReadOnlyView, target: object, *, format: str = "turtle"
+    ) -> RdfExportReport:
+        """Write the schema (OWL) and active assertions (RDF instances) to `target`.
+
+        Args:
+            kb: Read-only KB view.
+            target: A path (str/Path, opened for writing) or any writable
+                text-mode file-like object (e.g. io.StringIO for tests).
+            format: `rdflib` serialization format — Turtle by default.
+
+        Returns:
+            Counts of entities and assertions written.
+
+        Raises:
+            ValueError: No schema is registered for this namespace — there
+                is nothing to derive OWL classes/properties from.
+            TypeError: `target` is neither path-like nor writable.
+        """
+        schema = kb.schema()
+        if schema is None:
+            raise ValueError("Cannot export RDF/OWL: no schema registered for this namespace")
+
+        graph = to_owl(schema)
+
+        entities_seen: set[str] = set()
+        assertions_written = 0
+        for assertion in kb.assertions():
+            subject_iri = iri_for_entity(schema.namespace, assertion.subject)
+            if assertion.subject not in entities_seen:
+                entity = kb.get_entity(assertion.subject)
+                if entity is not None:
+                    graph.add(
+                        (subject_iri, RDF.type, iri_for_concept(schema.namespace, entity.concept))
+                    )
+                entities_seen.add(assertion.subject)
+
+            predicate_iri = iri_for_property(schema.namespace, assertion.predicate)
+            if assertion.value_kind == "literal":
+                assert assertion.value_type is not None  # required for value_kind="literal"
+                datatype = value_type_to_xsd(assertion.value_type)
+                graph.add(
+                    (subject_iri, predicate_iri, RdfLiteral(assertion.value, datatype=datatype))
+                )
+            else:
+                graph.add(
+                    (subject_iri, predicate_iri, iri_for_entity(schema.namespace, assertion.value))
+                )
+            assertions_written += 1
+
+        serialized = graph.serialize(format=format)
+        if hasattr(target, "write"):
+            target.write(serialized)
+        elif isinstance(target, (str, Path)):
+            with open(target, "w", encoding="utf-8") as fh:
+                fh.write(serialized)
+        else:
+            raise TypeError(f"Unsupported RDF export target type: {type(target).__name__}")
+
+        return RdfExportReport(
+            entities_written=len(entities_seen), assertions_written=assertions_written
+        )
+
+
+__all__ = ["RdfExporter", "RdfExportReport"]
