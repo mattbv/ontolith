@@ -1293,8 +1293,8 @@ class Ontology:
     def _reject_retract_if_party_to_contradiction(
         self, assertion_id: str, parties: set[str]
     ) -> None:
-        """Block retracting a flagged contradiction member any of ``parties``
-        is a party to (KI-033) — mirrors resolve_contradiction's
+        """Block retracting a member of an *open* contradiction any of
+        ``parties`` is a party to (KI-033) — mirrors resolve_contradiction's
         self-resolution guard (KI-026): checks every member, not just the
         target, since an interested party shouldn't get to unilaterally
         retract the *opposing* member either. Without this, a principal who
@@ -1310,6 +1310,18 @@ class Ontology:
         contradiction can reach the identical one-sided outcome by approving
         a neutral principal's retract proposal, not just by retracting
         directly.
+
+        Applies to a member in ANY status — not just `flagged` (KI-051).
+        Membership in a still-`open` contradiction, not the target's own
+        current status, is what makes this guard applicable: a member the
+        conflict-routing/`flag_contradiction()` machinery already
+        terminalized to `retracted`/`superseded` while its contradiction
+        stayed open (ADR-0031's own deliberate design — a terminal member
+        can still belong to an open contradiction) was previously exempt
+        from this guard entirely, since the pre-KI-051 check gated on
+        `status == "flagged"` before ever looking up membership. A party
+        could bypass KI-033 outright against exactly that member, at only
+        `write` capability.
 
         Must run inside the same transaction that performs the retraction
         (like resolve_contradiction's own check) and before any of that
@@ -1327,7 +1339,7 @@ class Ontology:
                 past (matches resolve_contradiction's own precedent, KI-026)
         """
         target = self.backend.get_assertion(assertion_id)
-        if target is None or target.status != "flagged":
+        if target is None:
             return
         contradiction = self.backend.get_open_contradiction(
             self.namespace, target.subject, target.predicate
@@ -1343,26 +1355,35 @@ class Ontology:
                 )
             if parties & ({member.author, member.acting_as} - {None}):
                 raise CapabilityError(
-                    f"Cannot retract assertion {assertion_id!r}: it is a flagged member of "
+                    f"Cannot retract assertion {assertion_id!r}: it is a member of "
                     f"open contradiction {contradiction.id!r} that {sorted(parties)!r} are "
                     f"party to (author or delegate of member assertion {member_id!r}) — use "
                     "resolve_contradiction() instead"
                 )
 
-    def _open_contradiction_if_flagged_member(self, assertion_id: str) -> Contradiction | None:
-        """Return the open Contradiction `assertion_id` is a currently-flagged
-        member of, or None otherwise (KI-043) — an ordinary retraction (target
-        not flagged, or its contradiction has since resolved) gets None.
+    def _open_contradiction_if_member(self, assertion_id: str) -> Contradiction | None:
+        """Return the open Contradiction `assertion_id` is a member of, or
+        None otherwise (KI-043) — an ordinary retraction (target not a
+        contradiction member, or its contradiction has since resolved)
+        gets None.
+
+        Applies regardless of the member's own current status — not just
+        `flagged` (KI-051) — for the same reason
+        `_reject_retract_if_party_to_contradiction`'s docstring explains:
+        an already-`retracted`/`superseded` member can still belong to a
+        still-`open` contradiction (ADR-0031), and this method's job is to
+        answer "is `assertion_id` governed by that open contradiction",
+        not "is it currently flagged".
 
         Shared by `retract()`/`resubmit()`'s optimistic pre-check (decides
         whether to route to review instead of evaluating `self.policy`) and
-        `_require_capability_to_retract_flagged_member`'s authoritative,
+        `_require_capability_to_retract_contradiction_member`'s authoritative,
         in-transaction recheck — the same read, used twice for the same
         TOCTOU-safety reason `_reject_retract_if_party_to_contradiction`'s
         own docstring explains.
         """
         target = self.backend.get_assertion(assertion_id)
-        if target is None or target.status != "flagged":
+        if target is None:
             return None
         contradiction = self.backend.get_open_contradiction(
             self.namespace, target.subject, target.predicate
@@ -1396,9 +1417,10 @@ class Ontology:
     def _retract_op_review_override(
         self, proposal: Proposal, principal: Principal, delegating: Principal | None
     ) -> RequireReview | None:
-        """If `proposal` stages any `retract` op targeting a flagged
-        contradiction member `principal` (+`delegating`) doesn't meet
-        `_meets_retract_contradiction_floor` for, return a `RequireReview`
+        """If `proposal` stages any `retract` op targeting an open
+        contradiction's member (any status, KI-051) `principal`
+        (+`delegating`) doesn't meet `_meets_retract_contradiction_floor`
+        for, return a `RequireReview`
         decision to use INSTEAD of evaluating `self.policy` — otherwise
         None, meaning the caller should evaluate policy normally
         (KI-043, ADR-0030). Checks every retract op in the payload, not
@@ -1426,7 +1448,7 @@ class Ontology:
         Called from `retract()` and `resubmit()`, both *before* evaluating
         `self.policy` and before opening a transaction — optimistic, like
         the read `_reject_retract_if_party_to_contradiction`/
-        `_require_capability_to_retract_flagged_member` perform again,
+        `_require_capability_to_retract_contradiction_member` perform again,
         authoritatively, once inside the transaction. A contradiction that
         opens concurrently between this call and the transaction is not
         caught here — that narrow race is what the in-transaction
@@ -1439,25 +1461,25 @@ class Ontology:
             op for op in proposal.payload.get("operations", []) if op["kind"] == "retract"
         )
         for op in retract_ops:
-            if self._open_contradiction_if_flagged_member(op["assertion_id"]) is None:
+            if self._open_contradiction_if_member(op["assertion_id"]) is None:
                 continue
             if self._meets_retract_contradiction_floor(principal, delegating):
                 continue
             return RequireReview(
                 reviewers=[],
-                reason="Retracting a flagged contradiction member requires review/admin "
+                reason="Retracting an open contradiction's member requires review/admin "
                 "capability, same floor as resolve_contradiction() (SPEC §10.3, KI-043)",
             )
         return None
 
-    def _require_capability_to_retract_flagged_member(
+    def _require_capability_to_retract_contradiction_member(
         self, assertion_id: str, principal: Principal, delegating: Principal | None
     ) -> None:
         """Authoritative, in-transaction backstop for
         `_retract_op_review_override`'s optimistic pre-check (KI-043):
         raises if `assertion_id` is (as of right now, inside the write
-        transaction) a flagged member of an open contradiction and
-        `principal` doesn't meet `_meets_retract_contradiction_floor`.
+        transaction) a member (any status, KI-051) of an open contradiction
+        and `principal` doesn't meet `_meets_retract_contradiction_floor`.
 
         In the common case this never fires — the pre-check in
         `retract()`/`resubmit()` already routed a below-floor principal to
@@ -1469,7 +1491,7 @@ class Ontology:
         raises `CapabilityError` and rolls back rather than silently
         letting the write land.
 
-        No-op when the target isn't currently a flagged member of an open
+        No-op when the target isn't currently a member of an open
         contradiction — an ordinary retraction is unaffected.
 
         Not called for `accept_proposal`'s replay of a retract op — the
@@ -1482,20 +1504,20 @@ class Ontology:
             CapabilityError: `principal` is AI-kind, or effective capability
                 (after delegation attenuation) is below `review`
         """
-        contradiction = self._open_contradiction_if_flagged_member(assertion_id)
+        contradiction = self._open_contradiction_if_member(assertion_id)
         if contradiction is None:
             return
         if self._meets_retract_contradiction_floor(principal, delegating):
             return
         if principal.kind == "ai":
             raise CapabilityError(
-                f"Cannot retract assertion {assertion_id!r}: it is a flagged member of open "
+                f"Cannot retract assertion {assertion_id!r}: it is a member of open "
                 f"contradiction {contradiction.id!r} — AI principal {principal.id!r} cannot "
                 "retract a disputed static fact, same floor as resolve_contradiction() "
                 "(SPEC §10.3, KI-043)"
             )
         raise CapabilityError(
-            f"Cannot retract assertion {assertion_id!r}: it is a flagged member of open "
+            f"Cannot retract assertion {assertion_id!r}: it is a member of open "
             f"contradiction {contradiction.id!r} — retracting a disputed static fact "
             f"requires review/admin capability, same floor as resolve_contradiction() "
             f"(SPEC §10.3, KI-043), not just write. This is an unusual race (a contradiction "
@@ -1516,25 +1538,39 @@ class Ontology:
         principal (delegation, ADR-0003).
 
         If ``self.policy`` would auto-accept and ``assertion_id`` is
-        currently a flagged member of an open contradiction, two further
-        checks apply before the write actually lands: the retracting
-        principal must not be a party to the contradiction (KI-033), and
-        must meet ``resolve_contradiction()``'s own review/admin + non-AI
-        floor (KI-043, ADR-0030) — if the latter fails, this routes to
-        review instead of raising, so even a ``write``-capability
-        principal below that floor has a real path forward (a
-        ``review``-capable, non-AI principal can accept the resulting
-        proposal via ``accept_proposal()``). A proposal ``self.policy``
-        was already going to send to review for its own reasons skips
-        both checks here entirely — matching how the party guard has
-        always worked, they're deferred to ``accept_proposal()``, which
-        re-checks both (the party check unconditionally; the capability
-        floor only for the narrow, no-reviewer-involved paths that need
-        it — see ``_replay_proposal_operations``'s docstring).
+        currently a member (any status — flagged, retracted, or
+        superseded, KI-051) of an open contradiction, two further checks
+        apply before the write actually lands: the retracting principal
+        must not be a party to the contradiction (KI-033), and must meet
+        ``resolve_contradiction()``'s own review/admin + non-AI floor
+        (KI-043, ADR-0030) — if the latter fails, this routes to review
+        instead of raising, so even a ``write``-capability principal below
+        that floor has a real path forward (a ``review``-capable, non-AI
+        principal can accept the resulting proposal via
+        ``accept_proposal()``). A proposal ``self.policy`` was already
+        going to send to review for its own reasons skips both checks here
+        entirely — matching how the party guard has always worked, they're
+        deferred to ``accept_proposal()``, which re-checks both (the party
+        check unconditionally; the capability floor only for the narrow,
+        no-reviewer-involved paths that need it — see
+        ``_replay_proposal_operations``'s docstring).
+
+        If ``assertion_id`` is already ``retracted``, this is a no-op on
+        the assertion itself (KI-051) — the proposal still records
+        `auto_accepted`, but no `set_assertion_status`/status event write
+        happens, since re-retracting an already-retracted target is a pure
+        status no-op that would otherwise record a second, misattributed
+        `retracted` event. Deliberately narrower than
+        `resolve_contradiction()`'s own loser-loop precedent (KI-044,
+        ADR-0031), which also skips an already-``superseded`` loser —
+        explicitly retracting a `superseded` assertion via this method is
+        a distinct, legitimate transition this codebase already treats as
+        worth its own event, unlike the loser loop's automatic side effect
+        of picking a winner.
 
         Raises:
             CapabilityError: ``self.policy`` would auto-accept and the
-                assertion is a flagged member of an open contradiction the
+                assertion is a member of an open contradiction the
                 retracting principal is a party to (author or delegate of
                 any member, KI-033) — use resolve_contradiction() instead;
                 or, in the narrow race where a contradiction opens
@@ -1587,12 +1623,28 @@ class Ontology:
         )
         with self.backend.transaction():
             self._reject_retract_if_party_to_contradiction(assertion_id, retracting_parties)
-            self._require_capability_to_retract_flagged_member(assertion_id, principal, delegating)
-            self.backend.put_proposal(accepted)
-            self.backend.set_assertion_status(
-                assertion_id, "retracted", valid_to=self._retraction_valid_to(assertion_id, now)
+            self._require_capability_to_retract_contradiction_member(
+                assertion_id, principal, delegating
             )
-            self._record_assertion_event(assertion_id, author, "retracted", now)
+            self.backend.put_proposal(accepted)
+            # KI-051: re-retracting an already-`retracted` target is a pure
+            # status no-op - writing it anyway would record a second,
+            # misattributed `retracted` event for a transition that already
+            # happened. Deliberately narrower than resolve_contradiction()'s
+            # own loser-loop precedent (KI-044, ADR-0031), which also skips
+            # an already-`superseded` loser: that loop is an automatic
+            # side effect of picking a winner, not a call the user directly
+            # targeted at that specific assertion. Explicitly retracting a
+            # `superseded` assertion via retract() is a distinct, legitimate
+            # action this codebase already treats as a real transition
+            # worth its own event (test_events_ordered_oldest_first) - only
+            # an exact `retracted` -> `retracted` re-call is the no-op.
+            current = self.backend.get_assertion(assertion_id)
+            if current is None or current.status != "retracted":
+                self.backend.set_assertion_status(
+                    assertion_id, "retracted", valid_to=self._retraction_valid_to(assertion_id, now)
+                )
+                self._record_assertion_event(assertion_id, author, "retracted", now)
         return accepted, decision
 
     def _apply_with_conflict_routing(
@@ -1868,7 +1920,7 @@ class Ontology:
         its caller is already required to be the proposal's own
         author/delegate, already covered by `proposal.author`/`acting_as`.
         Whether ``extra_retracting_party`` is set also decides whether a
-        `retract` op runs `_require_capability_to_retract_flagged_member`
+        `retract` op runs `_require_capability_to_retract_contradiction_member`
         (KI-043): only when it's unset (`resubmit`'s auto-accept branch),
         since `accept_proposal`'s reviewer already satisfies that floor via
         `_require_reviewer_principal` and re-checking would be redundant.
@@ -1968,17 +2020,23 @@ class Ontology:
                     # method's own docstring.
                     assert retracting_principal is not None
                     author_principal, delegating_principal = retracting_principal
-                    self._require_capability_to_retract_flagged_member(
+                    self._require_capability_to_retract_contradiction_member(
                         op["assertion_id"], author_principal, delegating_principal
                     )
                 retracted = self.backend.get_assertion(op["assertion_id"])
                 assert retracted is not None  # append-only; targeted by an existing proposal op
-                self.backend.set_assertion_status(
-                    op["assertion_id"],
-                    "retracted",
-                    valid_to=self._retraction_valid_to(op["assertion_id"], now),
-                )
-                self._record_assertion_event(op["assertion_id"], proposal.author, "retracted", now)
+                # KI-051: same already-`retracted` no-op retract() itself
+                # applies (not `superseded` too - see retract()'s own
+                # comment for why the two aren't treated the same here).
+                if retracted.status != "retracted":
+                    self.backend.set_assertion_status(
+                        op["assertion_id"],
+                        "retracted",
+                        valid_to=self._retraction_valid_to(op["assertion_id"], now),
+                    )
+                    self._record_assertion_event(
+                        op["assertion_id"], proposal.author, "retracted", now
+                    )
                 # Retraction is the one operation that can *reduce*
                 # completeness (an assert can only ever improve it) - its
                 # subject must be checked too, or accept_proposal could
@@ -2022,9 +2080,10 @@ class Ontology:
             NotFoundError: proposal_id does not name an existing proposal
             CapabilityError: reviewer lacks review/admin capability, is
                 AI-kind, or is the proposal's own author/delegate; or a
-                staged retract operation targets a flagged contradiction
-                member the proposal's own author/delegate *or the accepting
-                reviewer* is party to (KI-033)
+                staged retract operation targets an open contradiction's
+                member (any status, KI-051) the proposal's own
+                author/delegate *or the accepting reviewer* is party to
+                (KI-033)
             ValidationError: proposal is not pending review (including when
                 a concurrent transition already moved it out of that state,
                 KI-035); or a registered `Validator`/`completeness_validator`
@@ -2197,11 +2256,12 @@ class Ontology:
         (`decided_at` stays `None`, `created_at` stays the original
         submission time).
 
-        If the staged operation is a `retract` targeting a flagged
-        contradiction member and the author/delegate doesn't meet
-        `resolve_contradiction()`'s own review/admin + non-AI floor, this
-        routes back to review instead of evaluating `self.policy` at all —
-        same as `retract()`'s own submission-time check (KI-043, ADR-0030).
+        If the staged operation is a `retract` targeting an open
+        contradiction's member (any status, KI-051) and the author/delegate
+        doesn't meet `resolve_contradiction()`'s own review/admin + non-AI
+        floor, this routes back to review instead of evaluating
+        `self.policy` at all — same as `retract()`'s own submission-time
+        check (KI-043, ADR-0030).
 
         Args:
             proposal_id: ID of the proposal to resubmit
@@ -2216,10 +2276,10 @@ class Ontology:
                 (if since removed), is not a known principal
             NotFoundError: proposal_id does not name an existing proposal
             CapabilityError: author is not the proposal's own author/delegate;
-                or, on auto-accept, a staged retract operation targets a
-                flagged contradiction member the proposal's own
-                author/delegate is party to — shares the same
-                `_reject_retract_if_party_to_contradiction` guard as
+                or, on auto-accept, a staged retract operation targets an
+                open contradiction's member (any status, KI-051) the
+                proposal's own author/delegate is party to — shares the
+                same `_reject_retract_if_party_to_contradiction` guard as
                 `accept_proposal` (KI-033), though only reachable here if
                 the author's effective capability/trust has risen since the
                 original submission, since that same guard already blocks a
