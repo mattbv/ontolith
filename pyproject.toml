@@ -35,7 +35,7 @@ graphql = ["strawberry-graphql>=0.219"]
 mcp = [
     "mcp>=1.28.1,<2.0", # >=1.28.1 fixes PYSEC-2026-3483; <2.0 avoids an unreviewed major bump
 ]
-interop = ["pyyaml>=6.0"]
+interop = ["pyyaml>=6.0", "rdflib>=7.0"]
 all = ["ontolith[rest,graphql,mcp,interop,store-duckdb]"]
 dev = [
 	"ontolith[all]",
@@ -86,6 +86,7 @@ ontolith = "ontolith.interfaces.cli:app"
 csv-importer = "ontolith.plugins.reference.csv_importer:CsvImporter"
 json-exporter = "ontolith.plugins.reference.json_exporter:JsonExporter"
 required-fields-validator = "ontolith.plugins.reference.required_fields_validator:RequiredFieldsValidator"
+rdf-owl-exporter = "ontolith.plugins.reference.rdf_exporter:RdfExporter"
 
 [build-system]
 requires = ["hatchling"]
