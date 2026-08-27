@@ -155,8 +155,8 @@ class TestResubmitAutoAcceptCapabilityFloor:
         kb.close()
 
 
-class TestRequireCapabilityToRetractFlaggedMemberBackstop:
-    """`_require_capability_to_retract_flagged_member` is, in the non-race
+class TestRequireCapabilityToRetractContradictionMemberBackstop:
+    """`_require_capability_to_retract_contradiction_member` is, in the non-race
     case, unreachable: `retract()`/`resubmit()`'s own pre-check
     (`_retract_op_review_override`) always routes a below-floor principal
     to review before a transaction that could reach it ever opens. It only
@@ -183,7 +183,7 @@ class TestRequireCapabilityToRetractFlaggedMemberBackstop:
         assert frank is not None
 
         with pytest.raises(CapabilityError, match="AI principal"):
-            kb._require_capability_to_retract_flagged_member(ada_id, frank, None)
+            kb._require_capability_to_retract_contradiction_member(ada_id, frank, None)
         kb.close()
 
     def test_raises_for_capability_below_review(self) -> None:
@@ -197,7 +197,7 @@ class TestRequireCapabilityToRetractFlaggedMemberBackstop:
         assert dave is not None
 
         with pytest.raises(CapabilityError, match="review/admin capability"):
-            kb._require_capability_to_retract_flagged_member(ada_id, dave, None)
+            kb._require_capability_to_retract_contradiction_member(ada_id, dave, None)
         kb.close()
 
     def test_no_op_for_ordinary_non_contradiction_retraction(self) -> None:
@@ -211,5 +211,5 @@ class TestRequireCapabilityToRetractFlaggedMemberBackstop:
         dave = kb.backend.get_principal("dave")
         assert dave is not None
 
-        kb._require_capability_to_retract_flagged_member(assertion.id, dave, None)  # no raise
+        kb._require_capability_to_retract_contradiction_member(assertion.id, dave, None)  # no raise
         kb.close()

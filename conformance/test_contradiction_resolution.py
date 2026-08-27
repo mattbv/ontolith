@@ -16,7 +16,13 @@ import pytest
 from conformance.conftest import KbFactory
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
-from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
+from ontolith.core.errors import (
+    AuthError,
+    CapabilityError,
+    NotFoundError,
+    StorageError,
+    ValidationError,
+)
 from ontolith.govern import AutoAccept, Decision, PolicyStrategy, RequireReview
 from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 
@@ -32,7 +38,7 @@ class _AlwaysAutoAccept:
     """PolicyStrategy test double that auto-accepts unconditionally,
     including for AI-kind authors ThresholdPolicy would always send to
     review — used to reach KI-043's AI-kind check in
-    `_require_capability_to_retract_flagged_member`, which is otherwise
+    `_require_capability_to_retract_contradiction_member`, which is otherwise
     unreachable under the default ThresholdPolicy (an AI author's retract
     never auto-accepts in the first place, so that defensive check never
     runs). Deployments are free to plug in a PolicyStrategy this permissive
@@ -969,6 +975,221 @@ class TestRetractContradictionGuard:
 
         assert kb.backend.get_assertion(opposing_id).status == "flagged"  # type: ignore[union-attr]
         assert kb.backend.get_proposal(proposal.id).state == "require_review"  # type: ignore[union-attr]
+
+
+# ===========================================================================
+# KI-033/KI-043 guards apply to a `retracted`/`superseded` member of an
+# open contradiction too, not just a `flagged` one (KI-051)
+# ===========================================================================
+
+
+class TestRetractGuardsApplyToTerminalMembers:
+    """Before KI-051, `_reject_retract_if_party_to_contradiction` and the
+    KI-043 capability floor both gated on `status == "flagged"` before ever
+    checking contradiction membership - so a member ADR-0031's own design
+    had already terminalized (`retracted` via an earlier retract(), or
+    `superseded` via flag_contradiction() naming one) while its
+    contradiction stayed `open` was completely exempt from both guards. A
+    party could retract it - or a below-floor neutral principal could
+    auto-accept retracting it - with no governance applied at all, even
+    though the contradiction it belongs to was still open."""
+
+    def _open_contradiction_with_retracted_member(
+        self, make_kb: KbFactory
+    ) -> tuple[Ontology, str, str, str]:
+        """An open contradiction between HUMAN_WRITE's "Ada" and
+        REVIEWER's "Ava" - two different authors, so REVIEWER is a genuine
+        party (unlike the shared _open_contradiction() helper, whose two
+        members are both authored by HUMAN_WRITE and so have no party to
+        test against). "Ada" has already been retracted by a third,
+        neutral review-capability principal; the contradiction stays open
+        (only resolve_contradiction() closes it).
+        Returns (kb, entity_id, retracted_ada_id, still_flagged_ava_id)."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "erin@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_WRITE)
+        kb.propose(entity.id, "Person.name", "Ava", "Text", REVIEWER)
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        ada_id = next(a.id for a in flagged if a.author == HUMAN_WRITE)
+        ava_id = next(a.id for a in flagged if a.author == REVIEWER)
+        contradiction = kb.backend.get_open_contradiction("default", entity.id, "Person.name")
+        assert contradiction is not None
+        kb.retract(ada_id, "erin@example.com")
+        assert kb.backend.get_assertion(ada_id).status == "retracted"  # type: ignore[union-attr]
+        assert kb.backend.get_contradiction(contradiction.id).state == "open"  # type: ignore[union-attr]
+        return kb, entity.id, ada_id, ava_id
+
+    def test_party_cannot_retract_already_retracted_opposing_member(
+        self, make_kb: KbFactory
+    ) -> None:
+        """REVIEWER (author of the still-flagged "Ava") is a party to the
+        contradiction - blocked from retracting the *already-retracted*
+        "Ada", exactly as they'd be blocked from retracting it while still
+        flagged. Pre-KI-051 this call bypassed the party guard entirely,
+        since the guard's own status check gated on == "flagged"."""
+        kb, _entity_id, ada_id, _ava_id = self._open_contradiction_with_retracted_member(make_kb)
+
+        with pytest.raises(CapabilityError, match="party to"):
+            kb.retract(ada_id, REVIEWER)
+
+    def test_party_cannot_retract_already_superseded_member(self, make_kb: KbFactory) -> None:
+        """Same guard, for a `superseded` member named via
+        flag_contradiction() (ADR-0031's own escape hatch) rather than a
+        `retracted` one."""
+        kb = _kb(make_kb)
+        admin = "admin@example.com"
+        kb.create_principal(admin, kind="human", auth_method="oidc", default_capability="admin")
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "employer": PropertyDef(
+                            name="employer", value_type="Text", temporality="time_varying"
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(schema, author=admin)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        acme = kb.assert_literal(entity.id, "Person.employer", "Acme", "Text", HUMAN_WRITE)
+        # REVIEWER only has `review` capability - assert_literal requires
+        # write/admin, so REVIEWER's "Globex" goes through propose()
+        # (review-capability auto-accepts under ThresholdPolicy).
+        kb.propose(entity.id, "Person.employer", "Globex", "Text", REVIEWER)
+        globex = next(
+            a
+            for a in kb.assertions(subject=entity.id, predicate="Person.employer", status="active")
+            if a.value == "Globex"
+        )
+        assert kb.backend.get_assertion(acme.id).status == "superseded"  # type: ignore[union-attr]
+        contradiction, _action = kb.flag_contradiction(acme.id, globex.id, "admin@example.com")
+        assert contradiction.state == "open"
+
+        # REVIEWER authored "Globex" - a party to the contradiction,
+        # blocked from retracting the opposing (superseded) "Acme".
+        with pytest.raises(CapabilityError, match="party to"):
+            kb.retract(acme.id, REVIEWER)
+
+    def test_below_floor_neutral_principal_retracting_terminal_member_is_routed_to_review(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A neutral (non-party), merely-`write`-capability principal
+        retracting an already-`retracted` contradiction member is routed
+        to review (KI-043's floor), not auto-accepted - the same as
+        retracting a still-`flagged` member would be. Pre-KI-051 this
+        auto-accepted outright, since _open_contradiction_if_member (then
+        `..._if_flagged_member`) returned None for a non-flagged target,
+        making the capability floor a no-op for exactly this case."""
+        kb, _entity_id, ada_id, _ava_id = self._open_contradiction_with_retracted_member(make_kb)
+        kb.create_principal(
+            "frank@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+
+        proposal, decision = kb.retract(ada_id, "frank@example.com")
+
+        assert isinstance(decision, RequireReview)
+        # No further write happened - re-retracting is asserted separately
+        # below (TestRetractAlreadyTerminalIdempotency), not this test's
+        # concern; here only the routing decision matters.
+        assert proposal.state == "require_review"
+
+
+# ===========================================================================
+# retract() no-ops on an already-`retracted` target instead of recording a
+# second, misattributed event (KI-051)
+# ===========================================================================
+
+
+class TestRetractAlreadyTerminalIdempotency:
+    """Deliberately narrower than resolve_contradiction()'s own loser-loop
+    precedent (KI-044, ADR-0031), which treats `retracted` AND `superseded`
+    losers identically: that loop is an automatic side effect of picking a
+    winner, not a call the user directly targeted at that specific
+    assertion. retract() itself only no-ops on an exact `retracted` ->
+    `retracted` re-call - explicitly retracting a `superseded` assertion
+    remains a real, event-recording transition
+    (test_events_ordered_oldest_first,
+    test_retract_never_widens_an_already_closed_valid_to already pin this
+    half in conformance/test_bitemporal.py and
+    conformance/test_assertion_audit_log.py)."""
+
+    def test_re_retracting_records_no_second_event(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        a = kb.assert_literal(entity.id, "Person.born", "1815", "Text", HUMAN_WRITE)
+        kb.retract(a.id, HUMAN_WRITE)
+        events_after_first_retract = kb.backend.get_assertion_events(a.id)
+        assert [e.action for e in events_after_first_retract] == ["retracted"]
+
+        kb.retract(a.id, HUMAN_WRITE)
+
+        assert kb.backend.get_assertion_events(a.id) == events_after_first_retract
+        assert kb.backend.get_assertion(a.id).status == "retracted"  # type: ignore[union-attr]
+
+    def test_retracting_unknown_assertion_id_still_attempts_the_write(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The idempotency no-op's `current is None` branch falls through
+        to attempt the write exactly as before this KI, rather than
+        silently treating an unknown id the same as an already-terminal
+        one - retract() has never validated assertion_id exists ahead of
+        this point, so a nonexistent id still surfaces as a StorageError
+        from set_assertion_status, unchanged behavior this fix preserves
+        rather than papers over."""
+        kb = _kb(make_kb)
+
+        with pytest.raises(StorageError):
+            kb.retract("nonexistent-assertion-id", HUMAN_WRITE)
+
+    def test_re_retracting_does_not_widen_valid_to(self, make_kb: KbFactory) -> None:
+        """A second retract() call must not push valid_to forward either.
+        Already guaranteed independently by _retraction_valid_to (it
+        returns None, leaving valid_to untouched, once valid_to is already
+        set) rather than by this KI's own idempotency no-op specifically -
+        this is a regression guard for that existing behavior in the
+        re-retraction shape, not a test that discriminates the no-op
+        itself (see test_re_retracting_records_no_second_event for that)."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        a = kb.assert_literal(entity.id, "Person.born", "1815", "Text", HUMAN_WRITE)
+        kb.retract(a.id, HUMAN_WRITE)
+        first_valid_to = kb.backend.get_assertion(a.id).valid_to  # type: ignore[union-attr]
+
+        kb.clock.advance(days=1)  # type: ignore[attr-defined]
+        kb.retract(a.id, HUMAN_WRITE)
+
+        assert kb.backend.get_assertion(a.id).valid_to == first_valid_to  # type: ignore[union-attr]
+
+    def test_accept_proposal_replay_of_retract_also_no_ops(self, make_kb: KbFactory) -> None:
+        """The same idempotency applies to a retract op replayed via
+        accept_proposal() (_replay_proposal_operations), not just
+        retract()'s own direct auto-accept path."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "grace@example.com", kind="human", auth_method="oidc", default_capability="propose"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        a = kb.assert_literal(entity.id, "Person.born", "1815", "Text", HUMAN_WRITE)
+        kb.retract(a.id, HUMAN_WRITE)
+        events_before = kb.backend.get_assertion_events(a.id)
+
+        # grace's own low capability (propose, trust 0) - not the target's
+        # already-retracted status - is what routes this to review.
+        proposal, decision = kb.retract(a.id, "grace@example.com")
+        assert isinstance(decision, RequireReview)
+
+        accepted = kb.accept_proposal(proposal.id, REVIEWER)
+
+        assert accepted.state == "accepted"
+        assert kb.backend.get_assertion_events(a.id) == events_before
+        assert kb.backend.get_assertion(a.id).status == "retracted"  # type: ignore[union-attr]
 
 
 # ===========================================================================
