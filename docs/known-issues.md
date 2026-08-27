@@ -1103,10 +1103,10 @@ Conformance vectors (`conformance/test_contradiction_resolution.py::TestFlagCont
 
 ---
 
-## KI-051 — `retract()` can overwrite an already-`retracted`/`superseded` contradiction member, bypassing both the party guard and the capability floor
+## KI-051 — `retract()` can overwrite an already-`retracted`/`superseded` contradiction member, bypassing both the party guard and the capability floor ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — a governance action (KI-033's self-dealing guard, KI-043's capability floor) can be bypassed for any terminal-status member, not just a `flagged` one
-**Milestone target:** Backlog
+**Milestone target:** M3 — resolved via ADR-0030's amendment
 **SPEC reference:** SPEC §10.3 (contradiction resolution), §5 (append-only lifecycle)
 
 ### Description
@@ -1119,7 +1119,13 @@ Found during KI-044/ADR-0031's third review pass (2026-08-21); the `retracted`-t
 
 ### Fix
 
-Decide (ADR) whether `_reject_retract_if_party_to_contradiction` and the KI-043 capability-floor check should treat any terminal status (`retracted`, `superseded`) the same as `flagged` for guard-applicability purposes (i.e. "this target belongs to an open contradiction and is governed by these guards" should key off contradiction membership, not off `status == "flagged"` specifically) — most likely by changing `_open_contradiction_if_flagged_member`'s underlying membership check (and the equivalent inline check in `_reject_retract_if_party_to_contradiction`) to recognize any current or former member of an open contradiction as still governed, not just a currently-`flagged` one. Separately, consider whether `retract()` should also gain its own already-terminal idempotency no-op (independent of the contradiction question) to close the event-misattribution half even for a non-contradiction assertion. Add conformance vectors pinning both guards now apply to `retracted`/`superseded` members the way they already do to `flagged` ones.
+ADR-0030 amendment: `_open_contradiction_if_member` (renamed from `_open_contradiction_if_flagged_member`) and the equivalent inline check in `_reject_retract_if_party_to_contradiction` now key off contradiction membership alone — any current or former member of a still-`open` contradiction, regardless of the member's own status — instead of gating on `status == "flagged"` before ever checking membership. `_require_capability_to_retract_contradiction_member` (renamed from `..._flagged_member`) inherits the fix automatically, since it's built on the same shared membership check. Both KI-033's party guard and KI-043's capability floor now apply to a `retracted`/`superseded` contradiction member exactly as they already did to a `flagged` one.
+
+Separately, `retract()` and `_replay_proposal_operations`'s `retract` op branch now no-op (no `set_assertion_status`/event write) when re-retracting a target that's already exactly `retracted` — closing the narrower event-misattribution gap independent of contradiction membership. **Deliberately narrower than `resolve_contradiction()`'s own loser-loop no-op (KI-044, ADR-0031), which also skips an already-`superseded` loser**: that loop is an automatic side effect of picking a winner, not a call the user directly targeted at that assertion, whereas explicitly retracting a `superseded` assertion via `retract()` is a distinct, legitimate transition this codebase already treats as worth its own event (`test_events_ordered_oldest_first`, `test_retract_never_widens_an_already_closed_valid_to`) — verified this fix doesn't break either of those pre-existing tests.
+
+New conformance vectors: `conformance/test_contradiction_resolution.py::TestRetractGuardsApplyToTerminalMembers` (party guard blocks retracting an already-`retracted` or already-`superseded` opposing member; a below-floor neutral principal retracting a terminal member is routed to review, not auto-accepted) and `::TestRetractAlreadyTerminalIdempotency` (re-retracting records no second event and doesn't widen `valid_to`; the same no-op applies when the retract op is replayed via `accept_proposal`).
+
+**Breaking (observable, not signature-level):** a caller relying on `retract()` auto-accepting against a `retracted`/`superseded` contradiction member with no governance check (bypassing the party guard or capability floor) now gets the same `CapabilityError`/`RequireReview` routing a `flagged` member already had.
 
 ---
 

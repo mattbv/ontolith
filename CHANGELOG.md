@@ -235,6 +235,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- **Breaking:** KI-033's party guard and KI-043's capability floor now apply to a
+  `retracted`/`superseded` contradiction member exactly as they already did to a
+  `flagged` one (closes KI-051, amends ADR-0030). Both guards previously gated on
+  `status == "flagged"` before ever checking contradiction membership, so a member
+  ADR-0031 had already terminalized while its contradiction stayed `open` was
+  completely exempt — a party could retract it, or a below-floor neutral principal
+  could auto-accept retracting it, with no governance applied. `_open_contradiction_if_member`/
+  `_require_capability_to_retract_contradiction_member` (renamed from
+  `..._flagged_member`/`..._if_flagged_member` for accuracy) now key off contradiction
+  membership alone, independent of the target's own status. Separately, `retract()`
+  now no-ops (no status/event write) when re-retracting an already-`retracted` target,
+  closing a narrower, contradiction-independent event-misattribution gap — deliberately
+  **not** extended to an already-`superseded` target, unlike `resolve_contradiction()`'s
+  own loser-loop no-op (KI-044): explicitly retracting a `superseded` assertion via
+  `retract()` remains a real, event-recording transition this codebase already relies
+  on (`test_events_ordered_oldest_first`).
 - **Breaking:** `flag_contradiction()` now rejects opening a **new** contradiction whose
   two founding members are both already `retracted`/`superseded` (closes KI-050,
   ADR-0035) — `resolve_contradiction()` already rejects a terminal-status winner
