@@ -31,7 +31,7 @@ dependencies = [
 [project.optional-dependencies]
 store-duckdb = ["duckdb>=1.0"]
 rest = ["fastapi>=0.110", "uvicorn>=0.27"]
-graphql = ["strawberry-graphql>=0.219"]
+graphql = ["strawberry-graphql[fastapi]>=0.219", "uvicorn>=0.27"]
 mcp = [
     "mcp>=1.28.1,<2.0", # >=1.28.1 fixes PYSEC-2026-3483; <2.0 avoids an unreviewed major bump
 ]
