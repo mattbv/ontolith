@@ -137,16 +137,48 @@ class TestDocsUrls:
 # ---------------------------------------------------------------------------
 
 
+async def _post_concurrently(
+    app: object, headers: dict[str, str], query: str, count: int
+) -> tuple[list[int], list[dict[str, Any]], float]:
+    """Fire `count` concurrent GraphQL requests through a real ASGI
+    transport (not FastAPI's TestClient - see TestResolverConcurrency's own
+    docstring) and report status codes, JSON bodies, and elapsed time."""
+    import asyncio
+    import time
+
+    import httpx2
+
+    transport = httpx2.ASGITransport(app=app)  # type: ignore[arg-type]
+    async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+        start = time.perf_counter()
+        responses = await asyncio.wait_for(
+            asyncio.gather(
+                *[
+                    client.post("/graphql", json={"query": query}, headers=headers)
+                    for _ in range(count)
+                ]
+            ),
+            timeout=15,
+        )
+        elapsed = time.perf_counter() - start
+        return [r.status_code for r in responses], [r.json() for r in responses], elapsed
+
+
 class TestResolverConcurrency:
-    def test_concurrent_requests_overlap_instead_of_serializing(self, tmp_path: Path) -> None:
+    def test_concurrent_requests_overlap_instead_of_serializing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Before KI-052, every resolver ran inline on the event loop, so
         three concurrent 0.3s-resolver requests took ~0.9s (serialized).
         After converting resolvers to async + run_in_threadpool, they
-        overlap - this must take closer to 0.3s than 0.9s."""
+        overlap - this must take closer to 0.3s than 0.9s.
+
+        Asserts the slowed path actually ran (not just that responses came
+        back 200) - a resolver that stopped reaching get_schema entirely
+        (e.g. a future schema cache) would otherwise still return 200 fast
+        and pass vacuously without exercising the offload at all."""
         import asyncio
         import time
-
-        import httpx2
 
         kb = _kb(tmp_path)
         auth_provider = TokenAuthProvider(kb.backend)
@@ -155,38 +187,62 @@ class TestResolverConcurrency:
         headers = _auth(token)
 
         original_get_schema = kb.backend.get_schema
+        call_count = 0
 
         def _slow_get_schema(*args: object, **kwargs: object) -> object:
+            nonlocal call_count
+            call_count += 1
             time.sleep(0.3)
             return original_get_schema(*args, **kwargs)
 
-        kb.backend.get_schema = _slow_get_schema  # type: ignore[method-assign]
+        monkeypatch.setattr(kb.backend, "get_schema", _slow_get_schema)
 
-        async def _run_concurrently() -> tuple[list[int], float]:
-            transport = httpx2.ASGITransport(app=app)
-            async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
-                start = time.perf_counter()
-                responses = await asyncio.wait_for(
-                    asyncio.gather(
-                        *[
-                            client.post(
-                                "/graphql",
-                                json={"query": "{ schema { version } }"},
-                                headers=headers,
-                            )
-                            for _ in range(3)
-                        ]
-                    ),
-                    timeout=15,
-                )
-                elapsed = time.perf_counter() - start
-                return [r.status_code for r in responses], elapsed
-
-        statuses, elapsed = asyncio.run(_run_concurrently())
+        statuses, bodies, elapsed = asyncio.run(
+            _post_concurrently(app, headers, "{ schema { version } }", 3)
+        )
         assert statuses == [200, 200, 200]
+        assert all("errors" not in b for b in bodies), bodies
+        assert all(b["data"]["schema"] is not None for b in bodies), bodies
+        assert call_count == 3
         # Serialized would be ~0.9s (3 x 0.3s); overlapping is ~0.3s. 0.6s
         # is a generous midpoint that tolerates test-machine jitter while
         # still failing if resolvers regress to blocking the event loop.
+        assert elapsed < 0.6, f"expected overlapping concurrent requests, took {elapsed:.2f}s"
+
+    def test_context_auth_resolution_does_not_block_event_loop(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """create_graphql_app's _get_context offloads auth_provider.resolve()
+        too, not just the resolver body - a regression here would re-block
+        the event loop on *every* authenticated request, not just one
+        field, since every request resolves its token first."""
+        import asyncio
+        import time
+
+        kb = _kb(tmp_path)
+        auth_provider = TokenAuthProvider(kb.backend)
+        app = create_graphql_app(kb, auth_provider)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        headers = _auth(token)
+
+        original_resolve = auth_provider.resolve
+        call_count = 0
+
+        def _slow_resolve(*args: object, **kwargs: object) -> object:
+            nonlocal call_count
+            call_count += 1
+            time.sleep(0.3)
+            return original_resolve(*args, **kwargs)
+
+        monkeypatch.setattr(auth_provider, "resolve", _slow_resolve)
+
+        statuses, bodies, elapsed = asyncio.run(
+            _post_concurrently(app, headers, "{ schema { version } }", 3)
+        )
+        assert statuses == [200, 200, 200]
+        assert all("errors" not in b for b in bodies), bodies
+        assert all(b["data"]["schema"] is not None for b in bodies), bodies
+        assert call_count == 3
         assert elapsed < 0.6, f"expected overlapping concurrent requests, took {elapsed:.2f}s"
 
 

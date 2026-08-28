@@ -588,39 +588,39 @@ def _list_principals(kb: Ontology, author: str) -> list[PrincipalType]:
     ]
 
 
-def _do_propose(kb: Ontology, author: str, input: ProposeInput) -> ProposeResultType:
+def _do_propose(kb: Ontology, author: str, payload: ProposeInput) -> ProposeResultType:
     """Blocking body of Mutation.propose."""
-    has_literal = input.value is not None and input.value_type is not None
-    has_ref = input.target is not None
+    has_literal = payload.value is not None and payload.value_type is not None
+    has_ref = payload.target is not None
     if has_literal == has_ref:
         raise ValidationError("Provide exactly one of (value and value_type) or target")
 
     if has_ref:
-        assert input.target is not None
+        assert payload.target is not None
         proposal, decision = kb.propose_ref(
-            subject=input.subject,
-            predicate=input.predicate,
-            target=input.target,
+            subject=payload.subject,
+            predicate=payload.predicate,
+            target=payload.target,
             author=author,
-            confidence=input.confidence,
-            source=input.source,
-            rationale=input.rationale,
-            acting_as=input.acting_as,
-            model=input.model,
+            confidence=payload.confidence,
+            source=payload.source,
+            rationale=payload.rationale,
+            acting_as=payload.acting_as,
+            model=payload.model,
         )
     else:
-        assert input.value is not None and input.value_type is not None
+        assert payload.value is not None and payload.value_type is not None
         proposal, decision = kb.propose(
-            subject=input.subject,
-            predicate=input.predicate,
-            value=input.value,
-            value_type=input.value_type,
+            subject=payload.subject,
+            predicate=payload.predicate,
+            value=payload.value,
+            value_type=payload.value_type,
             author=author,
-            confidence=input.confidence,
-            source=input.source,
-            rationale=input.rationale,
-            acting_as=input.acting_as,
-            model=input.model,
+            confidence=payload.confidence,
+            source=payload.source,
+            rationale=payload.rationale,
+            acting_as=payload.acting_as,
+            model=payload.model,
         )
     return ProposeResultType(proposal=_proposal_type(proposal), decision=type(decision).__name__)
 
