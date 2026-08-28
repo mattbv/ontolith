@@ -415,7 +415,7 @@ Added a `token: str` parameter to `schema_tool`/`get_tool`/`query_tool`/`provena
 ## KI-022 — REST interface (SPEC §14.3) ✓ RESOLVED (M3)
 
 **Severity:** Architecture gap — named M3 scope item with zero implementation; all originally-deferred pieces now closed
-**Milestone target:** M3 — full SPEC §14.3 parity (`/query` offset pagination, GraphQL) remains Backlog, tracked as separate concerns, not blocked on this KI
+**Milestone target:** M3 — full SPEC §14.3 parity except `/query` offset pagination (tracked as a separate concern, not blocked on this KI); GraphQL resolved separately (ADR-0037)
 **SPEC reference:** SPEC §14.3 (REST + GraphQL), §16 (error model), §17 (security model)
 
 ### Description
@@ -443,7 +443,9 @@ GraphQL (SPEC §14.3's other named half) is untouched by this KI and remains ful
 
 **`GET /namespaces` (namespace registry): resolved (2026-07-28, ADR-0022 update).** New `Namespace` model (`ontolith.core.namespace`), `StorageBackend.list_namespaces()` port method (both backends, modeled on SPEC §12.2's own normative `namespace` table — resolving ADR-0022's own open question of table-vs-`DISTINCT` in the table's favor), `Ontology.list_namespaces()` (ungated, like `proposals()`/`contradictions()`), `GET /namespaces` (REST), and `ontolith namespace list` (CLI). Both backends idempotently register `DEFAULT_NAMESPACE` (`"default"`) at schema-creation time, and `put_schema()` idempotently registers `schema.namespace` too — otherwise a namespace with only a schema applied, no entities, would be invisible to the registry, the exact blind spot the table-over-`DISTINCT` decision was meant to close. No explicit `put_namespace`/create-namespace API was added; this project remains single-namespace throughout (ADR-0015). See ADR-0022's Update section for the full list of what's deliberately still out of scope (namespace-creation API, `Ontology.connect(namespace=...)`, per-namespace `principal_trust`/plugin isolation/read scoping, namespace-existence validation on other routes).
 
-**Still open, tracked as separate concerns (not blocked on "no backing method"):** `/query` offset pagination — `QueryBuilder` only supports `.limit()`, no `.offset()`; extending it is a `query/`+`store/` change, out of scope for "expose the existing SDK over HTTP." GraphQL (SPEC §14.3's other named half) remains fully unscoped.
+**GraphQL (SPEC §14.3's other named half): resolved separately (2026-08-27, ADR-0037).** `src/ontolith/interfaces/graphql.py` (`create_graphql_app`) — deliberately scoped to SPEC's literal wording (query/propose/review only, no direct-write or principal-admin mutations), not REST's fuller surface. See ADR-0037 for the full design.
+
+**Still open, tracked as a separate concern (not blocked on "no backing method"):** `/query` offset pagination — `QueryBuilder` only supports `.limit()`, no `.offset()`; extending it is a `query/`+`store/` change, out of scope for "expose the existing SDK over HTTP," and applies equally to both REST and GraphQL once addressed.
 
 ---
 
@@ -1128,6 +1130,24 @@ Separately, `retract()` and `_replay_proposal_operations`'s `retract` op branch 
 New conformance vectors: `conformance/test_contradiction_resolution.py::TestRetractGuardsApplyToTerminalMembers` (party guard blocks retracting an already-`retracted` or already-`superseded` opposing member; a below-floor neutral principal retracting a terminal member is routed to review, not auto-accepted) and `::TestRetractAlreadyTerminalIdempotency` (re-retracting records no second event and doesn't widen `valid_to`; the same no-op applies when the retract op is replayed via `accept_proposal`).
 
 **Breaking (observable, not signature-level):** a caller relying on `retract()` auto-accepting against a `retracted`/`superseded` contradiction member with no governance check (bypassing the party guard or capability floor) now gets the same `CapabilityError`/`RequireReview` routing a `flagged` member already had.
+
+---
+
+## KI-052 — GraphQL resolvers are synchronous and block the ASGI event loop under concurrent load
+
+**Severity:** Performance — measured, real production impact under concurrency; not a correctness or security gap
+**Milestone target:** Backlog — deferred, tracked here rather than silently accepted
+**SPEC reference:** SPEC §14.3 (REST + GraphQL)
+
+### Description
+
+Every resolver in `src/ontolith/interfaces/graphql.py` (`interfaces/graphql.py`, ADR-0037) is a plain synchronous function. REST's routes (`interfaces/rest.py`, ADR-0021) are also synchronous, but Starlette dispatches ordinary `def` route handlers to a thread pool automatically; `strawberry.fastapi.GraphQLRouter` executes resolvers inline on the ASGI event loop instead. A slow resolver — a large query, a cold vector index, a lock wait — blocks the event loop for the full duration of every concurrent request, not just the ones touching the database, unlike REST's equivalent.
+
+Measured directly during ADR-0037's second review round: three concurrent requests against a deliberately slowed (0.3s) resolver serialized to ~0.92s total under GraphQL, versus ~0.31s under REST's equivalent (the three requests overlap). Real-world impact is softened, though not eliminated, by `store/sqlite/backend.py`'s own process-wide write lock already serializing concurrent DB *writes* regardless of interface — the added harm here is event-loop starvation blocking *all* traffic (including fast, non-DB requests and socket servicing), not just DB-bound ones.
+
+### Fix
+
+Not yet implemented. Closing this properly means converting resolvers to `async def` and offloading blocking calls (backend I/O) via `starlette.concurrency.run_in_threadpool` (or an async-native storage path, a much larger change) — a signature change to every resolver, not a localized fix, and out of scope for the PR that shipped the interface itself. Recorded in ADR-0037's Update section as an accepted, documented limitation; this entry exists so it's visible in the tracked backlog too, not only inside that ADR.
 
 ---
 

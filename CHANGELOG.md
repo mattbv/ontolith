@@ -38,6 +38,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that context, unlike `JsonExporter`. `Ontology` and `ReadOnlyView` both gain a new
   `schema()` method — the first reference plugin needing schema access, not just
   entity/assertion data.
+- GraphQL interface, closing M3's last unstarted scope item (SPEC §14.3,
+  ADR-0037): `create_graphql_app(kb, auth_provider)` (`interfaces/graphql.py`)
+  serves a `strawberry`-backed schema at `/graphql` exposing `Entity`, `Assertion`,
+  `Proposal`, `Contradiction`, and `Principal` types with `query`, `propose`, and
+  `review` operations — SPEC's literal wording, deliberately narrower than REST's
+  own extended write/admin surface (ADR-0022): no direct-write mutation, no
+  principal creation or token issuance. `Query`: `schema`, `entity` (with a
+  lazily-resolved nested `assertions` field), `query`, `provenance`, `proposals`,
+  `contradictions`, `principals` (admin-gated). `Mutation`: `propose`,
+  `acceptProposal`, `rejectProposal`, `requestChanges`, `resubmitProposal`,
+  `flagContradiction`, `resolveContradiction`. Reuses ADR-0014 bearer-token auth,
+  resolved once per request into GraphQL context (never raised there, so
+  introspection stays reachable unauthenticated like REST's `/docs`) and checked
+  per-resolver. A custom `strawberry.Schema.process_errors` override centralizes
+  `OntolithError` → `extensions={code, detail}` mapping — the GraphQL analog of
+  REST's single `OntolithError` exception handler — redacting `StorageError`/
+  `PluginError` messages the same way REST does; any other resolver exception
+  (not a domain error) is redacted identically with a new `extensions.code =
+  "INTERNAL_ERROR"`, matching REST's generic, code-less 500 for the same
+  failure class rather than leaking the raw message. `create_graphql_app`
+  also gained `introspection` (default `True`; set `False` to disable
+  `__schema`/`__type` independent of the `graphql_ide` toggle) and
+  `docs_url`/`redoc_url`/`openapi_url` passthrough, matching
+  `create_rest_app`'s existing parameters. `graphql` extra widened to
+  `strawberry-graphql[fastapi]` plus `uvicorn` so it's installable standalone,
+  without also needing `[rest]`.
 - Class-based schema DSL compiler and `Ontology.apply_schema` (SPEC §6.2)
 - LinkML-aligned YAML schema front-end: `to_yaml`/`from_yaml`, a deliberately-scoped
   dialect subset documented in ADR-0013, with schema-level `default_range` support and
