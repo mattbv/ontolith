@@ -1133,7 +1133,7 @@ New conformance vectors: `conformance/test_contradiction_resolution.py::TestRetr
 
 ---
 
-## KI-052 — GraphQL resolvers are synchronous and block the ASGI event loop under concurrent load ✓ RESOLVED
+## KI-052 — GraphQL resolvers are synchronous and block the ASGI event loop under concurrent load ✓ RESOLVED (M3)
 
 **Severity:** Performance — measured, real production impact under concurrency; not a correctness or security gap
 **Milestone target:** Backlog — resolved as a follow-up fix, not blocking anything

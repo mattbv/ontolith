@@ -312,8 +312,21 @@ Not addressed by this fix, and out of scope for it: `store/sqlite/backend.py`'s
 own process-wide lock still serializes genuinely concurrent *writes*
 regardless of interface — pre-existing, orthogonal to the event-loop
 problem this fix closes, not something a resolver-level change can or
-should touch. The query cost/complexity-limiting gap named above is also
-untouched.
+should touch.
+
+This fix also has a second-order effect worth naming: converting resolvers
+to `async def` means graphql-core now executes *sibling root fields within
+one request* concurrently too, not just separate requests — a query
+aliasing many fields now dispatches that many `run_in_threadpool` calls at
+once, sharing the process's single anyio worker-thread pool (default
+capacity 40, also shared with any co-mounted REST app in the same
+process). Measured: 200 aliased fields at 0.5s each saturated the pool
+enough to delay an unrelated concurrent request by ~2.5s. This is strictly
+better than pre-fix behavior (the same query would have blocked the event
+loop directly, for the full ~100s), not a regression — but it makes the
+already-named, still-unimplemented query cost/complexity limiter
+(`strawberry.extensions.QueryDepthLimiter` or similar) more load-bearing
+than before this fix, not just a nice-to-have. Still not implemented here.
 
 ## References
 
