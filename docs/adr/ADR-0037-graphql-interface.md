@@ -259,12 +259,24 @@ own stated goals):
   signature, not a localized fix — deferred as a follow-up rather than
   rushed into this PR. Real-world impact is softened, not eliminated, by
   `store/sqlite/backend.py`'s own process-wide write lock already
-  serializing concurrent DB writes regardless of interface.
+  serializing concurrent DB writes regardless of interface. Tracked as
+  KI-052 (also filed in `docs/known-issues.md`, not just here, so it's
+  visible in the tracked backlog).
 - **No `as_of` argument on `Query.query`.** Consistent with REST and MCP —
   neither exposes bitemporal time-travel either — but worth naming
   explicitly since it's one of this project's headline capabilities and
   is the kind of gap easy to miss precisely because it matches existing
   precedent rather than standing out as new.
+- **No query cost/complexity limiting.** An authenticated caller can send
+  one request with many aliased selections (e.g. 200 aliased `entity {
+  assertions }` fields) and have it execute the full multiple of backend
+  calls in one round trip — verified directly. REST has no equivalent
+  single-request amplification vector (each request maps to one route),
+  and neither interface rate-limits today, so this isn't a regression
+  against REST's posture, but GraphQL is the first interface where one
+  HTTP request can carry unbounded work. A query depth/complexity limit
+  (e.g. `strawberry.extensions.QueryDepthLimiter` or a cost-based
+  extension) is a reasonable follow-up, not implemented here.
 
 ## References
 

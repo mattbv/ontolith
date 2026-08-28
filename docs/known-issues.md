@@ -1133,6 +1133,24 @@ New conformance vectors: `conformance/test_contradiction_resolution.py::TestRetr
 
 ---
 
+## KI-052 — GraphQL resolvers are synchronous and block the ASGI event loop under concurrent load
+
+**Severity:** Performance — measured, real production impact under concurrency; not a correctness or security gap
+**Milestone target:** Backlog — deferred, tracked here rather than silently accepted
+**SPEC reference:** SPEC §14.3 (REST + GraphQL)
+
+### Description
+
+Every resolver in `src/ontolith/interfaces/graphql.py` (`interfaces/graphql.py`, ADR-0037) is a plain synchronous function. REST's routes (`interfaces/rest.py`, ADR-0021) are also synchronous, but Starlette dispatches ordinary `def` route handlers to a thread pool automatically; `strawberry.fastapi.GraphQLRouter` executes resolvers inline on the ASGI event loop instead. A slow resolver — a large query, a cold vector index, a lock wait — blocks the event loop for the full duration of every concurrent request, not just the ones touching the database, unlike REST's equivalent.
+
+Measured directly during ADR-0037's second review round: three concurrent requests against a deliberately slowed (0.3s) resolver serialized to ~0.92s total under GraphQL, versus ~0.31s under REST's equivalent (the three requests overlap). Real-world impact is softened, though not eliminated, by `store/sqlite/backend.py`'s own process-wide write lock already serializing concurrent DB *writes* regardless of interface — the added harm here is event-loop starvation blocking *all* traffic (including fast, non-DB requests and socket servicing), not just DB-bound ones.
+
+### Fix
+
+Not yet implemented. Closing this properly means converting resolvers to `async def` and offloading blocking calls (backend I/O) via `starlette.concurrency.run_in_threadpool` (or an async-native storage path, a much larger change) — a signature change to every resolver, not a localized fix, and out of scope for the PR that shipped the interface itself. Recorded in ADR-0037's Update section as an accepted, documented limitation; this entry exists so it's visible in the tracked backlog too, not only inside that ADR.
+
+---
+
 ## Format
 
 Each entry follows this structure:

@@ -54,7 +54,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per-resolver. A custom `strawberry.Schema.process_errors` override centralizes
   `OntolithError` → `extensions={code, detail}` mapping — the GraphQL analog of
   REST's single `OntolithError` exception handler — redacting `StorageError`/
-  `PluginError` messages the same way REST does. `graphql` extra widened to
+  `PluginError` messages the same way REST does; any other resolver exception
+  (not a domain error) is redacted identically with a new `extensions.code =
+  "INTERNAL_ERROR"`, matching REST's generic, code-less 500 for the same
+  failure class rather than leaking the raw message. `create_graphql_app`
+  also gained `introspection` (default `True`; set `False` to disable
+  `__schema`/`__type` independent of the `graphql_ide` toggle) and
+  `docs_url`/`redoc_url`/`openapi_url` passthrough, matching
+  `create_rest_app`'s existing parameters. `graphql` extra widened to
   `strawberry-graphql[fastapi]` plus `uvicorn` so it's installable standalone,
   without also needing `[rest]`.
 - Class-based schema DSL compiler and `Ontology.apply_schema` (SPEC §6.2)
