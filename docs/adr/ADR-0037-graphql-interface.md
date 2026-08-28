@@ -278,6 +278,43 @@ own stated goals):
   (e.g. `strawberry.extensions.QueryDepthLimiter` or a cost-based
   extension) is a reasonable follow-up, not implemented here.
 
+## Update (2026-08-28): resolvers converted to async, KI-052 resolved
+
+The "Resolvers are synchronous and run inline in the ASGI event loop"
+limitation named above (KI-052) is now fixed, as a small dedicated
+follow-up rather than left deferred indefinitely.
+
+Every `Query`/`Mutation` field resolver, `EntityType.assertions`, and
+`create_graphql_app`'s `_get_context` are now `async def`.
+`_require_principal`/`_kb` (cheap dict lookups, no I/O) still run inline;
+every call that touches `kb`/`kb.backend` was factored into a plain sync
+helper function (e.g. `_build_schema`, `_execute_query`,
+`_do_accept_proposal`) and dispatched via
+`starlette.concurrency.run_in_threadpool` — one helper per resolver,
+mirroring the resolver's prior body exactly, so the fix is a mechanical
+"extract and offload," not a behavior change. `_get_context`'s
+`auth_provider.resolve(token)` call is offloaded the same way, since token
+resolution is also a backend-backed lookup, not just a dict access.
+
+Re-measured with the same deliberately-slowed-resolver setup this ADR's
+first measurement used: three concurrent requests now complete in ~0.33s,
+matching REST's ~0.31s (overlapping) rather than the original ~0.92s
+(serialized). Pinned by a new regression test,
+`TestResolverConcurrency::test_concurrent_requests_overlap_instead_of_serializing`
+— built on `httpx2.AsyncClient` + `ASGITransport` with real
+`asyncio.gather` concurrency rather than FastAPI's `TestClient` (which runs
+every request through a single background portal thread and doesn't
+exercise genuine concurrent event-loop scheduling the way a live async
+client does). Verified the test actually catches a regression: reverting
+one resolver to synchronous/inline execution reliably fails it.
+
+Not addressed by this fix, and out of scope for it: `store/sqlite/backend.py`'s
+own process-wide lock still serializes genuinely concurrent *writes*
+regardless of interface — pre-existing, orthogonal to the event-loop
+problem this fix closes, not something a resolver-level change can or
+should touch. The query cost/complexity-limiting gap named above is also
+untouched.
+
 ## References
 
 - SPEC §14.3 (REST + GraphQL), §16 (error model), §8.3 (capabilities), §17
@@ -287,4 +324,5 @@ own stated goals):
   ADR-0014 (MCP bearer-token authentication), ADR-0008 (MCP tool surface —
   the same read/propose-first precedent this ADR's scope follows)
 - `docs/known-issues.md` KI-022 (REST's own deferred-scope list, referenced
-  for what this ADR deliberately does not add)
+  for what this ADR deliberately does not add), KI-052 (event-loop-blocking
+  resolvers, resolved by the 2026-08-28 update above)

@@ -1133,10 +1133,10 @@ New conformance vectors: `conformance/test_contradiction_resolution.py::TestRetr
 
 ---
 
-## KI-052 — GraphQL resolvers are synchronous and block the ASGI event loop under concurrent load
+## KI-052 — GraphQL resolvers are synchronous and block the ASGI event loop under concurrent load ✓ RESOLVED
 
 **Severity:** Performance — measured, real production impact under concurrency; not a correctness or security gap
-**Milestone target:** Backlog — deferred, tracked here rather than silently accepted
+**Milestone target:** Backlog — resolved as a follow-up fix, not blocking anything
 **SPEC reference:** SPEC §14.3 (REST + GraphQL)
 
 ### Description
@@ -1147,7 +1147,12 @@ Measured directly during ADR-0037's second review round: three concurrent reques
 
 ### Fix
 
-Not yet implemented. Closing this properly means converting resolvers to `async def` and offloading blocking calls (backend I/O) via `starlette.concurrency.run_in_threadpool` (or an async-native storage path, a much larger change) — a signature change to every resolver, not a localized fix, and out of scope for the PR that shipped the interface itself. Recorded in ADR-0037's Update section as an accepted, documented limitation; this entry exists so it's visible in the tracked backlog too, not only inside that ADR.
+Every `Query`/`Mutation` field resolver, plus `EntityType.assertions` and `create_graphql_app`'s `_get_context`, is now `async def`. `_require_principal`/`_kb` (cheap dict lookups) still run inline; every call that touches `kb`/`kb.backend` — the actual blocking SQLite/DuckDB I/O — was factored into a plain sync helper function (`_build_schema`, `_build_entity`, `_execute_query`, `_build_provenance`, `_list_proposals`, `_list_contradictions`, `_list_principals`, `_do_propose`, `_do_accept_proposal`, `_do_reject_proposal`, `_do_request_changes`, `_do_resubmit_proposal`, `_do_flag_contradiction`, `_do_resolve_contradiction`, `_build_assertions`) and dispatched via `starlette.concurrency.run_in_threadpool`. `_get_context`'s `auth_provider.resolve(token)` call is offloaded the same way, since token resolution is also a backend-backed lookup.
+
+Re-measured after the fix with the same deliberately-slowed-resolver setup: three concurrent requests now complete in ~0.33s, matching REST's ~0.31s (overlapping) rather than the previous ~0.92s (serialized). New regression test
+`tests/unit/test_graphql.py::TestResolverConcurrency::test_concurrent_requests_overlap_instead_of_serializing` pins this — it uses `httpx2.AsyncClient` + `ASGITransport` with real `asyncio.gather` concurrency (FastAPI's `TestClient` runs everything through a single background portal thread and doesn't exercise genuine concurrent event-loop scheduling), and fails if resolvers ever regress back to blocking (verified via mutation testing: reverting one resolver to sync/inline execution reliably fails the test).
+
+**Not addressed by this fix, unchanged:** the backend's own process-wide lock (`store/sqlite/backend.py`) still serializes genuinely concurrent *writes* regardless of interface — expected, pre-existing, and orthogonal to the event-loop-blocking problem this KI was about.
 
 ---
 
