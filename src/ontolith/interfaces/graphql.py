@@ -42,6 +42,17 @@ is redacted the same way, with ``extensions.code = "INTERNAL_ERROR"``: REST's
 equivalent path gets FastAPI's generic, code-less 500, never the raw
 message, and this must fail closed to match rather than leak by omission.
 
+Concurrency (KI-052): every resolver is ``async def``. ``_require_principal``/
+``_kb`` are cheap dict lookups and run inline, but everything that touches
+``kb``/``kb.backend`` — the actual blocking SQLite/DuckDB I/O — is factored
+into a plain sync helper function and run via
+``starlette.concurrency.run_in_threadpool``. Unlike REST, whose plain ``def``
+routes Starlette dispatches to a thread pool automatically, `strawberry`'s
+`GraphQLRouter` executes resolvers inline on the ASGI event loop by default;
+without this, one slow resolver would block every concurrent request (not
+just database-bound ones) for its full duration — measured directly during
+review, closed here.
+
 Usage:
     from ontolith.identity.token_auth import TokenAuthProvider
     from ontolith.interfaces.graphql import create_graphql_app
@@ -57,6 +68,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 import strawberry
 from fastapi import FastAPI, Header
 from graphql.error import GraphQLError
+from starlette.concurrency import run_in_threadpool
 from strawberry.extensions import DisableIntrospection
 from strawberry.fastapi import GraphQLRouter
 
@@ -176,7 +188,7 @@ class EntityType:
     created_by: str
 
     @strawberry.field
-    def assertions(self, info: strawberry.Info) -> list[AssertionType]:
+    async def assertions(self, info: strawberry.Info) -> list[AssertionType]:
         """Currently active assertions for this entity — resolved lazily,
         so a query that only asks for entity fields never pays for it.
 
@@ -186,19 +198,7 @@ class EntityType:
         field ever returns EntityType through a different path."""
         _require_principal(info)
         kb = _kb(info)
-        active = kb.backend.assertions(subject=self.id, status="active")
-        return [
-            AssertionType(
-                id=a.id,
-                predicate=a.predicate,
-                value=a.value,
-                value_type=a.value_type,
-                confidence=a.confidence,
-                author=a.author,
-                asserted_at=a.asserted_at.isoformat(),
-            )
-            for a in active
-        ]
+        return await run_in_threadpool(_build_assertions, kb, self.id)
 
 
 @strawberry.type
@@ -407,6 +407,271 @@ def _require_principal(info: strawberry.Info) -> Principal:
 
 
 # ---------------------------------------------------------------------------
+# Resolver helpers (sync, blocking - always run via run_in_threadpool,
+# never called directly from a resolver, module docstring's Concurrency
+# section)
+# ---------------------------------------------------------------------------
+
+
+def _build_assertions(kb: Ontology, entity_id: str) -> list[AssertionType]:
+    """Blocking body of EntityType.assertions."""
+    active = kb.backend.assertions(subject=entity_id, status="active")
+    return [
+        AssertionType(
+            id=a.id,
+            predicate=a.predicate,
+            value=a.value,
+            value_type=a.value_type,
+            confidence=a.confidence,
+            author=a.author,
+            asserted_at=a.asserted_at.isoformat(),
+        )
+        for a in active
+    ]
+
+
+def _build_schema(kb: Ontology, namespace: str) -> SchemaType:
+    """Blocking body of Query.schema."""
+    ir = kb.backend.get_schema(namespace)
+    if ir is None:
+        return SchemaType(namespace=None, version=None, concepts=[])
+    concepts = [
+        ConceptType(
+            name=concept_name,
+            properties=[
+                PropertyType(
+                    name=prop_name,
+                    type=prop_def.value_type,
+                    cardinality=prop_def.cardinality,
+                    temporality=prop_def.temporality,
+                    required=prop_def.required,
+                )
+                for prop_name, prop_def in concept_def.properties.items()
+            ],
+            relations=[
+                RelationType(
+                    name=rel_name,
+                    target_concept=rel_def.target_concept,
+                    cardinality=rel_def.cardinality,
+                    required=rel_def.required,
+                    temporality=rel_def.temporality,
+                    inverse=rel_def.inverse,
+                )
+                for rel_name, rel_def in concept_def.relations.items()
+            ],
+        )
+        for concept_name, concept_def in ir.concepts.items()
+    ]
+    return SchemaType(namespace=namespace, version=ir.version, concepts=concepts)
+
+
+def _build_entity(kb: Ontology, entity_id: str) -> EntityType:
+    """Blocking body of Query.entity."""
+    entity = kb.backend.get_entity(entity_id)
+    if entity is None:
+        raise NotFoundError(f"Entity {entity_id!r} not found")
+    return EntityType(
+        id=entity.id,
+        concept=entity.concept,
+        namespace=entity.namespace,
+        natural_key=entity.natural_key,
+        created_at=entity.created_at.isoformat(),
+        created_by=entity.created_by,
+    )
+
+
+def _execute_query(
+    kb: Ontology,
+    concept: str,
+    filters: list[FilterInput] | None,
+    semantic: str | None,
+    min_confidence: float | None,
+    trust_at_least: int | None,
+    limit: int | None,
+) -> QueryResultType:
+    """Blocking body of Query.query."""
+    builder = kb.query(concept)
+    if filters:
+        keys = [f.key for f in filters]
+        duplicates = sorted({k for k in keys if keys.count(k) > 1})
+        if duplicates:
+            raise ValidationError(f"Duplicate filter keys: {duplicates}")
+        builder = builder.where(**{f.key: f.value for f in filters})
+    if semantic is not None:
+        builder = builder.semantic(semantic)
+    if min_confidence is not None:
+        builder = builder.min_confidence(min_confidence)
+    if trust_at_least is not None:
+        builder = builder.trust_at_least(trust_at_least)
+    if limit is not None:
+        builder = builder.limit(limit)
+    entities = builder.all()
+    return QueryResultType(
+        concept=concept,
+        count=len(entities),
+        entities=[
+            EntitySummaryType(
+                id=e.id,
+                concept=e.concept,
+                natural_key=e.natural_key,
+                created_at=e.created_at.isoformat(),
+            )
+            for e in entities
+        ],
+    )
+
+
+def _build_provenance(kb: Ontology, assertion_id: str) -> ProvenanceType:
+    """Blocking body of Query.provenance."""
+    match = kb.backend.get_assertion(assertion_id)
+    if match is None:
+        raise NotFoundError(f"Assertion {assertion_id!r} not found")
+
+    review_events = (
+        [
+            ReviewEventType(actor=e.actor, type=e.type, detail=e.detail, at=e.at.isoformat())
+            for e in kb.backend.get_proposal_events(match.proposal_id)
+        ]
+        if match.proposal_id
+        else []
+    )
+    superseded_ids = [
+        e.assertion_id for e in kb.backend.get_assertion_events_by_successor(match.id)
+    ]
+    return ProvenanceType(
+        id=match.id,
+        subject=match.subject,
+        predicate=match.predicate,
+        value=match.value,
+        value_type=match.value_type,
+        status=match.status,
+        author=match.author,
+        confidence=match.confidence,
+        source=match.source,
+        rationale=match.rationale,
+        model=match.model,
+        asserted_at=match.asserted_at.isoformat(),
+        valid_from=match.valid_from.isoformat() if match.valid_from else None,
+        valid_to=match.valid_to.isoformat() if match.valid_to else None,
+        proposal_id=match.proposal_id,
+        supersedes=match.supersedes,
+        superseded_ids=superseded_ids,
+        review_events=review_events,
+    )
+
+
+def _list_proposals(kb: Ontology, state: str | None) -> list[ProposalType]:
+    """Blocking body of Query.proposals."""
+    effective_state = None if state == "all" else state
+    return [_proposal_type(p) for p in kb.proposals(state=effective_state)]
+
+
+def _list_contradictions(kb: Ontology, state: str | None) -> list[ContradictionType]:
+    """Blocking body of Query.contradictions."""
+    effective_state = None if state == "all" else state
+    return [_contradiction_type(c) for c in kb.contradictions(state=effective_state)]
+
+
+def _list_principals(kb: Ontology, author: str) -> list[PrincipalType]:
+    """Blocking body of Query.principals."""
+    return [
+        PrincipalType(
+            id=p.id,
+            kind=p.kind,
+            owner=p.owner,
+            auth_method=p.auth_method,
+            default_capability=p.default_capability,
+            trust_level=p.trust_level,
+            created_at=p.created_at.isoformat(),
+        )
+        for p in kb.list_principals(author=author)
+    ]
+
+
+def _do_propose(kb: Ontology, author: str, input: ProposeInput) -> ProposeResultType:
+    """Blocking body of Mutation.propose."""
+    has_literal = input.value is not None and input.value_type is not None
+    has_ref = input.target is not None
+    if has_literal == has_ref:
+        raise ValidationError("Provide exactly one of (value and value_type) or target")
+
+    if has_ref:
+        assert input.target is not None
+        proposal, decision = kb.propose_ref(
+            subject=input.subject,
+            predicate=input.predicate,
+            target=input.target,
+            author=author,
+            confidence=input.confidence,
+            source=input.source,
+            rationale=input.rationale,
+            acting_as=input.acting_as,
+            model=input.model,
+        )
+    else:
+        assert input.value is not None and input.value_type is not None
+        proposal, decision = kb.propose(
+            subject=input.subject,
+            predicate=input.predicate,
+            value=input.value,
+            value_type=input.value_type,
+            author=author,
+            confidence=input.confidence,
+            source=input.source,
+            rationale=input.rationale,
+            acting_as=input.acting_as,
+            model=input.model,
+        )
+    return ProposeResultType(proposal=_proposal_type(proposal), decision=type(decision).__name__)
+
+
+def _do_accept_proposal(kb: Ontology, proposal_id: str, reviewer: str) -> ProposalType:
+    """Blocking body of Mutation.acceptProposal."""
+    return _proposal_type(kb.accept_proposal(proposal_id, reviewer))
+
+
+def _do_reject_proposal(kb: Ontology, proposal_id: str, reviewer: str, reason: str) -> ProposalType:
+    """Blocking body of Mutation.rejectProposal."""
+    return _proposal_type(kb.reject_proposal(proposal_id, reviewer, reason=reason))
+
+
+def _do_request_changes(kb: Ontology, proposal_id: str, reviewer: str, reason: str) -> ProposalType:
+    """Blocking body of Mutation.requestChanges."""
+    return _proposal_type(kb.request_changes(proposal_id, reviewer, reason=reason))
+
+
+def _do_resubmit_proposal(kb: Ontology, proposal_id: str, author: str) -> ProposeResultType:
+    """Blocking body of Mutation.resubmitProposal."""
+    proposal, decision = kb.resubmit(proposal_id, author)
+    return ProposeResultType(proposal=_proposal_type(proposal), decision=type(decision).__name__)
+
+
+def _do_flag_contradiction(
+    kb: Ontology,
+    assertion_id_a: str,
+    assertion_id_b: str,
+    author: str,
+    rationale: str | None,
+) -> FlagContradictionResultType:
+    """Blocking body of Mutation.flagContradiction."""
+    contradiction, action = kb.flag_contradiction(
+        assertion_id_a, assertion_id_b, author, rationale=rationale
+    )
+    return FlagContradictionResultType(
+        contradiction=_contradiction_type(contradiction), action=action
+    )
+
+
+def _do_resolve_contradiction(
+    kb: Ontology, contradiction_id: str, winner_assertion_id: str, resolver: str
+) -> ContradictionType:
+    """Blocking body of Mutation.resolveContradiction."""
+    return _contradiction_type(
+        kb.resolve_contradiction(contradiction_id, winner_assertion_id, resolver)
+    )
+
+
+# ---------------------------------------------------------------------------
 # Query
 # ---------------------------------------------------------------------------
 
@@ -416,62 +681,22 @@ class Query:
     """Root Query type — read operations (module docstring)."""
 
     @strawberry.field
-    def schema(self, info: strawberry.Info, namespace: str = "default") -> SchemaType:
+    async def schema(self, info: strawberry.Info, namespace: str = "default") -> SchemaType:
         """Return the schema (concepts, properties, relations) for a namespace."""
         _require_principal(info)
         kb = _kb(info)
-        ir = kb.backend.get_schema(namespace)
-        if ir is None:
-            return SchemaType(namespace=None, version=None, concepts=[])
-        concepts = [
-            ConceptType(
-                name=concept_name,
-                properties=[
-                    PropertyType(
-                        name=prop_name,
-                        type=prop_def.value_type,
-                        cardinality=prop_def.cardinality,
-                        temporality=prop_def.temporality,
-                        required=prop_def.required,
-                    )
-                    for prop_name, prop_def in concept_def.properties.items()
-                ],
-                relations=[
-                    RelationType(
-                        name=rel_name,
-                        target_concept=rel_def.target_concept,
-                        cardinality=rel_def.cardinality,
-                        required=rel_def.required,
-                        temporality=rel_def.temporality,
-                        inverse=rel_def.inverse,
-                    )
-                    for rel_name, rel_def in concept_def.relations.items()
-                ],
-            )
-            for concept_name, concept_def in ir.concepts.items()
-        ]
-        return SchemaType(namespace=namespace, version=ir.version, concepts=concepts)
+        return await run_in_threadpool(_build_schema, kb, namespace)
 
     @strawberry.field
-    def entity(self, info: strawberry.Info, id: str) -> EntityType:
+    async def entity(self, info: strawberry.Info, id: str) -> EntityType:
         """Fetch a single entity by id. Its assertions are a nested field
         (EntityType.assertions), resolved lazily on request."""
         _require_principal(info)
         kb = _kb(info)
-        entity = kb.backend.get_entity(id)
-        if entity is None:
-            raise NotFoundError(f"Entity {id!r} not found")
-        return EntityType(
-            id=entity.id,
-            concept=entity.concept,
-            namespace=entity.namespace,
-            natural_key=entity.natural_key,
-            created_at=entity.created_at.isoformat(),
-            created_by=entity.created_by,
-        )
+        return await run_in_threadpool(_build_entity, kb, id)
 
     @strawberry.field
-    def query(
+    async def query(
         self,
         info: strawberry.Info,
         concept: str,
@@ -485,80 +710,20 @@ class Query:
         REST's POST /query)."""
         _require_principal(info)
         kb = _kb(info)
-        builder = kb.query(concept)
-        if filters:
-            keys = [f.key for f in filters]
-            duplicates = sorted({k for k in keys if keys.count(k) > 1})
-            if duplicates:
-                raise ValidationError(f"Duplicate filter keys: {duplicates}")
-            builder = builder.where(**{f.key: f.value for f in filters})
-        if semantic is not None:
-            builder = builder.semantic(semantic)
-        if min_confidence is not None:
-            builder = builder.min_confidence(min_confidence)
-        if trust_at_least is not None:
-            builder = builder.trust_at_least(trust_at_least)
-        if limit is not None:
-            builder = builder.limit(limit)
-        entities = builder.all()
-        return QueryResultType(
-            concept=concept,
-            count=len(entities),
-            entities=[
-                EntitySummaryType(
-                    id=e.id,
-                    concept=e.concept,
-                    natural_key=e.natural_key,
-                    created_at=e.created_at.isoformat(),
-                )
-                for e in entities
-            ],
+        return await run_in_threadpool(
+            _execute_query, kb, concept, filters, semantic, min_confidence, trust_at_least, limit
         )
 
     @strawberry.field
-    def provenance(self, info: strawberry.Info, assertion_id: str) -> ProvenanceType:
+    async def provenance(self, info: strawberry.Info, assertion_id: str) -> ProvenanceType:
         """Return the full provenance record for a single assertion (mirrors
         REST's GET /provenance/{id})."""
         _require_principal(info)
         kb = _kb(info)
-        match = kb.backend.get_assertion(assertion_id)
-        if match is None:
-            raise NotFoundError(f"Assertion {assertion_id!r} not found")
-
-        review_events = (
-            [
-                ReviewEventType(actor=e.actor, type=e.type, detail=e.detail, at=e.at.isoformat())
-                for e in kb.backend.get_proposal_events(match.proposal_id)
-            ]
-            if match.proposal_id
-            else []
-        )
-        superseded_ids = [
-            e.assertion_id for e in kb.backend.get_assertion_events_by_successor(match.id)
-        ]
-        return ProvenanceType(
-            id=match.id,
-            subject=match.subject,
-            predicate=match.predicate,
-            value=match.value,
-            value_type=match.value_type,
-            status=match.status,
-            author=match.author,
-            confidence=match.confidence,
-            source=match.source,
-            rationale=match.rationale,
-            model=match.model,
-            asserted_at=match.asserted_at.isoformat(),
-            valid_from=match.valid_from.isoformat() if match.valid_from else None,
-            valid_to=match.valid_to.isoformat() if match.valid_to else None,
-            proposal_id=match.proposal_id,
-            supersedes=match.supersedes,
-            superseded_ids=superseded_ids,
-            review_events=review_events,
-        )
+        return await run_in_threadpool(_build_provenance, kb, assertion_id)
 
     @strawberry.field
-    def proposals(
+    async def proposals(
         self, info: strawberry.Info, state: str | None = "require_review"
     ) -> list[ProposalType]:
         """List proposals, defaulting to those pending review. Pass
@@ -567,38 +732,25 @@ class Query:
         needed)."""
         _require_principal(info)
         kb = _kb(info)
-        effective_state = None if state == "all" else state
-        return [_proposal_type(p) for p in kb.proposals(state=effective_state)]
+        return await run_in_threadpool(_list_proposals, kb, state)
 
     @strawberry.field
-    def contradictions(
+    async def contradictions(
         self, info: strawberry.Info, state: str | None = "open"
     ) -> list[ContradictionType]:
         """List contradictions, defaulting to open ones. Pass state="all"
         for every state (mirrors REST's GET /contradictions)."""
         _require_principal(info)
         kb = _kb(info)
-        effective_state = None if state == "all" else state
-        return [_contradiction_type(c) for c in kb.contradictions(state=effective_state)]
+        return await run_in_threadpool(_list_contradictions, kb, state)
 
     @strawberry.field
-    def principals(self, info: strawberry.Info) -> list[PrincipalType]:
+    async def principals(self, info: strawberry.Info) -> list[PrincipalType]:
         """List all principals. Requires admin capability (gated inside
         Ontology.list_principals, same as REST's GET /principals)."""
         principal = _require_principal(info)
         kb = _kb(info)
-        return [
-            PrincipalType(
-                id=p.id,
-                kind=p.kind,
-                owner=p.owner,
-                auth_method=p.auth_method,
-                default_capability=p.default_capability,
-                trust_level=p.trust_level,
-                created_at=p.created_at.isoformat(),
-            )
-            for p in kb.list_principals(author=principal.id)
-        ]
+        return await run_in_threadpool(_list_principals, kb, principal.id)
 
 
 # ---------------------------------------------------------------------------
@@ -611,70 +763,36 @@ class Mutation:
     """Root Mutation type — propose and review operations (module docstring)."""
 
     @strawberry.mutation
-    def propose(self, info: strawberry.Info, input: ProposeInput) -> ProposeResultType:
+    async def propose(self, info: strawberry.Info, input: ProposeInput) -> ProposeResultType:
         """Create a proposal to assert a fact or relation. Does NOT write
         directly. The acting principal is resolved from the bearer token
         (ADR-0014), never taken from the input (mirrors REST's POST
         /proposals)."""
         principal = _require_principal(info)
         kb = _kb(info)
-        has_literal = input.value is not None and input.value_type is not None
-        has_ref = input.target is not None
-        if has_literal == has_ref:
-            raise ValidationError("Provide exactly one of (value and value_type) or target")
-
-        if has_ref:
-            assert input.target is not None
-            proposal, decision = kb.propose_ref(
-                subject=input.subject,
-                predicate=input.predicate,
-                target=input.target,
-                author=principal.id,
-                confidence=input.confidence,
-                source=input.source,
-                rationale=input.rationale,
-                acting_as=input.acting_as,
-                model=input.model,
-            )
-        else:
-            assert input.value is not None and input.value_type is not None
-            proposal, decision = kb.propose(
-                subject=input.subject,
-                predicate=input.predicate,
-                value=input.value,
-                value_type=input.value_type,
-                author=principal.id,
-                confidence=input.confidence,
-                source=input.source,
-                rationale=input.rationale,
-                acting_as=input.acting_as,
-                model=input.model,
-            )
-        return ProposeResultType(
-            proposal=_proposal_type(proposal), decision=type(decision).__name__
-        )
+        return await run_in_threadpool(_do_propose, kb, principal.id, input)
 
     @strawberry.mutation
-    def accept_proposal(self, info: strawberry.Info, proposal_id: str) -> ProposalType:
+    async def accept_proposal(self, info: strawberry.Info, proposal_id: str) -> ProposalType:
         """Accept a pending proposal, replaying its operations. Requires
         review or admin capability; the reviewer must not be the
         proposal's own author or delegate (self-review is blocked)."""
         principal = _require_principal(info)
         kb = _kb(info)
-        return _proposal_type(kb.accept_proposal(proposal_id, principal.id))
+        return await run_in_threadpool(_do_accept_proposal, kb, proposal_id, principal.id)
 
     @strawberry.mutation
-    def reject_proposal(
+    async def reject_proposal(
         self, info: strawberry.Info, proposal_id: str, reason: str = ""
     ) -> ProposalType:
         """Reject a pending proposal. Requires review or admin capability;
         same self-review guard as accept."""
         principal = _require_principal(info)
         kb = _kb(info)
-        return _proposal_type(kb.reject_proposal(proposal_id, principal.id, reason=reason))
+        return await run_in_threadpool(_do_reject_proposal, kb, proposal_id, principal.id, reason)
 
     @strawberry.mutation
-    def request_changes(
+    async def request_changes(
         self, info: strawberry.Info, proposal_id: str, reason: str = ""
     ) -> ProposalType:
         """Request changes on a pending proposal (SPEC §9.1/§9.4's third
@@ -682,22 +800,19 @@ class Mutation:
         admin capability; same self-review guard as accept/reject."""
         principal = _require_principal(info)
         kb = _kb(info)
-        return _proposal_type(kb.request_changes(proposal_id, principal.id, reason=reason))
+        return await run_in_threadpool(_do_request_changes, kb, proposal_id, principal.id, reason)
 
     @strawberry.mutation
-    def resubmit_proposal(self, info: strawberry.Info, proposal_id: str) -> ProposeResultType:
+    async def resubmit_proposal(self, info: strawberry.Info, proposal_id: str) -> ProposeResultType:
         """Resubmit a proposal after changes were requested (KI-027),
         re-running policy evaluation against the unedited payload. Only the
         proposal's own author or delegate may call this."""
         principal = _require_principal(info)
         kb = _kb(info)
-        proposal, decision = kb.resubmit(proposal_id, principal.id)
-        return ProposeResultType(
-            proposal=_proposal_type(proposal), decision=type(decision).__name__
-        )
+        return await run_in_threadpool(_do_resubmit_proposal, kb, proposal_id, principal.id)
 
     @strawberry.mutation
-    def flag_contradiction(
+    async def flag_contradiction(
         self,
         info: strawberry.Info,
         assertion_id_a: str,
@@ -708,23 +823,20 @@ class Mutation:
         contradiction. Requires propose capability or higher (ADR-0008)."""
         principal = _require_principal(info)
         kb = _kb(info)
-        contradiction, action = kb.flag_contradiction(
-            assertion_id_a, assertion_id_b, principal.id, rationale=rationale
-        )
-        return FlagContradictionResultType(
-            contradiction=_contradiction_type(contradiction), action=action
+        return await run_in_threadpool(
+            _do_flag_contradiction, kb, assertion_id_a, assertion_id_b, principal.id, rationale
         )
 
     @strawberry.mutation
-    def resolve_contradiction(
+    async def resolve_contradiction(
         self, info: strawberry.Info, contradiction_id: str, winner_assertion_id: str
     ) -> ContradictionType:
         """Resolve an open contradiction by selecting a winning assertion.
         Requires review or admin capability."""
         principal = _require_principal(info)
         kb = _kb(info)
-        return _contradiction_type(
-            kb.resolve_contradiction(contradiction_id, winner_assertion_id, principal.id)
+        return await run_in_threadpool(
+            _do_resolve_contradiction, kb, contradiction_id, winner_assertion_id, principal.id
         )
 
 
@@ -838,7 +950,7 @@ def create_graphql_app(
             return context
         token = authorization.removeprefix("Bearer ")
         try:
-            context["principal"] = auth_provider.resolve(token)
+            context["principal"] = await run_in_threadpool(auth_provider.resolve, token)
         except OntolithError as exc:
             context["auth_error"] = exc
         return context

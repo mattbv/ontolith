@@ -129,6 +129,68 @@ class TestDocsUrls:
 
 
 # ---------------------------------------------------------------------------
+# Concurrency (KI-052): resolvers must not block the ASGI event loop.
+# Uses httpx2's ASGITransport + asyncio.gather, not FastAPI's TestClient -
+# TestClient runs the app through a single background portal thread, which
+# doesn't exercise real concurrent event-loop scheduling the way a live
+# server would; a genuine async client talking to the app in-process does.
+# ---------------------------------------------------------------------------
+
+
+class TestResolverConcurrency:
+    def test_concurrent_requests_overlap_instead_of_serializing(self, tmp_path: Path) -> None:
+        """Before KI-052, every resolver ran inline on the event loop, so
+        three concurrent 0.3s-resolver requests took ~0.9s (serialized).
+        After converting resolvers to async + run_in_threadpool, they
+        overlap - this must take closer to 0.3s than 0.9s."""
+        import asyncio
+        import time
+
+        import httpx2
+
+        kb = _kb(tmp_path)
+        auth_provider = TokenAuthProvider(kb.backend)
+        app = create_graphql_app(kb, auth_provider)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        headers = _auth(token)
+
+        original_get_schema = kb.backend.get_schema
+
+        def _slow_get_schema(*args: object, **kwargs: object) -> object:
+            time.sleep(0.3)
+            return original_get_schema(*args, **kwargs)
+
+        kb.backend.get_schema = _slow_get_schema  # type: ignore[method-assign]
+
+        async def _run_concurrently() -> tuple[list[int], float]:
+            transport = httpx2.ASGITransport(app=app)
+            async with httpx2.AsyncClient(transport=transport, base_url="http://test") as client:
+                start = time.perf_counter()
+                responses = await asyncio.wait_for(
+                    asyncio.gather(
+                        *[
+                            client.post(
+                                "/graphql",
+                                json={"query": "{ schema { version } }"},
+                                headers=headers,
+                            )
+                            for _ in range(3)
+                        ]
+                    ),
+                    timeout=15,
+                )
+                elapsed = time.perf_counter() - start
+                return [r.status_code for r in responses], elapsed
+
+        statuses, elapsed = asyncio.run(_run_concurrently())
+        assert statuses == [200, 200, 200]
+        # Serialized would be ~0.9s (3 x 0.3s); overlapping is ~0.3s. 0.6s
+        # is a generous midpoint that tolerates test-machine jitter while
+        # still failing if resolvers regress to blocking the event loop.
+        assert elapsed < 0.6, f"expected overlapping concurrent requests, took {elapsed:.2f}s"
+
+
+# ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
 
@@ -500,7 +562,9 @@ class TestEntityQuery:
         Query.entity is the only path that currently reaches EntityType, and
         it always gates first, so no query-level probe can exercise this
         resolver unauthenticated - verified directly instead, invoking the
-        strawberry-wrapped method with a minimal stub Info."""
+        strawberry-wrapped (async, KI-052) method with a minimal stub Info."""
+        import asyncio
+
         from ontolith.core.errors import AuthError
         from ontolith.interfaces.graphql import EntityType
 
@@ -519,7 +583,7 @@ class TestEntityQuery:
             created_by=HUMAN,
         )
         with pytest.raises(AuthError):
-            graphql_entity.assertions(_StubInfo())  # type: ignore[arg-type]
+            asyncio.run(graphql_entity.assertions(_StubInfo()))  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
