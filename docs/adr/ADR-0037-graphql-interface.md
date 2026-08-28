@@ -174,6 +174,98 @@ M3's scope column is now fully closed: REST (ADR-0021/0022), hybrid
 retrieval (KI-018), the RDF/OWL bridge (ADR-0036), and GraphQL (this ADR)
 are all shipped.
 
+## Update (2026-08-27): review-driven fixes
+
+Review before merge found two real issues and several smaller gaps, all
+fixed in the same PR:
+
+- **Every root `Query`/`Mutation` field's `_require_principal(info)` call
+  was effectively untested.** Two tests hit only `{ schema }`; mutation
+  testing (deleting the call from `entity`, `query`, `provenance`,
+  `proposals`, or `contradictions`) left the full suite green — each
+  deletion would have shipped unauthenticated read access to entity data,
+  assertion values, and proposal `source`/`rationale` text with no test
+  failure. Fixed with a parametrized sweep test that walks every field
+  strawberry's own introspection reports on `Query`/`Mutation` and asserts
+  `AUTH_ERROR` with no token — new fields are covered automatically, not
+  just the ones present today. `EntityType.assertions` also gained its own
+  `_require_principal` call (previously relied solely on `Query.entity`
+  gating the only path that reaches it) for the same reason: correctness
+  that depends on "nothing else ever calls this" is one refactor away from
+  silently breaking.
+- **`_OntolithSchema.process_errors`'s fallback branch returned a resolver
+  exception's raw message unredacted** — the *opposite* of REST's posture
+  for the same failure class (an unmapped exception there gets FastAPI's
+  generic 500, never the real message). This was reachable with an
+  in-bounds-looking input: `Mutation.propose` with `confidence: 5.0` hits
+  `Assertion`'s own pydantic bound check before reaching any `OntolithError`
+  path, and the resulting text (a raw pydantic validation message) reached
+  the client with no `code` extension at all — missing the SPEC §16
+  envelope entirely, not just verbose. Fixed: any resolver exception that
+  isn't an `OntolithError` is now also redacted to the generic message,
+  logged server-side with `exc_info`, and given a distinct
+  `extensions.code = "INTERNAL_ERROR"` so a client can still distinguish
+  "some resolver bug" from a named domain error. A `None`
+  `original_error` (GraphQL's own parse/validation failures, which never
+  reach a resolver — e.g. malformed query syntax) is deliberately left
+  unredacted; that text describes the query's own shape, not server
+  internals, the same class of thing REST's `RequestValidationError`
+  handler exposes. `_REDACT_MESSAGE_FOR` also switched from an exact
+  `type(x) in ...` check to `isinstance` — the previous form failed *open*
+  (unredacted) for a hypothetical future `OntolithError` subclass of
+  `StorageError`/`PluginError`, the opposite of the fail-closed default
+  this module otherwise aims for.
+- **`Query.query`'s `filters: [FilterInput!]` silently dropped duplicate
+  keys** (last-wins via a dict comprehension) instead of erroring — a
+  correctness gap `ProposeInput`'s list-shaped filter design introduced
+  that REST's plain `dict` body never could (a JSON object can't carry a
+  duplicate key past the parser). Fixed: `Query.query` now raises
+  `ValidationError` naming the duplicate key(s) before building the filter
+  dict. A related finding — a filter `key` of literal `"self"` raising a
+  raw `TypeError` from the `**kwargs` unpacking colliding with the bound
+  method's own `self` — is a pre-existing gap shared with REST's identical
+  `.where(**body.filters)` call, not introduced here; the redaction fix
+  above already prevents it from leaking past the generic message, so it
+  isn't separately patched in this ADR's scope.
+- **No way to disable GraphQL introspection independent of the IDE.**
+  `graphql_ide=None` correctly 404s the IDE's own UI, but an anonymous
+  `POST /graphql` running `{ __schema { ... } }` directly still returned
+  the full schema regardless — including every mutation name. Added
+  `introspection: bool = True` (backed by
+  `strawberry.extensions.DisableIntrospection`), and forwarded
+  `docs_url`/`redoc_url`/`openapi_url` to the wrapped `FastAPI(...)` call
+  the same way `create_rest_app` already does — previously hardcoded on
+  with no way to turn off, an incomplete parity claim against the
+  docstring's own "unauthenticated, like REST's docs_url" comparison.
+- **Scope boundary (Decision §1) had no test enforcing it.** Added an
+  introspection-based test asserting `Mutation`'s field set is exactly the
+  seven named operations — mirrors `test_mcp_server.py`'s existing
+  `test_no_write_tool_registered` precedent — so a future PR that quietly
+  adds a write-shaped mutation fails a test instead of silently widening
+  this ADR's stated boundary.
+
+**Deliberately not fixed, recorded here instead** (both were MEDIUM/LOW
+findings, not correctness or security regressions against this module's
+own stated goals):
+
+- **Resolvers are synchronous and run inline in the ASGI event loop**,
+  unlike REST's routes, which Starlette dispatches to a thread pool by
+  default. A slow resolver (a large query, a cold cache) blocks the event
+  loop for every concurrent request, not just database work — measured
+  directly: a deliberately slowed resolver serialized three concurrent
+  requests where REST's equivalent overlapped them. Fixing this properly
+  means `async def` resolvers offloading blocking calls via
+  `starlette.concurrency.run_in_threadpool`, a change to every resolver's
+  signature, not a localized fix — deferred as a follow-up rather than
+  rushed into this PR. Real-world impact is softened, not eliminated, by
+  `store/sqlite/backend.py`'s own process-wide write lock already
+  serializing concurrent DB writes regardless of interface.
+- **No `as_of` argument on `Query.query`.** Consistent with REST and MCP —
+  neither exposes bitemporal time-travel either — but worth naming
+  explicitly since it's one of this project's headline capabilities and
+  is the kind of gap easy to miss precisely because it matches existing
+  precedent rather than standing out as new.
+
 ## References
 
 - SPEC §14.3 (REST + GraphQL), §16 (error model), §8.3 (capabilities), §17

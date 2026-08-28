@@ -91,6 +91,43 @@ class TestGraphqlIde:
         assert response.status_code == 404
 
 
+class TestIntrospection:
+    def test_enabled_by_default(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        body = _gql(client, "{ __schema { queryType { name } } }")
+        assert "errors" not in body
+
+    def test_can_be_disabled_independent_of_ide(self, tmp_path: Path) -> None:
+        """graphql_ide=None only hides the IDE's UI - a raw POST could still
+        run __schema unless introspection itself is off too (review
+        finding)."""
+        kb = _kb(tmp_path)
+        auth_provider = TokenAuthProvider(kb.backend)
+        app = create_graphql_app(kb, auth_provider, introspection=False)
+        client = TestClient(app)
+        body = _gql(client, "{ __schema { queryType { name } } }")
+        assert body["data"] is None
+        assert "errors" in body
+
+
+class TestDocsUrls:
+    def test_docs_enabled_by_default(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        assert client.get("/docs").status_code == 200
+        assert client.get("/openapi.json").status_code == 200
+
+    def test_docs_can_be_disabled(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        auth_provider = TokenAuthProvider(kb.backend)
+        app = create_graphql_app(kb, auth_provider, docs_url=None, redoc_url=None, openapi_url=None)
+        client = TestClient(app)
+        assert client.get("/docs").status_code == 404
+        assert client.get("/redoc").status_code == 404
+        assert client.get("/openapi.json").status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # Authentication
 # ---------------------------------------------------------------------------
@@ -136,26 +173,139 @@ class TestAuth:
         assert "sqlite3" not in message
         assert "baz" not in str(body)
 
-    def test_non_ontolith_exception_falls_through_to_default_handling(
+    def test_non_ontolith_exception_is_redacted_like_storage_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A resolver raising a plain (non-OntolithError) exception - e.g. a
-        real bug - must not be mistaken for a domain error: no `code`
-        extension is fabricated for it, and the default
-        strawberry.Schema.process_errors handling (logging) still runs."""
+        real bug - must fail closed, same as REST's default 500 for the
+        same failure class: the real message never reaches the client, only
+        a generic message and a distinct INTERNAL_ERROR code (review
+        finding - the raw message previously leaked, unlike REST)."""
         kb = _kb(tmp_path)
         client, _ = _client(kb)
         token, _ = kb.issue_token(HUMAN, author=ADMIN)
 
         def _raise_runtime_error(*args: object, **kwargs: object) -> None:
-            raise RuntimeError("boom")
+            raise RuntimeError("boom: /var/db/secret_path")
 
         monkeypatch.setattr(kb.backend, "get_schema", _raise_runtime_error)
 
         body = _gql(client, "{ schema { version } }", headers=_auth(token))
-        [error] = body["errors"]
-        assert error.get("extensions", {}).get("code") is None
-        assert "boom" in error["message"]
+        assert _error_codes(body) == ["INTERNAL_ERROR"]
+        message = body["errors"][0]["message"]
+        assert message == "An internal error occurred"
+        assert "boom" not in message
+        assert "secret_path" not in str(body)
+
+    def test_plugin_error_redacts_internal_detail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from ontolith.core.errors import PluginError
+
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+
+        def _raise_plugin_error(*args: object, **kwargs: object) -> None:
+            raise PluginError("plugin 'foo' crashed: Traceback (most recent call last)...")
+
+        monkeypatch.setattr(kb.backend, "get_schema", _raise_plugin_error)
+
+        body = _gql(client, "{ schema { version } }", headers=_auth(token))
+        assert _error_codes(body) == ["PLUGIN_ERROR"]
+        message = body["errors"][0]["message"]
+        assert message == "An internal error occurred"
+        assert "Traceback" not in message
+
+    def test_graphql_parse_error_is_not_redacted(self, tmp_path: Path) -> None:
+        """A malformed query never reaches a resolver (original_error is
+        None) - that failure describes the query's own shape, not server
+        internals, so it must NOT be swept into the generic redaction."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        body = _gql(client, "{ schema { ")
+        assert "errors" in body
+        assert body["errors"][0]["message"] != "An internal error occurred"
+
+
+# ---------------------------------------------------------------------------
+# Every Query/Mutation field requires auth (review finding: this was
+# previously exercised for `schema` only - mutation testing showed deleting
+# _require_principal from `entity`/`query`/`provenance`/`proposals`/
+# `contradictions` left the suite green).
+# ---------------------------------------------------------------------------
+
+
+class TestAuthCoversEveryField:
+    # One syntactically-valid probe query per root field, using dummy
+    # argument values - _require_principal(info) raises before any argument
+    # is ever used, so an unauthenticated call never reaches real data.
+    # The `test_*_field_probe_set_matches_schema` tests below assert this
+    # dict's keys are exactly the schema's field set, so a newly-added field
+    # with no matching probe entry fails loudly instead of silently going
+    # unchecked.
+    _QUERY_FIELD_PROBES: dict[str, str] = {
+        "schema": "{ schema { version } }",
+        "entity": '{ entity(id: "nope") { id } }',
+        "query": '{ query(concept: "Person") { count } }',
+        "provenance": '{ provenance(assertionId: "nope") { id } }',
+        "proposals": "{ proposals { id } }",
+        "contradictions": "{ contradictions { id } }",
+        "principals": "{ principals { id } }",
+    }
+    _MUTATION_FIELD_PROBES: dict[str, str] = {
+        "propose": (
+            'mutation { propose(input: {subject: "s", predicate: "p", value: "v", '
+            'valueType: "Text"}) { decision } }'
+        ),
+        "acceptProposal": 'mutation { acceptProposal(proposalId: "nope") { id } }',
+        "rejectProposal": 'mutation { rejectProposal(proposalId: "nope") { id } }',
+        "requestChanges": 'mutation { requestChanges(proposalId: "nope") { id } }',
+        "resubmitProposal": 'mutation { resubmitProposal(proposalId: "nope") { decision } }',
+        "flagContradiction": (
+            'mutation { flagContradiction(assertionIdA: "a", assertionIdB: "b") { action } }'
+        ),
+        "resolveContradiction": (
+            'mutation { resolveContradiction(contradictionId: "c", '
+            'winnerAssertionId: "w") { state } }'
+        ),
+    }
+
+    def test_query_field_probe_set_matches_schema(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        body = _gql(client, '{ __type(name: "Query") { fields { name } } }')
+        names = {f["name"] for f in body["data"]["__type"]["fields"]}
+        assert names == set(self._QUERY_FIELD_PROBES)
+
+    def test_mutation_field_probe_set_matches_schema(self, tmp_path: Path) -> None:
+        """Also enforces ADR-0037 §1's scope boundary: this must be exactly
+        the seven query/propose/review operations, no direct-write or
+        principal-admin mutation (mirrors test_mcp_server.py's
+        test_no_write_tool_registered precedent)."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        body = _gql(client, '{ __type(name: "Mutation") { fields { name } } }')
+        names = {f["name"] for f in body["data"]["__type"]["fields"]}
+        assert names == set(self._MUTATION_FIELD_PROBES)
+
+    @pytest.mark.parametrize("field_name,query", list(_QUERY_FIELD_PROBES.items()))
+    def test_query_field_requires_auth(self, tmp_path: Path, field_name: str, query: str) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        body = _gql(client, query)
+        assert _error_codes(body) == ["AUTH_ERROR"], f"Query.{field_name} did not require auth"
+        assert body["data"] is None
+
+    @pytest.mark.parametrize("field_name,query", list(_MUTATION_FIELD_PROBES.items()))
+    def test_mutation_field_requires_auth(
+        self, tmp_path: Path, field_name: str, query: str
+    ) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        body = _gql(client, query)
+        assert _error_codes(body) == ["AUTH_ERROR"], f"Mutation.{field_name} did not require auth"
+        assert body["data"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -317,6 +467,33 @@ class TestQueryField:
         assert result["concept"] == "Person"
         assert result["count"] == 1
         assert result["entities"][0]["id"] == e1.id
+
+    def test_duplicate_filter_keys_is_validation_error(self, tmp_path: Path) -> None:
+        """A [FilterInput!] list can express what REST's plain dict body
+        never could - the same key twice. Silently keeping the last one
+        (dict-comprehension last-wins) would drop a filter with no error;
+        must fail loudly instead (review finding)."""
+        kb = _kb(tmp_path)
+        kb.create_entity("Person", author=HUMAN)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        query = """
+        query($filters: [FilterInput!]) {
+          query(concept: "Person", filters: $filters) { count }
+        }
+        """
+        body = _gql(
+            client,
+            query,
+            variables={
+                "filters": [
+                    {"key": "name", "value": "Ada"},
+                    {"key": "name", "value": "Bob"},
+                ]
+            },
+            headers=_auth(token),
+        )
+        assert _error_codes(body) == ["VALIDATION_ERROR"]
 
     def test_unfiltered_limit(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)

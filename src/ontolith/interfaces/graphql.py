@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 import strawberry
 from fastapi import FastAPI, Header
 from graphql.error import GraphQLError
+from strawberry.extensions import DisableIntrospection
 from strawberry.fastapi import GraphQLRouter
 
 from ontolith.core.errors import (
@@ -81,9 +82,11 @@ _logger = logging.getLogger(__name__)
 # _STATUS_BY_ERROR_TYPE). Redacted here rather than importing that dict
 # directly: GraphQL doesn't use HTTP status at all, so keying off REST's
 # status-code mapping would tie this module to a framing that doesn't apply
-# to it.
-_REDACT_MESSAGE_FOR: frozenset[type[OntolithError]] = frozenset({StorageError, PluginError})
+# to it. isinstance, not exact type, so an OntolithError subclass added
+# later fails closed (redacted) rather than open.
+_REDACT_MESSAGE_FOR: tuple[type[OntolithError], ...] = (StorageError, PluginError)
 _GENERIC_SERVER_ERROR_MESSAGE = "An internal error occurred"
+_INTERNAL_ERROR_CODE = "INTERNAL_ERROR"
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +162,13 @@ class EntityType:
     @strawberry.field
     def assertions(self, info: strawberry.Info) -> list[AssertionType]:
         """Currently active assertions for this entity — resolved lazily,
-        so a query that only asks for entity fields never pays for it."""
+        so a query that only asks for entity fields never pays for it.
+
+        Calls _require_principal itself rather than relying solely on
+        Query.entity's own gate (the only current caller) — matches every
+        other resolver's own-gate invariant, and stays correct if a future
+        field ever returns EntityType through a different path."""
+        _require_principal(info)
         kb = _kb(info)
         active = kb.backend.assertions(subject=self.id, status="active")
         return [
@@ -459,6 +468,10 @@ class Query:
         kb = _kb(info)
         builder = kb.query(concept)
         if filters:
+            keys = [f.key for f in filters]
+            duplicates = sorted({k for k in keys if keys.count(k) > 1})
+            if duplicates:
+                raise ValidationError(f"Duplicate filter keys: {duplicates}")
             builder = builder.where(**{f.key: f.value for f in filters})
         if semantic is not None:
             builder = builder.semantic(semantic)
@@ -711,15 +724,28 @@ class _OntolithSchema(strawberry.Schema):
         errors: list[GraphQLError],
         execution_context: ExecutionContext | None = None,
     ) -> None:
-        """Map each OntolithError to extensions={code, detail}; anything
-        else falls through to the default (log-only) behavior."""
+        """Map each OntolithError to extensions={code, detail}. Any other
+        resolver-raised exception (a genuine bug, not a domain error) is
+        redacted the same way — REST's default (unhandled-exception ->
+        generic 500, FastAPI/Starlette's own behavior) never returns a raw
+        exception message either, and this must fail closed to match, not
+        open. A None original_error (e.g. a GraphQL parse/validation
+        failure, never reaching a resolver) is not a resolver exception at
+        all and is left to the default (unredacted) behavior — that text
+        describes the query's own shape, not internal server state."""
         for error in errors:
             original = error.original_error
             if isinstance(original, OntolithError):
-                if type(original) in _REDACT_MESSAGE_FOR:
+                if isinstance(original, _REDACT_MESSAGE_FOR):
                     _logger.error("%s: %s", original.code, original.message)
                     error.message = _GENERIC_SERVER_ERROR_MESSAGE
                 error.extensions = {"code": original.code, "detail": original.detail}
+            elif original is not None:
+                _logger.error(
+                    "Unhandled exception in GraphQL resolver: %s", original, exc_info=original
+                )
+                error.message = _GENERIC_SERVER_ERROR_MESSAGE
+                error.extensions = {"code": _INTERNAL_ERROR_CODE, "detail": {}}
             else:
                 super().process_errors([error], execution_context)
 
@@ -730,6 +756,10 @@ def create_graphql_app(
     name: str = "ontolith",
     *,
     graphql_ide: Literal["graphiql", "apollo-sandbox", "pathfinder"] | None = "graphiql",
+    introspection: bool = True,
+    docs_url: str | None = "/docs",
+    redoc_url: str | None = "/redoc",
+    openapi_url: str | None = "/openapi.json",
 ) -> FastAPI:
     """Build and return a FastAPI app serving GraphQL at ``/graphql``.
 
@@ -740,16 +770,33 @@ def create_graphql_app(
         name: API title.
         graphql_ide: Which IDE to serve at GET /graphql ("graphiql",
             "apollo-sandbox", "pathfinder"), or None to disable it.
-            Unauthenticated, like REST's docs_url (module docstring) — it
-            exposes the API's shape via introspection, not its data.
+            Unauthenticated, like REST's docs_url — it exposes the API's
+            shape via the IDE's own introspection call, not its data.
+        introspection: Whether ``__schema``/``__type`` introspection
+            queries are answered at all. True by default (matches
+            ``graphql_ide``'s own default-on posture and most GraphQL
+            deployments); a hardened deployment that wants the schema
+            itself hidden from anonymous callers can set this False —
+            unlike ``graphql_ide``, which only hides the IDE's *UI*, an
+            anonymous POST to /graphql can still run `{ __schema { ... } }`
+            directly unless this is also off.
+        docs_url: FastAPI Swagger UI path, or None to disable it. Kept for
+            parity with ``create_rest_app`` — this app has no REST routes
+            of its own, but mounting under a shared FastAPI app is a
+            documented usage pattern, and the FastAPI docs surface exists
+            regardless.
+        redoc_url: ReDoc path, or None to disable it.
+        openapi_url: OpenAPI schema JSON path, or None to disable it (also
+            disables docs_url/redoc_url, which depend on it).
 
     Returns:
         Configured FastAPI app with the query/propose/review surface
         (ADR-0037).
     """
-    app = FastAPI(title=name)
+    app = FastAPI(title=name, docs_url=docs_url, redoc_url=redoc_url, openapi_url=openapi_url)
 
-    schema = _OntolithSchema(query=Query, mutation=Mutation)
+    extensions = [DisableIntrospection] if not introspection else []
+    schema = _OntolithSchema(query=Query, mutation=Mutation, extensions=extensions)
 
     async def _get_context(
         authorization: Annotated[str | None, Header()] = None,
