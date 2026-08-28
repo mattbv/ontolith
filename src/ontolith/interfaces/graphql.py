@@ -36,7 +36,11 @@ try/except): for every error whose ``original_error`` is an
 ``StorageError``/``PluginError`` (the same two REST maps to 5xx) additionally
 get their message redacted to a generic string and the real message logged
 server-side only — the raw text can carry internal exception detail (e.g.
-sqlite3 constraint/transaction-state messages) a caller has no use for.
+sqlite3 constraint/transaction-state messages) a caller has no use for. Any
+other resolver exception (not an ``OntolithError`` at all — a genuine bug)
+is redacted the same way, with ``extensions.code = "INTERNAL_ERROR"``: REST's
+equivalent path gets FastAPI's generic, code-less 500, never the raw
+message, and this must fail closed to match rather than leak by omission.
 
 Usage:
     from ontolith.identity.token_auth import TokenAuthProvider
@@ -86,6 +90,18 @@ _logger = logging.getLogger(__name__)
 # later fails closed (redacted) rather than open.
 _REDACT_MESSAGE_FOR: tuple[type[OntolithError], ...] = (StorageError, PluginError)
 _GENERIC_SERVER_ERROR_MESSAGE = "An internal error occurred"
+
+# Deliberately NOT an ontolith.core.errors.OntolithError code: SPEC §16's
+# error taxonomy is for *domain* errors (schema, validation, auth,
+# capability, policy, conflict, not-found, storage, plugin) - a bare
+# resolver exception that isn't any of those isn't a domain error either,
+# it's a bug. REST's equivalent path (an exception process_errors' fallback
+# branch below handles) never gets a code at all - it escapes to FastAPI's
+# generic, code-less 500. GraphQL's error envelope has no HTTP-status
+# channel to fall back to (module docstring), so this exists purely so a
+# client can distinguish "an unrecognized resolver failure" from a named
+# domain error without over-widening core/errors.py's stable taxonomy for
+# one interface's transport-level need.
 _INTERNAL_ERROR_CODE = "INTERNAL_ERROR"
 
 
@@ -370,8 +386,11 @@ def _kb(info: strawberry.Info) -> Ontology:
 
 
 def _require_principal(info: strawberry.Info) -> Principal:
-    """Resolve the calling Principal, raising the stored AuthError (set by
-    context_getter) if the bearer token was missing/malformed/invalid.
+    """Resolve the calling Principal, raising the stored error (set by
+    context_getter) if the bearer token was missing/malformed/invalid, or
+    if resolving it failed for a different domain reason (e.g. a
+    StorageError from the backend lookup — context_getter catches
+    OntolithError broadly, not just AuthError).
 
     Deferred to resolver-time rather than raised in context_getter itself
     so unauthenticated introspection queries stay reachable — mirrors
@@ -381,7 +400,7 @@ def _require_principal(info: strawberry.Info) -> Principal:
     principal = info.context.get("principal")
     if principal is None:
         error = info.context["auth_error"]
-        assert isinstance(error, AuthError)
+        assert isinstance(error, OntolithError)
         raise error
     assert isinstance(principal, Principal)
     return principal
@@ -779,7 +798,11 @@ def create_graphql_app(
             itself hidden from anonymous callers can set this False —
             unlike ``graphql_ide``, which only hides the IDE's *UI*, an
             anonymous POST to /graphql can still run `{ __schema { ... } }`
-            directly unless this is also off.
+            directly unless this is also off. Setting this False while
+            leaving ``graphql_ide`` at its default still serves the IDE
+            page itself (GET /graphql returns 200) — it just can't load a
+            schema through it; pass ``graphql_ide=None`` too for a fully
+            closed deployment.
         docs_url: FastAPI Swagger UI path, or None to disable it. Kept for
             parity with ``create_rest_app`` — this app has no REST routes
             of its own, but mounting under a shared FastAPI app is a
@@ -801,7 +824,14 @@ def create_graphql_app(
     async def _get_context(
         authorization: Annotated[str | None, Header()] = None,
     ) -> dict[str, object]:
-        """Resolve the bearer token into context, never raising here (module docstring)."""
+        """Resolve the bearer token into context, never raising here (module docstring).
+
+        Catches OntolithError broadly, not just AuthError: auth_provider.resolve()
+        is a StorageBackend-backed lookup and can raise StorageError too — that
+        must flow through the same deferred-to-resolver-time path (and so
+        through process_errors' redaction) rather than escaping this
+        dependency as a raw, unmapped 500 with no SPEC §16 envelope at all.
+        """
         context: dict[str, object] = {"kb": kb}
         if authorization is None or not authorization.startswith("Bearer "):
             context["auth_error"] = AuthError("Missing or malformed Authorization header")
@@ -809,7 +839,7 @@ def create_graphql_app(
         token = authorization.removeprefix("Bearer ")
         try:
             context["principal"] = auth_provider.resolve(token)
-        except AuthError as exc:
+        except OntolithError as exc:
             context["auth_error"] = exc
         return context
 

@@ -154,6 +154,68 @@ class TestAuth:
         body = _gql(client, "{ schema { version } }", headers=_auth("not-a-real-token"))
         assert _error_codes(body) == ["AUTH_ERROR"]
 
+    def test_rejects_missing_bearer_prefix(self, tmp_path: Path) -> None:
+        """A raw token with no `Bearer ` prefix must not be accepted -
+        pins the exact scheme this module's docstring promises."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(client, "{ schema { version } }", headers={"Authorization": token})
+        assert _error_codes(body) == ["AUTH_ERROR"]
+
+    def test_rejects_lowercase_bearer_scheme(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(client, "{ schema { version } }", headers={"Authorization": f"bearer {token}"})
+        assert _error_codes(body) == ["AUTH_ERROR"]
+
+    def test_storage_error_subclass_is_also_redacted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_REDACT_MESSAGE_FOR uses isinstance, not exact type, so a future
+        StorageError subclass still gets redacted - pins the fail-closed
+        behavior directly rather than trusting the isinstance change by
+        reading it."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+
+        class _SubStorageError(StorageError):
+            pass
+
+        def _raise_sub_storage_error(*args: object, **kwargs: object) -> None:
+            raise _SubStorageError("sqlite3: some internal detail")
+
+        monkeypatch.setattr(kb.backend, "get_schema", _raise_sub_storage_error)
+
+        body = _gql(client, "{ schema { version } }", headers=_auth(token))
+        assert _error_codes(body) == ["STORAGE_ERROR"]
+        message = body["errors"][0]["message"]
+        assert message == "An internal error occurred"
+        assert "sqlite3" not in message
+
+    def test_storage_error_from_token_resolution_is_redacted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A StorageError raised by auth_provider.resolve() itself (not a
+        resolver) must still flow through the same redaction path, not
+        escape as a raw, unmapped 500 (review finding)."""
+        kb = _kb(tmp_path)
+        client, auth_provider = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+
+        def _raise_storage_error(*args: object, **kwargs: object) -> None:
+            raise StorageError("sqlite3: token lookup failed")
+
+        monkeypatch.setattr(auth_provider, "resolve", _raise_storage_error)
+
+        body = _gql(client, "{ schema { version } }", headers=_auth(token))
+        assert _error_codes(body) == ["STORAGE_ERROR"]
+        message = body["errors"][0]["message"]
+        assert message == "An internal error occurred"
+        assert "sqlite3" not in message
+
     def test_storage_error_redacts_internal_detail(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -431,6 +493,33 @@ class TestEntityQuery:
         body = _gql(client, f'{{ entity(id: "{entity.id}") {{ id }} }}', headers=_auth(token))
         assert body["data"]["entity"]["id"] == entity.id
         assert called is False
+
+    def test_assertions_field_requires_auth_on_its_own(self, tmp_path: Path) -> None:
+        """EntityType.assertions calls _require_principal itself (review
+        finding) rather than relying solely on Query.entity's own gate.
+        Query.entity is the only path that currently reaches EntityType, and
+        it always gates first, so no query-level probe can exercise this
+        resolver unauthenticated - verified directly instead, invoking the
+        strawberry-wrapped method with a minimal stub Info."""
+        from ontolith.core.errors import AuthError
+        from ontolith.interfaces.graphql import EntityType
+
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+
+        class _StubInfo:
+            context = {"kb": kb, "auth_error": AuthError("Missing or malformed header")}
+
+        graphql_entity = EntityType(
+            id=entity.id,
+            concept="Person",
+            namespace="default",
+            natural_key=None,
+            created_at="2025-01-01T00:00:00",
+            created_by=HUMAN,
+        )
+        with pytest.raises(AuthError):
+            graphql_entity.assertions(_StubInfo())  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
