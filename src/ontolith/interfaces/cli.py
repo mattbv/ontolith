@@ -56,6 +56,19 @@ def root(
 def principal_create(
     principal_id: Annotated[str, typer.Argument(help="Principal ID (email or slug).")],
     kind: Annotated[str, typer.Option("--kind", help="Principal type: human, ai, or service.")],
+    author: Annotated[
+        str | None,
+        typer.Option(
+            "--author",
+            help=(
+                "Admin-capability principal creating this one. Required except for the "
+                "very first principal in a fresh database, which has no admin yet to "
+                "name (bootstrap: use the SDK directly, `Ontology.create_principal(...)`, "
+                "for that one call — matches this CLI's own implicitly-trusted local "
+                "access, same as every other principal-mutating command here)."
+            ),
+        ),
+    ] = None,
     owner: Annotated[
         str | None,
         typer.Option("--owner", help="Accountable owner (required for AI principals)."),
@@ -68,9 +81,23 @@ def principal_create(
     ] = "propose",
     trust_level: Annotated[int, typer.Option("--trust-level", help="Trust score 0-10.")] = 0,
 ) -> None:
-    """Create a new principal."""
+    """Create a new principal. Requires an existing admin principal named via
+    `--author` (KI-054) — the one exception is bootstrapping the very first
+    principal in a fresh database, where `--author` may be omitted."""
     kb = _kb()
     try:
+        if author is not None:
+            kb.require_admin(author)
+        elif kb.backend.list_principals():
+            # kb.backend (the raw port method) rather than kb.list_principals
+            # (which itself requires admin - can't use it to detect whether
+            # bootstrapping is legitimate without an admin already existing).
+            typer.echo(
+                "Error: --author is required (omit only to create the very first "
+                "principal in a brand-new database)",
+                err=True,
+            )
+            raise typer.Exit(1)
         p = kb.create_principal(
             principal_id,
             kind=kind,
@@ -79,6 +106,8 @@ def principal_create(
             trust_level=trust_level,
         )
         typer.echo(f"Created principal: {p.id}  kind={p.kind}  capability={p.default_capability}")
+    except typer.Exit:
+        raise
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None

@@ -2839,12 +2839,26 @@ class Ontology:
         """Shared gate for admin-level actions (credential issuance/revocation,
         plugin registration): these convert local access into a remote,
         network-reachable capability or a standing in-process actor, so they
-        require `admin`, not just whatever capability the target has."""
+        require `admin`, not just whatever capability the target has.
+
+        Rejects AI-kind principals regardless of their configured capability
+        (KI-053) — every other capability-tier gate in this module already
+        excludes AI-kind principals (`_check_direct_write_capability`,
+        `_require_reviewer_principal`, `resolve_contradiction`'s own check),
+        `admin` sits above all of them in SPEC §8.3's total order, and it was
+        the one gate that didn't. Without this, a misconfigured AI principal
+        with `default_capability="admin"` could call `issue_token()` for a
+        human principal and then authenticate as that human over REST/GraphQL
+        — bypassing every one of those other AI-kind checks and destroying
+        attribution on the resulting writes.
+        """
         principal = self.backend.get_principal(author)
         if principal is None:
             raise AuthError(f"Principal not found: {author}")
         if principal.default_capability != "admin":
             raise CapabilityError(f"Principal {author} lacks admin capability")
+        if principal.kind == "ai":
+            raise CapabilityError(f"Principal {author!r} is an AI principal and cannot hold admin")
         return principal
 
     def list_principals(self, author: str) -> list[Principal]:

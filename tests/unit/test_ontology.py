@@ -528,6 +528,40 @@ class TestApplySchema:
         with pytest.raises(AuthError, match="Principal not found"):
             kb.apply_schema(schema, author="nobody@example.com")
 
+
+class TestRequireAdmin:
+    """KI-053: require_admin must reject AI-kind principals regardless of
+    their configured capability, matching every other capability-tier gate
+    (_check_direct_write_capability, _require_reviewer_principal,
+    resolve_contradiction) - admin was the one gate that didn't."""
+
+    def test_human_admin_passes(self, kb: Ontology) -> None:
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        principal = kb.require_admin("admin@example.com")
+        assert principal.id == "admin@example.com"
+
+    def test_ai_principal_with_admin_capability_is_rejected(self, kb: Ontology) -> None:
+        """A misconfigured AI principal with default_capability="admin" must
+        not pass require_admin - without this, it could call issue_token()
+        for a human principal and authenticate as that human, bypassing
+        every AI-kind guard on write/review/resolve."""
+        kb.create_principal(
+            "bot-admin",
+            kind="ai",
+            owner="alice@example.com",
+            default_capability="admin",
+        )
+        with pytest.raises(CapabilityError, match="AI principal"):
+            kb.require_admin("bot-admin")
+
+    def test_non_admin_capability_is_rejected(self, kb: Ontology) -> None:
+        with pytest.raises(CapabilityError, match="lacks admin capability"):
+            kb.require_admin("alice@example.com")
+
+    def test_unknown_principal_raises_auth_error(self, kb: Ontology) -> None:
+        with pytest.raises(AuthError, match="Principal not found"):
+            kb.require_admin("nobody@example.com")
+
     def test_second_version_must_be_monotonic(self, kb: Ontology) -> None:
         kb.create_principal("admin@example.com", kind="human", default_capability="admin")
         kb.apply_schema(
