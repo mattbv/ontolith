@@ -289,6 +289,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- GraphQL resolvers (`interfaces/graphql.py`) no longer block the ASGI event loop
+  (closes KI-052, amends ADR-0037). Every `Query`/`Mutation` field, plus
+  `EntityType.assertions` and `create_graphql_app`'s `_get_context`, is now
+  `async def`; the actual blocking `kb`/`kb.backend` calls are factored into sync
+  helper functions and dispatched via `starlette.concurrency.run_in_threadpool`.
+  Previously every resolver ran inline on the event loop (unlike REST, whose
+  routes Starlette dispatches to a thread pool automatically), so a slow resolver
+  blocked *all* concurrent traffic, not just database-bound requests — measured
+  directly: three concurrent requests against a deliberately slowed resolver went
+  from ~0.92s (serialized) to ~0.33s (overlapping, matching REST).
 - **Breaking:** KI-033's party guard and KI-043's capability floor now apply to a
   `retracted`/`superseded` contradiction member exactly as they already did to a
   `flagged` one (closes KI-051, amends ADR-0030). Both guards previously gated on
