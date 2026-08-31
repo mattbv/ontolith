@@ -1326,19 +1326,19 @@ Add `issued_by`/`revoked_by` columns to `principal_credential` (both backends). 
 
 ---
 
-## KI-063 — CLI has no way to flag or resolve a contradiction
+## KI-063 — CLI has no way to flag or resolve a contradiction ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — the only one of four interfaces with zero contradiction write surface
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §10.3 (contradiction resolution), §14.2 (CLI)
 
 ### Description
 
-`contradiction_app` (`interfaces/cli.py`) registers only `contradiction list` — no `contradiction flag` or `contradiction resolve` command exists. REST has `POST /contradictions/flag` and `POST /contradictions/{id}/resolve`; GraphQL has `flagContradiction`/`resolveContradiction` mutations; MCP has `ontolith.flag_contradiction` (deliberately not `resolve`, per ADR-0008/KI-009's reviewer-only scoping). The CLI is the only one of the four with neither — and resolution in particular is explicitly a human-reviewer action per SPEC §10.3, i.e. exactly the actor the CLI serves, yet the CLI can't do it. KI-032 (M3) closed the equivalent gap for proposal review commands but never mentioned contradictions; this specific gap has never been named in any prior KI.
+`contradiction_app` (`interfaces/cli.py`) registered only `contradiction list` — no `contradiction flag` or `contradiction resolve` command existed. REST has `POST /contradictions/flag` and `POST /contradictions/{id}/resolve`; GraphQL has `flagContradiction`/`resolveContradiction` mutations; MCP has `ontolith.flag_contradiction` (deliberately not `resolve`, per ADR-0008/KI-009's reviewer-only scoping). The CLI was the only one of the four with neither — and resolution in particular is explicitly a human-reviewer action per SPEC §10.3, i.e. exactly the actor the CLI serves, yet the CLI couldn't do it. KI-032 (M3) closed the equivalent gap for proposal review commands but never mentioned contradictions; this specific gap had never been named in any prior KI.
 
 ### Fix
 
-Add `ontolith contradiction flag <id_a> <id_b>` and `ontolith contradiction resolve <id> --winner <assertion_id>` commands, mirroring the `proposal accept/reject/review` shape KI-032 already established.
+Added `ontolith contradiction flag <id_a> <id_b> --author <id> [--rationale <text>]` (propose-tier, mirrors `ontolith assert`/`retract`'s `--author` convention, not a reviewer action) and `ontolith contradiction resolve <id> --winner <assertion_id> --reviewer <id>` (mirrors `proposal accept`'s `--reviewer`/`--author` alias) — both thin wrappers around the already-governed `Ontology.flag_contradiction()`/`resolve_contradiction()`, no new domain logic.
 
 ---
 

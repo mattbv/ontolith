@@ -603,6 +603,68 @@ def list_contradictions(
         kb.close()
 
 
+@contradiction_app.command("flag")
+def flag_contradiction(
+    assertion_id_a: Annotated[str, typer.Argument(help="First assertion ID.")],
+    assertion_id_b: Annotated[str, typer.Argument(help="Second, conflicting assertion ID.")],
+    author: Annotated[
+        str,
+        typer.Option("--author", help="Principal ID flagging the contradiction."),
+    ],
+    rationale: Annotated[
+        str | None,
+        typer.Option("--rationale", help="Optional explanation for the flag."),
+    ] = None,
+) -> None:
+    """Flag two assertions as contradictory, opening or extending a
+    contradiction (SPEC §10.3). Requires propose capability or higher
+    (ADR-0008) — the same tier as `ontolith assert`'s governed
+    counterpart, not a reviewer-only action.
+    """
+    kb = _kb()
+    try:
+        contradiction, action = kb.flag_contradiction(
+            assertion_id_a, assertion_id_b, author, rationale=rationale
+        )
+        typer.echo(
+            f"{action.capitalize()}: {contradiction.id}  state={contradiction.state}  "
+            f"members={len(contradiction.member_ids)}"
+        )
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
+@contradiction_app.command("resolve")
+def resolve_contradiction(
+    contradiction_id: Annotated[str, typer.Argument(help="Contradiction ID to resolve.")],
+    winner: Annotated[
+        str,
+        typer.Option("--winner", help="Assertion ID of the winning member."),
+    ],
+    reviewer: Annotated[
+        str,
+        typer.Option("--reviewer", "--author", help="Reviewer principal resolving this."),
+    ],
+) -> None:
+    """Resolve an open contradiction by selecting a winning assertion
+    (SPEC §10.3). Every other member is retracted; the winner is
+    reactivated. Requires `review` (or `admin`) capability, non-AI, and
+    not a party to the contradiction (KI-026).
+    """
+    kb = _kb()
+    try:
+        contradiction = kb.resolve_contradiction(contradiction_id, winner, reviewer)
+        typer.echo(f"Resolved: {contradiction.id}  state={contradiction.state}  winner={winner}")
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
 # ─── namespace ────────────────────────────────────────────────────────────────
 
 
