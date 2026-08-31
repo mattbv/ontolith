@@ -1306,23 +1306,23 @@ Either lift the AI-requires-review check into `Ontology.propose`/`propose_ref`/`
 
 ---
 
-## KI-062 — Two known-vulnerable dev/docs-only dependencies; `pip-audit` CI gate currently red
+## KI-062 — Two known-vulnerable dev/docs-only dependencies; `pip-audit` CI gate currently red ✓ RESOLVED (Backlog)
 
 **Severity:** Performance/supply-chain — dev-only exposure, but the unconditional gate is failing
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** Implementation Plan §7.1 (supply-chain gate)
 
 ### Description
 
-`pip-audit` against the full locked dependency set currently reports two findings, both dev/docs-only (neither ships in the `ontolith` wheel or any runtime extra):
+`pip-audit` against the full locked dependency set reported two findings, both dev/docs-only (neither ships in the `ontolith` wheel or any runtime extra):
 - `pip==26.1.2` — PYSEC-2026-3721 / CVE-2026-13346 (doubly-encoded package URLs → arbitrary write location), fixed in `26.2`. Transitive via `pip-api` ← `pip-audit` itself.
 - `pymdown-extensions==11.0` — PYSEC-2026-3654 / GHSA-gm37-52c6-37mw / CVE-2026-67422 (ReDoS in four default-config inline processors), fixed in `11.0.1`. Transitive via `mkdocs-material`/`mkdocstrings`.
 
-`.github/workflows/security.yml`'s `pip-audit` step is unconditional, so the `scan` job is currently failing on every PR — `security.yml`'s own comments document a prior incident where exactly this kind of unfiltered noise masked a genuine finding. Runtime dependencies (`rdflib==7.6.0`, `strawberry-graphql==0.319.0`, `graphql-core==3.2.11`, `fastapi==0.138.0`, `starlette==1.3.1`, `mcp==1.29.0`, `sqlite-vec==0.1.3`, `duckdb==1.5.4`, `pydantic==2.13.4`) have no advisories — the M3 additions (`rdflib`, `strawberry-graphql`) introduce no CVE debt.
+`.github/workflows/security.yml`'s `pip-audit` step is unconditional, so the `scan` job was failing on every PR — `security.yml`'s own comments document a prior incident where exactly this kind of unfiltered noise masked a genuine finding. Runtime dependencies (`rdflib==7.6.0`, `strawberry-graphql==0.319.0`, `graphql-core==3.2.11`, `fastapi==0.138.0`, `starlette==1.3.1`, `mcp==1.29.0`, `sqlite-vec==0.1.3`, `duckdb==1.5.4`, `pydantic==2.13.4`) have no advisories — the M3 additions (`rdflib`, `strawberry-graphql`) introduced no CVE debt.
 
 ### Fix
 
-Bump `pip` and `pymdown-extensions` (transitively, via their parent dev dependencies) in `uv.lock`.
+`uv lock --upgrade-package pip --upgrade-package pymdown-extensions` bumped `pip` to `26.2.1` and `pymdown-extensions` to `11.0.2` in `uv.lock` — both transitive, via `pip-audit` and `mkdocs-material`/`mkdocstrings` respectively, so no direct `pyproject.toml` dependency changed. `uv run pip-audit` now reports zero findings.
 
 ---
 
