@@ -63,13 +63,19 @@ Usage:
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Annotated, Literal
 
 import strawberry
 from fastapi import FastAPI, Header
 from graphql.error import GraphQLError
 from starlette.concurrency import run_in_threadpool
-from strawberry.extensions import DisableIntrospection
+from strawberry.extensions import (
+    DisableIntrospection,
+    MaxAliasesLimiter,
+    QueryDepthLimiter,
+    SchemaExtension,
+)
 from strawberry.fastapi import GraphQLRouter
 
 from ontolith.core.errors import (
@@ -115,6 +121,21 @@ _GENERIC_SERVER_ERROR_MESSAGE = "An internal error occurred"
 # domain error without over-widening core/errors.py's stable taxonomy for
 # one interface's transport-level need.
 _INTERNAL_ERROR_CODE = "INTERNAL_ERROR"
+
+# Query-amplification limits (KI-056): always on, not configurable off.
+# Found in review: a single authenticated request with 200 aliased
+# `entity { assertions }` selections dispatches 400 backend calls in one
+# round trip, and — since KI-052 converted resolvers to async, sharing the
+# process's anyio worker-thread pool with any co-mounted REST app — this
+# became a cross-interface DoS vector, not just a self-inflicted one.
+# QueryDepthLimiter never bounds `__schema`/`__type` introspection fields
+# (a hardcoded, non-overridable carve-out in graphql-core's own depth
+# validator — introspection is disabled by default instead, see
+# `introspection` below). Real query shapes in this schema never exceed
+# ~4 levels of nesting or need more than a handful of aliases; both limits
+# below are generous multiples of that, not tight bounds.
+_MAX_QUERY_DEPTH = 10
+_MAX_ALIAS_COUNT = 15
 
 
 # ---------------------------------------------------------------------------
@@ -887,7 +908,7 @@ def create_graphql_app(
     name: str = "ontolith",
     *,
     graphql_ide: Literal["graphiql", "apollo-sandbox", "pathfinder"] | None = "graphiql",
-    introspection: bool = True,
+    introspection: bool = False,
     docs_url: str | None = "/docs",
     redoc_url: str | None = "/redoc",
     openapi_url: str | None = "/openapi.json",
@@ -904,17 +925,22 @@ def create_graphql_app(
             Unauthenticated, like REST's docs_url — it exposes the API's
             shape via the IDE's own introspection call, not its data.
         introspection: Whether ``__schema``/``__type`` introspection
-            queries are answered at all. True by default (matches
-            ``graphql_ide``'s own default-on posture and most GraphQL
-            deployments); a hardened deployment that wants the schema
-            itself hidden from anonymous callers can set this False —
-            unlike ``graphql_ide``, which only hides the IDE's *UI*, an
-            anonymous POST to /graphql can still run `{ __schema { ... } }`
-            directly unless this is also off. Setting this False while
-            leaving ``graphql_ide`` at its default still serves the IDE
-            page itself (GET /graphql returns 200) — it just can't load a
-            schema through it; pass ``graphql_ide=None`` too for a fully
-            closed deployment.
+            queries are answered at all. False by default (KI-056):
+            introspection queries are self-referentially recursive over the
+            schema's own type graph, and depth/alias limiting can't bound
+            them (`QueryDepthLimiter` hardcodes an introspection carve-out
+            in graphql-core itself — see the module-level comment above
+            `_MAX_QUERY_DEPTH`) — so unlike REST's `docs_url` (a fixed,
+            bounded JSON document with no recursive amplification
+            potential), leaving introspection on by default would leave an
+            *unauthenticated* recursive-response amplification vector open
+            with no other mitigation in this factory. Set this True for a
+            deployment that accepts that tradeoff (local development,
+            trusted-network staging, or any deployment that wants
+            self-documenting tooling and doesn't face untrusted traffic).
+            Leaving ``graphql_ide`` at its default while this is False still
+            serves the IDE page itself (GET /graphql returns 200) — it just
+            can't load a schema through it.
         docs_url: FastAPI Swagger UI path, or None to disable it. Kept for
             parity with ``create_rest_app`` — this app has no REST routes
             of its own, but mounting under a shared FastAPI app is a
@@ -930,7 +956,15 @@ def create_graphql_app(
     """
     app = FastAPI(title=name, docs_url=docs_url, redoc_url=redoc_url, openapi_url=openapi_url)
 
-    extensions = [DisableIntrospection] if not introspection else []
+    # Factory callables, not instances: passing an already-constructed
+    # extension instance to `extensions=[...]` is deprecated in strawberry
+    # (a fresh instance must be built per request).
+    extensions: list[Callable[[], SchemaExtension]] = [
+        lambda: QueryDepthLimiter(max_depth=_MAX_QUERY_DEPTH),
+        lambda: MaxAliasesLimiter(max_alias_count=_MAX_ALIAS_COUNT),
+    ]
+    if not introspection:
+        extensions.append(DisableIntrospection)
     schema = _OntolithSchema(query=Query, mutation=Mutation, extensions=extensions)
 
     async def _get_context(
