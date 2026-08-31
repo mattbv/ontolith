@@ -294,14 +294,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   self-referentially recursive over the schema's own type graph, and neither
   `QueryDepthLimiter` nor `MaxTokensLimiter` can bound that recursion (verified
   directly — `QueryDepthLimiter` hardcodes an introspection carve-out in
-  graphql-core itself); an anonymous caller previously had an unauthenticated,
-  unbounded-recursion amplification vector with no mitigation. Pass
-  `introspection=True` to opt back in. Also new: `MaxAliasesLimiter`/
-  `QueryDepthLimiter` are wired into every schema unconditionally, capping alias
-  count and query depth — closes the cross-interface DoS vector KI-052's async
-  resolver conversion introduced (many aliased fields in one authenticated
-  request previously saturated the anyio thread pool shared with any co-mounted
-  REST app).
+  *strawberry-graphql's own* depth-limiting validator, not graphql-core, which
+  has no depth validator at all); an anonymous caller previously had an
+  unauthenticated, unbounded-recursion amplification vector with no mitigation.
+  Pass `introspection=True` to opt back in — note `graphql_ide` still defaults
+  to serving GraphiQL, so pass both together for a working interactive dev
+  experience. Also new: `MaxAliasesLimiter`/`QueryDepthLimiter` are wired into
+  every schema unconditionally, capping alias count and query depth — *reduces*
+  the cross-interface DoS vector KI-052's async resolver conversion introduced
+  (measured: 15 concurrent worker threads per max-alias request against the
+  shared anyio pool's default 40-thread capacity, so this doesn't eliminate the
+  vector, only shrinks the amplification ratio from ~200 aliased fields to 15).
+  Requires `strawberry-graphql>=0.316` (bumped from `>=0.219` — the
+  factory-callable extension pattern this fix uses raises `TypeError` at
+  request time on older releases).
 - GraphQL resolvers (`interfaces/graphql.py`) no longer block the ASGI event loop
   (closes KI-052, amends ADR-0037). Every `Query`/`Mutation` field, plus
   `EntityType.assertions` and `create_graphql_app`'s `_get_context`, is now
