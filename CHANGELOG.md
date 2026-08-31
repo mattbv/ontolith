@@ -834,8 +834,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   convention alone (previously, only `StorageBackend` exposing no update/delete method stood
   between the audit tables and any code holding the raw connection). **DuckDB gets no equivalent
   fix** — verified DuckDB (1.5.4) has no `CREATE TRIGGER` support and no connection-level access
-  restriction to work around that; documented as a permanent, currently-unfixable backend
-  asymmetry rather than left unaddressed.
+  restriction to work around that; documented as a currently-unfixable backend asymmetry rather
+  than left unaddressed. Also closes a real bypass found in review: SQLite's
+  `recursive_triggers` pragma (now enabled) is required for the DELETE trigger to fire on the
+  conflict-row removal an `INSERT OR REPLACE` performs — without it, that statement could
+  silently rewrite an existing audit row, including its `actor` field.
 
 ### Security & Correctness Remediation (2026-07-06 – 2026-07-09)
 

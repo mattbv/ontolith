@@ -75,6 +75,14 @@ class SQLiteBackend:
     - assertion table with ULID primary key
     - Bitemporal columns (asserted_at, valid_from, valid_to)
     - Status tracking for append-only invariant
+
+    KI-066: `assertion_event`/`proposal_event`'s append-only invariant
+    (SPEC §17) is backed here by `BEFORE UPDATE`/`BEFORE DELETE` triggers
+    on both tables (raising `sqlite3.IntegrityError` on any raw mutation
+    attempt, including the conflict-row DELETE an `INSERT OR REPLACE`
+    performs — `PRAGMA recursive_triggers = ON` is required for that case
+    specifically), not just the port surface exposing no update/delete
+    method. `DuckDBBackend` has no equivalent — see its own docstring.
     """
 
     def __init__(self, path: str | Path, *, clock: Clock | None = None) -> None:
@@ -98,6 +106,15 @@ class SQLiteBackend:
         self.conn = sqlite3.connect(str(self.path), isolation_level=None, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        # KI-066 review: recursive_triggers defaults OFF, and SQLite only
+        # fires a BEFORE DELETE trigger for an `INSERT OR REPLACE`
+        # conflict-row removal when this is ON — without it, `INSERT OR
+        # REPLACE INTO assertion_event ...` with an existing id silently
+        # rewrites the row (including `actor`, laundering attribution)
+        # instead of tripping trg_assertion_event_no_delete/
+        # trg_proposal_event_no_delete below. Verified empirically: the
+        # bypass reproduces with this OFF and is blocked with it ON.
+        self.conn.execute("PRAGMA recursive_triggers = ON")
         # entities_where()'s __contains filter (KI-039) uses LIKE; SQLite's
         # default LIKE is ASCII-case-insensitive, DuckDB's is case-sensitive
         # — without this, the same .where(x__contains=...) call would
@@ -270,7 +287,7 @@ class SQLiteBackend:
         # These triggers make it a store-level guarantee instead (SPEC
         # §17: "the audit trail MUST NOT be mutable"). No DuckDB
         # equivalent exists — DuckDB has no CREATE TRIGGER support at all
-        # (verified against 1.5.4; see DuckDBBackend's own comment).
+        # (verified against 1.5.4; see DuckDBBackend's own docstring).
         cursor.execute("""
             CREATE TRIGGER IF NOT EXISTS trg_assertion_event_no_update
             BEFORE UPDATE ON assertion_event
