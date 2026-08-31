@@ -16,14 +16,17 @@ every query and mutation requires an ``Authorization: Bearer <token>``
 header, resolved server-side via the injected ``AuthProvider`` — never a
 caller-asserted principal ID. Unlike REST's ``Depends``-based dependency
 (which raises before the route body runs), GraphQL has no single
-request-level auth gate: introspection queries (``__schema``) must stay
-reachable even without a token, so auth resolution happens in
-``context_getter`` (storing either the resolved ``Principal`` or the
-``AuthError`` in context, never raising there) and each field resolver
-calls ``_require_principal(info)`` first, which raises the stored
-``AuthError`` if resolution failed — the exception then flows through
-GraphQL's normal per-field error path into the response body, same as any
-other domain error (see below).
+request-level auth gate: auth resolution happens in ``context_getter``
+(storing either the resolved ``Principal`` or the ``AuthError`` in context,
+never raising there) and each field resolver calls
+``_require_principal(info)`` first, which raises the stored ``AuthError``
+if resolution failed — the exception then flows through GraphQL's normal
+per-field error path into the response body, same as any other domain
+error (see below). This deferred-to-resolver-time design exists so
+introspection queries (``__schema``) *can* stay reachable without a token
+when a deployment opts into that (``introspection=True`` — see
+``create_graphql_app``'s own docstring; ``False`` by default since KI-056,
+so this isn't the out-of-the-box behavior).
 
 Error handling: GraphQL has no HTTP-status channel for domain errors the
 way REST does (SPEC §16's ``code``/``message``/``detail`` envelope doesn't
@@ -57,7 +60,10 @@ Usage:
     from ontolith.identity.token_auth import TokenAuthProvider
     from ontolith.interfaces.graphql import create_graphql_app
     app = create_graphql_app(kb, TokenAuthProvider(kb.backend))
-    # uvicorn.run(app) to serve; GraphiQL at /graphql by default
+    # uvicorn.run(app) to serve; GraphiQL served at /graphql by default, but
+    # introspection is off by default (KI-056) so it can't load a schema —
+    # pass introspection=True for a working interactive dev experience:
+    # app = create_graphql_app(kb, TokenAuthProvider(kb.backend), introspection=True)
 """
 
 from __future__ import annotations
@@ -123,17 +129,26 @@ _GENERIC_SERVER_ERROR_MESSAGE = "An internal error occurred"
 _INTERNAL_ERROR_CODE = "INTERNAL_ERROR"
 
 # Query-amplification limits (KI-056): always on, not configurable off.
-# Found in review: a single authenticated request with 200 aliased
-# `entity { assertions }` selections dispatches 400 backend calls in one
-# round trip, and — since KI-052 converted resolvers to async, sharing the
-# process's anyio worker-thread pool with any co-mounted REST app — this
-# became a cross-interface DoS vector, not just a self-inflicted one.
+# Found in review: a single authenticated request with many aliased
+# `entity { assertions }` selections dispatches that many backend calls in
+# one round trip, and — since KI-052 converted resolvers to async, sharing
+# the process's anyio worker-thread pool with any co-mounted REST app —
+# this became a cross-interface DoS vector, not just a self-inflicted one.
+# MaxAliasesLimiter bounds that directly (verified: 15 concurrent worker
+# threads per request against the pool's default 40-thread capacity — this
+# reduces the amplification ratio, it does not eliminate the vector; a few
+# concurrent max-alias requests can still exhaust the shared pool).
 # QueryDepthLimiter never bounds `__schema`/`__type` introspection fields
-# (a hardcoded, non-overridable carve-out in graphql-core's own depth
-# validator — introspection is disabled by default instead, see
-# `introspection` below). Real query shapes in this schema never exceed
-# ~4 levels of nesting or need more than a handful of aliases; both limits
-# below are generous multiples of that, not tight bounds.
+# (a hardcoded, non-overridable carve-out in *strawberry's own*
+# depth-limiting validator — this is a strawberry-graphql implementation
+# detail, not a graphql-core one; introspection is disabled by default
+# instead, see `introspection` below). Separately: no field in this schema
+# is recursive (no type nests back into itself), so no schema-valid query
+# can reach anywhere near max_depth=10 today — the depth limit is
+# forward-looking defense-in-depth for a future recursive relation field,
+# not a live mitigation. max_alias_count=15 is the limit doing real work
+# right now; real query shapes in this schema never need more than a
+# handful of aliases.
 _MAX_QUERY_DEPTH = 10
 _MAX_ALIAS_COUNT = 15
 
@@ -414,9 +429,10 @@ def _require_principal(info: strawberry.Info) -> Principal:
     OntolithError broadly, not just AuthError).
 
     Deferred to resolver-time rather than raised in context_getter itself
-    so unauthenticated introspection queries stay reachable — mirrors
-    REST's _resolve_principal, just triggered per-field instead of
-    per-request (module docstring).
+    so unauthenticated introspection queries *can* stay reachable when a
+    deployment opts into introspection=True — mirrors REST's
+    _resolve_principal, just triggered per-field instead of per-request
+    (module docstring).
     """
     principal = info.context.get("principal")
     if principal is None:
@@ -929,7 +945,8 @@ def create_graphql_app(
             introspection queries are self-referentially recursive over the
             schema's own type graph, and depth/alias limiting can't bound
             them (`QueryDepthLimiter` hardcodes an introspection carve-out
-            in graphql-core itself — see the module-level comment above
+            in *strawberry's own* depth-limiting validator, not
+            graphql-core's — see the module-level comment above
             `_MAX_QUERY_DEPTH`) — so unlike REST's `docs_url` (a fixed,
             bounded JSON document with no recursive amplification
             potential), leaving introspection on by default would leave an
@@ -939,8 +956,10 @@ def create_graphql_app(
             trusted-network staging, or any deployment that wants
             self-documenting tooling and doesn't face untrusted traffic).
             Leaving ``graphql_ide`` at its default while this is False still
-            serves the IDE page itself (GET /graphql returns 200) — it just
-            can't load a schema through it.
+            serves the IDE page itself (GET /graphql returns 200), but the
+            IDE won't be able to load a schema through it either — pass
+            ``introspection=True`` alongside the default ``graphql_ide`` for
+            a working interactive dev experience (see ``Usage`` above).
         docs_url: FastAPI Swagger UI path, or None to disable it. Kept for
             parity with ``create_rest_app`` — this app has no REST routes
             of its own, but mounting under a shared FastAPI app is a

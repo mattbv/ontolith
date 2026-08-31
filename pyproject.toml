@@ -31,7 +31,14 @@ dependencies = [
 [project.optional-dependencies]
 store-duckdb = ["duckdb>=1.0"]
 rest = ["fastapi>=0.110", "uvicorn>=0.27"]
-graphql = ["strawberry-graphql[fastapi]>=0.219", "uvicorn>=0.27"]
+graphql = [
+	# >=0.316: create_graphql_app's extensions=[lambda: QueryDepthLimiter(...), ...]
+	# factory-callable pattern (KI-056) raises TypeError at request time on
+	# strawberry-graphql<=0.313 (verified against real releases); the >=0.219
+	# floor predates that pattern and was never re-verified against it.
+	"strawberry-graphql[fastapi]>=0.316",
+	"uvicorn>=0.27",
+]
 mcp = [
     "mcp>=1.28.1,<2.0", # >=1.28.1 fixes PYSEC-2026-3483; <2.0 avoids an unreviewed major bump
 ]
