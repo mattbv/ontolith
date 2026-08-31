@@ -1358,19 +1358,19 @@ At minimum, record an ADR scoping M4's observability plan (or explicitly confirm
 
 ---
 
-## KI-065 — `strawberry-graphql`/`rdflib` have no upper version bound, unlike `mcp`
+## KI-065 — `strawberry-graphql`/`rdflib` have no upper version bound, unlike `mcp` ✓ RESOLVED (Backlog)
 
 **Severity:** Supply-chain — inconsistent pinning policy, not an active vulnerability
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** n/a (dependency management convention)
 
 ### Description
 
-`mcp` is pinned `>=1.28.1,<2.0` with a documented rationale ("avoids an unreviewed major bump"). The two M3-era dependencies carry no upper bound at all: `strawberry-graphql[fastapi]>=0.219` (currently resolving `0.319.0` — roughly a hundred minor releases of unreviewed drift on a library sitting directly on the auth-bearing request path) and `rdflib>=7.0`. `uv.lock` protects this repo's own CI, but not a downstream `pip install ontolith[graphql]`, which resolves whatever is newest at install time.
+`mcp` is pinned `>=1.28.1,<2.0` with a documented rationale ("avoids an unreviewed major bump"). The two M3-era dependencies carried no upper bound at all: `strawberry-graphql[fastapi]>=0.316` (currently resolving `0.319.0`) and `rdflib>=7.0`. `uv.lock` protects this repo's own CI, but not a downstream `pip install ontolith[graphql]`, which resolves whatever is newest at install time.
 
 ### Fix
 
-Apply the same `<N.0` convention already used for `mcp` to `strawberry-graphql` and `rdflib`, or record explicitly why the interop/graphql extras are treated differently.
+Applied the same `<N.0` convention already used for `mcp`: `strawberry-graphql[fastapi]>=0.316,<1.0` and `rdflib>=7.0,<8.0` (`pyproject.toml`). `uv lock` produced only a 2-line lockfile metadata diff — both packages were already resolving within the new bounds, no version actually changed. Noted explicitly in a `pyproject.toml` comment that `<1.0` is a coarser guarantee for `strawberry-graphql` specifically than for `mcp`/`rdflib`: the `>=0.316` floor itself exists because a *minor* pre-1.0 release already broke this integration once (KI-056's factory-callable pattern), so an upper bound at the next major version doesn't protect against the next 0.x break — `security.yml`'s weekly `pip-audit`/scheduled scan remains the real backstop for that, same as for any other dependency.
 
 ---
 

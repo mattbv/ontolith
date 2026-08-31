@@ -36,13 +36,19 @@ graphql = [
 	# factory-callable pattern (KI-056) raises TypeError at request time on
 	# strawberry-graphql<=0.313 (verified against real releases); the >=0.219
 	# floor predates that pattern and was never re-verified against it.
-	"strawberry-graphql[fastapi]>=0.316",
+	# <1.0: mirrors mcp's own upper-bound convention below (KI-065) - this
+	# package sits directly on the auth-bearing request path. Note the
+	# floor bump above is itself evidence a *minor* 0.x release already
+	# broke this integration once; <1.0 only guards against the next major,
+	# not the next 0.x drift - security.yml's weekly pip-audit/scheduled
+	# scan is the real backstop for that, same as any other dependency.
+	"strawberry-graphql[fastapi]>=0.316,<1.0",
 	"uvicorn>=0.27",
 ]
 mcp = [
     "mcp>=1.28.1,<2.0", # >=1.28.1 fixes PYSEC-2026-3483; <2.0 avoids an unreviewed major bump
 ]
-interop = ["pyyaml>=6.0", "rdflib>=7.0"]
+interop = ["pyyaml>=6.0", "rdflib>=7.0,<8.0"] # <8.0: KI-065, mirrors mcp's upper-bound convention
 all = ["ontolith[rest,graphql,mcp,interop,store-duckdb]"]
 dev = [
 	"ontolith[all]",
