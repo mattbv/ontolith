@@ -97,6 +97,7 @@ _EXPECTED: dict[str, frozenset[str]] = {
             "PolicyStrategy",
             "ThresholdPolicy",
             "SourceQuorum",
+            "Composite",
             "Activate",
             "Supersede",
             "Contradict",

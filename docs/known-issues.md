@@ -1290,19 +1290,19 @@ Add `issued_by`/`revoked_by` columns to `principal_credential` (both backends). 
 
 ---
 
-## KI-061 — `SourceQuorum` policy strategy silently drops the "AI proposals always require review" invariant
+## KI-061 — `SourceQuorum` policy strategy silently drops the "AI proposals always require review" invariant ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — the headline AI-safety guarantee becomes policy-dependent without any interface saying so
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved via ADR-0040
 **SPEC reference:** SPEC §9.2 (policy strategies, `Composite`), ADR-0003 (AI/low-trust principals require review)
 
 ### Description
 
-`SourceQuorum` (`govern/policy.py:206-288`) has no `kind`-based check anywhere in its evaluation — only `ThresholdPolicy` (the default) implements the "AI-kind principal always routes to review" rule (`policy.py:149-154`). `Ontology.propose`/`propose_ref` themselves have no AI check of their own (`ontology.py:1152-1156`) — the configured `PolicyStrategy` is the *only* thing standing between an AI-authored proposal and an immediate auto-accepted write. A deployment configured with `Ontology(backend, policy=SourceQuorum(2))` silently loses the guarantee, while MCP's tool docstrings (`mcp.py:320-323`, `:483-486`) continue telling agent callers their proposals are always queued for human review — which is only true under the default strategy. SPEC §9.2's `Composite` strategy, named in `SourceQuorum`'s own docstring as the intended resolution, isn't implemented.
+`SourceQuorum` (`govern/policy.py:206-288`) has no `kind`-based check anywhere in its evaluation — only `ThresholdPolicy` (the default) implements the "AI-kind principal always routes to review" rule (`policy.py:149-154`). `Ontology.propose`/`propose_ref` themselves have no AI check of their own (`ontology.py:1152-1156`) — the configured `PolicyStrategy` is the *only* thing standing between an AI-authored proposal and an immediate auto-accepted write. A deployment configured with `Ontology(backend, policy=SourceQuorum(2))` silently loses the guarantee, while MCP's tool docstrings (`mcp.py:320-323`, `:483-486`) continued telling agent callers their proposals are always queued for human review — which is only true under the default strategy. SPEC §9.2's `Composite` strategy, named in `SourceQuorum`'s own docstring as the intended resolution, wasn't implemented.
 
 ### Fix
 
-Either lift the AI-requires-review check into `Ontology.propose`/`propose_ref`/`retract` itself (ahead of policy evaluation, so it can't be configured away), or implement the `Composite` strategy and correct every interface docstring that currently states the guarantee unconditionally.
+`SourceQuorum`'s AI-auto-accept behavior is a deliberate ADR-0025 decision, pinned by its own conformance vector — this was decided not to be silently reversed. Instead, built SPEC §9.2's `Composite(all=…, any=…)` (`govern/policy.py`, ADR-0040): every strategy in `all` must independently `AutoAccept` (most-restrictive decision wins), at least one in `any` must (least-restrictive wins), same-severity decisions merge rather than one being discarded. `Composite(all=[<an AI-review strategy>, SourceQuorum(2)])` now actually expresses the combination ADR-0025 named but couldn't build. No new "AI-always-reviews" strategy shipped — `ThresholdPolicy` can't be reused for this (it would re-impose its own capability gate too), so the pattern is documented as a five-line inline example in `Composite`'s own docstring instead. MCP's `ontolith.propose`/`ontolith.resubmit` docstrings corrected to attribute the guarantee to the *default* `ThresholdPolicy`, not state it unconditionally.
 
 ---
 

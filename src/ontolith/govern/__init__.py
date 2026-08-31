@@ -11,6 +11,7 @@ from ontolith.govern.conflict import Activate, ConflictResult, Contradict, Super
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.policy import (
     AutoAccept,
+    Composite,
     Decision,
     KbView,
     PolicyStrategy,
@@ -33,6 +34,7 @@ __all__ = [
     "PolicyStrategy",
     "ThresholdPolicy",
     "SourceQuorum",
+    "Composite",
     "Activate",
     "Supersede",
     "Contradict",

@@ -1,0 +1,58 @@
+# ADR-0040: `Composite` Policy Strategy — Severity-Ordered `all`/`any` Combination, No New "AI-Review" Strategy Shipped
+
+**Status**: Accepted
+**Date**: 2026-08-31
+**Deciders**: Ontolith Core Team
+**Related**: SPEC §9.2 (policy engine contract, `Composite(all=…, any=…)`), ADR-0003 (AI/low-trust principals require review), ADR-0025 (`SourceQuorum`, `KbView`, KI-017), KI-061
+
+---
+
+## Context
+
+SPEC §9.2 names six built-in `PolicyStrategy` implementations a conforming implementation SHOULD provide: `ConfidenceThreshold`, `TrustLevel`, `SourceRequired`, `RequireReviewByRole`, `SourceQuorum`, and `Composite(all=…, any=…)`. Only `ThresholdPolicy` (the default, roughly `TrustLevel` + capability gating) and `SourceQuorum` (ADR-0025) exist; the other four, including `Composite`, were never built.
+
+`SourceQuorum`'s own docstring and ADR-0025 §5 record a deliberate decision: `SourceQuorum` does not special-case AI-authored proposals the way `ThresholdPolicy` does (ADR-0003's "AI principals always require review, regardless of trust level or delegation"). A deployment configured with `Ontology(backend, policy=SourceQuorum(2))` loses that guarantee entirely — an AI-authored proposal can auto-accept once enough distinct sources corroborate it. ADR-0025 explicitly named `Composite` as the sanctioned way to layer the two rules together, but never built it — leaving the combination genuinely impossible to configure, not just undocumented. KI-061 (filed during the M3 milestone-boundary security audit) named this: MCP's tool docstrings (`mcp.py`) tell agent callers their proposals are "always" queued for review, which is only true under the default `ThresholdPolicy` — a deployment on `SourceQuorum` alone silently breaks that promise with no interface saying so.
+
+Two fixes were considered for KI-061 (recorded in its own Fix text): lift the AI-review check into `Ontology.propose`/`propose_ref`/`retract` itself (making it structural, un-configurable), or build `Composite` and correct the docstrings. The first would reverse ADR-0025's own explicit, conformance-vector-pinned decision that `SourceQuorum`'s AI-auto-accept behavior is deliberate — not something to silently override without new information invalidating that decision. This ADR takes the second path.
+
+## Decision
+
+**Build `Composite(all=…, any=…)` exactly as SPEC §9.2 names it, with severity-ordered decision combination — and ship no new "AI-always-reviews" strategy alongside it.**
+
+**Combination semantics**: `Decision` severity is ordered `Reject > RequireReview > AutoAccept`.
+- `all`: every strategy must independently return `AutoAccept`. The **most restrictive** decision among the group wins — one `Reject` or `RequireReview` anywhere overrides every `AutoAccept` the others returned.
+- `any`: at least one strategy must return `AutoAccept`. The **least restrictive** decision among the group wins — one `AutoAccept` anywhere is enough, regardless of what the others returned.
+- Both groups must approve for `Composite` itself to auto-accept: the two group results are combined the same way as `all` (most-restrictive-wins), so an unsatisfied `any` group can still block an otherwise-satisfied `all` group and vice versa.
+- An unset group (`all=()` or `any=()`) is excluded from the combination entirely, rather than contributing a placeholder decision — a caller passing only one of the two parameters gets exactly that group's own semantics, unconstrained by the other, and the merged reason string carries no trace of the group that was never configured. `Composite()` with both empty raises `ValueError` (nothing to compose is a configuration mistake, mirroring `SourceQuorum`'s own `threshold < 1` guard).
+- When multiple strategies in the same group land at the same severity (e.g. two `RequireReview`s), their outcomes are merged rather than one arbitrarily discarded: `RequireReview.reviewers` is a dedup'd union preserving first-seen order; every `Decision.reason` is concatenated (`"; ".join(...)`) so no contributing strategy's rationale is silently dropped.
+
+**No new "AI-always-reviews" strategy is shipped.** The KI-061 motivating scenario — combine `SourceQuorum`'s corroboration rule with ADR-0003's AI-review rule — cannot reuse `ThresholdPolicy` itself as the `all`-group member: `ThresholdPolicy.evaluate()` bundles the AI check with its own capability/trust-level gate, so `Composite(all=[ThresholdPolicy(), SourceQuorum(2)])` would re-impose `ThresholdPolicy`'s full gate (e.g. rejecting a `propose`-capability human `SourceQuorum` would otherwise have let contribute once quorum is reached) — defeating the reason a deployment chose `SourceQuorum` over the default in the first place. A correct AI-only check is a five-line `PolicyStrategy`, documented as an inline example in `Composite`'s own docstring rather than a new symbol this package exports. SPEC §9.2 doesn't name an "AI-review" strategy among its six — inventing one un-named by the spec, just to make one example concrete, is scope beyond what KI-061 or SPEC actually asks for.
+
+## Rationale
+
+**Why severity-ordering instead of, say, first-match or explicit priority lists:** it's the simplest rule that satisfies both group semantics symmetrically (`all` = worst-case-wins, `any` = best-case-wins are duals of the same ordering) and requires no additional configuration (no "which strategy wins ties" parameter) while still being fully deterministic — `PolicyStrategy.evaluate()`'s SPEC §9.2 purity/determinism requirement extends to `Composite` itself.
+
+**Why merge same-severity decisions instead of picking the first:** silently dropping a second `RequireReview`'s reviewers or reason would mean a deployment combining, say, two independent review-routing rules only gets one of them acted on — a correctness bug in exactly the multi-strategy scenario `Composite` exists to support.
+
+**Why an empty group is excluded rather than contributing a placeholder `AutoAccept`:** an early version did inject a placeholder `AutoAccept("Composite: no \`any\` strategies configured")` for the unset group and merged it in unconditionally — behaviorally correct (an `AutoAccept` never changes which severity wins), but it leaked "no strategies configured" into the final `Decision.reason` even when a caller only ever set one group, polluting an otherwise-clean message with an irrelevant implementation detail. Conformance testing caught this immediately (`test_all_auto_accepts_when_every_strategy_does`, `test_any_auto_accepts_when_one_strategy_does`). Skipping the unset group in `evaluate()`'s own combination list is both simpler and produces the exact reason text a caller of a single-group `Composite` would expect.
+
+**Why `ValueError` on both groups empty:** matches `SourceQuorum.__init__`'s existing `threshold < 1` guard — an unusable configuration is rejected at construction time, not silently accepted to fail confusingly (or vacuously auto-accept everything) at evaluation time.
+
+## Consequences
+
+**Positive:**
+- Closes the configuration gap ADR-0025 named but didn't build: `SourceQuorum` combined with an AI-review rule is now actually expressible, not just documented as theoretically possible.
+- No change to `ThresholdPolicy` or `SourceQuorum`'s own behavior — both docstrings updated only to reference `Composite` as now-available, not to change what either strategy does. `conformance/test_source_quorum_policy.py::test_ai_authored_proposal_can_auto_accept` is unchanged and still passes — `SourceQuorum` alone remains exactly as permissive as ADR-0025 decided.
+- MCP's `ontolith.propose`/`ontolith.resubmit`/`ontolith.retract` docstrings, which stated "AI proposals always require review" unconditionally, now correctly attribute this to `ThresholdPolicy`'s default and note it's the installed `PolicyStrategy`'s responsibility under a custom one.
+
+**Negative / follow-ups:**
+- `Composite` still doesn't make the AI-review guarantee *structural* — a deployment on `SourceQuorum` alone (not composed with an AI-review strategy) still loses it, same as today. This ADR makes the correct configuration possible and the docs honest about the guarantee being policy-dependent; it doesn't force any deployment to adopt it. The "make it structural" alternative KI-061 also named remains available as a future, separate decision if a deployment-independent guarantee is ever required.
+- The other four SPEC §9.2-named strategies (`ConfidenceThreshold`, `TrustLevel`, `SourceRequired`, `RequireReviewByRole`) remain unbuilt — out of scope for KI-061, not newly discovered by this ADR.
+- `Composite`'s reason-concatenation format (`"; "`-joined) is a first cut with no established precedent elsewhere in the codebase to match; a future strategy with more elaborate reason structure might want something more structured than a joined string, which would be a compatible addition (a new field), not a breaking change to `Decision`.
+
+## Alternatives Considered
+
+- **Lift the AI-review check into `Ontology.propose`/`propose_ref`/`retract` itself** (KI-061's other named option): rejected for this pass — reverses ADR-0025's explicit, conformance-vector-pinned decision that `SourceQuorum`'s AI-auto-accept behavior is deliberate, without new information that invalidates that decision. Recorded as still-available future work if the project later decides the guarantee should be non-configurable.
+- **Ship a standalone `RequireReviewForAI`-shaped strategy alongside `Composite`**: rejected — see Decision above; SPEC doesn't name one among its six strategies, and the correct implementation is a five-line class better shown as a docstring example than shipped as a new public symbol with its own maintenance surface.
+- **First-strategy-wins or explicit-priority combination instead of severity ordering**: rejected — adds a configuration parameter (priority order) for no behavioral benefit over the simpler, symmetric severity rule, and risks silently discarding a later strategy's `Reject`/`RequireReview` if an earlier one in the list already returned `AutoAccept`.
+- **Silently pick one reason/reviewer set on a severity tie instead of merging**: rejected — see Rationale; would drop real information from whichever strategy wasn't picked.

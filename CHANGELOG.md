@@ -10,6 +10,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- `Composite(all=…, any=…)` policy strategy (`govern/policy.py`, SPEC §9.2, closes KI-061,
+  ADR-0040) — the last of SPEC §9.2's six named strategies still missing. Combines multiple
+  `PolicyStrategy` instances by decision severity (`Reject` > `RequireReview` > `AutoAccept`):
+  every strategy in `all` must independently `AutoAccept` for the group to approve (the most
+  restrictive decision wins); at least one strategy in `any` must (the least restrictive wins);
+  same-severity decisions at the winning level are merged — `RequireReview.reviewers` as a
+  dedup'd union, every `Decision.reason` concatenated — rather than one being silently discarded.
+  Closes a real configuration gap: `SourceQuorum` deliberately does not special-case AI-authored
+  proposals the way the default `ThresholdPolicy` does (ADR-0025 §5, unchanged by this), so a
+  deployment on `SourceQuorum` alone silently drops ADR-0003's "AI principals always require
+  review" guarantee — `Composite` is SPEC §9.2's sanctioned way to layer that rule back on top,
+  and until now it couldn't actually be built. No new "AI-always-reviews" strategy ships
+  alongside it (`ThresholdPolicy` can't be reused for this without re-imposing its own capability
+  gate); the five-line pattern is documented as an inline example in `Composite`'s own docstring.
+  MCP's `ontolith.propose`/`ontolith.resubmit` tool docstrings, which previously stated the
+  AI-review guarantee unconditionally, now correctly attribute it to the *default*
+  `ThresholdPolicy` specifically.
 - RDF/OWL bridge, export only (SPEC §13.3, ADR-0036): `schema.rdf.to_owl(schema)`
   translates a `SchemaIR` into an OWL ontology (`rdflib.Graph`) — concepts become
   `owl:Class`, properties become `owl:DatatypeProperty` (XSD-typed range), relations
