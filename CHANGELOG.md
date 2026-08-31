@@ -289,6 +289,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- **Security, Breaking:** `create_graphql_app`'s `introspection` parameter now
+  defaults to `False` (closes KI-056, amends ADR-0037). Introspection queries are
+  self-referentially recursive over the schema's own type graph, and neither
+  `QueryDepthLimiter` nor `MaxTokensLimiter` can bound that recursion (verified
+  directly — `QueryDepthLimiter` hardcodes an introspection carve-out in
+  graphql-core itself); an anonymous caller previously had an unauthenticated,
+  unbounded-recursion amplification vector with no mitigation. Pass
+  `introspection=True` to opt back in. Also new: `MaxAliasesLimiter`/
+  `QueryDepthLimiter` are wired into every schema unconditionally, capping alias
+  count and query depth — closes the cross-interface DoS vector KI-052's async
+  resolver conversion introduced (many aliased fields in one authenticated
+  request previously saturated the anyio thread pool shared with any co-mounted
+  REST app).
 - GraphQL resolvers (`interfaces/graphql.py`) no longer block the ASGI event loop
   (closes KI-052, amends ADR-0037). Every `Query`/`Mutation` field, plus
   `EntityType.assertions` and `create_graphql_app`'s `_get_context`, is now

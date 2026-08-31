@@ -328,6 +328,57 @@ already-named, still-unimplemented query cost/complexity limiter
 (`strawberry.extensions.QueryDepthLimiter` or similar) more load-bearing
 than before this fix, not just a nice-to-have. Still not implemented here.
 
+## Update (2026-08-30): query-amplification limiting, KI-056 resolved
+
+A milestone-boundary security audit escalated the "not just a nice-to-have"
+follow-up named above to a HIGH-severity finding (KI-056), for two reasons:
+the 200-aliased-field measurement above is now a cross-interface DoS (the
+shared anyio thread pool also serves any co-mounted REST app), and a second,
+separate vector — unauthenticated recursive `__schema` introspection — was
+also live by default.
+
+**Alias/depth limiting, always on.** `create_graphql_app` now wires
+`strawberry.extensions.MaxAliasesLimiter(max_alias_count=15)` and
+`QueryDepthLimiter(max_depth=10)` into every schema unconditionally — not
+tied to the `introspection` flag, no way to disable them. Both are generous
+multiples of what any real query against this schema needs (nothing exceeds
+~4 levels of nesting or needs more than a handful of aliases). Verified
+directly: an authenticated 20-alias query is rejected, a 5-alias query
+succeeds.
+
+**`QueryDepthLimiter` does not bound introspection — verified empirically,
+not assumed.** graphql-core's own depth-counting logic hardcodes a carve-out
+for any field beginning with `__` ("by default, ignore the introspection
+fields," in its own source comment) — confirmed a deeply recursive
+`{ __schema { types { fields { type { fields { ... } } } } } }` query passes
+depth validation untouched regardless of `max_depth`, and that a custom
+`should_ignore` callback can't override the hardcoded carve-out either (it's
+OR'd after the built-in check, never instead of it). `MaxTokensLimiter` was
+also considered and rejected: it bounds the *request's* token count, not the
+*response's* size, and introspection's amplification ratio is exactly a
+short query producing a disproportionately large response by walking the
+schema's own (cyclic) type graph — bounding input tokens doesn't touch that.
+
+**Introspection now defaults to `False`.** Since no combination of the
+built-in limiters can bound introspection's recursion, and REST's `docs_url`
+analogy (module docstring, previously used to justify defaulting
+introspection on) doesn't actually hold for this specific risk — REST's
+OpenAPI JSON is a fixed, non-recursive document with no amplification
+potential, unlike GraphQL's self-referential schema graph — introspection is
+now off unless a deployment opts in via `introspection=True`. This is a
+default-behavior change from this ADR's original decision, made deliberately
+rather than silently: local development, trusted-network staging, or any
+deployment that wants self-documenting tooling and doesn't face untrusted
+traffic can still opt back in.
+
+**Rejected: a custom depth-limiting validator that also bounds introspection.**
+Considered instead of flipping the default (would have kept introspection
+on by default with real depth protection), but requires hand-rolling a
+`graphql-core` `ValidationRule` bypassing the builtin's hardcoded carve-out —
+materially more engineering and testing burden than the fix shipped, for a
+capability (introspection-with-bounded-recursion) most deployments don't
+need by default anyway.
+
 ## References
 
 - SPEC §14.3 (REST + GraphQL), §16 (error model), §8.3 (capabilities), §17

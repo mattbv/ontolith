@@ -1156,6 +1156,25 @@ Re-measured after the fix with the same deliberately-slowed-resolver setup: thre
 
 ---
 
+## KI-056 — GraphQL query amplification: unauthenticated introspection recursion, and alias amplification escalated to cross-interface DoS by KI-052 ✓ RESOLVED (M3)
+
+**Severity:** Security — live, remotely-reachable amplification vector; the only finding from the M3 milestone-boundary security audit reachable without any credential
+**Milestone target:** M3 — resolved via ADR-0037's 2026-08-30 update
+**SPEC reference:** SPEC §17 (security model)
+
+### Description
+
+Found during the M3 milestone-boundary security audit, as a direct escalation of a limitation ADR-0037 had already named but not fixed. Two distinct vectors:
+
+1. **Unauthenticated introspection amplification.** `create_graphql_app`'s auth model defers `_require_principal` to resolver-time so introspection queries stay reachable without a token (by design, matching REST's `docs_url` posture). Introspection queries are self-referentially recursive over the schema's own type graph (`{ __schema { types { fields { type { fields { ... } } } } } }`), so an anonymous caller could trigger an expensive, deeply-nested response with a short request — the classic GraphQL introspection DoS shape — with no depth or cost limit anywhere.
+2. **Authenticated, now cross-interface, alias amplification.** ADR-0037's own 2026-08-28 measurement (recorded when resolvers were converted to async, KI-052) showed 200 aliased root fields at 0.5s each saturating the shared anyio worker-thread pool enough to delay an unrelated concurrent request by ~2.5s. Before KI-052, the same query would have blocked only the GraphQL event loop itself; after it, the harm reaches any REST app mounted in the same process, since both now share the same thread pool.
+
+### Fix
+
+`strawberry.extensions.MaxAliasesLimiter(max_alias_count=15)` and `QueryDepthLimiter(max_depth=10)` are now wired into every schema unconditionally (not tied to any flag) — closes vector 2. `QueryDepthLimiter` was verified *not* to bound introspection (graphql-core hardcodes an introspection carve-out in its own depth-counting logic that a custom `should_ignore` callback can't override), so `introspection` now defaults to `False` — closes vector 1. `MaxTokensLimiter` was considered and rejected for the introspection vector: it bounds request token count, not response size, and introspection's amplification is exactly a short request producing a disproportionately large response. See ADR-0037's 2026-08-30 update for the full design record, including why the REST `docs_url` analogy that originally justified defaulting introspection on doesn't hold for this specific risk (REST's OpenAPI JSON has no recursive amplification potential; GraphQL's schema graph does).
+
+---
+
 ## Format
 
 Each entry follows this structure:
