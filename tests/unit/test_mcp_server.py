@@ -990,6 +990,24 @@ class TestRetractTool:
 
         assert result["proposal"]["acting_as"] == HUMAN
 
+    def test_unknown_acting_as_returns_auth_error(self, tmp_path: Path) -> None:
+        """Distinct from an invalid token: the token resolves fine, but the
+        requested acting_as principal doesn't exist - _resolve_delegation
+        raises AuthError for this, not CapabilityError."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.retract").fn(
+            assertion_id=assertion.id,
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            acting_as="nonexistent-principal",
+        )
+
+        assert "error" in result
+        assert result["code"] == "auth_error"
+
     def test_retract_invalid_token_returns_auth_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
