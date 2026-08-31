@@ -1438,6 +1438,22 @@ Implement `ConfidenceThreshold`, `SourceRequired`, and `RequireReviewByRole` (or
 
 ---
 
+## KI-070 — Most direct dependencies still have no upper version bound
+
+**Severity:** Supply-chain — inconsistent pinning policy, not an active vulnerability
+**Milestone target:** Backlog
+**SPEC reference:** n/a (dependency management convention)
+
+### Description
+
+KI-065 extended the `<N.0` upper-bound convention (established for `mcp`, ADR-0026) to `strawberry-graphql`/`rdflib`, but left every other direct dependency unbounded: `pydantic>=2.0`, `typer>=0.9`, `python-ulid>=2.0`, `fastapi>=0.110`, `duckdb>=1.0`, `uvicorn>=0.27`, `pyyaml>=6.0` (`pyproject.toml`). Several of these have a *higher* blast radius than the two KI-065 covered — `pydantic` underlies every domain model, `fastapi` sits on the same auth-bearing request path the new `strawberry-graphql` bound's own rationale names. A downstream `pip install ontolith` (no extras) or any extra resolves whatever is newest for these at install time, unreviewed by the project, same gap KI-065 closed for two packages specifically.
+
+### Fix
+
+Either apply the same `<N.0` convention to the remaining direct dependencies (`pydantic`, `fastapi`, `duckdb` first, given their blast radius and auth-adjacency), or explicitly record why they're treated differently (e.g. `typer`/`python-ulid`/`pyyaml` are lower-risk enough that the convention doesn't need to reach them yet).
+
+---
+
 ## Format
 
 Each entry follows this structure:

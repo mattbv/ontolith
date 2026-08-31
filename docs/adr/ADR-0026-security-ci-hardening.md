@@ -142,6 +142,13 @@ warning's line attribution doesn't match the suppression's actual effect), not a
 any of the seven suppressions and re-running reliably reintroduces exactly that many real findings.
 Noted here so a future reader doesn't mistake the warning for something broken.
 
+**Update (2026-08-31, KI-065):** the `mcp` upper-bound convention this ADR established (`<2.0`,
+"avoids an unreviewed major bump") was extended to `strawberry-graphql[fastapi]` (`<1.0`) and
+`rdflib` (`<8.0`) — the two other M3-era dependencies that previously had none. Not extended to
+every direct dependency (`pydantic`, `typer`, `python-ulid`, `fastapi`, `duckdb`, `uvicorn`,
+`pyyaml` remain unbounded) — those are a separate, broader decision tracked as a follow-up, not
+silently out of scope.
+
 ## References
 
 - Implementation Plan §5 (quality gates table), §7.1 (CI pipeline)
