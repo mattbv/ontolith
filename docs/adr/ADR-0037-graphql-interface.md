@@ -414,6 +414,12 @@ on strawberry-graphql<=0.313; verified against real released versions that
 it works starting at 0.316. Bumped the floor to `>=0.316` accordingly — the
 locked version (0.319) was already compatible, so this only changes what a
 fresh `pip install ontolith[graphql]` resolves to, not this repo's own CI.
+**Update (2026-08-31, KI-065):** the extra also gained an upper bound,
+`strawberry-graphql[fastapi]>=0.316,<1.0`, mirroring `mcp`'s existing
+`<2.0` convention (ADR-0026) — this floor bump is itself the evidence that
+`<1.0` is a coarser guarantee here than `mcp`'s `<2.0`: a *minor* pre-1.0
+release already broke this exact integration once, so the upper bound
+only guards against the next major, not the next 0.x break.
 
 ## References
 

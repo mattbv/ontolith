@@ -812,6 +812,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --upgrade-package` (closes KI-062, found in the M3 milestone-boundary security audit) — same
   lockfile-only shape as the `cryptography` bump above. Neither ships in the `ontolith` wheel or
   any runtime extra. No `pyproject.toml` change.
+- `strawberry-graphql[fastapi]` and `rdflib` now carry an upper version bound (`<1.0`, `<8.0`
+  respectively), matching `mcp`'s existing `<2.0` convention (closes KI-065) — previously
+  unbounded, so a downstream `pip install ontolith[graphql]`/`ontolith[interop]` resolved
+  whatever was newest at install time, unreviewed by this project. No version actually changed;
+  both were already resolving within the new bounds. `<1.0` is a weaker guarantee for
+  `strawberry-graphql` than `<2.0` is for `mcp`: it's still pre-1.0, and a *minor* release already
+  broke this integration once (the `>=0.316` floor bump above), so the bound guards against the
+  next major only, not the next 0.x break.
 
 ### Security & Correctness Remediation (2026-07-06 – 2026-07-09)
 
