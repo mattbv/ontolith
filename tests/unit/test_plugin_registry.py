@@ -146,6 +146,47 @@ class TestEntryPointDiscovery:
             registry.register("trivial-importer", author=ADMIN)
 
 
+class TestUnenforcedCapabilityWarning:
+    """KI-014: registering a plugin that declares network/filesystem intent
+    logs a visible warning, since only capabilities.storage is actually
+    enforced - the plugin runs in-process with no isolation."""
+
+    def test_warns_when_network_and_filesystem_requested(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _patch_entry_points(
+            monkeypatch,
+            _entry_point(
+                "trivial-importer-net-fs",
+                "tests.fixtures.plugins.trivial_importer_network_and_filesystem",
+                "TrivialImporterNetworkAndFilesystem",
+            ),
+        )
+        registry = PluginRegistry(kb)
+        with caplog.at_level("WARNING", logger="ontolith.plugins.registry"):
+            registry.register("trivial-importer-net-fs", author=ADMIN)
+
+        [record] = caplog.records
+        assert "trivial-importer-net-fs" in record.message
+        assert "network/filesystem" in record.message
+        assert "not enforced" in record.message
+
+    def test_no_warning_when_neither_requested(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _patch_entry_points(
+            monkeypatch,
+            _entry_point(
+                "trivial-importer", "tests.fixtures.plugins.trivial_importer", "TrivialImporter"
+            ),
+        )
+        registry = PluginRegistry(kb)
+        with caplog.at_level("WARNING", logger="ontolith.plugins.registry"):
+            registry.register("trivial-importer", author=ADMIN)
+
+        assert caplog.records == []
+
+
 class TestCapabilityNegotiation:
     def test_write_capable_kind_resolving_to_read_raises_plugin_error(
         self, kb: Ontology, monkeypatch: pytest.MonkeyPatch

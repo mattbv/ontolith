@@ -7,6 +7,7 @@ loading a plugin creates a standing in-process actor, a higher-stakes action
 than the plugin's own requested capability.
 """
 
+import logging
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 from typing import Any, get_args
@@ -16,6 +17,8 @@ from ontolith.identity.principal import min_capability
 from ontolith.ontology import Ontology
 from ontolith.plugins.manifest import PluginKind, PluginManifest
 from ontolith.plugins.views import ReadOnlyView, WriteView
+
+_logger = logging.getLogger(__name__)
 
 _ENTRY_POINT_GROUP = "ontolith.plugins"
 _PLUGIN_METADATA_MARKER = "ontolith_plugin"
@@ -87,6 +90,7 @@ class PluginRegistry:
 
         plugin_obj = self._load_entry_point(entry_point_name)
         manifest = self._load_manifest(plugin_obj, entry_point_name)
+        self._warn_if_unenforced_capabilities_requested(manifest)
         effective_capability = self._effective_capability(manifest, granted_capability)
 
         if manifest.kind in _WRITE_CAPABLE_KINDS and effective_capability == "read":
@@ -137,6 +141,38 @@ class PluginRegistry:
                 f"Plugin {entry_point_name!r} manifest is not a PluginManifest instance"
             )
         return manifest
+
+    def _warn_if_unenforced_capabilities_requested(self, manifest: PluginManifest) -> None:
+        """Log a visible warning when a plugin declares network/filesystem
+        intent — only `capabilities.storage` is actually enforced (KI-014):
+        the plugin runs in-process with no process/wasm isolation, so
+        declaring `network=False`/`filesystem=False` does not prevent a
+        plugin from making network calls or touching the filesystem
+        anyway. `PluginCapabilities`'s own docstring already states this;
+        this warning exists so an operator granting these at registration
+        time — the moment that matters, not a docstring they may never
+        read — gets an explicit, real-time signal rather than a false
+        sense of enforcement. See ADR-0015's Consequences for the full
+        statement of what this module does and doesn't defend against.
+        """
+        unenforced = [
+            name
+            for name, requested in (
+                ("network", manifest.capabilities.network),
+                ("filesystem", manifest.capabilities.filesystem),
+            )
+            if requested
+        ]
+        if unenforced:
+            _logger.warning(
+                "Plugin %r declares capabilities.%s=True, but %s not enforced — "
+                "the plugin runs in-process with no isolation and can make network "
+                "calls / touch the filesystem regardless of this declaration "
+                "(ADR-0015, KI-014). Only capabilities.storage is actually enforced.",
+                manifest.name,
+                "/".join(unenforced),
+                "is" if len(unenforced) == 1 else "are",
+            )
 
     def _effective_capability(self, manifest: PluginManifest, granted: str) -> str:
         """min(requested, granted), then hard-capped to 'read' for read-only
