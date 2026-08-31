@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### M3 - Extensible (0.3) (In Progress)
+### M3 - Extensible (0.3)
 
 #### Added
 - RDF/OWL bridge, export only (SPEC §13.3, ADR-0036): `schema.rdf.to_owl(schema)`
@@ -308,6 +308,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Requires `strawberry-graphql>=0.316` (bumped from `>=0.219` — the
   factory-callable extension pattern this fix uses raises `TypeError` at
   request time on older releases).
+- **Security, Breaking:** `require_admin` (`ontology.py`) now rejects AI-kind
+  principals regardless of their configured capability (closes KI-053, ADR-0038),
+  matching every other capability-tier gate in the codebase. Previously a
+  misconfigured AI principal with `default_capability="admin"` could call
+  `issue_token()` for a human principal and authenticate as them over
+  REST/GraphQL, bypassing every AI-kind guard on direct write, review, and
+  contradiction resolution — any deployment relying on that (misconfigured)
+  behavior now gets `CapabilityError` instead. CLI's `principal create` now
+  requires `--author` (naming an existing admin) once a database has any
+  principal at all, mirroring REST's already-correct external-gate pattern, with
+  a bootstrap exception only for a database's first-ever principal (closes
+  KI-054, same ADR) — **any script or runbook calling `ontolith principal
+  create` without `--author` against a non-empty database now exits 1** instead
+  of succeeding.
 - GraphQL resolvers (`interfaces/graphql.py`) no longer block the ASGI event loop
   (closes KI-052, amends ADR-0037). Every `Query`/`Mutation` field, plus
   `EntityType.assertions` and `create_graphql_app`'s `_get_context`, is now
