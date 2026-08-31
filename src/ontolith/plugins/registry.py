@@ -85,12 +85,19 @@ class PluginRegistry:
                 missing/invalid, a write-capable plugin's effective
                 capability resolved to "read", or the plugin's name is
                 already occupied by an unrelated principal
+
+        Note:
+            Logs a `logging.WARNING` (KI-014) if the plugin's manifest
+            declares `capabilities.network`/`.filesystem` — neither is
+            actually enforced yet, so the manifest declaration alone
+            doesn't restrict anything. Only logged on successful
+            registration (the plugin actually becomes a standing
+            in-process actor), not on a failed attempt.
         """
         self._kb.require_admin(author)
 
         plugin_obj = self._load_entry_point(entry_point_name)
         manifest = self._load_manifest(plugin_obj, entry_point_name)
-        self._warn_if_unenforced_capabilities_requested(manifest)
         effective_capability = self._effective_capability(manifest, granted_capability)
 
         if manifest.kind in _WRITE_CAPABLE_KINDS and effective_capability == "read":
@@ -104,6 +111,12 @@ class PluginRegistry:
 
         principal_id = self._ensure_principal(manifest, effective_capability)
         view = self._build_view(principal_id, effective_capability)
+        # Warn only once registration actually succeeds (review finding):
+        # this plugin is now live in-process with unenforced network/
+        # filesystem access, which is the claim the warning makes — a
+        # registration attempt that fails before this point never becomes
+        # a standing in-process actor at all.
+        self._warn_if_unenforced_capabilities_requested(manifest)
 
         return LoadedPlugin(
             manifest=manifest,
@@ -149,11 +162,16 @@ class PluginRegistry:
         declaring `network=False`/`filesystem=False` does not prevent a
         plugin from making network calls or touching the filesystem
         anyway. `PluginCapabilities`'s own docstring already states this;
-        this warning exists so an operator granting these at registration
-        time — the moment that matters, not a docstring they may never
-        read — gets an explicit, real-time signal rather than a false
-        sense of enforcement. See ADR-0015's Consequences for the full
-        statement of what this module does and doesn't defend against.
+        this warning exists so an operator deciding whether to register
+        this plugin at all — the moment that actually matters, not a
+        docstring they may never read — gets an explicit, real-time
+        signal rather than a false sense of enforcement. There is no
+        separate "grant" for network/filesystem the way there is for
+        storage (`granted_capability`); the plugin author declares intent
+        in the manifest, and the operator's only lever is whether to
+        register the plugin at all. See ADR-0015's Consequences for the
+        full statement of what this module does and doesn't defend
+        against.
         """
         unenforced = [
             name

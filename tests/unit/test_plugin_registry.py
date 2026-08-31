@@ -169,7 +169,51 @@ class TestUnenforcedCapabilityWarning:
         [record] = caplog.records
         assert "trivial-importer-net-fs" in record.message
         assert "network/filesystem" in record.message
-        assert "not enforced" in record.message
+        assert "but are not enforced" in record.message
+
+    def test_warns_naming_only_filesystem_when_only_filesystem_requested(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Review finding: a helper that always names both capabilities
+        regardless of what was actually declared would pass every other
+        test in this class - this is the real-world shape too, since
+        every shipped reference plugin declares filesystem only."""
+        _patch_entry_points(
+            monkeypatch,
+            _entry_point(
+                "trivial-importer-fs-only",
+                "tests.fixtures.plugins.trivial_importer_filesystem_only",
+                "TrivialImporterFilesystemOnly",
+            ),
+        )
+        registry = PluginRegistry(kb)
+        with caplog.at_level("WARNING", logger="ontolith.plugins.registry"):
+            registry.register("trivial-importer-fs-only", author=ADMIN)
+
+        [record] = caplog.records
+        assert "capabilities.filesystem=True" in record.message
+        assert "capabilities.network=True" not in record.message
+        assert "but is not enforced" in record.message
+
+    def test_warns_naming_only_network_when_only_network_requested(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _patch_entry_points(
+            monkeypatch,
+            _entry_point(
+                "trivial-importer-net-only",
+                "tests.fixtures.plugins.trivial_importer_network_only",
+                "TrivialImporterNetworkOnly",
+            ),
+        )
+        registry = PluginRegistry(kb)
+        with caplog.at_level("WARNING", logger="ontolith.plugins.registry"):
+            registry.register("trivial-importer-net-only", author=ADMIN)
+
+        [record] = caplog.records
+        assert "capabilities.network=True" in record.message
+        assert "capabilities.filesystem=True" not in record.message
+        assert "but is not enforced" in record.message
 
     def test_no_warning_when_neither_requested(
         self, kb: Ontology, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
