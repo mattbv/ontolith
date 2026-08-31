@@ -1,0 +1,47 @@
+# ADR-0041: `assertion_event`/`proposal_event` Immutability Enforced by SQLite Triggers; No DuckDB Equivalent Exists
+
+**Status**: Accepted
+**Date**: 2026-08-31
+**Deciders**: Ontolith Core Team
+**Related**: SPEC §17 ("the audit trail MUST NOT be mutable"), ADR-0011 (accountable-owner DB-layer defense-in-depth — the direct precedent for a store-level guarantee backing an application-layer convention), ADR-0032 (DuckDB concurrency lock — the direct precedent for a documented, currently-unfixable backend asymmetry), KI-066
+
+---
+
+## Context
+
+`assertion_event`/`proposal_event` are Ontolith's audit log — every status mutation (supersession, flagging, retraction, reactivation) and every structured review action is recorded as an independently-attributable, timestamped row. SPEC §17 states the audit trail MUST NOT be mutable. Prior to this ADR, that guarantee existed only as a convention: `StorageBackend`'s port surface exposes `put_assertion_event`/`put_proposal_event` and no corresponding update/delete method, so no code going through the port can mutate a row — but any code holding the raw connection (a future reasoner plugin reaching `ReadOnlyView._backend`, a maintenance script, a bug in a future backend method) could issue a raw `UPDATE`/`DELETE` against either table directly, with nothing at the database layer to stop it. This is the identical shape ADR-0011 already closed for the AI-accountable-owner invariant (`CHECK`/`FOREIGN KEY` constraints backing what was otherwise only an application-layer check) — KI-066 asked for the same treatment here.
+
+**Verified before deciding, not assumed:** DuckDB (1.5.4, the version this project currently depends on) has no `CREATE TRIGGER` support at all — confirmed by attempting one directly against a live connection, which fails at parse time (`Parser Error: syntax error at or near "TRIGGER"`). SQLite supports `BEFORE UPDATE`/`BEFORE DELETE` triggers with `RAISE(ABORT, ...)`, which the Python `sqlite3` driver surfaces as `sqlite3.IntegrityError` — the same exception class ADR-0011's `CHECK`/`FOREIGN KEY` violations already raise, so this fix produces no new exception type for callers to handle.
+
+## Decision
+
+**SQLiteBackend gains four triggers — `BEFORE UPDATE`/`BEFORE DELETE` on each of `assertion_event` and `proposal_event` — each raising `RAISE(ABORT, '<table> is append-only: <OP> is not permitted')`. DuckDBBackend gains no equivalent; the asymmetry is documented explicitly rather than worked around.**
+
+The triggers are created with `CREATE TRIGGER IF NOT EXISTS` alongside every other schema object, in the same `_create_schema`-equivalent method that already creates the two tables — idempotent on every connection open, matching the existing `CREATE TABLE IF NOT EXISTS` pattern. No migration path is needed: a database created before this change gets the triggers installed the next time `SQLiteBackend.__init__` runs against it, the same way a `CREATE INDEX IF NOT EXISTS` added later would be.
+
+`DuckDBBackend`'s class docstring now states the limitation directly: the port-surface convention is the *only* enforcement DuckDB gets, code holding the raw `duckdb.DuckDBPyConnection` can still mutate either audit table, and there is no available DuckDB mechanism (no triggers, no role/grant system in DuckDB's embedded single-user connection model) to close this the way SQLite's was closed. `conformance/test_audit_table_immutability.py` pins both behaviors as tests, not just comments: `TestSQLiteAuditTablesAreImmutable` asserts `sqlite3.IntegrityError` on all four operations (UPDATE/DELETE × assertion_event/proposal_event); `TestDuckDBAuditTablesAreCurrentlyMutable` asserts the *opposite* — that the same raw operations currently still succeed against DuckDB — so a future DuckDB release adding trigger support, or a regression silently dropping the SQLite triggers, is caught by a failing test either way rather than by nobody noticing.
+
+## Rationale
+
+**Why not attempt a workaround for DuckDB** (e.g., a restricted-role connection, a view-based indirection layer): DuckDB's connection model has no user/role/grant system to restrict — every connection to a DuckDB file has full DDL/DML access, unlike Postgres's `REVOKE`-based approach ADR-0011's own Alternatives section for a hypothetical multi-user deployment might have reached for. A view can't stop a caller who already knows (or can discover via `duckdb_tables()`) the real table name from querying it directly — DuckDB has no mechanism to actually hide or lock the base table from a connection that already has it open. Any workaround available would be security theater, not a real guarantee, and this project's own engineering conventions call for verified correctness over the appearance of it.
+
+**Why this is acceptable to ship as a documented asymmetry rather than blocking on it:** the conformance kit's own stated purpose (ADR-0016) is that both backends satisfy the *same governed-write-path guarantees* — creating, retracting, and querying assertions behave identically regardless of backend. Raw-connection tampering bypassing the port entirely was never something either backend's normal operation exercises; it is the same class of defense-in-depth ADR-0011 already treats as "in addition to, not instead of" the application-layer check that actually gates every real code path. SQLite gaining a stronger guarantee than DuckDB in this one dimension doesn't create a functional divergence between the two backends for any caller going through `Ontology`/`StorageBackend` — it only affects an attacker or bug that's already bypassed the port, a scenario neither backend fully defends against today (DuckDB not at all here; SQLite still not against, say, someone deleting the whole database file).
+
+**Why `RAISE(ABORT, ...)` and not `RAISE(FAIL, ...)` or `RAISE(ROLLBACK, ...)`:** `ABORT` (SQLite's default conflict resolution) rolls back only the current statement, not the entire enclosing transaction — consistent with every other constraint violation this codebase already relies on (the existing `CHECK`/`FOREIGN KEY` constraints all use SQLite's default `ABORT` behavior too, per ADR-0011), so a caller catching the resulting `IntegrityError` sees the same transaction-state contract they already do for any other constraint failure.
+
+## Consequences
+
+**Positive:**
+- Closes KI-066 for SQLite: audit-trail immutability is now a store-level guarantee, not a port-surface convention alone, matching SPEC §17's literal "MUST NOT be mutable" more directly.
+- No behavior change for any caller going through the governed write path (`Ontology`, `StorageBackend` port methods) — the triggers only ever fire on a raw `UPDATE`/`DELETE` against the audit tables, which no existing code path performs.
+- `conformance/test_audit_table_immutability.py` pins both the SQLite guarantee and the DuckDB gap as executable, not just documented, facts.
+
+**Negative / follow-ups:**
+- **DuckDB remains genuinely unprotected at the store layer.** This is not closed by this ADR — it's explicitly acknowledged as currently unfixable given DuckDB's feature set, mirroring ADR-0032's own precedent for a documented, backend-specific limitation. If DuckDB ever adds trigger support (or an equivalent mechanism), this ADR and KI-066 should be revisited together.
+- A database file created before this change only gains the triggers the next time it's opened via `SQLiteBackend.__init__` (which always runs the idempotent schema-creation block) — a long-lived connection already open before an upgrade doesn't retroactively install them mid-session, though this matches how every other `CREATE ... IF NOT EXISTS` schema addition in this codebase already behaves.
+
+## Alternatives Considered
+
+- **A view-based indirection with the real table access-restricted**: rejected — DuckDB has no connection-level access restriction mechanism to enforce it (see Rationale).
+- **Application-layer-only enforcement, revisited/re-documented rather than adding DB triggers**: rejected — this is exactly the status quo KI-066 was filed against; it doesn't close the "code with raw connection access" gap the KI names, only restates it.
+- **A generic, backend-agnostic soft-delete/tombstone convention instead of DB-level immutability**: rejected — out of scope; the tables are already append-only by design (no soft-delete semantics exist for them), and this ADR is about enforcing that existing design, not changing it.

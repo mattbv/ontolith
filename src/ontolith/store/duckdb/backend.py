@@ -112,6 +112,18 @@ class DuckDBBackend:
     - assertion table with ULID primary key
     - Bitemporal columns (asserted_at, valid_from, valid_to)
     - Status tracking for append-only invariant
+
+    KI-066: unlike SQLiteBackend, `assertion_event`/`proposal_event`'s
+    append-only invariant (SPEC §17: "the audit trail MUST NOT be
+    mutable") is enforced here only by this port's own surface exposing
+    no update/delete method — a convention, not a store-level guarantee.
+    DuckDB (verified against 1.5.4) has no `CREATE TRIGGER` support at
+    all, so the `BEFORE UPDATE`/`BEFORE DELETE` triggers SQLiteBackend
+    installs on both tables have no DuckDB equivalent; code holding this
+    backend's raw `duckdb.DuckDBPyConnection` can still `UPDATE`/`DELETE`
+    either audit table directly. Not fixable without a different
+    mechanism (e.g. a superuser-only schema plus a restricted role — not
+    available in DuckDB's embedded, single-user connection model either).
     """
 
     def __init__(self, path: str | Path, *, clock: Clock | None = None) -> None:

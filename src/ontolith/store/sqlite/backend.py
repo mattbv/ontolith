@@ -264,6 +264,29 @@ class SQLiteBackend:
             ON assertion_event(successor_id)
         """)
 
+        # KI-066: immutability was previously enforced only by
+        # StorageBackend's port surface exposing no update/delete method —
+        # a convention any code holding this raw connection could bypass.
+        # These triggers make it a store-level guarantee instead (SPEC
+        # §17: "the audit trail MUST NOT be mutable"). No DuckDB
+        # equivalent exists — DuckDB has no CREATE TRIGGER support at all
+        # (verified against 1.5.4; see DuckDBBackend's own comment).
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_assertion_event_no_update
+            BEFORE UPDATE ON assertion_event
+            BEGIN
+                SELECT RAISE(ABORT, 'assertion_event is append-only: UPDATE is not permitted');
+            END
+        """)
+
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_assertion_event_no_delete
+            BEFORE DELETE ON assertion_event
+            BEGIN
+                SELECT RAISE(ABORT, 'assertion_event is append-only: DELETE is not permitted');
+            END
+        """)
+
         # Proposal table (SPEC §9.1)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS proposal (
@@ -315,6 +338,24 @@ class SQLiteBackend:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_proposal_event_proposal
             ON proposal_event(proposal_id)
+        """)
+
+        # KI-066: same store-level immutability guarantee as
+        # assertion_event above (SPEC §17).
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_proposal_event_no_update
+            BEFORE UPDATE ON proposal_event
+            BEGIN
+                SELECT RAISE(ABORT, 'proposal_event is append-only: UPDATE is not permitted');
+            END
+        """)
+
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_proposal_event_no_delete
+            BEFORE DELETE ON proposal_event
+            BEGIN
+                SELECT RAISE(ABORT, 'proposal_event is append-only: DELETE is not permitted');
+            END
         """)
 
         # Contradiction table (SPEC §10.3)

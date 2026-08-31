@@ -1374,19 +1374,19 @@ Applied the same `<N.0` convention already used for `mcp`: `strawberry-graphql[f
 
 ---
 
-## KI-066 — Audit tables (`assertion_event`/`proposal_event`) are append-only by convention, not by DB constraint
+## KI-066 — Audit tables (`assertion_event`/`proposal_event`) are append-only by convention, not by DB constraint ✓ RESOLVED (Backlog, SQLite only)
 
 **Severity:** Architecture gap — defense-in-depth gap, not a demonstrated exploit
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved for SQLite via ADR-0041; DuckDB has no fix available
 **SPEC reference:** SPEC §17 ("the audit trail MUST NOT be mutable")
 
 ### Description
 
-Immutability of `assertion_event`/`proposal_event` is enforced solely by `StorageBackend`'s port surface exposing only `put_assertion_event`/`put_proposal_event` — no update or delete method exists at the port level. There is no DB trigger, view, or revoked grant backing this. Any code holding the raw `sqlite3.Connection` (including, per KI-055, an in-process plugin that reaches `ReadOnlyView._backend`) can `UPDATE`/`DELETE` the audit tables directly.
+Immutability of `assertion_event`/`proposal_event` was enforced solely by `StorageBackend`'s port surface exposing only `put_assertion_event`/`put_proposal_event` — no update or delete method exists at the port level. There was no DB trigger, view, or revoked grant backing this. Any code holding the raw connection (including, per KI-014's own "still open" update, an in-process plugin that reaches `ReadOnlyView._backend` one attribute hop past the intended API) could `UPDATE`/`DELETE` the audit tables directly.
 
 ### Fix
 
-Add `BEFORE UPDATE`/`BEFORE DELETE` triggers on `assertion_event` and `proposal_event` (both backends) that `RAISE(ABORT, ...)`, making immutability a store-level guarantee rather than a port-surface convention.
+Added `BEFORE UPDATE`/`BEFORE DELETE` triggers on `assertion_event` and `proposal_event` that `RAISE(ABORT, ...)` — `SQLiteBackend` only. `DuckDBBackend` gained no equivalent: verified DuckDB (1.5.4) has no `CREATE TRIGGER` support at all, and no connection-level access-restriction mechanism exists to work around that (DuckDB's embedded, single-user connection model has no role/grant system to revoke). Documented explicitly as a currently-unfixable, permanent backend asymmetry in `DuckDBBackend`'s own docstring, mirroring ADR-0032's precedent for the same kind of documented DuckDB limitation — not silently left unaddressed. `conformance/test_audit_table_immutability.py` pins both the SQLite guarantee (`sqlite3.IntegrityError` on all four operations) and the DuckDB gap (the same operations currently still succeed) as executable tests. ADR-0041.
 
 ---
 

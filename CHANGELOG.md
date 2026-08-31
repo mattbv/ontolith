@@ -828,6 +828,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `strawberry-graphql` than `<2.0` is for `mcp`: it's still pre-1.0, and a *minor* release already
   broke this integration once (the `>=0.316` floor bump above), so the bound guards against the
   next major only, not the next 0.x break.
+- **SQLite:** `assertion_event`/`proposal_event` now reject raw `UPDATE`/`DELETE` at the database
+  layer via `BEFORE UPDATE`/`BEFORE DELETE` triggers (closes KI-066, ADR-0041), making SPEC §17's
+  "the audit trail MUST NOT be mutable" a store-level guarantee rather than a port-surface
+  convention alone (previously, only `StorageBackend` exposing no update/delete method stood
+  between the audit tables and any code holding the raw connection). **DuckDB gets no equivalent
+  fix** — verified DuckDB (1.5.4) has no `CREATE TRIGGER` support and no connection-level access
+  restriction to work around that; documented as a permanent, currently-unfixable backend
+  asymmetry rather than left unaddressed.
 
 ### Security & Correctness Remediation (2026-07-06 – 2026-07-09)
 
