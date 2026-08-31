@@ -159,15 +159,19 @@ loader existed yet" state this ADR was originally written against. Recorded as a
 KI-014 (the same "network/filesystem enforcement" item that KI already tracks as its still-open
 half), not a new KI number — same underlying gap, re-surfaced by the same kind of audit.
 
-**What changed:** `PluginRegistry.register()` now logs a `logging.WARNING` when a plugin's
-manifest declares `capabilities.network=True` or `capabilities.filesystem=True`, naming the
-plugin, which capabilities were requested, and stating plainly that they are not enforced. This
-targets a specific, narrower problem than the "Negative" consequences themselves: an operator
-granting these capabilities at registration time — the moment that actually matters — previously
-had no signal *at that moment* that the declaration does nothing, only this ADR's own prose (which
-they may never read) and `PluginCapabilities`'s docstring (same problem). The warning doesn't
-change what's enforced; it closes the gap between what the manifest API visually implies
-("declaring `network=False` is a control") and what's actually true.
+**What changed:** `PluginRegistry.register()` now logs a `logging.WARNING`, only on a
+*successful* registration (a failed attempt never becomes a standing in-process actor, so it
+doesn't warrant the warning), when a plugin's manifest declares `capabilities.network=True` or
+`capabilities.filesystem=True` — naming the plugin, which capabilities were requested, and
+stating plainly that they are not enforced. This targets a specific, narrower problem than the
+"Negative" consequences themselves: an operator deciding whether to register a plugin at all —
+the moment that actually matters — previously had no signal *at that moment* that its
+network/filesystem declaration does nothing, only this ADR's own prose (which they may never
+read) and `PluginCapabilities`'s docstring (same problem). There is no separate "grant" step for
+network/filesystem the way there is for storage capability (`granted_capability`) — the plugin
+author declares intent in the manifest, and the operator's only lever is registering the plugin
+or not. The warning doesn't change what's enforced; it closes the gap between what the manifest
+API visually implies ("declaring `network=False` is a control") and what's actually true.
 
 **What did not change, and is not fixed by this update:** SPEC §17's "MUST deny undeclared access
 (storage, network, filesystem)" remains unmet for the network/filesystem dimensions — this update
@@ -180,6 +184,13 @@ isolation does. Attempting to "materialize" `query()`'s results eagerly to avoid
 backend-carrying object was considered and rejected: it would break the fluent builder API
 (`.where(...).limit(n).all()`) that's the whole point of `QueryBuilder`, for a security property
 Python's object model can't actually provide regardless.
+
+**Expected new noise:** three of the four shipped reference plugins (`CsvImporter`,
+`JsonExporter`, `RdfExporter` — all declare `filesystem=True`, genuinely needing file I/O; only
+`RequiredFieldsValidator` declares neither) now log this warning on every registration. This is
+the mitigation working as intended, not a bug — but it means anyone registering a bundled plugin
+sees a security-toned `WARNING` immediately, with nothing in this ADR previously telling them to
+expect it. Recorded here so it isn't mistaken for a regression.
 
 **Deliberately not built in this update:** real process/subprocess/wasm isolation for
 `PluginKind` plugins, per this ADR's own Alternatives Considered section calling it "premature...
