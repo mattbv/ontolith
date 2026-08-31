@@ -524,6 +524,7 @@ class TestAuthCoversEveryField:
         "rejectProposal": 'mutation { rejectProposal(proposalId: "nope") { id } }',
         "requestChanges": 'mutation { requestChanges(proposalId: "nope") { id } }',
         "resubmitProposal": 'mutation { resubmitProposal(proposalId: "nope") { decision } }',
+        "retract": 'mutation { retract(assertionId: "nope") { decision } }',
         "flagContradiction": (
             'mutation { flagContradiction(assertionIdA: "a", assertionIdB: "b") { action } }'
         ),
@@ -546,9 +547,10 @@ class TestAuthCoversEveryField:
 
     def test_mutation_field_probe_set_matches_schema(self, tmp_path: Path) -> None:
         """Also enforces ADR-0037 §1's scope boundary: this must be exactly
-        the seven query/propose/review operations, no direct-write or
-        principal-admin mutation (mirrors test_mcp_server.py's
-        test_no_write_tool_registered precedent)."""
+        the eight query/propose/review/retract operations (retract added
+        for KI-057, ADR-0039), no direct-write or principal-admin mutation
+        (mirrors test_mcp_server.py's test_no_write_tool_registered
+        precedent)."""
         kb = _kb(tmp_path)
         app = create_graphql_app(kb, TokenAuthProvider(kb.backend), introspection=True)
         client = TestClient(app)
@@ -1129,6 +1131,74 @@ class TestProposalReviewMutations:
             headers=_auth(token),
         )
         assert _error_codes(body) == ["CAPABILITY_ERROR"]
+
+
+# ---------------------------------------------------------------------------
+# Mutation.retract (KI-057, ADR-0039)
+# ---------------------------------------------------------------------------
+
+
+class TestRetractMutation:
+    def test_write_capability_auto_accepts(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+
+        body = _gql(
+            client,
+            "mutation($id: String!) { retract(assertionId: $id) { proposal { state } decision } }",
+            variables={"id": assertion.id},
+            headers=_auth(token),
+        )
+
+        assert body["data"]["retract"]["proposal"]["state"] == "auto_accepted"
+        assert body["data"]["retract"]["decision"] == "AutoAccept"
+        retracted = kb.assertions(subject=entity.id, status=None)[0]
+        assert retracted.status == "retracted"
+
+    def test_ai_requires_review(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(AI, author=ADMIN)
+
+        body = _gql(
+            client,
+            "mutation($id: String!) { retract(assertionId: $id) { proposal { state } decision } }",
+            variables={"id": assertion.id},
+            headers=_auth(token),
+        )
+
+        assert body["data"]["retract"]["proposal"]["state"] == "require_review"
+        assert body["data"]["retract"]["decision"] == "RequireReview"
+
+    def test_acting_as_delegation(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "delegate@example.com",
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            owner=HUMAN,
+        )
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token("delegate@example.com", author=ADMIN)
+
+        body = _gql(
+            client,
+            "mutation($id: String!, $actingAs: String!) { "
+            "retract(assertionId: $id, actingAs: $actingAs) "
+            "{ proposal { actingAs } } }",
+            variables={"id": assertion.id, "actingAs": HUMAN},
+            headers=_auth(token),
+        )
+
+        assert body["data"]["retract"]["proposal"]["actingAs"] == HUMAN
 
 
 # ---------------------------------------------------------------------------

@@ -683,6 +683,14 @@ def _do_resubmit_proposal(kb: Ontology, proposal_id: str, author: str) -> Propos
     return ProposeResultType(proposal=_proposal_type(proposal), decision=type(decision).__name__)
 
 
+def _do_retract(
+    kb: Ontology, assertion_id: str, author: str, acting_as: str | None
+) -> ProposeResultType:
+    """Blocking body of Mutation.retract."""
+    proposal, decision = kb.retract(assertion_id, author=author, acting_as=acting_as)
+    return ProposeResultType(proposal=_proposal_type(proposal), decision=type(decision).__name__)
+
+
 def _do_flag_contradiction(
     kb: Ontology,
     assertion_id_a: str,
@@ -847,6 +855,19 @@ class Mutation:
         principal = _require_principal(info)
         kb = _kb(info)
         return await run_in_threadpool(_do_resubmit_proposal, kb, proposal_id, principal.id)
+
+    @strawberry.mutation
+    async def retract(
+        self, info: strawberry.Info, assertion_id: str, acting_as: str | None = None
+    ) -> ProposeResultType:
+        """Propose retraction of an assertion through the governed
+        proposal/policy pipeline (SPEC §9) — does NOT delete or write
+        directly, mirrors REST's POST /assertions/{id}/retract. When
+        acting_as is set the retraction is made on behalf of another
+        principal (delegation, ADR-0003)."""
+        principal = _require_principal(info)
+        kb = _kb(info)
+        return await run_in_threadpool(_do_retract, kb, assertion_id, principal.id, acting_as)
 
     @strawberry.mutation
     async def flag_contradiction(

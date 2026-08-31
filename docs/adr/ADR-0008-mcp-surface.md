@@ -27,6 +27,8 @@ The MCP (Model Context Protocol) server exposes Ontolith to AI agents as a tool.
 6. **`ontolith.flag_contradiction`** — Open/extend contradiction (propose, NOT write)
 7. **`ontolith.resubmit`** — Resubmit a `changes_requested` proposal (propose, NOT write; added
    2026-07-29, see Update below, KI-027)
+8. **`ontolith.retract`** — Propose retraction of an assertion (propose, NOT write; added
+   2026-08-31, see Update below, KI-057/ADR-0039)
 
 **Forbidden Tools:**
 - ❌ `ontolith.write` — No direct write
@@ -108,6 +110,18 @@ follows the exact same shape as `ontolith.propose`: it re-runs policy evaluation
 or edit an assertion directly, so it does not widen the "no direct write" boundary this ADR
 establishes — it accepts only a `proposal_id` and a token-resolved principal, the same footprint as
 the tool it mirrors.
+
+## Update (2026-08-31): `ontolith.retract` added, KI-057/ADR-0039
+
+An 8th tool, **`ontolith.retract`**, was added (propose, NOT write) — full rationale and
+implementation notes are recorded in `ADR-0039`, not duplicated here. In short: `Ontology.retract()`
+had no route on any of the four shipped interfaces, so a REST/GraphQL/MCP/CLI-only deployment had
+no way to retract a fact at all (KI-057). `ontolith.retract` follows the same shape as
+`ontolith.propose`/`ontolith.resubmit`: it is policy-evaluated and proposal-producing, cannot write
+or edit an assertion directly, and accepts only an `assertion_id`, a token-resolved principal, and
+an optional `acting_as` — the same footprint as the tools it mirrors. This is a different posture
+than `resolve_contradiction()`, which has no policy evaluation at all and remains deliberately
+excluded from MCP as a reviewer-only action (unchanged by this update).
 
 ## References
 

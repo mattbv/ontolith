@@ -491,6 +491,81 @@ class TestListAssertions:
         assert "Person.born" not in result.output
 
 
+class TestRetract:
+    def test_write_capability_auto_accepts(self, seeded_db: tuple[Path, str, str]) -> None:
+        db, author, entity_id = seeded_db
+        kb = Ontology.connect(db)
+        assertion = kb.assert_literal(entity_id, "Person.name", "Ada", "Text", author)
+        kb.close()
+
+        result = runner.invoke(app, ["--db", str(db), "retract", assertion.id, "--author", author])
+        assert result.exit_code == 0
+        assert "decision=AutoAccept" in result.output
+        assert "state=auto_accepted" in result.output
+
+        kb = Ontology.connect(db)
+        retracted = kb.assertions(subject=entity_id, status=None)[0]
+        assert retracted.status == "retracted"
+        kb.close()
+
+    def test_ai_author_requires_review(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        bot = kb.create_principal(
+            "bot@example.com",
+            kind="ai",
+            auth_method="apikey",
+            owner=alice.id,
+            default_capability="propose",
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", alice.id)
+        kb.close()
+
+        result = runner.invoke(
+            app, ["--db", str(temp_db), "retract", assertion.id, "--author", bot.id]
+        )
+        assert result.exit_code == 0
+        assert "decision=RequireReview" in result.output
+
+    def test_acting_as_delegation(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        delegate = kb.create_principal(
+            "delegate@example.com",
+            kind="human",
+            default_capability="write",
+            owner=alice.id,
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", alice.id)
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "retract",
+                assertion.id,
+                "--author",
+                delegate.id,
+                "--acting-as",
+                alice.id,
+            ],
+        )
+        assert result.exit_code == 0
+        assert "decision=AutoAccept" in result.output
+
+    def test_retract_unknown_assertion_exits_nonzero(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        db, author, _ = seeded_db
+        result = runner.invoke(app, ["--db", str(db), "retract", "nonexistent", "--author", author])
+        assert result.exit_code == 1
+        assert "Error:" in result.output
+
+
 class TestQuery:
     def test_returns_entities_of_concept(self, seeded_db: tuple[Path, str, str]) -> None:
         db, _, entity_id = seeded_db

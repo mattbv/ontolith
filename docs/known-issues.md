@@ -1215,26 +1215,26 @@ Found during the M3 milestone-boundary security audit, as a direct escalation of
 
 ---
 
-## KI-057 — `Ontology.retract()` is unreachable from REST, GraphQL, MCP, or the CLI
+## KI-057 — `Ontology.retract()` is unreachable from REST, GraphQL, MCP, or the CLI ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — the most heavily-governed write path in the codebase has zero production interface exposure
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved via ADR-0039
 **SPEC reference:** SPEC §5.3 (append-only assertions, retraction), §10.3 (contradiction resolution), §14 (interfaces)
 
 ### Description
 
-`Ontology.retract()` (`src/ontolith/ontology.py:1542`) is the only production entry point for governed retraction — introduced by KI-002 specifically so retraction would go through the same proposal/policy/conflict-routing pipeline as every other write, then hardened across five further KIs and two ADRs (KI-033's self-dealing guard, KI-043/ADR-0030's capability floor and review routing, KI-044/ADR-0031's terminal-status winner guard, KI-051's terminal-member guard extension). Despite that, it has no route on any of the four shipped interfaces:
+`Ontology.retract()` (`src/ontolith/ontology.py:1542`) is the only production entry point for governed retraction — introduced by KI-002 specifically so retraction would go through the same proposal/policy/conflict-routing pipeline as every other write, then hardened across five further KIs and two ADRs (KI-033's self-dealing guard, KI-043/ADR-0030's capability floor and review routing, KI-044/ADR-0031's terminal-status winner guard, KI-051's terminal-member guard extension). Despite that, it had no route on any of the four shipped interfaces:
 
-- REST (`interfaces/rest.py`): no `/assertions/{id}/retract` or equivalent — the full route list (`/schema`, `/entities/{id}`, `/query`, `/provenance/{id}`, `/proposals`, `/proposals/{id}/accept|reject|review|resubmit`, `/assertions` POST, `/contradictions`, `/contradictions/flag`, `/contradictions/{id}/resolve`, `/principals`, `/principals/{id}/tokens`, `/namespaces`) has no retract path.
-- GraphQL (`interfaces/graphql.py`): `Mutation` exposes `propose`, `acceptProposal`, `rejectProposal`, `requestChanges`, `resubmitProposal`, `flagContradiction`, `resolveContradiction` — no `retract`.
+- REST (`interfaces/rest.py`): no `/assertions/{id}/retract` or equivalent — the full route list (`/schema`, `/entities/{id}`, `/query`, `/provenance/{id}`, `/proposals`, `/proposals/{id}/accept|reject|review|resubmit`, `/assertions` POST, `/contradictions`, `/contradictions/flag`, `/contradictions/{id}/resolve`, `/principals`, `/principals/{id}/tokens`, `/namespaces`) had no retract path.
+- GraphQL (`interfaces/graphql.py`): `Mutation` exposed `propose`, `acceptProposal`, `rejectProposal`, `requestChanges`, `resubmitProposal`, `flagContradiction`, `resolveContradiction` — no `retract`.
 - MCP (`interfaces/mcp.py`): six tools registered, no retract tool.
 - CLI (`interfaces/cli.py`): `assert`/`assertions`/`proposal {list,accept,reject,review,resubmit}`/`contradiction list` — no `assert retract` or equivalent.
 
-It is reachable from `WriteView.retract()` (`plugins/views.py:144`) and the SDK directly, but a REST/GraphQL/MCP/CLI-only deployment — the normal production shape — has no way to retract a fact at all. Unlike `resolve_contradiction`'s deliberate MCP omission (explicitly recorded in this file as a reviewer-only action, out of ADR-0008's propose-only scope), this gap has never been named as a deliberate boundary in any ADR or KI.
+It was reachable from `WriteView.retract()` (`plugins/views.py:144`) and the SDK directly, but a REST/GraphQL/MCP/CLI-only deployment — the normal production shape — had no way to retract a fact at all. Unlike `resolve_contradiction`'s deliberate MCP omission (explicitly recorded in this file as a reviewer-only action, out of ADR-0008's propose-only scope), this gap had never been named as a deliberate boundary in any ADR or KI.
 
 ### Fix
 
-Add `POST /assertions/{id}/retract` (REST), a `retract` mutation (GraphQL), and `ontolith assert retract <id>` (CLI), wired to `Ontology.retract()`. Decide and record in an ADR whether MCP should also expose it (a `propose`-tier action, similar posture to `flag_contradiction`) or is deliberately excluded the way `resolve_contradiction` already is.
+Added `POST /assertions/{id}/retract` (REST, `acting_as` as an optional query parameter), a `retract` mutation (GraphQL), a new top-level `ontolith retract <id> --author <id> [--acting-as <id>]` CLI command (not nested under `assert`, which is a plain command, not a Typer sub-app), and `ontolith.retract` (MCP) — all thin wrappers around the already-governed `Ontology.retract()`, no new domain logic. MCP inclusion was the one open design question the original Fix text named: decided in favor of exposing it, at the same `propose` tier as `ontolith.propose`/`ontolith.flag_contradiction`, since `retract()` is structurally policy-evaluated and proposal-producing like those two — unlike the reviewer-only, unconditionally-gated `resolve_contradiction()`, which stays MCP-excluded. Full rationale in ADR-0039.
 
 ---
 

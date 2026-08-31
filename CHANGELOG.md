@@ -289,6 +289,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- `Ontology.retract()` — the codebase's most heavily-governed write path — is now
+  reachable from every shipped interface, not just the SDK (closes KI-057, ADR-0039):
+  `POST /assertions/{id}/retract` (REST, `acting_as` as an optional query parameter),
+  a `retract` mutation (GraphQL), a new top-level `ontolith retract <id> --author <id>
+  [--acting-as <id>]` CLI command, and `ontolith.retract` (MCP, `propose` capability
+  tier — the same tier as `ontolith.propose`/`ontolith.flag_contradiction`, unlike the
+  reviewer-only `resolve_contradiction`, which stays MCP-excluded). All four are thin
+  wrappers with no new domain logic.
 - **Security, Breaking:** `create_graphql_app`'s `introspection` parameter now
   defaults to `False` (closes KI-056, amends ADR-0037). Introspection queries are
   self-referentially recursive over the schema's own type graph, and neither
