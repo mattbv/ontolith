@@ -1190,6 +1190,213 @@ Found during the same audit as KI-053. `Ontology.create_principal` has no capabi
 
 ---
 
+## KI-057 — `Ontology.retract()` is unreachable from REST, GraphQL, MCP, or the CLI
+
+**Severity:** Architecture gap — the most heavily-governed write path in the codebase has zero production interface exposure
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §5.3 (append-only assertions, retraction), §10.3 (contradiction resolution), §14 (interfaces)
+
+### Description
+
+`Ontology.retract()` (`src/ontolith/ontology.py:1542`) is the only production entry point for governed retraction — introduced by KI-002 specifically so retraction would go through the same proposal/policy/conflict-routing pipeline as every other write, then hardened across five further KIs and two ADRs (KI-033's self-dealing guard, KI-043/ADR-0030's capability floor and review routing, KI-044/ADR-0031's terminal-status winner guard, KI-051's terminal-member guard extension). Despite that, it has no route on any of the four shipped interfaces:
+
+- REST (`interfaces/rest.py`): no `/assertions/{id}/retract` or equivalent — the full route list (`/schema`, `/entities/{id}`, `/query`, `/provenance/{id}`, `/proposals`, `/proposals/{id}/accept|reject|review|resubmit`, `/assertions` POST, `/contradictions`, `/contradictions/flag`, `/contradictions/{id}/resolve`, `/principals`, `/principals/{id}/tokens`, `/namespaces`) has no retract path.
+- GraphQL (`interfaces/graphql.py`): `Mutation` exposes `propose`, `acceptProposal`, `rejectProposal`, `requestChanges`, `resubmitProposal`, `flagContradiction`, `resolveContradiction` — no `retract`.
+- MCP (`interfaces/mcp.py`): six tools registered, no retract tool.
+- CLI (`interfaces/cli.py`): `assert`/`assertions`/`proposal {list,accept,reject,review,resubmit}`/`contradiction list` — no `assert retract` or equivalent.
+
+It is reachable from `WriteView.retract()` (`plugins/views.py:144`) and the SDK directly, but a REST/GraphQL/MCP/CLI-only deployment — the normal production shape — has no way to retract a fact at all. Unlike `resolve_contradiction`'s deliberate MCP omission (explicitly recorded in this file as a reviewer-only action, out of ADR-0008's propose-only scope), this gap has never been named as a deliberate boundary in any ADR or KI.
+
+### Fix
+
+Add `POST /assertions/{id}/retract` (REST), a `retract` mutation (GraphQL), and `ontolith assert retract <id>` (CLI), wired to `Ontology.retract()`. Decide and record in an ADR whether MCP should also expose it (a `propose`-tier action, similar posture to `flag_contradiction`) or is deliberately excluded the way `resolve_contradiction` already is.
+
+---
+
+## KI-058 — MCP's `ontolith.query` tool has none of the hybrid-retrieval or time-travel parameters REST/GraphQL expose
+
+**Severity:** Architecture gap — agents (MCP's own audience) cannot use semantic retrieval at all
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §14.4 (`ontolith.query | {namespace, concept, where?, semantic?, as_of?, min_confidence?, limit?}`), §11.3 (hybrid retrieval)
+
+### Description
+
+`query_tool(concept, token, filters=None, namespace="default")` (`interfaces/mcp.py:174-228`) accepts only `concept`, `token`, `filters`, `namespace`. It has no `semantic`, `min_confidence`, `trust_at_least`, `as_of`, or `limit` parameters — none of the hybrid-retrieval capability `QueryBuilder` gained in M3 (KI-018, KI-037/KI-047's confidence/trust filters) is reachable from MCP, and there is no way to cap result size via MCP at all. REST's `POST /query` and GraphQL's `Query.query` both wire `semantic`, `min_confidence`, `trust_at_least`, and `limit` straight into the same `QueryBuilder`; MCP does not. SPEC §14.4's own normative tool table names `semantic`, `as_of`, and `min_confidence` explicitly, and ADR-0008 itself describes the tool as "Symbolic + semantic retrieval."
+
+Found at the M3 milestone boundary specifically because it requires comparing MCP against REST/GraphQL side by side — no single PR review (KI-018's hybrid-retrieval PR didn't touch MCP; the M2 MCP PR predates hybrid retrieval entirely) would surface it.
+
+### Fix
+
+Add `semantic`, `as_of`, `min_confidence`, `trust_at_least`, `limit` parameters to `query_tool`, mirroring REST/GraphQL's `QueryBuilder` wiring; update the tool's docstring, which currently documents only `filters`.
+
+---
+
+## KI-059 — MCP's error `code` values diverge from the taxonomy REST and GraphQL share
+
+**Severity:** Architecture gap — breaks cross-interface client error-handling reuse
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §16 (stable, machine-readable error codes)
+
+### Description
+
+19 call sites in `interfaces/mcp.py` hand-write `{"error": str(exc), "code": "auth_error"}` / `"capability_error"` / `"validation_error"` / `"not_found"` rather than reading `exc.code` off the caught `OntolithError`. `core/errors.py` defines the actual codes as `ONTOLITH_ERROR`, `SCHEMA_ERROR`, `VALIDATION_ERROR`, `AUTH_ERROR`, `CAPABILITY_ERROR`, `POLICY_DENIED`, `CONFLICT_ERROR`, `NOT_FOUND`, `STORAGE_ERROR`, `PLUGIN_ERROR`. REST (`rest.py:494`, `ErrorOut(code=exc.code, ...)`) and GraphQL (`graphql.py:873`, `error.extensions = {"code": original.code, ...}`) both pass `exc.code` through unmodified, so the taxonomy is genuinely identical between those two — MCP alone diverges, both in casing (`auth_error` vs `AUTH_ERROR`) and, for not-found, in the literal string used (`not_found` vs `NOT_FOUND`). The divergence was introduced piecemeal starting with KI-024 and never reconciled once REST/GraphQL's shared convention formed afterward — exactly the kind of drift only visible once all three interfaces exist and are compared directly.
+
+### Fix
+
+Replace every hand-written `"code": "..."` literal in `mcp.py` with `exc.code` from the caught `OntolithError` instance. Add a cross-interface regression test asserting REST, GraphQL, and MCP all return the same `code` string for the same underlying exception type.
+
+---
+
+## KI-060 — No audit trail for admin actions: token issuance/revocation, principal creation, and schema application are unattributable
+
+**Severity:** Architecture gap — the highest-value actions in the system leave no forensic trace
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §17 ("all writes, proposal decisions, and resolutions are append-only and attributable")
+
+### Description
+
+`PrincipalCredential` (`identity/credential.py:25-29`) records `principal_id`, `token_hash`, `created_at`, `revoked_at` — never who issued or revoked it, even though `Ontology.issue_token(principal_id, author)` (`ontology.py:2907-2920`) and `revoke_token` (`ontology.py:2936-2941`) both receive the acting admin's id and discard it. There is no event-table row for credential lifecycle, principal creation (`create_principal`, `ontology.py:258-319`), schema application (`apply_schema`, `ontology.py:2825-2836`), or plugin registration. The only audit tables that exist at all are `assertion_event` and `proposal_event`.
+
+Token issuance in particular converts local file access into a durable, network-reachable credential — the single highest-value action in the system — yet after an incident there is no way to answer "which admin minted this credential, and who revoked it and when." This also means any investigation into a credential-compromise or privilege-escalation incident (see KI-053/KI-054) has no trace to work from.
+
+### Fix
+
+Add `issued_by`/`revoked_by` columns to `principal_credential` (both backends). Record an append-only admin-action event for `create_principal`, `apply_schema`, and `PluginRegistry.register`.
+
+---
+
+## KI-061 — `SourceQuorum` policy strategy silently drops the "AI proposals always require review" invariant
+
+**Severity:** Architecture gap — the headline AI-safety guarantee becomes policy-dependent without any interface saying so
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §9.2 (policy strategies, `Composite`), ADR-0003 (AI/low-trust principals require review)
+
+### Description
+
+`SourceQuorum` (`govern/policy.py:206-288`) has no `kind`-based check anywhere in its evaluation — only `ThresholdPolicy` (the default) implements the "AI-kind principal always routes to review" rule (`policy.py:149-154`). `Ontology.propose`/`propose_ref` themselves have no AI check of their own (`ontology.py:1152-1156`) — the configured `PolicyStrategy` is the *only* thing standing between an AI-authored proposal and an immediate auto-accepted write. A deployment configured with `Ontology(backend, policy=SourceQuorum(2))` silently loses the guarantee, while MCP's tool docstrings (`mcp.py:320-323`, `:483-486`) continue telling agent callers their proposals are always queued for human review — which is only true under the default strategy. SPEC §9.2's `Composite` strategy, named in `SourceQuorum`'s own docstring as the intended resolution, isn't implemented.
+
+### Fix
+
+Either lift the AI-requires-review check into `Ontology.propose`/`propose_ref`/`retract` itself (ahead of policy evaluation, so it can't be configured away), or implement the `Composite` strategy and correct every interface docstring that currently states the guarantee unconditionally.
+
+---
+
+## KI-062 — Two known-vulnerable dev/docs-only dependencies; `pip-audit` CI gate currently red
+
+**Severity:** Performance/supply-chain — dev-only exposure, but the unconditional gate is failing
+**Milestone target:** Backlog
+**SPEC reference:** Implementation Plan §7.1 (supply-chain gate)
+
+### Description
+
+`pip-audit` against the full locked dependency set currently reports two findings, both dev/docs-only (neither ships in the `ontolith` wheel or any runtime extra):
+- `pip==26.1.2` — PYSEC-2026-3721 / CVE-2026-13346 (doubly-encoded package URLs → arbitrary write location), fixed in `26.2`. Transitive via `pip-api` ← `pip-audit` itself.
+- `pymdown-extensions==11.0` — PYSEC-2026-3654 / GHSA-gm37-52c6-37mw / CVE-2026-67422 (ReDoS in four default-config inline processors), fixed in `11.0.1`. Transitive via `mkdocs-material`/`mkdocstrings`.
+
+`.github/workflows/security.yml`'s `pip-audit` step is unconditional, so the `scan` job is currently failing on every PR — `security.yml`'s own comments document a prior incident where exactly this kind of unfiltered noise masked a genuine finding. Runtime dependencies (`rdflib==7.6.0`, `strawberry-graphql==0.319.0`, `graphql-core==3.2.11`, `fastapi==0.138.0`, `starlette==1.3.1`, `mcp==1.29.0`, `sqlite-vec==0.1.3`, `duckdb==1.5.4`, `pydantic==2.13.4`) have no advisories — the M3 additions (`rdflib`, `strawberry-graphql`) introduce no CVE debt.
+
+### Fix
+
+Bump `pip` and `pymdown-extensions` (transitively, via their parent dev dependencies) in `uv.lock`.
+
+---
+
+## KI-063 — CLI has no way to flag or resolve a contradiction
+
+**Severity:** Architecture gap — the only one of four interfaces with zero contradiction write surface
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §10.3 (contradiction resolution), §14.2 (CLI)
+
+### Description
+
+`contradiction_app` (`interfaces/cli.py`) registers only `contradiction list` — no `contradiction flag` or `contradiction resolve` command exists. REST has `POST /contradictions/flag` and `POST /contradictions/{id}/resolve`; GraphQL has `flagContradiction`/`resolveContradiction` mutations; MCP has `ontolith.flag_contradiction` (deliberately not `resolve`, per ADR-0008/KI-009's reviewer-only scoping). The CLI is the only one of the four with neither — and resolution in particular is explicitly a human-reviewer action per SPEC §10.3, i.e. exactly the actor the CLI serves, yet the CLI can't do it. KI-032 (M3) closed the equivalent gap for proposal review commands but never mentioned contradictions; this specific gap has never been named in any prior KI.
+
+### Fix
+
+Add `ontolith contradiction flag <id_a> <id_b>` and `ontolith contradiction resolve <id> --winner <assertion_id>` commands, mirroring the `proposal accept/reject/review` shape KI-032 already established.
+
+---
+
+## KI-064 — `observe/` remains a fully empty package at the M3 milestone boundary
+
+**Severity:** Architecture gap — SPEC §18 (SHOULD, not MUST) unimplemented across the whole M0-M3 arc
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §18 (metrics, events, structured logs)
+
+### Description
+
+`src/ontolith/observe/__init__.py` is empty (0 lines) as of M3's close. With REST, GraphQL, MCP, and CLI all now shipped and deployable, there is no way to observe proposal-acceptance rate, review latency, open-contradiction count, or auto-accept rate for any live interface, and no structured logging correlating `namespace`/`principal`/`acting_as`/`proposal_id` across a request — exactly what SPEC §18 asks for. This was flagged as a lower-confidence, informational observation mid-M3 (§18 is SHOULD, not MUST, so it never blocks a conformance vector); at the M3 boundary, with a production-shaped deployment now genuinely possible, the absence is more consequential and worth a real decision rather than continuing to defer silently.
+
+### Fix
+
+At minimum, record an ADR scoping M4's observability plan (or explicitly confirm it's out of scope through 1.0). Not urgent enough to block M4 planning, but should stop being silently deferred milestone over milestone.
+
+---
+
+## KI-065 — `strawberry-graphql`/`rdflib` have no upper version bound, unlike `mcp`
+
+**Severity:** Supply-chain — inconsistent pinning policy, not an active vulnerability
+**Milestone target:** Backlog
+**SPEC reference:** n/a (dependency management convention)
+
+### Description
+
+`mcp` is pinned `>=1.28.1,<2.0` with a documented rationale ("avoids an unreviewed major bump"). The two M3-era dependencies carry no upper bound at all: `strawberry-graphql[fastapi]>=0.219` (currently resolving `0.319.0` — roughly a hundred minor releases of unreviewed drift on a library sitting directly on the auth-bearing request path) and `rdflib>=7.0`. `uv.lock` protects this repo's own CI, but not a downstream `pip install ontolith[graphql]`, which resolves whatever is newest at install time.
+
+### Fix
+
+Apply the same `<N.0` convention already used for `mcp` to `strawberry-graphql` and `rdflib`, or record explicitly why the interop/graphql extras are treated differently.
+
+---
+
+## KI-066 — Audit tables (`assertion_event`/`proposal_event`) are append-only by convention, not by DB constraint
+
+**Severity:** Architecture gap — defense-in-depth gap, not a demonstrated exploit
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §17 ("the audit trail MUST NOT be mutable")
+
+### Description
+
+Immutability of `assertion_event`/`proposal_event` is enforced solely by `StorageBackend`'s port surface exposing only `put_assertion_event`/`put_proposal_event` — no update or delete method exists at the port level. There is no DB trigger, view, or revoked grant backing this. Any code holding the raw `sqlite3.Connection` (including, per KI-055, an in-process plugin that reaches `ReadOnlyView._backend`) can `UPDATE`/`DELETE` the audit tables directly.
+
+### Fix
+
+Add `BEFORE UPDATE`/`BEFORE DELETE` triggers on `assertion_event` and `proposal_event` (both backends) that `RAISE(ABORT, ...)`, making immutability a store-level guarantee rather than a port-surface convention.
+
+---
+
+## KI-067 — MCP tools take bearer tokens as arguments, placing a live credential in model context
+
+**Severity:** Architecture gap — credential-exposure surface outside Ontolith's own logging
+**Milestone target:** Backlog
+**SPEC reference:** ADR-0014 (bearer-token authentication)
+
+### Description
+
+Every MCP tool (`interfaces/mcp.py`) takes `token: str` as a parameter rather than reading it from a transport-level header. Because the token is a tool *argument*, the calling model must emit it in every tool call — it therefore lands in the model's context window, conversation transcripts, and any MCP client's own tool-call logging, none of which Ontolith controls. ADR-0014 discusses token hashing and revocation but never names this exposure path. Tokens are also long-lived (no expiry — ADR-0014 states a leaked token grants access "until revoked"), making a transcript-embedded token a durable liability. The SSE transport (`mcp.py`, `mcp.run("sse")`) has a header channel available and unused.
+
+### Fix
+
+For SSE, read the token from an `Authorization` header instead of a tool argument. At minimum, document the stdio exposure in ADR-0014 and recommend short-lived tokens for MCP-facing principals.
+
+---
+
+## KI-068 — RDF/OWL bridge and LinkML bridge map `Float` to different XSD precisions, disclosed on only one side
+
+**Severity:** Informational — export-only, non-normative for round-tripping
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §4 (value types)
+
+### Description
+
+`schema/linkml.py` maps Ontolith's `Float` to LinkML `range: float` (which real LinkML tooling treats as 32-bit `xsd:float`); `schema/rdf.py` maps the same `Float` to `XSD.double` (64-bit) — matching what Ontolith actually stores (Python `float`/IEEE-754 double). ADR-0036 candidly discloses this divergence in its own Consequences section, but ADR-0013 (the LinkML bridge's ADR) has no corresponding note, so a reader of the LinkML bridge in isolation has no signal that a same-`value_type` inconsistency exists on the RDF/OWL side.
+
+### Fix
+
+Either change the LinkML bridge's `Float` mapping to something that round-trips to 64-bit precision, or add a cross-reference note to ADR-0013 so the inconsistency is discoverable from either bridge's own documentation, closing the one-sided disclosure.
+
+---
+
 ## Format
 
 Each entry follows this structure:
