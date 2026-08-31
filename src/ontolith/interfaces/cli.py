@@ -94,7 +94,9 @@ def principal_create(
             # bootstrapping is legitimate without an admin already existing).
             typer.echo(
                 "Error: --author is required (omit only to create the very first "
-                "principal in a brand-new database)",
+                "principal in a brand-new database). If this database has no admin "
+                "principal at all yet, use the SDK directly instead: "
+                'Ontology.connect(...).create_principal(..., default_capability="admin").',
                 err=True,
             )
             raise typer.Exit(1)

@@ -78,6 +78,10 @@ class TestPrincipalCreate:
         )
         assert result.exit_code == 1
         assert "--author is required" in result.output
+        # The typer.Exit raised for this specific denial must not also be
+        # caught by the generic `except Exception` below it and re-echoed
+        # as a second, spurious "Error: 1" line.
+        assert "Error: 1" not in result.output
 
     def test_second_principal_with_non_admin_author_is_rejected(self, temp_db: Path) -> None:
         kb = Ontology.connect(temp_db)

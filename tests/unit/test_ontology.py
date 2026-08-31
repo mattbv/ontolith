@@ -528,6 +528,36 @@ class TestApplySchema:
         with pytest.raises(AuthError, match="Principal not found"):
             kb.apply_schema(schema, author="nobody@example.com")
 
+    def test_second_version_must_be_monotonic(self, kb: Ontology) -> None:
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        kb.apply_schema(
+            SchemaIR(namespace="default", version=1, concepts={}), author="admin@example.com"
+        )
+
+        applied = kb.apply_schema(
+            SchemaIR(namespace="default", version=2, concepts={}), author="admin@example.com"
+        )
+        assert applied.version == 2
+
+    def test_skipping_a_version_raises_schema_error(self, kb: Ontology) -> None:
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        kb.apply_schema(
+            SchemaIR(namespace="default", version=1, concepts={}), author="admin@example.com"
+        )
+
+        with pytest.raises(SchemaError, match="expected 2"):
+            kb.apply_schema(
+                SchemaIR(namespace="default", version=3, concepts={}), author="admin@example.com"
+            )
+
+    def test_first_version_must_be_one(self, kb: Ontology) -> None:
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+
+        with pytest.raises(SchemaError, match="expected 1"):
+            kb.apply_schema(
+                SchemaIR(namespace="default", version=2, concepts={}), author="admin@example.com"
+            )
+
 
 class TestRequireAdmin:
     """KI-053: require_admin must reject AI-kind principals regardless of
@@ -561,36 +591,6 @@ class TestRequireAdmin:
     def test_unknown_principal_raises_auth_error(self, kb: Ontology) -> None:
         with pytest.raises(AuthError, match="Principal not found"):
             kb.require_admin("nobody@example.com")
-
-    def test_second_version_must_be_monotonic(self, kb: Ontology) -> None:
-        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
-        kb.apply_schema(
-            SchemaIR(namespace="default", version=1, concepts={}), author="admin@example.com"
-        )
-
-        applied = kb.apply_schema(
-            SchemaIR(namespace="default", version=2, concepts={}), author="admin@example.com"
-        )
-        assert applied.version == 2
-
-    def test_skipping_a_version_raises_schema_error(self, kb: Ontology) -> None:
-        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
-        kb.apply_schema(
-            SchemaIR(namespace="default", version=1, concepts={}), author="admin@example.com"
-        )
-
-        with pytest.raises(SchemaError, match="expected 2"):
-            kb.apply_schema(
-                SchemaIR(namespace="default", version=3, concepts={}), author="admin@example.com"
-            )
-
-    def test_first_version_must_be_one(self, kb: Ontology) -> None:
-        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
-
-        with pytest.raises(SchemaError, match="expected 1"):
-            kb.apply_schema(
-                SchemaIR(namespace="default", version=2, concepts={}), author="admin@example.com"
-            )
 
 
 class TestSchema:
