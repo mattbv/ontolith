@@ -42,6 +42,7 @@ class TestPrincipalCreate:
     def test_creates_ai_principal_with_owner(self, temp_db: Path) -> None:
         kb = Ontology.connect(temp_db)
         kb.create_principal("alice@example.com", kind="human")
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
         kb.close()
 
         result = runner.invoke(
@@ -56,10 +57,74 @@ class TestPrincipalCreate:
                 "ai",
                 "--owner",
                 "alice@example.com",
+                "--author",
+                "admin@example.com",
             ],
         )
         assert result.exit_code == 0
         assert "bot-1" in result.output
+
+    def test_second_principal_requires_author(self, temp_db: Path) -> None:
+        """KI-054: once a database has at least one principal, --author
+        (naming an existing admin) becomes required - only the very first
+        principal in a fresh database may omit it."""
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("alice@example.com", kind="human")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "principal", "create", "bob@example.com", "--kind", "human"],
+        )
+        assert result.exit_code == 1
+        assert "--author is required" in result.output
+        # The typer.Exit raised for this specific denial must not also be
+        # caught by the generic `except Exception` below it and re-echoed
+        # as a second, spurious "Error: 1" line.
+        assert "Error: 1" not in result.output
+
+    def test_second_principal_with_non_admin_author_is_rejected(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "principal",
+                "create",
+                "bob@example.com",
+                "--kind",
+                "human",
+                "--author",
+                "alice@example.com",
+            ],
+        )
+        assert result.exit_code == 1
+
+    def test_second_principal_with_admin_author_succeeds(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "principal",
+                "create",
+                "bob@example.com",
+                "--kind",
+                "human",
+                "--author",
+                "admin@example.com",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "bob@example.com" in result.output
 
     def test_output_shows_kind_and_capability(self, temp_db: Path) -> None:
         result = runner.invoke(

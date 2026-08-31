@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### M3 - Extensible (0.3) (In Progress)
+### M3 - Extensible (0.3)
 
 #### Added
 - RDF/OWL bridge, export only (SPEC §13.3, ADR-0036): `schema.rdf.to_owl(schema)`
@@ -289,6 +289,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- **Security, Breaking:** `require_admin` (`ontology.py`) now rejects AI-kind
+  principals regardless of their configured capability (closes KI-053, ADR-0038),
+  matching every other capability-tier gate in the codebase. Previously a
+  misconfigured AI principal with `default_capability="admin"` could call
+  `issue_token()` for a human principal and authenticate as them over
+  REST/GraphQL, bypassing every AI-kind guard on direct write, review, and
+  contradiction resolution — any deployment relying on that (misconfigured)
+  behavior now gets `CapabilityError` instead. CLI's `principal create` now
+  requires `--author` (naming an existing admin) once a database has any
+  principal at all, mirroring REST's already-correct external-gate pattern, with
+  a bootstrap exception only for a database's first-ever principal (closes
+  KI-054, same ADR) — **any script or runbook calling `ontolith principal
+  create` without `--author` against a non-empty database now exits 1** instead
+  of succeeding.
 - **Security:** `PluginRegistry.register()` (`plugins/registry.py`) now logs a warning, on
   successful registration, when a plugin's manifest declares `capabilities.network=True` or
   `capabilities.filesystem=True` (amends KI-014's still-open half, ADR-0015). Only
