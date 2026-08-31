@@ -333,12 +333,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a regression. Visibility only, not enforcement: SPEC §17's MUST for network/filesystem
   isolation remains unmet. Real process/wasm isolation is unchanged, tracked separately per the
   Implementation Plan's existing phasing.
-- **Security:** bumped `pip` (`26.1.2` → `26.2.1`) and `pymdown-extensions` (`11.0` → `11.0.2`) in
-  `uv.lock` (closes KI-062), fixing PYSEC-2026-3721/CVE-2026-13346 and
-  PYSEC-2026-3654/CVE-2026-67422 respectively. Both are dev/docs-only transitive dependencies
-  (via `pip-audit` and `mkdocs-material`/`mkdocstrings`) — neither ships in the `ontolith` wheel
-  or any runtime extra — but `.github/workflows/security.yml`'s `pip-audit` step is unconditional
-  and was failing on every PR. No direct `pyproject.toml` dependency changed.
 - GraphQL resolvers (`interfaces/graphql.py`) no longer block the ASGI event loop
   (closes KI-052, amends ADR-0037). Every `Query`/`Mutation` field, plus
   `EntityType.assertions` and `create_graphql_app`'s `_get_context`, is now
@@ -787,6 +781,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actually run locally against `bandit` until this pass. `security.yml`'s `bandit`/SBOM steps
   now run with `if: always()` so a `pip-audit` failure can no longer mask them again — the same
   masking is exactly how the two bandit findings went unseen across a full PR.
+- `pip` (a transitive dependency of `pip-audit` itself, via `pip-api`) bumped 26.1.2 → 26.2.1
+  (PYSEC-2026-3721/CVE-2026-13346) and `pymdown-extensions` (transitive via `mkdocs-material`/
+  `mkdocstrings`) bumped 11.0 → 11.0.2 (PYSEC-2026-3654/CVE-2026-67422), both via `uv lock
+  --upgrade-package` (closes KI-062, found in the M3 milestone-boundary security audit) — same
+  lockfile-only shape as the `cryptography` bump above. Neither ships in the `ontolith` wheel or
+  any runtime extra. No `pyproject.toml` change.
 
 ### Security & Correctness Remediation (2026-07-06 – 2026-07-09)
 

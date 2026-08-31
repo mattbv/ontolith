@@ -1308,7 +1308,7 @@ Either lift the AI-requires-review check into `Ontology.propose`/`propose_ref`/`
 
 ## KI-062 — Two known-vulnerable dev/docs-only dependencies; `pip-audit` CI gate currently red ✓ RESOLVED (Backlog)
 
-**Severity:** Performance/supply-chain — dev-only exposure, but the unconditional gate is failing
+**Severity:** Security/supply-chain — dev-only exposure, but the unconditional gate is failing
 **Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** Implementation Plan §7.1 (supply-chain gate)
 
