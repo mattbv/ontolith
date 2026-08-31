@@ -118,10 +118,11 @@ class DuckDBBackend:
     mutable") is enforced here only by this port's own surface exposing
     no update/delete method — a convention, not a store-level guarantee.
     DuckDB (verified against 1.5.4) has no `CREATE TRIGGER` support at
-    all, so the `BEFORE UPDATE`/`BEFORE DELETE` triggers SQLiteBackend
-    installs on both tables have no DuckDB equivalent; code holding this
-    backend's raw `duckdb.DuckDBPyConnection` can still `UPDATE`/`DELETE`
-    either audit table directly. Not fixable without a different
+    all, so the three triggers per table (`BEFORE UPDATE`, `BEFORE
+    DELETE`, `BEFORE INSERT ... WHEN EXISTS(...)`) SQLiteBackend installs
+    have no DuckDB equivalent; code holding this backend's raw
+    `duckdb.DuckDBPyConnection` can still `UPDATE`/`DELETE`/`INSERT OR
+    REPLACE` either audit table directly. Not fixable without a different
     mechanism (e.g. a superuser-only schema plus a restricted role — not
     available in DuckDB's embedded, single-user connection model either).
     """

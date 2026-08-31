@@ -69,7 +69,9 @@ def _seed_proposal_event(backend: StorageBackend) -> str:
 
 
 class TestSQLiteAuditTablesAreImmutable:
-    """Store-level enforcement: BEFORE UPDATE/DELETE triggers (KI-066)."""
+    """Store-level enforcement via the backend's own connection: BEFORE
+    UPDATE / BEFORE DELETE / BEFORE INSERT (REPLACE-guard) triggers
+    (KI-066)."""
 
     def test_assertion_event_update_rejected(self, tmp_path: Path) -> None:
         import sqlite3
@@ -133,8 +135,18 @@ class TestSQLiteAuditTablesAreImmutable:
         = ON`, that DELETE doesn't fire trg_assertion_event_no_delete
         (found in review: a real bypass distinct from a plain DELETE,
         since REPLACE can also rewrite every other column including
-        `actor` - attribution laundering, not just row loss - this test
-        only needs to prove the trigger fires, not exercise that angle)."""
+        `actor` when the replacement is an existing principal id -
+        attribution laundering, not just row loss).
+
+        Matches specifically on "REPLACE is not permitted", not just
+        "append-only": on this connection `recursive_triggers` is ON, so
+        without trg_assertion_event_no_replace the *DELETE* trigger would
+        catch the conflict-row removal instead and produce a
+        DELETE-flavored message that also contains "append-only" - a
+        broader match would pass even with trg_assertion_event_no_replace
+        deleted, silently un-pinning the round-2 fix (found in review
+        round 3: this exact gap existed on the proposal_event sibling
+        test below until this round tightened both)."""
         import sqlite3
 
         from ontolith.store.sqlite import SQLiteBackend
@@ -142,7 +154,7 @@ class TestSQLiteAuditTablesAreImmutable:
         backend = SQLiteBackend(tmp_path / "test.db")
         try:
             event_id = _seed_assertion_event(backend)
-            with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            with pytest.raises(sqlite3.IntegrityError, match="REPLACE is not permitted"):
                 backend.conn.execute(
                     """
                     INSERT OR REPLACE INTO assertion_event
@@ -156,8 +168,9 @@ class TestSQLiteAuditTablesAreImmutable:
             backend.close()
 
     def test_proposal_event_replace_rejected(self, tmp_path: Path) -> None:
-        """Same REPLACE-bypass shape as
-        test_assertion_event_replace_rejected, for proposal_event."""
+        """Same REPLACE-bypass shape and same "REPLACE is not permitted"
+        match precision as test_assertion_event_replace_rejected, for
+        proposal_event."""
         import sqlite3
 
         from ontolith.store.sqlite import SQLiteBackend
@@ -165,7 +178,7 @@ class TestSQLiteAuditTablesAreImmutable:
         backend = SQLiteBackend(tmp_path / "test.db")
         try:
             event_id = _seed_proposal_event(backend)
-            with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            with pytest.raises(sqlite3.IntegrityError, match="REPLACE is not permitted"):
                 backend.conn.execute(
                     """
                     INSERT OR REPLACE INTO proposal_event
@@ -175,6 +188,24 @@ class TestSQLiteAuditTablesAreImmutable:
                     """,
                     (event_id,),
                 )
+        finally:
+            backend.close()
+
+    def test_assertion_event_unqualified_delete_rejected(self, tmp_path: Path) -> None:
+        """A bare `DELETE FROM assertion_event` (no WHERE) is the most
+        direct "wipe the log" statement, and the one SQLite's truncate
+        optimization would otherwise fast-path - confirms the optimization
+        is correctly disabled when delete triggers exist (found worth
+        pinning in review round 3)."""
+        import sqlite3
+
+        from ontolith.store.sqlite import SQLiteBackend
+
+        backend = SQLiteBackend(tmp_path / "test.db")
+        try:
+            _seed_assertion_event(backend)
+            with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                backend.conn.execute("DELETE FROM assertion_event")
         finally:
             backend.close()
 
@@ -191,9 +222,15 @@ class TestSecondConnectionCannotBypassEitherTrigger:
     persists in the schema and needs no pragma at all) rather than relying
     on the pragma alone - these tests open a second connection and
     deliberately do NOT set `recursive_triggers`, to prove the schema-level
-    trigger is what's actually doing the work."""
+    trigger is what's actually doing the work.
 
-    def test_second_connection_replace_still_rejected(self, tmp_path: Path) -> None:
+    Both tables get all three operations (UPDATE/DELETE/REPLACE) from the
+    second connection - round 3 review found the first version of this
+    class only exercised REPLACE for assertion_event and only
+    UPDATE/DELETE for proposal_event, leaving each table's REPLACE-from-a-
+    second-connection path only half covered."""
+
+    def test_assertion_event_second_connection_rejected(self, tmp_path: Path) -> None:
         import sqlite3
 
         from ontolith.store.sqlite import SQLiteBackend
@@ -205,6 +242,12 @@ class TestSecondConnectionCannotBypassEitherTrigger:
             try:
                 assert second_conn.execute("PRAGMA recursive_triggers").fetchone()[0] == 0
                 with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                    second_conn.execute(
+                        "UPDATE assertion_event SET action = 'flagged' WHERE id = ?", (event_id,)
+                    )
+                with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                    second_conn.execute("DELETE FROM assertion_event WHERE id = ?", (event_id,))
+                with pytest.raises(sqlite3.IntegrityError, match="REPLACE is not permitted"):
                     second_conn.execute(
                         """
                         INSERT OR REPLACE INTO assertion_event
@@ -219,7 +262,7 @@ class TestSecondConnectionCannotBypassEitherTrigger:
         finally:
             backend.close()
 
-    def test_second_connection_update_and_delete_still_rejected(self, tmp_path: Path) -> None:
+    def test_proposal_event_second_connection_rejected(self, tmp_path: Path) -> None:
         import sqlite3
 
         from ontolith.store.sqlite import SQLiteBackend
@@ -229,12 +272,23 @@ class TestSecondConnectionCannotBypassEitherTrigger:
             event_id = _seed_proposal_event(backend)
             second_conn = sqlite3.connect(backend.path)
             try:
+                assert second_conn.execute("PRAGMA recursive_triggers").fetchone()[0] == 0
                 with pytest.raises(sqlite3.IntegrityError, match="append-only"):
                     second_conn.execute(
                         "UPDATE proposal_event SET detail = 'edited' WHERE id = ?", (event_id,)
                     )
                 with pytest.raises(sqlite3.IntegrityError, match="append-only"):
                     second_conn.execute("DELETE FROM proposal_event WHERE id = ?", (event_id,))
+                with pytest.raises(sqlite3.IntegrityError, match="REPLACE is not permitted"):
+                    second_conn.execute(
+                        """
+                        INSERT OR REPLACE INTO proposal_event
+                            (id, proposal_id, actor, type, detail, at)
+                        SELECT id, proposal_id, actor, type, 'TAMPERED', at
+                        FROM proposal_event WHERE id = ?
+                        """,
+                        (event_id,),
+                    )
             finally:
                 second_conn.close()
         finally:
@@ -278,5 +332,32 @@ class TestDuckDBAuditTablesAreCurrentlyMutable:
                 "SELECT 1 FROM proposal_event WHERE id = ?", [event_id]
             ).fetchone()
             assert row is None
+        finally:
+            backend.close()
+
+    def test_assertion_event_replace_currently_succeeds(self, tmp_path: Path) -> None:
+        """DuckDB supports `INSERT OR REPLACE` natively (unlike SQLite,
+        no pragma involved) - included for symmetry with the SQLite side's
+        REPLACE coverage, not because DuckDB has any REPLACE-specific
+        mechanism to pin beyond "no triggers exist at all"."""
+        from ontolith.store.duckdb import DuckDBBackend
+
+        backend = DuckDBBackend(tmp_path / "test.db")
+        try:
+            event_id = _seed_assertion_event(backend)
+            backend.conn.execute(
+                """
+                INSERT OR REPLACE INTO assertion_event
+                    (id, assertion_id, actor, action, "at")
+                SELECT id, assertion_id, actor, 'flagged', "at"
+                FROM assertion_event WHERE id = ?
+                """,
+                [event_id],
+            )
+            row = backend.conn.execute(
+                "SELECT action FROM assertion_event WHERE id = ?", [event_id]
+            ).fetchone()
+            assert row is not None
+            assert row[0] == "flagged"
         finally:
             backend.close()
