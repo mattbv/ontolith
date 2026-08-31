@@ -77,12 +77,16 @@ class SQLiteBackend:
     - Status tracking for append-only invariant
 
     KI-066: `assertion_event`/`proposal_event`'s append-only invariant
-    (SPEC §17) is backed here by `BEFORE UPDATE`/`BEFORE DELETE` triggers
-    on both tables (raising `sqlite3.IntegrityError` on any raw mutation
-    attempt, including the conflict-row DELETE an `INSERT OR REPLACE`
-    performs — `PRAGMA recursive_triggers = ON` is required for that case
-    specifically), not just the port surface exposing no update/delete
-    method. `DuckDBBackend` has no equivalent — see its own docstring.
+    (SPEC §17) is backed here by three triggers per table — `BEFORE
+    UPDATE`, `BEFORE DELETE`, and `BEFORE INSERT ... WHEN EXISTS(...)` —
+    raising `sqlite3.IntegrityError` on any raw mutation attempt, not just
+    the port surface exposing no update/delete method. The `BEFORE INSERT`
+    trigger is what actually closes `INSERT OR REPLACE`: it is schema
+    state (persisted in the file, enforced on every connection), unlike
+    `PRAGMA recursive_triggers = ON` (also set below, as defense in depth)
+    which is per-connection and does not by itself stop a second raw
+    connection to the same file from reviving the REPLACE bypass. `DuckDBBackend`
+    has no equivalent — see its own docstring.
     """
 
     def __init__(self, path: str | Path, *, clock: Clock | None = None) -> None:
@@ -304,6 +308,28 @@ class SQLiteBackend:
             END
         """)
 
+        # Round-2 review finding: `PRAGMA recursive_triggers` (below, in
+        # __init__) is per-*connection* state, not persisted in the
+        # database file — a second raw connection to the same file opens
+        # with it OFF regardless, silently reviving the `INSERT OR
+        # REPLACE` bypass the pragma was meant to close, with no
+        # privilege escalation needed (just `backend.path`, a public
+        # attribute). This trigger closes it durably at the schema level:
+        # any `INSERT` whose id already exists is exactly what a REPLACE
+        # conflict-resolution does, regardless of pragma state or which
+        # connection issues it. The pragma is kept anyway (defense in
+        # depth, and it produces a clearer error for a plain `UPDATE`-
+        # shaped conflict-row removal specifically) but is no longer
+        # load-bearing for REPLACE.
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_assertion_event_no_replace
+            BEFORE INSERT ON assertion_event
+            WHEN EXISTS(SELECT 1 FROM assertion_event WHERE id = NEW.id)
+            BEGIN
+                SELECT RAISE(ABORT, 'assertion_event is append-only: REPLACE is not permitted');
+            END
+        """)
+
         # Proposal table (SPEC §9.1)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS proposal (
@@ -372,6 +398,17 @@ class SQLiteBackend:
             BEFORE DELETE ON proposal_event
             BEGIN
                 SELECT RAISE(ABORT, 'proposal_event is append-only: DELETE is not permitted');
+            END
+        """)
+
+        # Same durable REPLACE-bypass close as trg_assertion_event_no_replace
+        # above — see its comment for why the pragma alone isn't enough.
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_proposal_event_no_replace
+            BEFORE INSERT ON proposal_event
+            WHEN EXISTS(SELECT 1 FROM proposal_event WHERE id = NEW.id)
+            BEGIN
+                SELECT RAISE(ABORT, 'proposal_event is append-only: REPLACE is not permitted');
             END
         """)
 

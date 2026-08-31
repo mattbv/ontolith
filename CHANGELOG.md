@@ -828,17 +828,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `strawberry-graphql` than `<2.0` is for `mcp`: it's still pre-1.0, and a *minor* release already
   broke this integration once (the `>=0.316` floor bump above), so the bound guards against the
   next major only, not the next 0.x break.
-- **SQLite:** `assertion_event`/`proposal_event` now reject raw `UPDATE`/`DELETE` at the database
-  layer via `BEFORE UPDATE`/`BEFORE DELETE` triggers (closes KI-066, ADR-0041), making SPEC §17's
+- **SQLite:** `assertion_event`/`proposal_event` now reject raw `UPDATE`/`DELETE`/`INSERT OR
+  REPLACE` at the database layer via six triggers (closes KI-066, ADR-0041), making SPEC §17's
   "the audit trail MUST NOT be mutable" a store-level guarantee rather than a port-surface
   convention alone (previously, only `StorageBackend` exposing no update/delete method stood
   between the audit tables and any code holding the raw connection). **DuckDB gets no equivalent
   fix** — verified DuckDB (1.5.4) has no `CREATE TRIGGER` support and no connection-level access
   restriction to work around that; documented as a currently-unfixable backend asymmetry rather
-  than left unaddressed. Also closes a real bypass found in review: SQLite's
-  `recursive_triggers` pragma (now enabled) is required for the DELETE trigger to fire on the
-  conflict-row removal an `INSERT OR REPLACE` performs — without it, that statement could
-  silently rewrite an existing audit row, including its `actor` field.
+  than left unaddressed. Two real bypasses found in two review rounds and closed before merge:
+  (1) `INSERT OR REPLACE`'s implicit conflict-row delete doesn't fire a `BEFORE DELETE` trigger
+  unless `PRAGMA recursive_triggers` is ON (SQLite defaults it OFF) — could otherwise silently
+  rewrite an existing audit row, including its `actor` field; (2) that pragma is per-*connection*,
+  not persisted in the database file, so a second raw connection to the same file revived the
+  bypass regardless — closed durably with a third, schema-persisted `BEFORE INSERT ... WHEN
+  EXISTS(...)` trigger per table, which needs no pragma at all.
 
 ### Security & Correctness Remediation (2026-07-06 – 2026-07-09)
 

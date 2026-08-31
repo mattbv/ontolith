@@ -4,13 +4,16 @@ SPEC §17: "the audit trail MUST NOT be mutable." Prior to this KI, that was
 enforced only by StorageBackend's port surface exposing no update/delete
 method for `assertion_event`/`proposal_event` — a convention any code
 holding the raw connection could bypass. SQLiteBackend now backs this with
-`BEFORE UPDATE`/`BEFORE DELETE` triggers on both tables (store-level
-guarantee), plus `PRAGMA recursive_triggers = ON` — without it, SQLite
-doesn't fire a `BEFORE DELETE` trigger for the conflict-row removal an
-`INSERT OR REPLACE` performs, so that statement would otherwise silently
-rewrite an existing row (including `actor`, laundering attribution)
-instead of tripping the trigger (found in review; see the two
-`_replace_...` tests below).
+three triggers per table: `BEFORE UPDATE`, `BEFORE DELETE`, and `BEFORE
+INSERT ... WHEN EXISTS(...)` (the last closes `INSERT OR REPLACE`, which
+performs an implicit conflict-row delete that a plain `BEFORE DELETE`
+trigger only catches when `PRAGMA recursive_triggers` is ON — found in
+review round 1). `recursive_triggers` is also set ON in `__init__` as
+defense in depth, but is NOT load-bearing for the REPLACE case: the
+`BEFORE INSERT` trigger persists in the schema itself and blocks REPLACE
+regardless of pragma state, unlike the pragma, which is per-*connection*
+and doesn't follow a second raw connection to the same file (found in
+review round 2 — see `TestSecondConnectionCannotBypassEitherTrigger`).
 
 DuckDB has no `CREATE TRIGGER` support at all (verified against 1.5.4) —
 DuckDBBackend's own docstring documents this as a known, currently
@@ -172,6 +175,68 @@ class TestSQLiteAuditTablesAreImmutable:
                     """,
                     (event_id,),
                 )
+        finally:
+            backend.close()
+
+
+class TestSecondConnectionCannotBypassEitherTrigger:
+    """Round-2 review finding: `PRAGMA recursive_triggers` is per-
+    *connection* state, not persisted in the database file - a second raw
+    connection to the same file (e.g. via `backend.path`, a public
+    attribute one hop past `ReadOnlyView._backend`, KI-066's own named
+    threat model) opens with the pragma OFF regardless of what
+    `SQLiteBackend.__init__` set on its own connection, reviving the
+    REPLACE bypass with no privilege escalation needed. Closed durably by
+    `trg_*_no_replace` (a `BEFORE INSERT ... WHEN EXISTS` trigger, which
+    persists in the schema and needs no pragma at all) rather than relying
+    on the pragma alone - these tests open a second connection and
+    deliberately do NOT set `recursive_triggers`, to prove the schema-level
+    trigger is what's actually doing the work."""
+
+    def test_second_connection_replace_still_rejected(self, tmp_path: Path) -> None:
+        import sqlite3
+
+        from ontolith.store.sqlite import SQLiteBackend
+
+        backend = SQLiteBackend(tmp_path / "test.db")
+        try:
+            event_id = _seed_assertion_event(backend)
+            second_conn = sqlite3.connect(backend.path)
+            try:
+                assert second_conn.execute("PRAGMA recursive_triggers").fetchone()[0] == 0
+                with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                    second_conn.execute(
+                        """
+                        INSERT OR REPLACE INTO assertion_event
+                            (id, assertion_id, actor, action, at)
+                        SELECT id, assertion_id, actor, 'flagged', at
+                        FROM assertion_event WHERE id = ?
+                        """,
+                        (event_id,),
+                    )
+            finally:
+                second_conn.close()
+        finally:
+            backend.close()
+
+    def test_second_connection_update_and_delete_still_rejected(self, tmp_path: Path) -> None:
+        import sqlite3
+
+        from ontolith.store.sqlite import SQLiteBackend
+
+        backend = SQLiteBackend(tmp_path / "test.db")
+        try:
+            event_id = _seed_proposal_event(backend)
+            second_conn = sqlite3.connect(backend.path)
+            try:
+                with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                    second_conn.execute(
+                        "UPDATE proposal_event SET detail = 'edited' WHERE id = ?", (event_id,)
+                    )
+                with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                    second_conn.execute("DELETE FROM proposal_event WHERE id = ?", (event_id,))
+            finally:
+                second_conn.close()
         finally:
             backend.close()
 
