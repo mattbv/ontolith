@@ -289,6 +289,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- **Security, Breaking:** `create_graphql_app`'s `introspection` parameter now
+  defaults to `False` (closes KI-056, amends ADR-0037). Introspection queries are
+  self-referentially recursive over the schema's own type graph, and neither
+  `QueryDepthLimiter` nor `MaxTokensLimiter` can bound that recursion (verified
+  directly — `QueryDepthLimiter` hardcodes an introspection carve-out in
+  *strawberry-graphql's own* depth-limiting validator, not graphql-core, which
+  has no depth validator at all); an anonymous caller previously had an
+  unauthenticated, unbounded-recursion amplification vector with no mitigation.
+  Pass `introspection=True` to opt back in — note `graphql_ide` still defaults
+  to serving GraphiQL, so pass both together for a working interactive dev
+  experience. Also new: `MaxAliasesLimiter`/`QueryDepthLimiter` are wired into
+  every schema unconditionally, capping alias count and query depth — *reduces*
+  the cross-interface DoS vector KI-052's async resolver conversion introduced
+  (measured: 15 concurrent worker threads per max-alias request against the
+  shared anyio pool's default 40-thread capacity, so this doesn't eliminate the
+  vector, only shrinks the amplification ratio from ~200 aliased fields to 15).
+  Requires `strawberry-graphql>=0.316` (bumped from `>=0.219` — the
+  factory-callable extension pattern this fix uses raises `TypeError` at
+  request time on older releases).
 - **Security, Breaking:** `require_admin` (`ontology.py`) now rejects AI-kind
   principals regardless of their configured capability (closes KI-053, ADR-0038),
   matching every other capability-tier gate in the codebase. Previously a

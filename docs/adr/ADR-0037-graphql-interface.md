@@ -328,6 +328,93 @@ already-named, still-unimplemented query cost/complexity limiter
 (`strawberry.extensions.QueryDepthLimiter` or similar) more load-bearing
 than before this fix, not just a nice-to-have. Still not implemented here.
 
+## Update (2026-08-30): query-amplification limiting, KI-056 resolved
+
+A milestone-boundary security audit escalated the "not just a nice-to-have"
+follow-up named above to a HIGH-severity finding (KI-056), for two reasons:
+the 200-aliased-field measurement above is now a cross-interface DoS (the
+shared anyio thread pool also serves any co-mounted REST app), and a second,
+separate vector — unauthenticated recursive `__schema` introspection — was
+also live by default.
+
+**Alias/depth limiting, always on.** `create_graphql_app` now wires
+`strawberry.extensions.MaxAliasesLimiter(max_alias_count=15)` and
+`QueryDepthLimiter(max_depth=10)` into every schema unconditionally — not
+tied to the `introspection` flag (a regression a review round actually
+mutation-tested for and caught: nesting the limiter list inside `if not
+introspection:` still passed every other test in the suite). `MaxAliasesLimiter`
+is the one doing real work: it reduces the amplification ratio from
+~200 aliased fields per request to 15, converting the vector from
+"amplification" into an ordinary connection-count-proportional cost — it
+**does not eliminate** the shared-pool exposure named above (measured: 15
+concurrent worker threads per request against the pool's default 40-thread
+capacity, so a handful of concurrent max-alias requests can still exhaust
+it). `QueryDepthLimiter(max_depth=10)` is, today, pure defense-in-depth: no
+type in this schema is recursive (nothing nests back into itself), so no
+schema-valid query can reach anywhere near depth 10 — the limiter currently
+rejects nothing a query-validity check wouldn't already reject on its own.
+It earns its keep the day a recursive relation field is added.
+
+**The alias limit also applies to `Mutation`, where the amplification threat
+it's meant to address doesn't exist** — GraphQL requires root mutation
+fields to execute serially, so N aliased mutations occupy one worker thread
+at a time regardless of N. This is a real, if minor, behavior change: with
+no bulk-propose mutation and no batch-query field in this schema, aliasing
+was the only way to submit more than one proposal or fetch more than one
+entity's assertions in a single round trip, and 15 is now a hard ceiling on
+that too. Accepted as a reasonable tradeoff — one shared limiter is simpler
+than a mutation-aware exception, and 15 aliased operations per request is
+not a meaningfully tight ceiling for real client usage.
+
+**`QueryDepthLimiter` does not bound introspection — verified empirically,
+not assumed.** The carve-out is in *strawberry's own* depth-limiting
+validator (`strawberry.extensions.query_depth_limiter`), not graphql-core —
+graphql-core itself has no depth-limiting validator at all; strawberry's
+hardcodes a skip for any field beginning with `__` ("by default, ignore the
+introspection fields," in its own source comment) — confirmed a deeply
+recursive `{ __schema { types { fields { type { ... } } } } }` query passes
+depth validation untouched regardless of `max_depth`, and that a custom
+`should_ignore` callback can't override the hardcoded carve-out either (it's
+OR'd after the built-in check, never instead of it). `MaxTokensLimiter` was
+also considered and rejected: it bounds the *request's* token count, not the
+*response's* size, and introspection's amplification ratio is exactly a
+short query producing a disproportionately large response by walking the
+schema's own (cyclic) type graph — bounding input tokens doesn't touch that.
+
+**Introspection now defaults to `False`.** Since no combination of the
+built-in limiters can bound introspection's recursion, and REST's `docs_url`
+analogy (module docstring, previously used to justify defaulting
+introspection on) doesn't actually hold for this specific risk — REST's
+OpenAPI JSON is a fixed, non-recursive document with no amplification
+potential, unlike GraphQL's self-referential schema graph — introspection is
+now off unless a deployment opts in via `introspection=True`. This is a
+default-behavior change from this ADR's original decision, made deliberately
+rather than silently: local development, trusted-network staging, or any
+deployment that wants self-documenting tooling and doesn't face untrusted
+traffic can still opt back in. One consequence worth naming: `graphql_ide`
+still defaults to serving GraphiQL at `GET /graphql`, so the out-of-the-box
+experience is a 200 IDE page that can't actually browse the schema unless
+`introspection=True` is also passed — the module's `Usage:` block and the
+`introspection` parameter's own docstring both now say so explicitly.
+
+**Rejected: a custom depth-limiting validator that also bounds introspection.**
+Considered instead of flipping the default (would have kept introspection
+on by default with real depth protection), but requires hand-rolling a
+graphql-core `ValidationRule` bypassing strawberry's hardcoded carve-out —
+materially more engineering and testing burden than the fix shipped, for a
+capability (introspection-with-bounded-recursion) most deployments don't
+need by default anyway.
+
+**Dependency floor bump, found in review.** `pyproject.toml`'s `graphql`
+extra required `strawberry-graphql>=0.219`, a floor set before this fix
+existed. The `extensions=[lambda: QueryDepthLimiter(...), ...]`
+factory-callable pattern this fix introduces raises `TypeError` at
+*request* time (not import time — `create_graphql_app` itself builds fine)
+on strawberry-graphql<=0.313; verified against real released versions that
+it works starting at 0.316. Bumped the floor to `>=0.316` accordingly — the
+locked version (0.319) was already compatible, so this only changes what a
+fresh `pip install ontolith[graphql]` resolves to, not this repo's own CI.
+
 ## References
 
 - SPEC §14.3 (REST + GraphQL), §16 (error model), §8.3 (capabilities), §17

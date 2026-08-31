@@ -92,16 +92,31 @@ class TestGraphqlIde:
 
 
 class TestIntrospection:
-    def test_enabled_by_default(self, tmp_path: Path) -> None:
+    def test_disabled_by_default(self, tmp_path: Path) -> None:
+        """KI-056: introspection defaults to off - depth/alias limiting
+        can't bound it (graphql-core hardcodes an introspection carve-out
+        in its own depth validator), so an unauthenticated recursive
+        __schema query has no other mitigation in this factory."""
         kb = _kb(tmp_path)
         client, _ = _client(kb)
         body = _gql(client, "{ __schema { queryType { name } } }")
-        assert "errors" not in body
+        assert body["data"] is None
+        assert "errors" in body
 
-    def test_can_be_disabled_independent_of_ide(self, tmp_path: Path) -> None:
-        """graphql_ide=None only hides the IDE's UI - a raw POST could still
-        run __schema unless introspection itself is off too (review
-        finding)."""
+    def test_can_be_enabled_explicitly(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        auth_provider = TokenAuthProvider(kb.backend)
+        app = create_graphql_app(kb, auth_provider, introspection=True)
+        client = TestClient(app)
+        body = _gql(client, "{ __schema { queryType { name } } }")
+        assert "errors" not in body
+        assert body["data"]["__schema"]["queryType"]["name"] == "Query"
+
+    def test_disabled_independent_of_ide(self, tmp_path: Path) -> None:
+        """graphql_ide has its own separate on/off switch - explicitly
+        disabling introspection while leaving graphql_ide at its default
+        must still block a raw POST from running __schema (review finding
+        for the original, pre-KI-056 introspection=True default)."""
         kb = _kb(tmp_path)
         auth_provider = TokenAuthProvider(kb.backend)
         app = create_graphql_app(kb, auth_provider, introspection=False)
@@ -109,6 +124,67 @@ class TestIntrospection:
         body = _gql(client, "{ __schema { queryType { name } } }")
         assert body["data"] is None
         assert "errors" in body
+
+
+class TestQueryAmplificationLimits:
+    """KI-056: MaxAliasesLimiter/QueryDepthLimiter are always on (not tied
+    to the introspection flag) - bound the alias-amplification vector
+    KI-052's async conversion made cross-interface (shared anyio thread
+    pool with any co-mounted REST app). max_alias_count=15 doesn't
+    eliminate that vector, only reduces it (15 concurrent worker threads
+    per request against a shared pool of 40) - see ADR-0037's Update for
+    the full accounting; this class only pins the limiter's own behavior."""
+
+    @staticmethod
+    def _alias_query(count: int) -> str:
+        return "{ " + " ".join(f"a{i}: schema {{ version }}" for i in range(count)) + " }"
+
+    def test_at_alias_limit_succeeds(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(client, self._alias_query(15), headers=_auth(token))
+        assert "errors" not in body
+
+    def test_one_over_alias_limit_rejected(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(client, self._alias_query(16), headers=_auth(token))
+        assert body["data"] is None
+        assert "aliases found" in body["errors"][0]["message"]
+
+    def test_alias_limit_still_applies_when_introspection_is_enabled(self, tmp_path: Path) -> None:
+        """The limiters must not be nested inside the `if not
+        introspection:` branch - review finding: a version that was would
+        still pass every other test in this class, since none of them
+        exercise introspection=True."""
+        kb = _kb(tmp_path)
+        auth_provider = TokenAuthProvider(kb.backend)
+        app = create_graphql_app(kb, auth_provider, introspection=True)
+        client = TestClient(app)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(client, self._alias_query(16), headers=_auth(token))
+        assert body["data"] is None
+        assert "aliases found" in body["errors"][0]["message"]
+
+    def test_excess_depth_rejected(self, tmp_path: Path) -> None:
+        """No field in this schema is recursive, so no schema-valid query
+        can actually reach 10 levels of nesting - this probe query is
+        deliberately invalid (PropertyType has no `properties` field) to
+        force enough AST depth to trip the limiter; the response also
+        carries a field-validity error alongside the depth one, so this
+        asserts membership rather than errors[0] specifically."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        nested = "name"
+        for _ in range(12):
+            nested = f"properties {{ {nested} }}"
+        query = f"{{ schema {{ concepts {{ {nested} }} }} }}"
+        body = _gql(client, query, headers=_auth(token))
+        assert body["data"] is None
+        assert any("exceeds maximum operation depth" in e["message"] for e in body["errors"])
 
 
 class TestDocsUrls:
@@ -252,9 +328,15 @@ class TestResolverConcurrency:
 
 
 class TestAuth:
-    def test_introspection_works_unauthenticated(self, tmp_path: Path) -> None:
+    def test_introspection_works_unauthenticated_when_enabled(self, tmp_path: Path) -> None:
+        """Auth deferral (module docstring) is about context_getter never
+        raising, so introspection - when explicitly enabled, see
+        TestIntrospection for the KI-056 default-off behavior - stays
+        reachable without a token."""
         kb = _kb(tmp_path)
-        client, _ = _client(kb)
+        auth_provider = TokenAuthProvider(kb.backend)
+        app = create_graphql_app(kb, auth_provider, introspection=True)
+        client = TestClient(app)
         body = _gql(client, "{ __schema { queryType { name } } }")
         assert "errors" not in body
         assert body["data"]["__schema"]["queryType"]["name"] == "Query"
@@ -452,8 +534,12 @@ class TestAuthCoversEveryField:
     }
 
     def test_query_field_probe_set_matches_schema(self, tmp_path: Path) -> None:
+        # Introspection is off by default (KI-056) - needs explicit opt-in
+        # here purely to enumerate the schema's own field list for this
+        # test; unrelated to the auth-gating behavior under test elsewhere.
         kb = _kb(tmp_path)
-        client, _ = _client(kb)
+        app = create_graphql_app(kb, TokenAuthProvider(kb.backend), introspection=True)
+        client = TestClient(app)
         body = _gql(client, '{ __type(name: "Query") { fields { name } } }')
         names = {f["name"] for f in body["data"]["__type"]["fields"]}
         assert names == set(self._QUERY_FIELD_PROBES)
@@ -464,7 +550,8 @@ class TestAuthCoversEveryField:
         principal-admin mutation (mirrors test_mcp_server.py's
         test_no_write_tool_registered precedent)."""
         kb = _kb(tmp_path)
-        client, _ = _client(kb)
+        app = create_graphql_app(kb, TokenAuthProvider(kb.backend), introspection=True)
+        client = TestClient(app)
         body = _gql(client, '{ __type(name: "Mutation") { fields { name } } }')
         names = {f["name"] for f in body["data"]["__type"]["fields"]}
         assert names == set(self._MUTATION_FIELD_PROBES)
