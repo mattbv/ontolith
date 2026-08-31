@@ -1156,6 +1156,40 @@ Re-measured after the fix with the same deliberately-slowed-resolver setup: thre
 
 ---
 
+## KI-053 — `require_admin` never checks principal `kind`, letting a misconfigured AI principal hold `admin` ✓ RESOLVED (M3)
+
+**Severity:** Security — real (if misconfiguration-gated) privilege-escalation path
+**Milestone target:** M3 — resolved via ADR-0038
+**SPEC reference:** SPEC §17 (capability-checked operations), §8.3 (capability ordering)
+
+### Description
+
+Found during the M3 milestone-boundary security audit. `Ontology.require_admin` (`ontology.py`) — the shared gate for token issuance/revocation, principal listing, schema application, and plugin registration — checked `principal.default_capability == "admin"` but never `principal.kind`. Every other capability-tier gate in the codebase already excludes AI-kind principals regardless of configured capability (`_check_direct_write_capability`, `_require_reviewer_principal`, `resolve_contradiction`'s own inline check) — `admin` sits above all of them in SPEC §8.3's total order, and it was the one gate that didn't.
+
+Concretely: a misconfigured AI principal with `default_capability="admin"` could call `issue_token(<a human write/review principal>)`, receive a raw bearer token for that human, and authenticate as them over REST or GraphQL — bypassing every AI-kind guard on direct write, review, and contradiction resolution, and destroying attribution on the resulting writes.
+
+### Fix
+
+`require_admin` now raises `CapabilityError` for `kind == "ai"`, mirroring `_require_reviewer_principal`'s existing pattern exactly. Closes the gap for all of `require_admin`'s callers at once — no call-site changes needed. See ADR-0038 for the full design record, including why the fix lives at the gate (matching the codebase's existing "defense at every gate" pattern) rather than at `Principal`/`create_principal` construction time.
+
+---
+
+## KI-054 — CLI's `principal create` is the one identity-mutating command with no `--author`/capability gate ✓ RESOLVED (M3)
+
+**Severity:** Security — consistency gap (SPEC §17 MUST), not a new trust-boundary crossing (CLI access already implies file-level trust)
+**Milestone target:** M3 — resolved via ADR-0038
+**SPEC reference:** SPEC §17 (capability-checked operations)
+
+### Description
+
+Found during the same audit as KI-053. `Ontology.create_principal` has no capability check of its own — a deliberate ADR-0022 decision, matching the CLI's own historically ungated `principal create` command on an "implicitly-trusted local access" rationale. REST doesn't share that trust boundary (network-reachable), so `create_principal_route` compensates by calling `Ontology.require_admin(principal.id)` explicitly before calling `create_principal`. The CLI never adopted that same external-gate pattern: `principal create` was the only identity-mutating CLI command with no `--author` option at all, unlike `principal list`, `issue-token`, `revoke-token`, `list-tokens`, and every `proposal`/`schema` write command.
+
+### Fix
+
+`principal create` now requires `--author` (naming an existing admin, checked via `Ontology.require_admin`), mirroring REST's already-correct pattern — with one bootstrap exception: `--author` may be omitted only when the database has zero existing principals (checked via the raw `StorageBackend.list_principals()` port method, not the gated `Ontology.list_principals`, to avoid a circular "need an admin to check if an admin exists" dependency). `Ontology.create_principal` itself remains intentionally ungated for direct SDK callers, unchanged from ADR-0022 — see ADR-0038 for the full reasoning.
+
+---
+
 ## KI-057 — `Ontology.retract()` is unreachable from REST, GraphQL, MCP, or the CLI
 
 **Severity:** Architecture gap — the most heavily-governed write path in the codebase has zero production interface exposure
