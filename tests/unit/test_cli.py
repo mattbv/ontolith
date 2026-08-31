@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ontolith import Ontology
+from ontolith.core import Assertion
 from ontolith.interfaces.cli import app
 from ontolith.schema import ConceptDef, PropertyDef, RelationDef, SchemaIR
 
@@ -1126,6 +1127,128 @@ class TestContradictionList:
 
         all_result = runner.invoke(app, ["--db", str(db), "contradiction", "list", "--all"])
         assert "state=resolved" in all_result.output
+
+
+class TestContradictionFlag:
+    def test_flag_creates_contradiction(self, seeded_db: tuple[Path, str, str]) -> None:
+        db, author, entity_id = seeded_db
+        kb = Ontology.connect(db)
+        kb.assert_literal(entity_id, "Person.name", "Ada", "Text", author)
+        first = kb.assertions(subject=entity_id, predicate="Person.name", status="active")[0]
+
+        # Need a second, still-active assertion sharing (subject,
+        # predicate) that conflict routing hasn't already flagged —
+        # insert directly via backend (mirrors test_rest.py/
+        # test_mcp_server.py's own TestFlagContradictionRoute/Tool setup).
+        second = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity_id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada Lovelace",
+            author=author,
+            asserted_at=kb.clock.now(),
+            status="active",
+        )
+        kb.backend.put_assertion(second)
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "contradiction",
+                "flag",
+                first.id,
+                second.id,
+                "--author",
+                author,
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Created:" in result.output
+        assert "members=2" in result.output
+
+        kb = Ontology.connect(db)
+        [contradiction] = kb.contradictions()
+        assert contradiction.state == "open"
+        kb.close()
+
+    def test_flag_unknown_assertion_exits_nonzero(self, seeded_db: tuple[Path, str, str]) -> None:
+        db, author, _ = seeded_db
+        result = runner.invoke(
+            app,
+            ["--db", str(db), "contradiction", "flag", "nope-a", "nope-b", "--author", author],
+        )
+        assert result.exit_code == 1
+        assert "Assertion not found" in result.output
+
+
+class TestContradictionResolve:
+    def test_resolves_contradiction(self, seeded_db: tuple[Path, str, str]) -> None:
+        db, author, entity_id = seeded_db
+        kb = Ontology.connect(db)
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        kb.assert_literal(entity_id, "Person.name", "Ada", "Text", author)
+        kb.assert_literal(entity_id, "Person.name", "Ava", "Text", author)
+        flagged = kb.assertions(subject=entity_id, predicate="Person.name", status="flagged")
+        [contradiction] = kb.contradictions()
+        winner = flagged[0].id
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "contradiction",
+                "resolve",
+                contradiction.id,
+                "--winner",
+                winner,
+                "--reviewer",
+                "carol@example.com",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Resolved:" in result.output
+        assert "state=resolved" in result.output
+        assert winner in result.output
+
+        kb = Ontology.connect(db)
+        assert kb.backend.get_assertion(winner).status == "active"  # type: ignore[union-attr]
+        kb.close()
+
+    def test_resolve_without_review_capability_exits_nonzero(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        db, author, entity_id = seeded_db
+        kb = Ontology.connect(db)
+        kb.assert_literal(entity_id, "Person.name", "Ada", "Text", author)
+        kb.assert_literal(entity_id, "Person.name", "Ava", "Text", author)
+        flagged = kb.assertions(subject=entity_id, predicate="Person.name", status="flagged")
+        [contradiction] = kb.contradictions()
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "contradiction",
+                "resolve",
+                contradiction.id,
+                "--winner",
+                flagged[0].id,
+                "--reviewer",
+                author,
+            ],
+        )
+        assert result.exit_code == 1
+        assert "lacks review capability" in result.output
 
 
 class TestNamespaceList:

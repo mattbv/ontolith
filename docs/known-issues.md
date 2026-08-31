@@ -1326,19 +1326,19 @@ Add `issued_by`/`revoked_by` columns to `principal_credential` (both backends). 
 
 ---
 
-## KI-063 — CLI has no way to flag or resolve a contradiction
+## KI-063 — CLI has no way to flag or resolve a contradiction ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — the only one of four interfaces with zero contradiction write surface
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §10.3 (contradiction resolution), §14.2 (CLI)
 
 ### Description
 
-`contradiction_app` (`interfaces/cli.py`) registers only `contradiction list` — no `contradiction flag` or `contradiction resolve` command exists. REST has `POST /contradictions/flag` and `POST /contradictions/{id}/resolve`; GraphQL has `flagContradiction`/`resolveContradiction` mutations; MCP has `ontolith.flag_contradiction` (deliberately not `resolve`, per ADR-0008/KI-009's reviewer-only scoping). The CLI is the only one of the four with neither — and resolution in particular is explicitly a human-reviewer action per SPEC §10.3, i.e. exactly the actor the CLI serves, yet the CLI can't do it. KI-032 (M3) closed the equivalent gap for proposal review commands but never mentioned contradictions; this specific gap has never been named in any prior KI.
+`contradiction_app` (`interfaces/cli.py`) registered only `contradiction list` — no `contradiction flag` or `contradiction resolve` command existed. REST has `POST /contradictions/flag` and `POST /contradictions/{id}/resolve`; GraphQL has `flagContradiction`/`resolveContradiction` mutations; MCP has `ontolith.flag_contradiction` (deliberately not `resolve`, per ADR-0008/KI-009's reviewer-only scoping). The CLI was the only one of the four with neither — and resolution in particular is explicitly a human-reviewer action per SPEC §10.3, i.e. exactly the actor the CLI serves, yet the CLI couldn't do it. KI-032 (M3) closed the equivalent gap for proposal review commands but never mentioned contradictions; this specific gap had never been named in any prior KI.
 
 ### Fix
 
-Add `ontolith contradiction flag <id_a> <id_b>` and `ontolith contradiction resolve <id> --winner <assertion_id>` commands, mirroring the `proposal accept/reject/review` shape KI-032 already established.
+Added `ontolith contradiction flag <id_a> <id_b> --author <id> [--rationale <text>]` (propose-tier, mirrors `ontolith assert`/`retract`'s `--author` convention, not a reviewer action) and `ontolith contradiction resolve <id> --winner <assertion_id> --reviewer <id>` (mirrors `proposal accept`'s `--reviewer`/`--author` alias) — both thin wrappers around the already-governed `Ontology.flag_contradiction()`/`resolve_contradiction()`, no new domain logic.
 
 ---
 
@@ -1451,6 +1451,22 @@ KI-065 extended the `<N.0` upper-bound convention (established for `mcp`, ADR-00
 ### Fix
 
 Either apply the same `<N.0` convention to the remaining direct dependencies (`pydantic`, `fastapi`, `duckdb` first, given their blast radius and auth-adjacency), or explicitly record why they're treated differently (e.g. `typer`/`python-ulid`/`pyyaml` are lower-risk enough that the convention doesn't need to reach them yet).
+
+---
+
+## KI-071 — `flag_contradiction()`'s `rationale` is silently dropped when extending an already-open contradiction
+
+**Severity:** Data-loss gap — a caller-supplied explanation is silently discarded, not rejected or errored
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §10.3 (contradiction resolution)
+
+### Description
+
+`Ontology.flag_contradiction(assertion_id_a, assertion_id_b, author, *, rationale=None)` (`ontology.py`) only writes `rationale` into the new `Contradiction`'s `metadata` on the "create a new contradiction" branch (`Contradiction(..., metadata={"rationale": rationale} if rationale else {})`). The "extend an already-open contradiction" branch (`self.backend.update_contradiction_members(existing.id, merged)`) never touches `metadata` at all — a caller who passes `rationale="..."` while extending gets no error, no warning, and the text is simply gone. Affects every interface that exposes `flag_contradiction`: REST (`POST /contradictions/flag`), GraphQL (`flagContradiction`), MCP (`ontolith.flag_contradiction`), and now the CLI (`ontolith contradiction flag --rationale`, KI-063) — none of their docstrings/help text mention this. Found in review of KI-063's CLI addition; pre-existing, not introduced by that PR.
+
+### Fix
+
+Either accumulate a per-extension rationale somewhere retrievable (e.g. a list in `metadata`, or a new `ContradictionEvent`-shaped record mirroring how `ProposalEvent` tracks proposal-lifecycle actions), or explicitly document that `rationale` is create-only and have every interface's help/docstring say so, so a caller extending a contradiction doesn't reasonably expect their explanation to be recorded.
 
 ---
 
