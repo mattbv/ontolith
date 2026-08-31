@@ -163,9 +163,22 @@ ungated for direct SDK callers — unchanged from ADR-0022, not a regression,
 but worth naming since a future audit might re-raise it. The broader question
 of whether AI principals should be preventable from ever holding elevated
 capability (rather than just blocked at each gate) is intentionally left
-open; multiple existing SPEC/CLAUDE.md invariants already assume the "blocked
-at the gate" model, so revisiting it is a larger discussion than this ADR's
-scope.
+open; multiple existing SPEC invariants already assume the "blocked at the
+gate" model, so revisiting it is a larger discussion than this ADR's scope.
+
+**CLI lockout risk, found in review:** if an operator's very first `principal
+create` call (the one bootstrap call that may omit `--author`) creates a
+principal at less than `admin` capability — the CLI's own `--capability`
+default is `propose` — every subsequent `principal create` call is
+permanently blocked: `--author` is now required, but no principal in the
+database holds `admin` to satisfy it. The denial message names the SDK
+escape hatch (`Ontology.create_principal(..., default_capability="admin")`)
+explicitly for exactly this reason, but there's no guard rail preventing the
+lockout from happening in the first place. Deliberately not hardened further
+in this ADR — forcing the bootstrap principal to be `admin` would remove
+legitimate uses of the bootstrap exception (e.g. seeding a lower-capability
+principal first in a test fixture) for a failure mode the improved error
+message already makes recoverable, just not automatically.
 
 ## References
 
