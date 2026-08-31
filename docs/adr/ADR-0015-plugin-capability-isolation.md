@@ -149,9 +149,51 @@ infrastructure commitment than the storage-capability view, and the Implementati
 correctly phases it to "v1... hardened... by 1.0." Building it now, before any real plugin exists
 to run in it, would be speculative infrastructure ahead of need.
 
+## Update (2026-08-30): registration-time warning added (KI-014's still-open half)
+
+A milestone-boundary security audit re-confirmed the two "Negative" consequences named above are
+still exactly true — no code change to either has landed since this ADR shipped — and escalated
+them to HIGH severity given the context has changed materially: this design now ships with four
+real reference plugins and a documented third-party entry-point contract, not the "no plugin
+loader existed yet" state this ADR was originally written against. Recorded as an update to
+KI-014 (the same "network/filesystem enforcement" item that KI already tracks as its still-open
+half), not a new KI number — same underlying gap, re-surfaced by the same kind of audit.
+
+**What changed:** `PluginRegistry.register()` now logs a `logging.WARNING` when a plugin's
+manifest declares `capabilities.network=True` or `capabilities.filesystem=True`, naming the
+plugin, which capabilities were requested, and stating plainly that they are not enforced. This
+targets a specific, narrower problem than the "Negative" consequences themselves: an operator
+granting these capabilities at registration time — the moment that actually matters — previously
+had no signal *at that moment* that the declaration does nothing, only this ADR's own prose (which
+they may never read) and `PluginCapabilities`'s docstring (same problem). The warning doesn't
+change what's enforced; it closes the gap between what the manifest API visually implies
+("declaring `network=False` is a control") and what's actually true.
+
+**What did not change, and is not fixed by this update:** SPEC §17's "MUST deny undeclared access
+(storage, network, filesystem)" remains unmet for the network/filesystem dimensions — this update
+adds visibility, not enforcement. `ReadOnlyView.query(...)`'s `QueryBuilder` (and the equivalent
+for `.as_of(...)`) still holds a raw `StorageBackend` reference reachable by any code willing to
+reach past the view's intended surface — this was not changed, and this ADR's own Consequences
+section already correctly frames why: Python has no true encapsulation, and no object-level API
+change closes that path for a genuinely adversarial plugin author, only real process/wasm
+isolation does. Attempting to "materialize" `query()`'s results eagerly to avoid exposing a
+backend-carrying object was considered and rejected: it would break the fluent builder API
+(`.where(...).limit(n).all()`) that's the whole point of `QueryBuilder`, for a security property
+Python's object model can't actually provide regardless.
+
+**Deliberately not built in this update:** real process/subprocess/wasm isolation for
+`PluginKind` plugins, per this ADR's own Alternatives Considered section calling it "premature...
+before any real plugin exists to run in it." Four reference plugins now exist, which weakens that
+original rationale somewhat, but implementing real isolation is a materially larger, separate
+infrastructure project — sandboxed process execution, IPC for the view's method calls, resource
+limits — not a fix that fits alongside a milestone-boundary audit's other findings. Remains
+tracked as the Implementation Plan's own phasing already states ("process isolation in v1,
+wasm/subprocess hardening + signed registry plugins by 1.0") and as KI-014's still-open half.
+
 ## References
 
-- `docs/known-issues.md` KI-014 (the finding this ADR closes, storage half)
+- `docs/known-issues.md` KI-014 (the finding this ADR closes; storage half resolved, network/
+  filesystem half re-escalated and partially mitigated by the 2026-08-30 audit, see Update above)
 - ADR-0003 (Agent identity, `acting_as` delegation — the reason views expose no delegation surface)
 - ADR-0014 (MCP authentication — the `require_admin`/token-issuance-gate precedent this mirrors)
 - SPEC §13 (Plugin protocols and discovery), §17 (Security model, plugin sandboxing)
