@@ -7,6 +7,7 @@ loading a plugin creates a standing in-process actor, a higher-stakes action
 than the plugin's own requested capability.
 """
 
+import logging
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 from typing import Any, get_args
@@ -16,6 +17,8 @@ from ontolith.identity.principal import min_capability
 from ontolith.ontology import Ontology
 from ontolith.plugins.manifest import PluginKind, PluginManifest
 from ontolith.plugins.views import ReadOnlyView, WriteView
+
+_logger = logging.getLogger(__name__)
 
 _ENTRY_POINT_GROUP = "ontolith.plugins"
 _PLUGIN_METADATA_MARKER = "ontolith_plugin"
@@ -82,6 +85,14 @@ class PluginRegistry:
                 missing/invalid, a write-capable plugin's effective
                 capability resolved to "read", or the plugin's name is
                 already occupied by an unrelated principal
+
+        Note:
+            Logs a `logging.WARNING` (KI-014) if the plugin's manifest
+            declares `capabilities.network`/`.filesystem` — neither is
+            actually enforced yet, so the manifest declaration alone
+            doesn't restrict anything. Only logged on successful
+            registration (the plugin actually becomes a standing
+            in-process actor), not on a failed attempt.
         """
         self._kb.require_admin(author)
 
@@ -100,6 +111,12 @@ class PluginRegistry:
 
         principal_id = self._ensure_principal(manifest, effective_capability)
         view = self._build_view(principal_id, effective_capability)
+        # Warn only once registration actually succeeds (review finding):
+        # this plugin is now live in-process with unenforced network/
+        # filesystem access, which is the claim the warning makes — a
+        # registration attempt that fails before this point never becomes
+        # a standing in-process actor at all.
+        self._warn_if_unenforced_capabilities_requested(manifest)
 
         return LoadedPlugin(
             manifest=manifest,
@@ -137,6 +154,43 @@ class PluginRegistry:
                 f"Plugin {entry_point_name!r} manifest is not a PluginManifest instance"
             )
         return manifest
+
+    def _warn_if_unenforced_capabilities_requested(self, manifest: PluginManifest) -> None:
+        """Log a visible warning when a plugin declares network/filesystem
+        intent — only `capabilities.storage` is actually enforced (KI-014):
+        the plugin runs in-process with no process/wasm isolation, so
+        declaring `network=False`/`filesystem=False` does not prevent a
+        plugin from making network calls or touching the filesystem
+        anyway. `PluginCapabilities`'s own docstring already states this;
+        this warning exists so an operator deciding whether to register
+        this plugin at all — the moment that actually matters, not a
+        docstring they may never read — gets an explicit, real-time
+        signal rather than a false sense of enforcement. There is no
+        separate "grant" for network/filesystem the way there is for
+        storage (`granted_capability`); the plugin author declares intent
+        in the manifest, and the operator's only lever is whether to
+        register the plugin at all. See ADR-0015's Consequences for the
+        full statement of what this module does and doesn't defend
+        against.
+        """
+        unenforced = [
+            name
+            for name, requested in (
+                ("network", manifest.capabilities.network),
+                ("filesystem", manifest.capabilities.filesystem),
+            )
+            if requested
+        ]
+        if unenforced:
+            _logger.warning(
+                "Plugin %r declares capabilities.%s=True, but %s not enforced — "
+                "the plugin runs in-process with no isolation and can make network "
+                "calls / touch the filesystem regardless of this declaration "
+                "(ADR-0015, KI-014). Only capabilities.storage is actually enforced.",
+                manifest.name,
+                "/".join(unenforced),
+                "is" if len(unenforced) == 1 else "are",
+            )
 
     def _effective_capability(self, manifest: PluginManifest, granted: str) -> str:
         """min(requested, granted), then hard-capped to 'read' for read-only

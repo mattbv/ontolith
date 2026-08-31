@@ -322,6 +322,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   KI-054, same ADR) — **any script or runbook calling `ontolith principal
   create` without `--author` against a non-empty database now exits 1** instead
   of succeeding.
+- **Security:** `PluginRegistry.register()` (`plugins/registry.py`) now logs a warning, on
+  successful registration, when a plugin's manifest declares `capabilities.network=True` or
+  `capabilities.filesystem=True` (amends KI-014's still-open half, ADR-0015). Only
+  `capabilities.storage` is actually enforced — plugins run in-process with no process/wasm
+  isolation — so declaring these was previously silent, leaving an operator deciding whether to
+  register the plugin with no signal, at the moment that matters, that the declaration does
+  nothing. Three of the four shipped reference plugins (`CsvImporter`, `JsonExporter`,
+  `RdfExporter`) declare `filesystem=True` and now log this on every registration — expected, not
+  a regression. Visibility only, not enforcement: SPEC §17's MUST for network/filesystem
+  isolation remains unmet. Real process/wasm isolation is unchanged, tracked separately per the
+  Implementation Plan's existing phasing.
 - GraphQL resolvers (`interfaces/graphql.py`) no longer block the ASGI event loop
   (closes KI-052, amends ADR-0037). Every `Query`/`Mutation` field, plus
   `EntityType.assertions` and `create_graphql_app`'s `_get_context`, is now
