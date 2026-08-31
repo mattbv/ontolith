@@ -317,10 +317,18 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     ) -> dict[str, Any]:
         """Create a proposal to assert a fact or relation. Does NOT write directly.
 
-        The proposal is evaluated by the policy engine:
+        The proposal is evaluated by the server's configured `PolicyStrategy`
+        (SPEC §9.2). Under the default `ThresholdPolicy`:
         - Trusted principals → auto_accepted (assertion written immediately)
         - AI/low-trust principals → require_review (queued for human review)
         - Read-only principals → rejected
+
+        A deployment MAY configure a different strategy (e.g. `SourceQuorum`,
+        `Composite`) with different rules — `ThresholdPolicy`'s "AI principals
+        always require review" guarantee (ADR-0003) is that strategy's own
+        design choice, not enforced unconditionally by this tool. Check the
+        server's actual policy configuration before relying on it (KI-061,
+        ADR-0040).
 
         Conflict-routing temporality is resolved server-side from the active
         schema's declaration for ``predicate`` (SPEC §10.1) — it is not a
@@ -550,9 +558,11 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         acting principal is resolved from ``token`` (ADR-0014), never taken
         as a caller-supplied ID. This is the only MCP-exposed way for an AI
         principal to act on a ``changes_requested`` proposal it authored —
-        AI proposals always route to require_review (ADR-0003), so an AI
-        author reaching changes_requested has no write capability to fall
-        back on outside this tool.
+        under the default ``ThresholdPolicy``, AI proposals always route to
+        require_review (ADR-0003), so an AI author reaching
+        changes_requested has no write capability to fall back on outside
+        this tool. A deployment on a different `PolicyStrategy` (KI-061,
+        ADR-0040) may route AI proposals differently.
 
         Args:
             proposal_id: ID of the proposal to resubmit

@@ -1290,19 +1290,19 @@ Add `issued_by`/`revoked_by` columns to `principal_credential` (both backends). 
 
 ---
 
-## KI-061 — `SourceQuorum` policy strategy silently drops the "AI proposals always require review" invariant
+## KI-061 — `SourceQuorum` policy strategy silently drops the "AI proposals always require review" invariant ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — the headline AI-safety guarantee becomes policy-dependent without any interface saying so
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved via ADR-0040
 **SPEC reference:** SPEC §9.2 (policy strategies, `Composite`), ADR-0003 (AI/low-trust principals require review)
 
 ### Description
 
-`SourceQuorum` (`govern/policy.py:206-288`) has no `kind`-based check anywhere in its evaluation — only `ThresholdPolicy` (the default) implements the "AI-kind principal always routes to review" rule (`policy.py:149-154`). `Ontology.propose`/`propose_ref` themselves have no AI check of their own (`ontology.py:1152-1156`) — the configured `PolicyStrategy` is the *only* thing standing between an AI-authored proposal and an immediate auto-accepted write. A deployment configured with `Ontology(backend, policy=SourceQuorum(2))` silently loses the guarantee, while MCP's tool docstrings (`mcp.py:320-323`, `:483-486`) continue telling agent callers their proposals are always queued for human review — which is only true under the default strategy. SPEC §9.2's `Composite` strategy, named in `SourceQuorum`'s own docstring as the intended resolution, isn't implemented.
+`SourceQuorum` (`govern/policy.py:206-288`) has no `kind`-based check anywhere in its evaluation — only `ThresholdPolicy` (the default) implements the "AI-kind principal always routes to review" rule (`policy.py:149-154`). `Ontology.propose`/`propose_ref` themselves have no AI check of their own (`ontology.py:1152-1156`) — the configured `PolicyStrategy` is the *only* thing standing between an AI-authored proposal and an immediate auto-accepted write. A deployment configured with `Ontology(backend, policy=SourceQuorum(2))` silently loses the guarantee, while MCP's tool docstrings (`mcp.py:320-323`, `:483-486`) continued telling agent callers their proposals are always queued for human review — which is only true under the default strategy. SPEC §9.2's `Composite` strategy, named in `SourceQuorum`'s own docstring as the intended resolution, wasn't implemented.
 
 ### Fix
 
-Either lift the AI-requires-review check into `Ontology.propose`/`propose_ref`/`retract` itself (ahead of policy evaluation, so it can't be configured away), or implement the `Composite` strategy and correct every interface docstring that currently states the guarantee unconditionally.
+`SourceQuorum`'s AI-auto-accept behavior is a deliberate ADR-0025 decision, pinned by its own conformance vector — this was decided not to be silently reversed. Instead, built SPEC §9.2's `Composite(all=…, any=…)` (`govern/policy.py`, ADR-0040): every strategy in `all` must independently `AutoAccept` (most-restrictive decision wins), at least one in `any` must (least-restrictive wins), same-severity decisions merge rather than one being discarded. `Composite(all=[<an AI-review strategy>, SourceQuorum(2)])` now actually expresses the combination ADR-0025 named but couldn't build. No new "AI-always-reviews" strategy shipped — `ThresholdPolicy` can't be reused for this (it would re-impose its own capability gate too), so the pattern is documented as a five-line inline example in `Composite`'s own docstring instead. MCP's `ontolith.propose`/`ontolith.resubmit` docstrings corrected to attribute the guarantee to the *default* `ThresholdPolicy`, not state it unconditionally.
 
 ---
 
@@ -1419,6 +1419,22 @@ For SSE, read the token from an `Authorization` header instead of a tool argumen
 ### Fix
 
 Either change the LinkML bridge's `Float` mapping to something that round-trips to 64-bit precision, or add a cross-reference note to ADR-0013 so the inconsistency is discoverable from either bridge's own documentation, closing the one-sided disclosure.
+
+---
+
+## KI-069 — SPEC §9.2 still names four unbuilt `PolicyStrategy` implementations
+
+**Severity:** Architecture gap — a SPEC SHOULD-list gap with no open tracking item once KI-061 closes
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §9.2 (policy strategies)
+
+### Description
+
+SPEC §9.2 names six built-in `PolicyStrategy` implementations a conforming implementation SHOULD provide: `ConfidenceThreshold`, `TrustLevel`, `SourceRequired`, `RequireReviewByRole`, `SourceQuorum`, and `Composite(all=…, any=…)`. `SourceQuorum` (ADR-0025) and `Composite` (KI-061, ADR-0040) are now built; `ThresholdPolicy` (the default) covers roughly what `TrustLevel` would. `ConfidenceThreshold`, `SourceRequired`, and `RequireReviewByRole` remain entirely unbuilt, with no strategy in the codebase covering their specific behavior (confidence-based routing, requiring a non-empty `source`, and role-based reviewer assignment, respectively). Found while resolving KI-061 (ADR-0040's own Consequences section names this gap) — closing KI-061 removed the last KI that named it, leaving it untracked.
+
+### Fix
+
+Implement `ConfidenceThreshold`, `SourceRequired`, and `RequireReviewByRole` (or explicitly decide and record, per strategy, that it's out of scope for the foreseeable future) — each is a small, independent `PolicyStrategy`, not a combinator like `Composite`, so they can be picked up individually rather than as one large PR.
 
 ---
 

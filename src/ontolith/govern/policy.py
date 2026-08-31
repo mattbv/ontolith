@@ -8,6 +8,7 @@ no writes and deterministic given its inputs — a strategy MAY read via ``kb``
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Protocol
 
 from ontolith.govern.proposal import Proposal
@@ -193,7 +194,7 @@ class SourceQuorum:
 
     Rejects principals without at least ``propose`` capability, mirroring
     ``ThresholdPolicy``'s read-only rejection — with no other pre-write
-    capability check in `Ontology.propose`/`propose_ref`/`retract`, KI-016's
+    capability check in `Ontology.propose`/`propose_ref`/`retract`, KI-015's
     resolution requires every ``PolicyStrategy`` to enforce this floor itself
     (`docs/known-issues.md`).
 
@@ -207,9 +208,11 @@ class SourceQuorum:
     "AI always requires review" rule (ADR-0003) is that strategy's own
     design choice, not a cross-cutting invariant every ``PolicyStrategy``
     must reimplement — an AI-authored proposal CAN auto-accept here once
-    quorum is reached (`conformance/test_source_quorum_policy.py` pins this).
-    Combining a source-quorum rule with an AI-review rule is what SPEC
-    §9.2's ``Composite`` strategy is for — not built here.
+    quorum is reached (`conformance/test_source_quorum_policy.py` pins this
+    as deliberate, unchanged behavior). A deployment that wants both rules
+    combines them explicitly via ``Composite`` (KI-061, ADR-0040) — e.g.
+    ``Composite(all=[SourceQuorum(2), some_ai_review_strategy])`` — rather
+    than this class silently gaining an AI check of its own.
 
     Corroboration is checked against ``kb``'s pinned-at-``created_at`` state
     only — it does not compare the proposal's own ``valid_from``/``valid_to``
@@ -288,6 +291,198 @@ class SourceQuorum:
         )
 
 
+def _merge_reject(decisions: list[Reject]) -> Reject:
+    """Combine multiple Reject decisions into one, concatenating reasons in
+    input order (each retains its originating strategy's own wording)."""
+    return Reject("; ".join(d.reason for d in decisions))
+
+
+def _merge_require_review(decisions: list[RequireReview]) -> RequireReview:
+    """Combine multiple RequireReview decisions into one: reviewers are a
+    dedup'd union preserving first-seen order (the same reviewer named by
+    two strategies is only assigned once); reasons are concatenated in
+    input order."""
+    reviewers: list[str] = []
+    seen: set[str] = set()
+    for d in decisions:
+        for reviewer in d.reviewers:
+            if reviewer not in seen:
+                seen.add(reviewer)
+                reviewers.append(reviewer)
+    return RequireReview(reviewers, "; ".join(d.reason for d in decisions))
+
+
+def _merge_auto_accept(decisions: list[AutoAccept]) -> AutoAccept:
+    """Combine multiple AutoAccept decisions into one, concatenating reasons
+    in input order."""
+    return AutoAccept("; ".join(d.reason for d in decisions))
+
+
+def _most_restrictive(decisions: list[Decision]) -> Decision:
+    """The most restrictive decision among `decisions` (Reject > RequireReview
+    > AutoAccept), merging every decision at that severity level.
+
+    Used for `Composite(all=...)`: every strategy must independently agree
+    to auto-accept — one Reject or RequireReview anywhere in the group
+    overrides every AutoAccept the others returned, since "all" strategies
+    must approve for the group as a whole to approve.
+    """
+    rejects = [d for d in decisions if isinstance(d, Reject)]
+    if rejects:
+        return _merge_reject(rejects)
+    reviews = [d for d in decisions if isinstance(d, RequireReview)]
+    if reviews:
+        return _merge_require_review(reviews)
+    accepts = [d for d in decisions if isinstance(d, AutoAccept)]
+    return _merge_auto_accept(accepts)
+
+
+def _least_restrictive(decisions: list[Decision]) -> Decision:
+    """The least restrictive decision among `decisions` (AutoAccept >
+    RequireReview > Reject), merging every decision at that severity level.
+
+    Used for `Composite(any=...)`: only one strategy needs to approve — a
+    single AutoAccept anywhere in the group is enough for the group as a
+    whole to approve, regardless of what the others returned.
+    """
+    accepts = [d for d in decisions if isinstance(d, AutoAccept)]
+    if accepts:
+        return _merge_auto_accept(accepts)
+    reviews = [d for d in decisions if isinstance(d, RequireReview)]
+    if reviews:
+        return _merge_require_review(reviews)
+    rejects = [d for d in decisions if isinstance(d, Reject)]
+    return _merge_reject(rejects)
+
+
+class Composite:
+    """Combines PolicyStrategy instances into one decision (SPEC §9.2's
+    ``Composite(all=…, any=…)``).
+
+    Every strategy in ``all`` must independently return ``AutoAccept`` for
+    the ``all`` group to approve — a single ``Reject``/``RequireReview``
+    anywhere in the group overrides every ``AutoAccept`` the others
+    returned. At least one strategy in ``any`` must return ``AutoAccept``
+    for the ``any`` group to approve. Both groups must approve for
+    ``Composite`` itself to auto-accept (an unset group is excluded from
+    the combination entirely, rather than contributing a placeholder
+    decision — a caller passing only ``all=`` or only ``any=`` gets exactly
+    that group's own semantics, unconstrained by the other).
+
+    This is SPEC §9.2's sanctioned way to layer an unconditional rule (e.g.
+    ThresholdPolicy's "AI principals always require review", ADR-0003) on
+    top of a KB-inspecting strategy like ``SourceQuorum``, which
+    deliberately does not special-case AI authorship on its own (KI-061,
+    ADR-0025 §5). A deployment wanting both writes a small strategy for the
+    unconditional half and composes it — Ontolith does not ship a
+    standalone "AI always requires review" strategy, since ``ThresholdPolicy``
+    bundles that rule with its own capability/trust-level checks (using the
+    whole of ``ThresholdPolicy`` here would re-impose *its* capability gate
+    too, defeating the point of choosing ``SourceQuorum`` in the first
+    place)::
+
+        class RequireReviewForAI:
+            def evaluate(
+                self,
+                proposal: Proposal,
+                principal: Principal,
+                kb: KbView | None = None,
+                acting_as: Principal | None = None,
+            ) -> Decision:
+                if principal.kind == "ai":
+                    return RequireReview([principal.owner] if principal.owner else [],
+                                          "AI proposals require review")
+                return AutoAccept("non-AI: deferring to the rest of the Composite")
+
+        policy = Composite(all=[RequireReviewForAI(), SourceQuorum(2)])
+
+    When multiple strategies in the same group land at the same decision
+    severity (e.g. two ``RequireReview``s), their reviewers are merged as a
+    dedup'd union and their reasons are concatenated — every contributing
+    strategy's rationale is preserved, not just the first one evaluated.
+
+    Reads via ``kb`` are still permitted (this composes, not replaces, the
+    contained strategies) — purity/determinism holds as long as every
+    contained strategy holds it.
+
+    ``Composite`` does not itself enforce KI-015's read-capability floor
+    (``docs/known-issues.md``: "any future ``PolicyStrategy`` needs to make
+    the same deliberate choice; it is not inherited for free") — it is
+    exactly as permissive or restrictive as its contained strategies, by
+    design, since it is a combinator rather than a leaf strategy. This is
+    safe for ``all=``: any member's own ``Reject`` for a read-capability
+    principal (e.g. ``SourceQuorum``'s) still wins, since ``all`` uses the
+    most-restrictive decision. It is a real sharp edge for ``any=``: if one
+    member in the group doesn't check capability at all and would
+    otherwise ``AutoAccept``, that member's decision can win the group even
+    though a stricter sibling (like ``SourceQuorum``) would have rejected
+    the same principal — the same "OR" semantics that let one strategy's
+    approval cover for another's stricter rule also let it cover for a
+    missing capability check. Every strategy composed into an ``any=``
+    group should enforce the floor itself if that matters for the
+    deployment, the same way ``SourceQuorum`` already does.
+    """
+
+    def __init__(
+        self,
+        *,
+        all: Sequence[PolicyStrategy] = (),
+        any: Sequence[PolicyStrategy] = (),
+    ) -> None:
+        """Configure the strategy.
+
+        Args:
+            all: Strategies that must every one auto-accept.
+            any: Strategies of which at least one must auto-accept.
+
+        Raises:
+            ValueError: neither `all` nor `any` has any strategies —
+                a Composite with nothing to compose is a configuration
+                mistake, not a meaningful policy.
+        """
+        if not all and not any:
+            raise ValueError("Composite requires at least one strategy in `all` or `any`")
+        # Stored as tuples, not lists, and under a private name: a public
+        # mutable list would let `composite.all.clear()` silently empty a
+        # group after construction, bypassing the `__init__` guard above
+        # and making `evaluate()` fail open (found in review) instead of
+        # raising as a freshly-emptied `Composite()` would.
+        self._all = tuple(all)
+        self._any = tuple(any)
+
+    def evaluate(
+        self,
+        proposal: Proposal,
+        principal: Principal,
+        kb: KbView,
+        acting_as: Principal | None = None,
+    ) -> Decision:
+        """Evaluate every contained strategy and combine their decisions.
+
+        Unlike ``ThresholdPolicy`` (which never reads ``kb`` and so
+        defaults it to ``None`` for caller convenience), ``kb`` is required
+        here — a contained strategy (e.g. ``SourceQuorum``) may genuinely
+        need it, mirroring ``SourceQuorum``'s own required-``kb`` signature.
+        """
+        group_results: list[Decision] = []
+        if self._all:
+            group_results.append(
+                _most_restrictive(
+                    [s.evaluate(proposal, principal, kb, acting_as) for s in self._all]
+                )
+            )
+        if self._any:
+            group_results.append(
+                _least_restrictive(
+                    [s.evaluate(proposal, principal, kb, acting_as) for s in self._any]
+                )
+            )
+        # __init__ guarantees at least one group is non-empty, and both are
+        # immutable tuples set once at construction, so group_results is
+        # never empty here.
+        return _most_restrictive(group_results)
+
+
 __all__ = [
     "Decision",
     "AutoAccept",
@@ -297,4 +492,5 @@ __all__ = [
     "PolicyStrategy",
     "ThresholdPolicy",
     "SourceQuorum",
+    "Composite",
 ]

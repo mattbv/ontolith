@@ -105,7 +105,7 @@ the behavior stays deliberate. Combining a source-quorum rule with an AI-review 
 
 **6. `SourceQuorum` rejects principals below `propose` capability, mirroring `ThresholdPolicy`'s
 read-only rejection.** `Ontology.propose`/`propose_ref`/`retract` have no capability pre-check of
-their own — KI-016's resolution (`docs/known-issues.md`) explicitly relies on `ThresholdPolicy`
+their own — KI-015's resolution (`docs/known-issues.md`) explicitly relies on `ThresholdPolicy`
 being the thing that rejects `read`-capability principals on those paths. Since `PolicyStrategy` is
 now genuinely swappable, that safety net is only as good as whichever strategy is installed;
 without this check `SourceQuorum` alone would let a `read`-capability principal's proposal
