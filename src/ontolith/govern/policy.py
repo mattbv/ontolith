@@ -194,7 +194,7 @@ class SourceQuorum:
 
     Rejects principals without at least ``propose`` capability, mirroring
     ``ThresholdPolicy``'s read-only rejection — with no other pre-write
-    capability check in `Ontology.propose`/`propose_ref`/`retract`, KI-016's
+    capability check in `Ontology.propose`/`propose_ref`/`retract`, KI-015's
     resolution requires every ``PolicyStrategy`` to enforce this floor itself
     (`docs/known-issues.md`).
 
@@ -382,7 +382,13 @@ class Composite:
     place)::
 
         class RequireReviewForAI:
-            def evaluate(self, proposal, principal, kb=None, acting_as=None):
+            def evaluate(
+                self,
+                proposal: Proposal,
+                principal: Principal,
+                kb: KbView | None = None,
+                acting_as: Principal | None = None,
+            ) -> Decision:
                 if principal.kind == "ai":
                     return RequireReview([principal.owner] if principal.owner else [],
                                           "AI proposals require review")
@@ -398,6 +404,23 @@ class Composite:
     Reads via ``kb`` are still permitted (this composes, not replaces, the
     contained strategies) — purity/determinism holds as long as every
     contained strategy holds it.
+
+    ``Composite`` does not itself enforce KI-015's read-capability floor
+    (``docs/known-issues.md``: "any future ``PolicyStrategy`` needs to make
+    the same deliberate choice; it is not inherited for free") — it is
+    exactly as permissive or restrictive as its contained strategies, by
+    design, since it is a combinator rather than a leaf strategy. This is
+    safe for ``all=``: any member's own ``Reject`` for a read-capability
+    principal (e.g. ``SourceQuorum``'s) still wins, since ``all`` uses the
+    most-restrictive decision. It is a real sharp edge for ``any=``: if one
+    member in the group doesn't check capability at all and would
+    otherwise ``AutoAccept``, that member's decision can win the group even
+    though a stricter sibling (like ``SourceQuorum``) would have rejected
+    the same principal — the same "OR" semantics that let one strategy's
+    approval cover for another's stricter rule also let it cover for a
+    missing capability check. Every strategy composed into an ``any=``
+    group should enforce the floor itself if that matters for the
+    deployment, the same way ``SourceQuorum`` already does.
     """
 
     def __init__(
@@ -419,8 +442,13 @@ class Composite:
         """
         if not all and not any:
             raise ValueError("Composite requires at least one strategy in `all` or `any`")
-        self.all = list(all)
-        self.any = list(any)
+        # Stored as tuples, not lists, and under a private name: a public
+        # mutable list would let `composite.all.clear()` silently empty a
+        # group after construction, bypassing the `__init__` guard above
+        # and making `evaluate()` fail open (found in review) instead of
+        # raising as a freshly-emptied `Composite()` would.
+        self._all = tuple(all)
+        self._any = tuple(any)
 
     def evaluate(
         self,
@@ -437,20 +465,21 @@ class Composite:
         need it, mirroring ``SourceQuorum``'s own required-``kb`` signature.
         """
         group_results: list[Decision] = []
-        if self.all:
+        if self._all:
             group_results.append(
                 _most_restrictive(
-                    [s.evaluate(proposal, principal, kb, acting_as) for s in self.all]
+                    [s.evaluate(proposal, principal, kb, acting_as) for s in self._all]
                 )
             )
-        if self.any:
+        if self._any:
             group_results.append(
                 _least_restrictive(
-                    [s.evaluate(proposal, principal, kb, acting_as) for s in self.any]
+                    [s.evaluate(proposal, principal, kb, acting_as) for s in self._any]
                 )
             )
-        # __init__ guarantees at least one group is non-empty, so
-        # group_results is never empty here.
+        # __init__ guarantees at least one group is non-empty, and both are
+        # immutable tuples set once at construction, so group_results is
+        # never empty here.
         return _most_restrictive(group_results)
 
 

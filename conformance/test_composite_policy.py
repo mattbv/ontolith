@@ -86,6 +86,17 @@ def test_empty_composite_raises() -> None:
         Composite()
 
 
+def test_groups_are_not_publicly_mutable() -> None:
+    """Review finding: an earlier version stored the `all`/`any` groups as
+    public mutable lists, so `composite.all.clear()` could silently empty
+    a group after construction and make `evaluate()` fail open despite
+    `__init__`'s guard against an empty Composite. No public `all`/`any`
+    attribute exists to mutate anymore."""
+    policy = Composite(all=[_Fixed(AutoAccept("ok"))])
+    assert not hasattr(policy, "all")
+    assert not hasattr(policy, "any")
+
+
 def test_all_auto_accepts_when_every_strategy_does() -> None:
     policy = Composite(all=[_Fixed(AutoAccept("a")), _Fixed(AutoAccept("b"))])
     decision = policy.evaluate(PROPOSAL, PRINCIPAL, EMPTY_KB)
@@ -197,6 +208,35 @@ def test_is_deterministic() -> None:
     d2 = policy.evaluate(PROPOSAL, PRINCIPAL, EMPTY_KB)
     assert type(d1) is type(d2)
     assert d1.reason == d2.reason
+
+
+class _Spy:
+    """PolicyStrategy stub that records the exact (kb, acting_as) it was
+    called with, then auto-accepts - proves Composite forwards both
+    arguments to every contained strategy rather than dropping them."""
+
+    def __init__(self) -> None:
+        self.received_kb: object | None = None
+        self.received_acting_as: Principal | None = None
+
+    def evaluate(self, proposal, principal, kb=None, acting_as=None) -> Decision:
+        self.received_kb = kb
+        self.received_acting_as = acting_as
+        return AutoAccept("spy")
+
+
+def test_kb_and_acting_as_are_forwarded_to_every_contained_strategy() -> None:
+    delegate = _principal(id="delegate")
+    all_spy = _Spy()
+    any_spy = _Spy()
+    policy = Composite(all=[all_spy], any=[any_spy])
+
+    policy.evaluate(PROPOSAL, PRINCIPAL, EMPTY_KB, acting_as=delegate)
+
+    assert all_spy.received_kb is EMPTY_KB
+    assert all_spy.received_acting_as is delegate
+    assert any_spy.received_kb is EMPTY_KB
+    assert any_spy.received_acting_as is delegate
 
 
 class _RequireReviewForAI:

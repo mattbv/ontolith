@@ -453,9 +453,11 @@ class Ontology:
         A principal with `write` (or `admin`) capability MAY bypass proposals,
         but direct writes still pass through conflict routing (§10) and
         provenance is still recorded. AI-kind principals are never permitted
-        this path, even if misconfigured with elevated capability — AI
-        proposals always require review (ADR-0003); direct writes skip review
-        entirely.
+        this path, even if misconfigured with elevated capability — under the
+        default `ThresholdPolicy`, AI proposals always require review
+        (ADR-0003); direct writes skip review entirely, so this structural
+        block holds regardless of which `PolicyStrategy` a deployment
+        installs (KI-061, ADR-0040).
 
         Returns:
             (author principal, delegating principal or None)

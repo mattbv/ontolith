@@ -1422,6 +1422,22 @@ Either change the LinkML bridge's `Float` mapping to something that round-trips 
 
 ---
 
+## KI-069 — SPEC §9.2 still names four unbuilt `PolicyStrategy` implementations
+
+**Severity:** Architecture gap — a SPEC SHOULD-list gap with no open tracking item once KI-061 closes
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §9.2 (policy strategies)
+
+### Description
+
+SPEC §9.2 names six built-in `PolicyStrategy` implementations a conforming implementation SHOULD provide: `ConfidenceThreshold`, `TrustLevel`, `SourceRequired`, `RequireReviewByRole`, `SourceQuorum`, and `Composite(all=…, any=…)`. `SourceQuorum` (ADR-0025) and `Composite` (KI-061, ADR-0040) are now built; `ThresholdPolicy` (the default) covers roughly what `TrustLevel` would. `ConfidenceThreshold`, `SourceRequired`, and `RequireReviewByRole` remain entirely unbuilt, with no strategy in the codebase covering their specific behavior (confidence-based routing, requiring a non-empty `source`, and role-based reviewer assignment, respectively). Found while resolving KI-061 (ADR-0040's own Consequences section names this gap) — closing KI-061 removed the last KI that named it, leaving it untracked.
+
+### Fix
+
+Implement `ConfidenceThreshold`, `SourceRequired`, and `RequireReviewByRole` (or explicitly decide and record, per strategy, that it's out of scope for the foreseeable future) — each is a small, independent `PolicyStrategy`, not a combinator like `Composite`, so they can be picked up individually rather than as one large PR.
+
+---
+
 ## Format
 
 Each entry follows this structure:
