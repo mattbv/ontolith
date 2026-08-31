@@ -324,8 +324,8 @@ Each milestone ships only when its §2 exit criteria pass. The non-negotiables: 
 ## 14. Open execution questions
 
 1. ~~Second backend for the conformance kit — DuckDB+DuckPGQ vs a maintained graph engine; pick by M3 against the traversal benchmark.~~ **Resolved:** DuckDB chosen (ADR-0016). DuckPGQ/graph-native traversal deferred — no traversal method exists on `StorageBackend` yet for it to serve.
-2. **MCP SDK choice & version** for the server surface.
-3. **GraphQL library** (e.g. Strawberry) — confirm at M3.
+2. ~~**MCP SDK choice & version** for the server surface.~~ **Resolved:** the official `mcp` Python SDK's `mcp.server.fastmcp.FastMCP` (`interfaces/mcp.py`), version-capped `>=1.28.1,<2.0` (ADR-0008, ADR-0014).
+3. ~~**GraphQL library** (e.g. Strawberry) — confirm at M3.~~ **Resolved:** `strawberry-graphql` (ADR-0037).
 4. **CLA vs DCO** — decide before the first external contribution (affects relicensing flexibility, PRD §12).
 5. **Benchmark dataset** — synthetic generator parameters that resemble real org/research graphs.
 6. **Public API stability line** — exactly which symbols are covered by the SemVer guarantee at 1.0.

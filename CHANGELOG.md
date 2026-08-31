@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### M3 - Extensible (0.3) (In Progress)
+### M3 - Extensible (0.3)
 
 #### Added
 - RDF/OWL bridge, export only (SPEC §13.3, ADR-0036): `schema.rdf.to_owl(schema)`
