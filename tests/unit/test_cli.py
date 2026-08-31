@@ -1184,7 +1184,7 @@ class TestContradictionFlag:
             ["--db", str(db), "contradiction", "flag", "nope-a", "nope-b", "--author", author],
         )
         assert result.exit_code == 1
-        assert "Error" in result.output
+        assert "Assertion not found" in result.output
 
 
 class TestContradictionResolve:
@@ -1248,7 +1248,7 @@ class TestContradictionResolve:
             ],
         )
         assert result.exit_code == 1
-        assert "Error" in result.output
+        assert "lacks review capability" in result.output
 
 
 class TestNamespaceList:

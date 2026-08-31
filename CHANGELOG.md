@@ -13,7 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CLI `ontolith contradiction flag <id_a> <id_b> --author <id> [--rationale <text>]` and
   `ontolith contradiction resolve <id> --winner <assertion_id> --reviewer <id>` (closes KI-063) —
   the CLI was the only one of the four shipped interfaces with no contradiction write surface at
-  all (REST/GraphQL/MCP all had at least `flag`, three of four had `resolve`). Both are thin
+  all (REST/GraphQL/MCP all had at least `flag`; REST/GraphQL also had `resolve` — MCP
+  deliberately doesn't, per ADR-0008/KI-009's reviewer-only scoping). Both are thin
   wrappers around `Ontology.flag_contradiction()`/`resolve_contradiction()`, mirroring existing
   CLI conventions (`flag`'s `--author` matches `assert`/`retract`; `resolve`'s `--reviewer`/
   `--author` alias matches `proposal accept`).

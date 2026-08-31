@@ -18,7 +18,7 @@ app = typer.Typer(
 principal_app = typer.Typer(help="Manage principals.", no_args_is_help=True)
 entity_app = typer.Typer(help="Manage entities.", no_args_is_help=True)
 proposal_app = typer.Typer(help="Inspect and act on proposals.", no_args_is_help=True)
-contradiction_app = typer.Typer(help="Inspect contradictions.", no_args_is_help=True)
+contradiction_app = typer.Typer(help="Inspect and act on contradictions.", no_args_is_help=True)
 namespace_app = typer.Typer(help="Inspect namespaces.", no_args_is_help=True)
 schema_app = typer.Typer(help="Inspect and apply the schema.", no_args_is_help=True)
 app.add_typer(principal_app, name="principal")
@@ -618,8 +618,8 @@ def flag_contradiction(
 ) -> None:
     """Flag two assertions as contradictory, opening or extending a
     contradiction (SPEC §10.3). Requires propose capability or higher
-    (ADR-0008) — the same tier as `ontolith assert`'s governed
-    counterpart, not a reviewer-only action.
+    (ADR-0008) — the same tier as `ontolith retract`/`ontolith.propose`,
+    not a reviewer-only action.
     """
     kb = _kb()
     try:
