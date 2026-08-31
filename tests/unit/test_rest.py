@@ -1033,6 +1033,90 @@ class TestWriteAssertionRoute:
 
 
 # ---------------------------------------------------------------------------
+# POST /assertions/{assertion_id}/retract
+# ---------------------------------------------------------------------------
+
+
+class TestRetractAssertionRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        client, _ = _client(kb)
+        response = client.post(f"/assertions/{assertion.id}/retract")
+        assert response.status_code == 401
+
+    def test_write_capability_auto_accepts(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+
+        response = client.post(f"/assertions/{assertion.id}/retract", headers=_auth(token))
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["proposal"]["state"] == "auto_accepted"
+        assert body["decision"] == "AutoAccept"
+        retracted = kb.assertions(subject=entity.id, status=None)[0]
+        assert retracted.status == "retracted"
+
+    def test_ai_propose_requires_review(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(AI, author=ADMIN)
+
+        response = client.post(f"/assertions/{assertion.id}/retract", headers=_auth(token))
+
+        assert response.status_code == 201
+        body = response.json()
+        assert body["proposal"]["state"] == "require_review"
+        assert body["decision"] == "RequireReview"
+
+    def test_read_capability_rejected(self, tmp_path: Path) -> None:
+        # ThresholdPolicy resolves a read-capability author to a persisted
+        # Reject decision (SPEC §9.1's modeled state, not an exception) —
+        # same as POST /proposals's own read-capability case above.
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "readonly@example.com", kind="human", auth_method="oidc", default_capability="read"
+        )
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token("readonly@example.com", author=ADMIN)
+
+        response = client.post(f"/assertions/{assertion.id}/retract", headers=_auth(token))
+
+        assert response.status_code == 201
+        assert response.json()["proposal"]["state"] == "rejected"
+
+    def test_acting_as_delegation(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "delegate@example.com",
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            owner=HUMAN,
+        )
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token("delegate@example.com", author=ADMIN)
+
+        response = client.post(
+            f"/assertions/{assertion.id}/retract?acting_as={HUMAN}", headers=_auth(token)
+        )
+
+        assert response.status_code == 201
+        assert response.json()["proposal"]["acting_as"] == HUMAN
+
+
+# ---------------------------------------------------------------------------
 # POST /proposals/{proposal_id}/accept
 # ---------------------------------------------------------------------------
 

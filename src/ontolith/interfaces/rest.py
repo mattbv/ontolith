@@ -1,8 +1,9 @@
 """REST interface for Ontolith (SPEC §14.3, ADR-0021).
 
-Exposes read, propose, direct write, proposal review (accept/reject/
-request_changes/resubmit), contradiction listing/flagging/resolution,
-namespace listing, and principal/token admin over HTTP. Full SPEC §14.3
+Exposes read, propose, direct write, retraction (governed, KI-057), proposal
+review (accept/reject/request_changes/resubmit), contradiction listing/
+flagging/resolution, namespace listing, and principal/token admin over HTTP.
+Full SPEC §14.3
 resource parity (``/query`` offset pagination, GraphQL) is out of scope
 (KI-022).
 
@@ -847,6 +848,36 @@ def create_rest_app(
             valid_from=assertion.valid_from.isoformat() if assertion.valid_from else None,
             valid_to=assertion.valid_to.isoformat() if assertion.valid_to else None,
             supersedes=assertion.supersedes,
+        )
+
+    # ------------------------------------------------------------------
+    # POST /assertions/{assertion_id}/retract
+    # ------------------------------------------------------------------
+
+    @app.post("/assertions/{assertion_id}/retract", status_code=201)
+    def retract_assertion_route(
+        assertion_id: str,
+        acting_as: str | None = None,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> ProposeOut:
+        """Propose retraction of an assertion through the governed
+        proposal/policy pipeline (SPEC §9). Does NOT delete or write
+        directly — same propose/policy/conflict-routing pipeline as POST
+        /proposals. When acting_as is set the retraction is made on
+        behalf of another principal (delegation, ADR-0003)."""
+        proposal, decision = kb.retract(assertion_id, author=principal.id, acting_as=acting_as)
+        return ProposeOut(
+            proposal=ProposalOut(
+                id=proposal.id,
+                namespace=proposal.namespace,
+                author=proposal.author,
+                acting_as=proposal.acting_as,
+                state=proposal.state,
+                created_at=proposal.created_at.isoformat(),
+                decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
+                policy_reason=proposal.policy_reason,
+            ),
+            decision=type(decision).__name__,
         )
 
     # ------------------------------------------------------------------

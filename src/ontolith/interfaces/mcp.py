@@ -3,7 +3,7 @@
 Exposes read/propose/flag tools to AI agents. No direct write tool is exposed;
 all mutations flow through the proposal/policy pipeline.
 
-Tools (ADR-0008, plus resubmit added for KI-027):
+Tools (ADR-0008, plus resubmit added for KI-027, retract added for KI-057/ADR-0039):
   ontolith.schema           — read concept/relation definitions
   ontolith.get              — fetch entity + current assertions
   ontolith.query            — symbolic entity retrieval
@@ -11,6 +11,7 @@ Tools (ADR-0008, plus resubmit added for KI-027):
   ontolith.propose          — create a proposal (NOT write)
   ontolith.flag_contradiction — open/extend a contradiction for review
   ontolith.resubmit         — resubmit a changes_requested proposal (NOT write)
+  ontolith.retract          — propose retraction of an assertion (NOT write)
 
 Authentication (ADR-0014): every tool, reads included, takes a bearer
 ``token``. The server resolves the token to a Principal via the injected
@@ -396,6 +397,74 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             return {"error": str(exc), "code": "capability_error"}
         except ValidationError as exc:
             return {"error": str(exc), "code": "validation_error"}
+
+        return {
+            "proposal": {
+                "id": proposal.id,
+                "state": proposal.state,
+                "policy_reason": proposal.policy_reason,
+                "decided_at": proposal.decided_at.isoformat() if proposal.decided_at else None,
+                "acting_as": proposal.acting_as,
+            },
+            "decision": type(decision).__name__,
+        }
+
+    # ------------------------------------------------------------------
+    # ontolith.retract — propose retraction of an assertion (NOT a direct write)
+    # ------------------------------------------------------------------
+
+    @mcp.tool(name="ontolith.retract")
+    def retract_tool(
+        assertion_id: str,
+        token: str,
+        acting_as: str | None = None,
+    ) -> dict[str, Any]:
+        """Propose retraction of an assertion through the governed
+        proposal/policy pipeline (SPEC §9). Does NOT delete or write
+        directly — same propose/policy/conflict-routing pipeline as
+        ``ontolith.propose``, exposed at the same propose capability tier
+        (ADR-0008/ADR-0039), unlike ``resolve_contradiction`` which stays
+        reviewer-only and is deliberately not exposed via MCP at all.
+
+        The acting principal is resolved from ``token`` (ADR-0014), never
+        taken as a caller-supplied ID. When ``acting_as`` is set
+        (delegation), the retraction is made on behalf of another
+        principal (SPEC §8.4, ADR-0003).
+
+        Args:
+            assertion_id: ID of the assertion to retract
+            token: Bearer token identifying the calling principal (ADR-0014)
+            acting_as: Optional principal ID being acted on behalf of (delegation)
+
+        Returns:
+            Dict with "proposal" (id, state, policy_reason, decided_at) and
+            "decision" type, or "error".
+
+        Note:
+            Unlike ``ontolith.resubmit``, ``retract()`` cannot raise
+            ``NotFoundError``/``ValidationError`` — an unknown
+            ``assertion_id`` surfaces as ``StorageError`` from the backend
+            write itself (pre-existing, not specific to this tool; REST's
+            generic ``OntolithError`` handler maps it to a redacted 500
+            the same way). Only ``AuthError`` (bad token, or an unknown
+            ``acting_as``) and ``CapabilityError`` (delegation not owned,
+            or the KI-033/KI-043 contradiction party/floor guards) are
+            actually reachable from ``kb.retract()``, so those are the
+            only two caught here.
+        """
+        from ontolith.core.errors import AuthError, CapabilityError
+
+        try:
+            author = auth_provider.resolve(token).id
+        except AuthError as exc:
+            return {"error": str(exc), "code": "auth_error"}
+
+        try:
+            proposal, decision = kb.retract(assertion_id, author=author, acting_as=acting_as)
+        except AuthError as exc:
+            return {"error": str(exc), "code": "auth_error"}
+        except CapabilityError as exc:
+            return {"error": str(exc), "code": "capability_error"}
 
         return {
             "proposal": {

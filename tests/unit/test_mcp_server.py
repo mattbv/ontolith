@@ -660,7 +660,8 @@ class TestProposeTool:
         assert tool_names.isdisjoint(forbidden)
 
     def test_all_required_tools_registered(self, tmp_path: Path) -> None:
-        """ADR-0008 plus resubmit (KI-027): all 7 required tools must be present."""
+        """ADR-0008 plus resubmit (KI-027) and retract (KI-057, ADR-0039):
+        all 8 required tools must be present."""
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}
@@ -672,6 +673,7 @@ class TestProposeTool:
             "ontolith.propose",
             "ontolith.flag_contradiction",
             "ontolith.resubmit",
+            "ontolith.retract",
         }
         assert required.issubset(tool_names)
 
@@ -929,3 +931,99 @@ class TestResubmitTool:
 
         assert "error" in result
         assert result["code"] == "auth_error"
+
+
+# ---------------------------------------------------------------------------
+# ontolith.retract (KI-057, ADR-0039)
+# ---------------------------------------------------------------------------
+
+
+class TestRetractTool:
+    def test_write_capability_auto_accepts(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.retract").fn(
+            assertion_id=assertion.id,
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+        )
+
+        assert result["proposal"]["state"] == "auto_accepted"
+        assert result["decision"] == "AutoAccept"
+        retracted = kb.assertions(subject=entity.id, status=None)[0]
+        assert retracted.status == "retracted"
+
+    def test_ai_requires_review(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.retract").fn(
+            assertion_id=assertion.id,
+            token=kb.issue_token(AI, author=ADMIN)[0],
+        )
+
+        assert result["proposal"]["state"] == "require_review"
+        assert result["decision"] == "RequireReview"
+
+    def test_acting_as_delegation(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "delegate@example.com",
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            owner=HUMAN,
+        )
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.retract").fn(
+            assertion_id=assertion.id,
+            token=kb.issue_token("delegate@example.com", author=ADMIN)[0],
+            acting_as=HUMAN,
+        )
+
+        assert result["proposal"]["acting_as"] == HUMAN
+
+    def test_retract_invalid_token_returns_auth_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.retract").fn(
+            assertion_id=assertion.id,
+            token="not-a-real-token",
+        )
+
+        assert "error" in result
+        assert result["code"] == "auth_error"
+
+    def test_party_to_contradiction_returns_capability_error(self, tmp_path: Path) -> None:
+        """KI-033: a party to an open contradiction can't retract the
+        opposing member, even at write capability (auto-accept would
+        otherwise let them unilaterally settle their own dispute)."""
+        kb = _kb(tmp_path)
+        kb.create_principal("wendy@example.com", kind="human", default_capability="write")
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", "wendy@example.com")
+        opposing = next(
+            a
+            for a in kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+            if a.author == "wendy@example.com"
+        )
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.retract").fn(
+            assertion_id=opposing.id,
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+        )
+
+        assert "error" in result
+        assert result["code"] == "capability_error"

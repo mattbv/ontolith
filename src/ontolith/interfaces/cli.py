@@ -317,6 +317,42 @@ def list_assertions(
         kb.close()
 
 
+# ─── retract ──────────────────────────────────────────────────────────────────
+
+
+@app.command("retract")
+def retract_assertion(
+    assertion_id: Annotated[str, typer.Argument(help="Assertion ID to retract.")],
+    author: Annotated[
+        str,
+        typer.Option("--author", help="Principal ID of the retracting author."),
+    ],
+    acting_as: Annotated[
+        str | None,
+        typer.Option("--acting-as", help="Retract on behalf of another principal (delegation)."),
+    ] = None,
+) -> None:
+    """Propose retraction of an assertion through the governed
+    proposal/policy pipeline (SPEC §9). Does NOT delete or write directly —
+    same propose/policy/conflict-routing pipeline as `ontolith assert`'s
+    governed counterpart. May auto-accept, require review, or route through
+    a contradiction's own capability floor depending on policy and the
+    assertion's current state.
+    """
+    kb = _kb()
+    try:
+        proposal, decision = kb.retract(assertion_id, author=author, acting_as=acting_as)
+        typer.echo(
+            f"Retract proposed: {proposal.id}  state={proposal.state}  "
+            f"decision={type(decision).__name__}  reason={proposal.policy_reason or '-'}"
+        )
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
 # ─── query ────────────────────────────────────────────────────────────────────
 
 
