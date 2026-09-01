@@ -1470,6 +1470,22 @@ Either accumulate a per-extension rationale somewhere retrievable (e.g. a list i
 
 ---
 
+## KI-073 — MCP has no way to require the `Authorization` header, so a deployment can't close the `token`-argument exposure outright
+
+**Severity:** Architecture gap — the fix KI-067 shipped makes the exposure avoidable, not eliminated
+**Milestone target:** Backlog
+**SPEC reference:** ADR-0014 (bearer-token authentication)
+
+### Description
+
+KI-067/ADR-0014 made every MCP tool's `token` argument optional and prefer a transport-level `Authorization` header when one is present and well-formed, closing the default exposure of a live credential landing in the calling model's own context. But the `token` argument still works whenever no header is supplied at all — an HTTP (SSE/streamable-HTTP) deployment cannot currently *require* the header and reject the argument outright. A model that already has a token in its context (or a client that keeps emitting one out of habit) can keep authenticating via the argument indefinitely; nothing server-side forces the more private channel to actually be used.
+
+### Fix
+
+Add an opt-in `require_header_token: bool = False` parameter to `create_mcp_server()` that, when set, makes `_bearer_token()` return the "No bearer token provided"/"Malformed Authorization header" errors even for a live HTTP request whose header is absent — i.e. disables the argument fallback entirely for HTTP transports (stdio, which has no header channel at all, would need its own carve-out or would simply be unusable with the flag set, which is fine since stdio-facing principals already need the argument). Not built as part of KI-067 itself — that KI's own Fix text scoped it to making the header path available and preferred, and this is a strictly opt-in hardening a deployment reaches for once available, not a fix for a live vulnerability.
+
+---
+
 ## Format
 
 Each entry follows this structure:

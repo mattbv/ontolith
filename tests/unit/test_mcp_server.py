@@ -1151,6 +1151,24 @@ class TestBearerTokenTransport:
 
         assert result == {"concepts": []}
 
+    def test_unresolvable_header_token_does_not_fall_back_to_valid_argument(
+        self, tmp_path: Path
+    ) -> None:
+        """The strongest fail-closed case: a well-formed header carrying a
+        token that doesn't resolve to any principal must fail — even
+        alongside a `token` argument that IS valid. The header winning only
+        when it happens to work would defeat the point (a caller could
+        smuggle a bad header past authentication by also supplying a good
+        argument); the header must win, full stop, once it's well-formed."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        valid_token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request("Bearer not-a-real-token"):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=valid_token)
+
+        assert result == {"error": "Invalid or revoked token", "code": "auth_error"}
+
     def test_no_header_falls_back_to_token_argument(self, tmp_path: Path) -> None:
         """A live HTTP request with no Authorization header at all (as
         opposed to no HTTP request/context existing) still falls back to

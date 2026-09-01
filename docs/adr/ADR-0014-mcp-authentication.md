@@ -176,6 +176,14 @@ silently falling back to the argument on ANY unparseable header, not just an abs
 exposure this fix exists to remove, reopened with no signal, the moment a proxy's header injection
 ever misconfigured. Fixed before merge, not left as a follow-up.)
 
+**Migration note:** a deployment sitting behind a proxy/gateway that already sets its own
+`Authorization` header for an unrelated purpose (its own bearer scheme, or a foreign token) — and
+that was previously relying on the `token` *argument* to authenticate to Ontolith — now fails
+closed instead of authenticating via the argument, since a present header always takes priority and
+a malformed or unresolvable one is never silently skipped. This is the intended tightening, not a
+bug, but it is a real behavior change for that specific setup: such a deployment must strip or
+rename the incoming header before proxying to Ontolith's MCP server.
+
 **Why not adopt the mcp SDK's built-in OAuth-shaped bearer-auth stack instead** (`FastMCP(auth=...,
 token_verifier=...)`, `RequireAuthMiddleware`/`BearerAuthBackend`): that machinery models a full
 OAuth 2.1 resource server — it requires an `issuer_url` and advertises RFC 9728 Protected Resource
@@ -201,9 +209,10 @@ remains an accepted, schema-advertised argument on every tool, so a model that a
 in context can keep emitting it and it will keep authenticating (the header only wins when both are
 present *and* well-formed). A `require_header_token: bool` flag on `create_mcp_server()` that
 disables the argument fallback entirely for HTTP transports would let a deployment close this
-outright — not built here, since KI-067's own Fix text scoped this pass to making the header path
-available and preferred, not to removing the argument path. Left as a named follow-up rather than
-silently left unaddressed.
+outright — not built here: it's an opt-in hardening a deployment could reach for once available,
+not a fix for a live vulnerability (the default behavior changes nothing on its own), so it was
+judged out of scope for this pass rather than blocking it. Tracked as KI-073 rather than left as
+ADR prose only.
 
 ## References
 
@@ -214,4 +223,4 @@ silently left unaddressed.
   return-type change above)
 - SPEC §8.2 (Authentication), §14.4 (MCP server)
 - `identity/ports.py` (`AuthProvider`, stubbed since M0)
-- `docs/known-issues.md` KI-024, KI-067 (both now resolved)
+- `docs/known-issues.md` KI-024, KI-067 (both resolved), KI-073 (the deferred `require_header_token` follow-up)
