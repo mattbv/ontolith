@@ -75,6 +75,18 @@ class SQLiteBackend:
     - assertion table with ULID primary key
     - Bitemporal columns (asserted_at, valid_from, valid_to)
     - Status tracking for append-only invariant
+
+    KI-066: `assertion_event`/`proposal_event`'s append-only invariant
+    (SPEC §17) is backed here by three triggers per table — `BEFORE
+    UPDATE`, `BEFORE DELETE`, and `BEFORE INSERT ... WHEN EXISTS(...)` —
+    raising `sqlite3.IntegrityError` on any raw mutation attempt, not just
+    the port surface exposing no update/delete method. The `BEFORE INSERT`
+    trigger is what actually closes `INSERT OR REPLACE`: it is schema
+    state (persisted in the file, enforced on every connection), unlike
+    `PRAGMA recursive_triggers = ON` (also set below, as defense in depth)
+    which is per-connection and does not by itself stop a second raw
+    connection to the same file from reviving the REPLACE bypass. `DuckDBBackend`
+    has no equivalent — see its own docstring.
     """
 
     def __init__(self, path: str | Path, *, clock: Clock | None = None) -> None:
@@ -98,6 +110,15 @@ class SQLiteBackend:
         self.conn = sqlite3.connect(str(self.path), isolation_level=None, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        # KI-066 review: recursive_triggers defaults OFF, and SQLite only
+        # fires a BEFORE DELETE trigger for an `INSERT OR REPLACE`
+        # conflict-row removal when this is ON — without it, `INSERT OR
+        # REPLACE INTO assertion_event ...` with an existing id silently
+        # rewrites the row (including `actor`, laundering attribution)
+        # instead of tripping trg_assertion_event_no_delete/
+        # trg_proposal_event_no_delete below. Verified empirically: the
+        # bypass reproduces with this OFF and is blocked with it ON.
+        self.conn.execute("PRAGMA recursive_triggers = ON")
         # entities_where()'s __contains filter (KI-039) uses LIKE; SQLite's
         # default LIKE is ASCII-case-insensitive, DuckDB's is case-sensitive
         # — without this, the same .where(x__contains=...) call would
@@ -264,6 +285,51 @@ class SQLiteBackend:
             ON assertion_event(successor_id)
         """)
 
+        # KI-066: immutability was previously enforced only by
+        # StorageBackend's port surface exposing no update/delete method —
+        # a convention any code holding this raw connection could bypass.
+        # These triggers make it a store-level guarantee instead (SPEC
+        # §17: "the audit trail MUST NOT be mutable"). No DuckDB
+        # equivalent exists — DuckDB has no CREATE TRIGGER support at all
+        # (verified against 1.5.4; see DuckDBBackend's own docstring).
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_assertion_event_no_update
+            BEFORE UPDATE ON assertion_event
+            BEGIN
+                SELECT RAISE(ABORT, 'assertion_event is append-only: UPDATE is not permitted');
+            END
+        """)
+
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_assertion_event_no_delete
+            BEFORE DELETE ON assertion_event
+            BEGIN
+                SELECT RAISE(ABORT, 'assertion_event is append-only: DELETE is not permitted');
+            END
+        """)
+
+        # Round-2 review finding: `PRAGMA recursive_triggers` (below, in
+        # __init__) is per-*connection* state, not persisted in the
+        # database file — a second raw connection to the same file opens
+        # with it OFF regardless, silently reviving the `INSERT OR
+        # REPLACE` bypass the pragma was meant to close, with no
+        # privilege escalation needed (just `backend.path`, a public
+        # attribute). This trigger closes it durably at the schema level:
+        # any `INSERT` whose id already exists is exactly what a REPLACE
+        # conflict-resolution does, regardless of pragma state or which
+        # connection issues it. The pragma is kept anyway (defense in
+        # depth, and it produces a clearer error for a plain `UPDATE`-
+        # shaped conflict-row removal specifically) but is no longer
+        # load-bearing for REPLACE.
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_assertion_event_no_replace
+            BEFORE INSERT ON assertion_event
+            WHEN EXISTS(SELECT 1 FROM assertion_event WHERE id = NEW.id)
+            BEGIN
+                SELECT RAISE(ABORT, 'assertion_event is append-only: REPLACE is not permitted');
+            END
+        """)
+
         # Proposal table (SPEC §9.1)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS proposal (
@@ -315,6 +381,35 @@ class SQLiteBackend:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_proposal_event_proposal
             ON proposal_event(proposal_id)
+        """)
+
+        # KI-066: same store-level immutability guarantee as
+        # assertion_event above (SPEC §17).
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_proposal_event_no_update
+            BEFORE UPDATE ON proposal_event
+            BEGIN
+                SELECT RAISE(ABORT, 'proposal_event is append-only: UPDATE is not permitted');
+            END
+        """)
+
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_proposal_event_no_delete
+            BEFORE DELETE ON proposal_event
+            BEGIN
+                SELECT RAISE(ABORT, 'proposal_event is append-only: DELETE is not permitted');
+            END
+        """)
+
+        # Same durable REPLACE-bypass close as trg_assertion_event_no_replace
+        # above — see its comment for why the pragma alone isn't enough.
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_proposal_event_no_replace
+            BEFORE INSERT ON proposal_event
+            WHEN EXISTS(SELECT 1 FROM proposal_event WHERE id = NEW.id)
+            BEGIN
+                SELECT RAISE(ABORT, 'proposal_event is append-only: REPLACE is not permitted');
+            END
         """)
 
         # Contradiction table (SPEC §10.3)
