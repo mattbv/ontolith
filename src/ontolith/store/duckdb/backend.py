@@ -63,7 +63,7 @@ from ontolith.core import Assertion, AssertionEvent, Clock, Entity, Namespace, S
 from ontolith.core.errors import StorageError, ValidationError
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
-from ontolith.identity import Principal, PrincipalCredential
+from ontolith.identity import AdminEvent, Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
 from ontolith.store.base import DEFAULT_NAMESPACE, VECTOR_SCOPES
 
@@ -178,6 +178,8 @@ class DuckDBBackend:
                 token_hash TEXT NOT NULL UNIQUE,
                 created_at TEXT NOT NULL,
                 revoked_at TEXT,
+                issued_by TEXT,
+                revoked_by TEXT,
                 FOREIGN KEY(principal_id) REFERENCES principal(id)
             )
         """)
@@ -186,6 +188,17 @@ class DuckDBBackend:
             CREATE INDEX IF NOT EXISTS idx_principal_credential_principal
             ON principal_credential(principal_id)
         """)
+
+        # KI-060: `issued_by`/`revoked_by` were added after this table was
+        # first shipped — `CREATE TABLE IF NOT EXISTS` above is a no-op
+        # against a database file that already has this table. Unlike
+        # SQLite, DuckDB supports `ADD COLUMN IF NOT EXISTS` natively.
+        self.conn.execute(
+            "ALTER TABLE principal_credential ADD COLUMN IF NOT EXISTS issued_by TEXT"
+        )
+        self.conn.execute(
+            "ALTER TABLE principal_credential ADD COLUMN IF NOT EXISTS revoked_by TEXT"
+        )
 
         # Namespace registry table (SPEC §12.2, KI-022) — tracks namespaces
         # that have a schema applied or are the seeded default; NOT a
@@ -366,6 +379,36 @@ class DuckDBBackend:
         self.conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_proposal_event_proposal
             ON proposal_event(proposal_id)
+        """)
+
+        # Admin event table (KI-060, SPEC §17) — see SQLiteBackend's
+        # identical table for the full design rationale (target is free
+        # text, not a foreign key; actor also isn't, since
+        # create_principal's author is optional and unvalidated). No
+        # immutability triggers here — DuckDB has no CREATE TRIGGER
+        # support at all (KI-066), same documented asymmetry as
+        # assertion_event/proposal_event.
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS admin_event (
+                id TEXT PRIMARY KEY,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL CHECK(action IN (
+                    'create_principal', 'apply_schema', 'register_plugin'
+                )),
+                target TEXT NOT NULL,
+                "at" TEXT NOT NULL,
+                detail TEXT
+            )
+        """)
+
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_admin_event_actor
+            ON admin_event(actor)
+        """)
+
+        self.conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_admin_event_target
+            ON admin_event(target)
         """)
 
         # Contradiction table (SPEC §10.3)
@@ -659,8 +702,8 @@ class DuckDBBackend:
             self.conn.execute(
                 """
                 INSERT INTO principal_credential
-                    (id, principal_id, token_hash, created_at, revoked_at)
-                VALUES (?, ?, ?, ?, ?)
+                    (id, principal_id, token_hash, created_at, revoked_at, issued_by, revoked_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     credential.id,
@@ -668,6 +711,8 @@ class DuckDBBackend:
                     credential.token_hash,
                     credential.created_at.isoformat(),
                     credential.revoked_at.isoformat() if credential.revoked_at else None,
+                    credential.issued_by,
+                    credential.revoked_by,
                 ],
             )
         except duckdb.IntegrityError as e:
@@ -751,25 +796,91 @@ class DuckDBBackend:
             token_hash=row["token_hash"],
             created_at=datetime.fromisoformat(row["created_at"]),
             revoked_at=datetime.fromisoformat(row["revoked_at"]) if row["revoked_at"] else None,
+            issued_by=row["issued_by"],
+            revoked_by=row["revoked_by"],
         )
 
     @_synchronized
-    def revoke_credential(self, credential_id: str, revoked_at: datetime) -> None:
-        """Mark a credential as revoked. Idempotent-safe: re-revoking is a no-op update.
+    def revoke_credential(self, credential_id: str, revoked_at: datetime, revoked_by: str) -> None:
+        """Mark a credential as revoked. Idempotent-safe: re-revoking an
+        already-revoked credential is a true no-op — see SQLiteBackend's
+        identical method for why (KI-060: doesn't launder attribution by
+        overwriting `revoked_by` on a second call).
 
         Args:
             credential_id: Credential to revoke
             revoked_at: Timestamp of revocation
+            revoked_by: Principal ID of the admin performing the revocation
 
         Raises:
             StorageError: If the credential is not found
         """
         cursor = self.conn.execute(
-            "UPDATE principal_credential SET revoked_at = ? WHERE id = ? RETURNING id",
-            [revoked_at.isoformat(), credential_id],
+            "UPDATE principal_credential SET revoked_at = ?, revoked_by = ? "
+            "WHERE id = ? AND revoked_at IS NULL RETURNING id",
+            [revoked_at.isoformat(), revoked_by, credential_id],
         )
         if not cursor.fetchall():
-            raise StorageError(f"Credential not found: {credential_id}")
+            exists = self.conn.execute(
+                "SELECT 1 FROM principal_credential WHERE id = ?", [credential_id]
+            ).fetchone()
+            if exists is None:
+                raise StorageError(f"Credential not found: {credential_id}")
+            # Already revoked - no-op, first revocation's attribution stands.
+
+    @_synchronized
+    def put_admin_event(self, event: AdminEvent) -> None:
+        """Persist an append-only admin-action event (KI-060)."""
+        try:
+            self.conn.execute(
+                """
+                INSERT INTO admin_event (id, actor, action, target, "at", detail)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    event.id,
+                    event.actor,
+                    event.action,
+                    event.target,
+                    event.at.isoformat(),
+                    event.detail,
+                ],
+            )
+        except duckdb.IntegrityError as e:
+            raise StorageError(f"Admin event conflict (id={event.id}): {e}") from e
+        except duckdb.Error as e:
+            raise StorageError(f"Failed to persist admin event (id={event.id}): {e}") from e
+
+    @_synchronized
+    def get_admin_events(
+        self, actor: str | None = None, target: str | None = None
+    ) -> list[AdminEvent]:
+        """Retrieve admin events, optionally filtered by actor or target, oldest first."""
+        query = "SELECT * FROM admin_event WHERE 1=1"
+        params: list[str] = []
+        if actor is not None:
+            query += " AND actor = ?"
+            params.append(actor)
+        if target is not None:
+            query += " AND target = ?"
+            params.append(target)
+        query += ' ORDER BY "at" ASC'
+        cursor = self.conn.execute(query, params)
+        return [
+            self._row_to_admin_event(self._row_to_dict(cursor, row)) for row in cursor.fetchall()
+        ]
+
+    @staticmethod
+    def _row_to_admin_event(row: dict[str, Any]) -> AdminEvent:
+        """Deserialize an `admin_event` table row into an AdminEvent."""
+        return AdminEvent(
+            id=row["id"],
+            actor=row["actor"],
+            action=row["action"],
+            target=row["target"],
+            at=datetime.fromisoformat(row["at"]),
+            detail=row["detail"],
+        )
 
     @_synchronized
     def put_entity(self, entity: Entity) -> None:

@@ -14,7 +14,7 @@ import pytest
 from ontolith.core import Assertion, Entity, FixedClock
 from ontolith.core.errors import StorageError
 from ontolith.govern.proposal import Proposal, ProposalEvent
-from ontolith.identity import Principal, PrincipalCredential
+from ontolith.identity import AdminEvent, Principal, PrincipalCredential
 from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 from ontolith.store.duckdb import DuckDBBackend
 
@@ -640,13 +640,15 @@ class TestDuckDBBackend:
             created_at=datetime(2025, 1, 1, tzinfo=UTC),
         )
         backend.put_credential(credential)
-        backend.revoke_credential("cred-1", datetime(2025, 1, 2, tzinfo=UTC))
+        backend.revoke_credential("cred-1", datetime(2025, 1, 2, tzinfo=UTC), "admin@test.com")
 
         assert backend.get_principal_by_token_hash("deadbeef" * 8) is None
 
     def test_revoke_nonexistent_credential_raises(self, backend: DuckDBBackend) -> None:
         with pytest.raises(StorageError, match="Credential not found"):
-            backend.revoke_credential("nonexistent", datetime(2025, 1, 1, tzinfo=UTC))
+            backend.revoke_credential(
+                "nonexistent", datetime(2025, 1, 1, tzinfo=UTC), "admin@test.com"
+            )
 
     def test_get_credential_by_id(self, backend: DuckDBBackend) -> None:
         credential = PrincipalCredential(
@@ -688,9 +690,140 @@ class TestDuckDBBackend:
         credentials = backend.get_credentials_for_principal("alice@test.com")
         assert {c.id for c in credentials} == {"cred-1", "cred-2"}
 
-        backend.revoke_credential("cred-1", datetime(2025, 1, 3, tzinfo=UTC))
+        backend.revoke_credential("cred-1", datetime(2025, 1, 3, tzinfo=UTC), "admin@test.com")
         assert backend.get_principal_by_token_hash("a" * 64) is None
         assert backend.get_principal_by_token_hash("b" * 64) is not None
+
+    def test_credential_issued_by_and_revoked_by_roundtrip(self, backend: DuckDBBackend) -> None:
+        credential = PrincipalCredential(
+            id="cred-1",
+            principal_id="alice@test.com",
+            token_hash="deadbeef" * 8,
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            issued_by="admin@test.com",
+        )
+        backend.put_credential(credential)
+        stored = backend.get_credential("cred-1")
+        assert stored is not None
+        assert stored.issued_by == "admin@test.com"
+        assert stored.revoked_by is None
+
+        backend.revoke_credential("cred-1", datetime(2025, 1, 2, tzinfo=UTC), "carol@test.com")
+        revoked = backend.get_credential("cred-1")
+        assert revoked is not None
+        assert revoked.revoked_by == "carol@test.com"
+
+    def test_re_revoking_credential_does_not_overwrite_revoker(
+        self, backend: DuckDBBackend
+    ) -> None:
+        backend.put_credential(
+            PrincipalCredential(
+                id="cred-1",
+                principal_id="alice@test.com",
+                token_hash="deadbeef" * 8,
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+        backend.revoke_credential("cred-1", datetime(2025, 1, 2, tzinfo=UTC), "admin@test.com")
+
+        backend.revoke_credential("cred-1", datetime(2025, 1, 3, tzinfo=UTC), "carol@test.com")
+
+        credential = backend.get_credential("cred-1")
+        assert credential is not None
+        assert credential.revoked_by == "admin@test.com"
+        assert credential.revoked_at == datetime(2025, 1, 2, tzinfo=UTC)
+
+    def test_put_and_get_admin_event(self, backend: DuckDBBackend) -> None:
+        event = AdminEvent(
+            id="event-1",
+            actor="admin@test.com",
+            action="create_principal",
+            target="alice@test.com",
+            at=datetime(2025, 1, 1, tzinfo=UTC),
+            detail="bootstrap",
+        )
+        backend.put_admin_event(event)
+
+        [retrieved] = backend.get_admin_events()
+        assert retrieved == event
+
+    def test_get_admin_events_filters(self, backend: DuckDBBackend) -> None:
+        backend.put_admin_event(
+            AdminEvent(
+                id="event-1",
+                actor="admin@test.com",
+                action="create_principal",
+                target="alice@test.com",
+                at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+        backend.put_admin_event(
+            AdminEvent(
+                id="event-2",
+                actor="carol@test.com",
+                action="apply_schema",
+                target="default:v1",
+                at=datetime(2025, 1, 2, tzinfo=UTC),
+            )
+        )
+
+        assert [e.id for e in backend.get_admin_events(actor="admin@test.com")] == ["event-1"]
+        assert [e.id for e in backend.get_admin_events(target="default:v1")] == ["event-2"]
+        assert [e.id for e in backend.get_admin_events()] == ["event-1", "event-2"]
+
+    def test_admin_event_update_and_delete_currently_succeed(self, backend: DuckDBBackend) -> None:
+        """Documents the KI-066 asymmetry for this new table too: DuckDB
+        has no CREATE TRIGGER support at all, so admin_event has no
+        immutability enforcement here, unlike SQLiteBackend's."""
+        backend.put_admin_event(
+            AdminEvent(
+                id="event-1",
+                actor="admin@test.com",
+                action="create_principal",
+                target="alice@test.com",
+                at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+        backend.conn.execute("UPDATE admin_event SET actor = 'mallory' WHERE id = 'event-1'")
+        assert backend.get_admin_events()[0].actor == "mallory"
+
+        backend.conn.execute("DELETE FROM admin_event WHERE id = 'event-1'")
+        assert backend.get_admin_events() == []
+
+    def test_principal_credential_migration_adds_new_columns_to_existing_db(
+        self, temp_db: Path
+    ) -> None:
+        """A database file created before issued_by/revoked_by existed
+        gets them added on next open (KI-060) — simulates that by building
+        the table in its pre-KI-060 shape directly, bypassing
+        DuckDBBackend's own (already-migrated) schema setup."""
+        raw = duckdb.connect(str(temp_db))
+        raw.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, "
+            "token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT)"
+        )
+        raw.execute(
+            "INSERT INTO principal_credential (id, principal_id, token_hash, created_at) "
+            "VALUES ('old-cred', 'alice@test.com', 'oldhash', '2025-01-01T00:00:00+00:00')"
+        )
+        raw.close()
+
+        backend = DuckDBBackend(temp_db)
+        try:
+            columns = {
+                row[1]
+                for row in backend.conn.execute(
+                    "PRAGMA table_info('principal_credential')"
+                ).fetchall()
+            }
+            assert {"issued_by", "revoked_by"}.issubset(columns)
+            old = backend.get_credential("old-cred")
+            assert old is not None
+            assert old.principal_id == "alice@test.com"
+            assert old.issued_by is None
+            assert old.revoked_by is None
+        finally:
+            backend.close()
 
     def _put_proposal(self, backend: DuckDBBackend, proposal_id: str) -> None:
         backend.put_proposal(

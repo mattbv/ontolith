@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- Admin-action audit trail (closes KI-060, ADR-0042): `PrincipalCredential` gains `issued_by`/
+  `revoked_by` columns (both backends, migrated in place for existing database files), populated
+  from `issue_token`/`revoke_token`'s already-required `author` parameter. New `AdminEvent`
+  (`identity/admin_event.py`) and `admin_event` table record `create_principal`/`apply_schema`/
+  `PluginRegistry.register` — reuses the exact SQLite-trigger immutability mechanism KI-066/
+  ADR-0041 built for `assertion_event`/`proposal_event` (DuckDB has the same documented gap).
+  `Ontology.create_principal` gained an optional `author` parameter, used only to attribute the
+  resulting event — not a new capability gate; `ADR-0022`'s "no built-in check" decision is
+  unchanged. REST's `POST /principals` and the CLI's `principal create` both pass through the
+  admin id they already validate. **Breaking:** `StorageBackend.revoke_credential()` gained a
+  required `revoked_by: str` parameter — any external `StorageBackend` implementation must update
+  its signature. Also fixed along the way: re-revoking an already-revoked credential was silently
+  overwriting `revoked_by` on a second call (attribution laundering) — now a true no-op.
 - CLI `ontolith contradiction flag <id_a> <id_b> --author <id> [--rationale <text>]` and
   `ontolith contradiction resolve <id> --winner <assertion_id> --reviewer <id>` (closes KI-063) —
   the CLI was the only one of the four shipped interfaces with no contradiction write surface at

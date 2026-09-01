@@ -1102,6 +1102,7 @@ def create_rest_app(
             default_capability=body.default_capability,
             trust_level=body.trust_level,
             metadata=body.metadata,
+            author=principal.id,
         )
         return PrincipalOut(
             id=created.id,

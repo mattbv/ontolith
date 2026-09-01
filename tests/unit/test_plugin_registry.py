@@ -378,3 +378,59 @@ class TestReRegistration:
         registry = PluginRegistry(kb)
         with pytest.raises(PluginError, match="not a plugin principal"):
             registry.register("trivial-importer", author=ADMIN, granted_capability="propose")
+
+
+class TestAdminEventRecording:
+    """KI-060: register() records a register_plugin AdminEvent on success,
+    and (only for a first-time registration) a create_principal event via
+    _ensure_principal's own create_principal(..., author=author) call."""
+
+    def test_first_registration_records_both_events(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_entry_points(
+            monkeypatch,
+            _entry_point(
+                "trivial-importer", "tests.fixtures.plugins.trivial_importer", "TrivialImporter"
+            ),
+        )
+        registry = PluginRegistry(kb)
+        loaded = registry.register("trivial-importer", author=ADMIN, granted_capability="propose")
+
+        events = kb.backend.get_admin_events(target=loaded.principal_id)
+        actions = {e.action for e in events}
+        assert actions == {"create_principal", "register_plugin"}
+        assert all(e.actor == ADMIN for e in events)
+
+    def test_reregistration_records_only_register_plugin_event(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No principal is created the second time - only one new event."""
+        _patch_entry_points(
+            monkeypatch,
+            _entry_point(
+                "trivial-importer", "tests.fixtures.plugins.trivial_importer", "TrivialImporter"
+            ),
+        )
+        registry = PluginRegistry(kb)
+        registry.register("trivial-importer", author=ADMIN, granted_capability="propose")
+        before = len(kb.backend.get_admin_events())
+
+        registry.register("trivial-importer", author=ADMIN, granted_capability="propose")
+
+        after = kb.backend.get_admin_events()
+        assert len(after) == before + 1
+        assert after[-1].action == "register_plugin"
+
+    def test_failed_registration_records_no_event(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A registration attempt that never becomes a standing in-process
+        actor (KI-014's own precedent for the sibling warning) shouldn't be
+        recorded as though one was created."""
+        _patch_entry_points(monkeypatch)
+        registry = PluginRegistry(kb)
+        with pytest.raises(PluginError, match="not found"):
+            registry.register("nonexistent-entry-point", author=ADMIN)
+
+        assert kb.backend.get_admin_events() == []
