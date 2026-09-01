@@ -1252,7 +1252,7 @@ Found at the M3 milestone boundary specifically because it requires comparing MC
 
 ### Fix
 
-Added `semantic`, `as_of`, `min_confidence`, `trust_at_least`, `limit` parameters to `query_tool`, mirroring REST/GraphQL's `QueryBuilder` wiring for the first, third, fourth, and fifth (ADR-0043) — `as_of` is new even to REST/GraphQL, added to MCP alone per SPEC §14.4's own normative tool table naming it for this tool specifically. Also removed the tool's pre-existing `namespace` parameter: `Ontology.query()` never accepted one (namespace is hardcoded, an M1 limitation REST/GraphQL already work around by not exposing the field at all), so it was silently doing nothing on every call.
+Added `semantic`, `as_of`, `min_confidence`, `trust_at_least`, `limit` parameters to `query_tool`, mirroring REST/GraphQL's `QueryBuilder` wiring for the first, third, fourth, and fifth (ADR-0043) — `as_of` is new even to REST/GraphQL, added to MCP alone per SPEC §14.4's own normative tool table naming it for this tool specifically. Also removed the tool's pre-existing `namespace` parameter: `Ontology.query()` never accepted one (namespace is hardcoded, an M1 limitation REST/GraphQL already work around by not exposing the field at all), so it was silently doing nothing on every call — schema-visible, not runtime-breaking (FastMCP drops unrecognized arguments rather than rejecting the call). While adding `as_of` support, found and fixed a related bitemporal-correctness gap: `QueryBuilder.semantic()` combined with `.as_of()` but no `.where()` filter ignored `as_of_time` entirely, returning entities that didn't exist yet at that point in time — unreachable before this KI, since no prior interface ever exposed `as_of` at all.
 
 ---
 

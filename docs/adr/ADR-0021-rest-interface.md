@@ -121,15 +121,16 @@ tool equivalent):
 | `/proposals` | GET | *(new)* |
 
 `/query` is POST, not GET: `filters` is an arbitrary dict and `semantic` is
-free text, neither of which encodes cleanly into a query string. Unlike
-`ontolith.query`'s MCP tool, `/query`'s request body has no `namespace`
-field — `Ontology.namespace` is hardcoded to `"default"` (M1 limitation,
-`ontology.py`'s own comment), so `kb.query()` takes no namespace argument to
-forward one to; MCP's tool accepts a `namespace` parameter today but never
-actually uses it, a pre-existing no-op this ADR deliberately does not
-propagate into the new interface. `/schema`'s `namespace` query parameter
-*is* real (`StorageBackend.get_schema(namespace)` is namespace-scoped at the
-backend level, independent of `Ontology.namespace`), so it's kept.
+free text, neither of which encodes cleanly into a query string. `/query`'s
+request body has no `namespace` field — `Ontology.namespace` is hardcoded to
+`"default"` (M1 limitation, `ontology.py`'s own comment), so `kb.query()`
+takes no namespace argument to forward one to. (At the time this ADR was
+written, `ontolith.query`'s MCP tool still accepted a `namespace` parameter
+that never actually did anything — that pre-existing no-op was removed by
+ADR-0043/KI-058, bringing MCP in line with what this ADR already did here.)
+`/schema`'s `namespace` query parameter *is* real
+(`StorageBackend.get_schema(namespace)` is namespace-scoped at the backend
+level, independent of `Ontology.namespace`), so it's kept.
 
 `value`/`value_type` and `target` on `POST /proposals` remain mutually
 exclusive (XOR), matching `ontolith.propose`'s existing validation. The

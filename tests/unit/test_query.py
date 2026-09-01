@@ -490,6 +490,65 @@ class TestSemanticSearch:
         assert results == []
         kb.close()
 
+    def test_semantic_with_as_of_excludes_entity_not_yet_existing(self, tmp_path: Path) -> None:
+        """KI-058: found while wiring .as_of() into MCP's query tool -
+        _semantic_candidates() previously ignored as_of_time entirely
+        unless .where() was also set, so a semantic-only as_of query
+        returned entities that didn't exist yet at that point in time, even
+        though they're in the vector index and match. No prior interface
+        ever combined .as_of() with .semantic() (REST/GraphQL don't expose
+        as_of at all), so this was unreachable in practice until now."""
+        clock = FixedClock("2025-01-01T00:00:00Z")
+        embedder = LookupEmbedder(
+            {"Ada": [1.0, 0.0, 0.0], "Ada Jr": [0.9, 0.1, 0.0], "query": [1.0, 0.0, 0.0]}, dim=3
+        )
+        kb = Ontology.connect(tmp_path / "semantic_as_of.db", clock=clock, embedder=embedder)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        existing = kb.create_entity("Person", author=alice.id)
+        kb.assert_literal(existing.id, "Person.name", "Ada", "Text", alice.id)
+        kb.reindex()
+        as_of_time = clock.now()
+
+        clock.advance(days=1)
+        later = kb.create_entity("Person", author=alice.id)
+        kb.assert_literal(later.id, "Person.name", "Ada Jr", "Text", alice.id)
+        kb.reindex()
+
+        results = kb.as_of(as_of_time).query("Person").semantic("query").all()
+
+        assert [r.id for r in results] == [existing.id]
+        kb.close()
+
+    def test_semantic_with_as_of_and_where_still_excludes_not_yet_existing(
+        self, tmp_path: Path
+    ) -> None:
+        """The .where()-set branch already threaded as_of_time through
+        entities_where() before this KI - this pins that the pre-existing
+        behavior held, distinct from the no-.where() gap the sibling test
+        above closes."""
+        clock = FixedClock("2025-01-01T00:00:00Z")
+        embedder = LookupEmbedder(
+            {"Ada": [1.0, 0.0, 0.0], "Ada Jr": [0.9, 0.1, 0.0], "query": [1.0, 0.0, 0.0]}, dim=3
+        )
+        kb = Ontology.connect(tmp_path / "semantic_as_of_where.db", clock=clock, embedder=embedder)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        existing = kb.create_entity("Person", author=alice.id)
+        kb.assert_literal(existing.id, "Person.name", "Ada", "Text", alice.id)
+        kb.reindex()
+        as_of_time = clock.now()
+
+        clock.advance(days=1)
+        later = kb.create_entity("Person", author=alice.id)
+        kb.assert_literal(later.id, "Person.name", "Ada Jr", "Text", alice.id)
+        kb.reindex()
+
+        results = (
+            kb.as_of(as_of_time).query("Person").semantic("query").where(name__contains="Ada").all()
+        )
+
+        assert [r.id for r in results] == [existing.id]
+        kb.close()
+
     def test_semantic_intersects_with_where_preserving_rank_order(self, tmp_path: Path) -> None:
         """.semantic() + .where() keeps only symbolic matches, in vector rank order."""
         # _entity_text() sorts by predicate then asserted_at: "Person.born" <

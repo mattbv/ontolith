@@ -359,15 +359,17 @@ class TestQueryTool:
         assert "error" in result
         assert result["code"] == "validation_error"
 
-    def test_query_semantic_ranks_by_similarity(self, tmp_path: Path) -> None:
+    def test_query_semantic_restricts_to_indexed_entities(self, tmp_path: Path) -> None:
         """KI-058: `semantic` was previously unreachable from MCP at all.
 
-        The second entity is created (and left unindexed) AFTER reindex() -
-        a real semantic search only ranks entities the vector index knows
-        about, so it must be excluded; a no-op `semantic` that silently
-        fell through to a plain, unranked entities() scan would include it
-        (count=2), which is what makes this discriminating rather than
-        vacuously passing on a single-entity KB."""
+        Pins that .semantic() is actually invoked, not ranking quality
+        (that's QueryBuilder's own concern) - the second entity is created
+        (and left unindexed) AFTER reindex(), so a real semantic search
+        must exclude it (only the vector index's own entities are
+        candidates); a no-op `semantic` that silently fell through to a
+        plain, unranked entities() scan would include it (count=2), which
+        is what makes this discriminating rather than vacuously passing on
+        a single-entity KB."""
         kb = _kb(tmp_path)
         indexed = kb.create_entity("Person", author=HUMAN)
         kb.propose(indexed.id, "Person.name", "Ada Lovelace", "Text", HUMAN)
@@ -382,6 +384,75 @@ class TestQueryTool:
         )
         assert result["count"] == 1
         assert result["entities"][0]["id"] == indexed.id
+
+    def test_query_unknown_namespace_argument_is_silently_dropped(self, tmp_path: Path) -> None:
+        """KI-058 removed the tool's dead `namespace` parameter. Through the
+        real schema-validated dispatch path (unlike `.fn()`, which every
+        other test in this class uses and which bypasses the tool's JSON
+        schema entirely), FastMCP drops arguments the schema doesn't
+        declare rather than rejecting the call - so a caller still passing
+        `namespace=` keeps succeeding, identically to before this KI, when
+        it was already a silent no-op. Pins that this is genuinely
+        non-breaking at the protocol level, not just at the Python level."""
+        kb = _kb(tmp_path)
+        kb.create_entity("Person", author=HUMAN)
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        async def _call() -> object:
+            _, structured = await mcp.call_tool(
+                "ontolith.query", {"concept": "Person", "token": token, "namespace": "other"}
+            )
+            return structured
+
+        result = asyncio.run(_call())
+        assert result == {
+            "concept": "Person",
+            "count": 1,
+            "entities": [
+                {
+                    "id": "id-0",
+                    "concept": "Person",
+                    "natural_key": None,
+                    "created_at": "2025-01-01T00:00:00+00:00",
+                }
+            ],
+        }
+
+    def test_query_as_of_excludes_entity_not_yet_existing_with_semantic(
+        self, tmp_path: Path
+    ) -> None:
+        """Found while adding as_of/semantic coverage for KI-058: with no
+        .where() filter, `_semantic_candidates()` previously ignored
+        as_of_time entirely, so a semantic-only as_of query returned
+        entities that didn't exist yet at that point in time. Fixed in the
+        same PR (query/builder.py) since KI-058 is what first exposes this
+        combination through any interface at all - REST/GraphQL don't have
+        as_of wired in, so nothing could trigger it before now."""
+        kb = _kb(tmp_path)
+        existing = kb.create_entity("Person", author=HUMAN)
+        kb.propose(existing.id, "Person.name", "Ada Lovelace", "Text", HUMAN)
+        kb.reindex()
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)
+        # Created AND reindexed only after T0 - a real as_of(T0) query must
+        # exclude it even though it's in the vector index and matches
+        # semantically.
+        later = kb.create_entity("Person", author=HUMAN)
+        kb.propose(later.id, "Person.name", "Ada Lovelace Jr", "Text", HUMAN)
+        kb.reindex()
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person",
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            semantic="Ada Lovelace",
+            as_of=T0.isoformat(),
+        )
+        assert result["count"] == 1
+        assert result["entities"][0]["id"] == existing.id
 
     def test_query_semantic_without_embedder_returns_validation_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
