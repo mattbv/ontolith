@@ -497,10 +497,15 @@ class TestSemanticSearch:
         returned entities that didn't exist yet at that point in time, even
         though they're in the vector index and match. No prior interface
         ever combined .as_of() with .semantic() (REST/GraphQL don't expose
-        as_of at all), so this was unreachable in practice until now."""
+        as_of at all), so this was unreachable in practice until now.
+
+        The not-yet-existing entity ("Ada Jr") is the *nearer* vector match
+        - a weaker version of this test with the excluded entity ranked
+        second wouldn't catch a bug where as_of-exclusion runs after
+        .limit() truncates the ranked list instead of before it."""
         clock = FixedClock("2025-01-01T00:00:00Z")
         embedder = LookupEmbedder(
-            {"Ada": [1.0, 0.0, 0.0], "Ada Jr": [0.9, 0.1, 0.0], "query": [1.0, 0.0, 0.0]}, dim=3
+            {"Ada": [0.9, 0.1, 0.0], "Ada Jr": [1.0, 0.0, 0.0], "query": [1.0, 0.0, 0.0]}, dim=3
         )
         kb = Ontology.connect(tmp_path / "semantic_as_of.db", clock=clock, embedder=embedder)
         alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
@@ -514,7 +519,7 @@ class TestSemanticSearch:
         kb.assert_literal(later.id, "Person.name", "Ada Jr", "Text", alice.id)
         kb.reindex()
 
-        results = kb.as_of(as_of_time).query("Person").semantic("query").all()
+        results = kb.as_of(as_of_time).query("Person").semantic("query").limit(1).all()
 
         assert [r.id for r in results] == [existing.id]
         kb.close()

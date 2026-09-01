@@ -286,6 +286,12 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
                 shipped interfaces to expose bitemporal time-travel at all
                 (REST/GraphQL/CLI don't yet — KI-058's own scope is MCP
                 only). A malformed value returns a validation_error.
+                Combined with ``semantic``: only entity *existence* as of
+                this time is reconstructed (an entity that didn't exist yet
+                is excluded) — the ranking itself is not bitemporal, since
+                the vector index holds one embedding per entity as of its
+                last reindex, not a historical version. Results are always
+                ranked by an entity's *current* embedded content.
             min_confidence: Optional 0.0-1.0 floor — keep only entities
                 with at least one qualifying active assertion at or above
                 this confidence (ADR-0004: an assertion with

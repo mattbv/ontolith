@@ -20,14 +20,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limitation REST/GraphQL already work around by never exposing the field) — schema-visible, not
   runtime-breaking: FastMCP drops unrecognized tool arguments rather than rejecting the call, so a
   caller still passing `namespace=` keeps succeeding exactly as it silently did before.
-- Fixed a bitemporal-correctness gap in `QueryBuilder.semantic()` found while adding MCP's `as_of`
-  support above: combined with `.as_of()` but no `.where()` filter, semantic search previously
-  ignored `as_of_time` entirely, returning entities that didn't exist yet at that point in time.
-  No prior interface could trigger this (REST/GraphQL never exposed `as_of`), so it was unreachable
-  until this PR's own MCP change made it reachable. `.semantic()` combined with `.as_of()` still
-  only excludes entities that didn't exist by that time — it does not make the vector search itself
-  bitemporal, since the vector index holds one embedding per entity with no historical versions;
-  documented explicitly on `QueryBuilder.semantic()`.
 - Admin-action audit trail (closes KI-060, ADR-0042): `PrincipalCredential` gains `issued_by`/
   `revoked_by` columns (both backends, migrated in place for existing database files), populated
   from `issue_token`/`revoke_token`'s already-required `author` parameter. New `AdminEvent`
@@ -349,6 +341,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- Bitemporal-correctness gap in `QueryBuilder.semantic()`, found while adding MCP's `as_of`
+  support (KI-058): combined with `.as_of()` but no `.where()` filter, semantic search previously
+  ignored `as_of_time` entirely, returning entities that didn't exist yet at that point in time. No
+  prior interface could trigger this (REST/GraphQL never exposed `as_of`), so it was unreachable
+  until MCP's own `as_of` addition made it reachable. `.semantic()` combined with `.as_of()` still
+  only excludes entities that didn't exist by that time — it does not make the vector search itself
+  bitemporal, since the vector index holds one embedding per entity with no historical versions;
+  documented explicitly on `QueryBuilder.semantic()` and `query_tool`'s own `as_of` docstring.
 - `Ontology.retract()` — the codebase's most heavily-governed write path — is now
   reachable from every shipped interface, not just the SDK (closes KI-057, ADR-0039):
   `POST /assertions/{id}/retract` (REST, `acting_as` as an optional query parameter),

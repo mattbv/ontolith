@@ -368,21 +368,15 @@ class QueryBuilder:
                 )
             }
             ranked_ids = [entity_id for entity_id in ranked_ids if entity_id in symbolic_ids]
-        elif self._as_of_time is not None:
-            # No .where() to intersect with, but still as_of-pinned: a
-            # semantic-only query must still exclude entities that didn't
-            # exist yet at as_of_time (see Note above for what this does
-            # NOT fix).
-            existing_ids = {
-                e.id
-                for e in self._backend.entities(
-                    namespace=self._namespace,
-                    concept=self._concept,
-                    as_of_time=self._as_of_time,
-                )
-            }
-            ranked_ids = [entity_id for entity_id in ranked_ids if entity_id in existing_ids]
 
+        # No .where() to intersect with: the as_of-existence check ("did
+        # this entity exist yet at as_of_time?") that entities_where() would
+        # otherwise apply happens below instead, per-candidate against the
+        # entity row the loop already fetches — not via a second full-concept
+        # scan, which would cost O(concept size) per call regardless of the
+        # (already-bounded) candidate count (KI-058 review, round 2: an
+        # earlier version here did do a full entities(as_of_time=...) scan
+        # and measured a 25x regression at 20k entities).
         entities = []
         for entity_id in ranked_ids:
             entity = self._backend.get_entity(entity_id)
@@ -390,6 +384,7 @@ class QueryBuilder:
                 entity is not None
                 and entity.namespace == self._namespace
                 and entity.concept == self._concept
+                and (self._as_of_time is None or entity.created_at <= self._as_of_time)
             ):
                 entities.append(entity)
         return entities
