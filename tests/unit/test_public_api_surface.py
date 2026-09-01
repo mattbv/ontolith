@@ -80,7 +80,9 @@ _EXPECTED: dict[str, frozenset[str]] = {
             "LookupEmbedder",
         }
     ),
-    "ontolith.identity": frozenset({"Principal", "PrincipalCredential", "min_capability"}),
+    "ontolith.identity": frozenset(
+        {"AdminAction", "AdminEvent", "Principal", "PrincipalCredential", "min_capability"}
+    ),
     "ontolith.store": frozenset({"StorageBackend"}),
     "ontolith.store.sqlite": frozenset({"SQLiteBackend"}),
     "ontolith.store.duckdb": frozenset({"DuckDBBackend"}),

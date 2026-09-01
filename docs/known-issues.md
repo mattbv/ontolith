@@ -1272,21 +1272,21 @@ Replace every hand-written `"code": "..."` literal in `mcp.py` with `exc.code` f
 
 ---
 
-## KI-060 — No audit trail for admin actions: token issuance/revocation, principal creation, and schema application are unattributable
+## KI-060 — No audit trail for admin actions: token issuance/revocation, principal creation, and schema application are unattributable ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — the highest-value actions in the system leave no forensic trace
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved via ADR-0042
 **SPEC reference:** SPEC §17 ("all writes, proposal decisions, and resolutions are append-only and attributable")
 
 ### Description
 
-`PrincipalCredential` (`identity/credential.py:25-29`) records `principal_id`, `token_hash`, `created_at`, `revoked_at` — never who issued or revoked it, even though `Ontology.issue_token(principal_id, author)` (`ontology.py:2907-2920`) and `revoke_token` (`ontology.py:2936-2941`) both receive the acting admin's id and discard it. There is no event-table row for credential lifecycle, principal creation (`create_principal`, `ontology.py:258-319`), schema application (`apply_schema`, `ontology.py:2825-2836`), or plugin registration. The only audit tables that exist at all are `assertion_event` and `proposal_event`.
+`PrincipalCredential` (`identity/credential.py:25-29`) recorded `principal_id`, `token_hash`, `created_at`, `revoked_at` — never who issued or revoked it, even though `Ontology.issue_token(principal_id, author)` (`ontology.py:2907-2920`) and `revoke_token` (`ontology.py:2936-2941`) both received the acting admin's id and discarded it. There was no event-table row for credential lifecycle, principal creation (`create_principal`, `ontology.py:258-319`), schema application (`apply_schema`, `ontology.py:2825-2836`), or plugin registration. The only audit tables that existed at all were `assertion_event` and `proposal_event`.
 
-Token issuance in particular converts local file access into a durable, network-reachable credential — the single highest-value action in the system — yet after an incident there is no way to answer "which admin minted this credential, and who revoked it and when." This also means any investigation into a credential-compromise or privilege-escalation incident (see KI-053/KI-054) has no trace to work from.
+Token issuance in particular converts local file access into a durable, network-reachable credential — the single highest-value action in the system — yet after an incident there was no way to answer "which admin minted this credential, and who revoked it and when." This also meant any investigation into a credential-compromise or privilege-escalation incident (see KI-053/KI-054) had no trace to work from.
 
 ### Fix
 
-Add `issued_by`/`revoked_by` columns to `principal_credential` (both backends). Record an append-only admin-action event for `create_principal`, `apply_schema`, and `PluginRegistry.register`.
+Added `issued_by`/`revoked_by` columns to `principal_credential` (both backends) — `issue_token`/`revoke_token` populate them from the already-required `author` parameter. Added a new `AdminEvent` (`identity/admin_event.py`) and `admin_event` table for `create_principal`, `apply_schema`, and `PluginRegistry.register` — reuses ADR-0041's exact SQLite-trigger immutability mechanism (DuckDB gets the same documented no-equivalent gap). `create_principal` gained an optional `author` parameter (attribution only, not a new capability gate — ADR-0022's "no built-in check" decision is unchanged) so REST/CLI can pass through the admin id they already validate via `require_admin`/`--author`. Found and fixed along the way: re-revoking an already-revoked credential was silently overwriting `revoked_by` on a second call — now a true no-op, preserving the first revocation's real attribution. ADR-0042.
 
 ---
 
@@ -1467,6 +1467,22 @@ Either apply the same `<N.0` convention to the remaining direct dependencies (`p
 ### Fix
 
 Either accumulate a per-extension rationale somewhere retrievable (e.g. a list in `metadata`, or a new `ContradictionEvent`-shaped record mirroring how `ProposalEvent` tracks proposal-lifecycle actions), or explicitly document that `rationale` is create-only and have every interface's help/docstring say so, so a caller extending a contradiction doesn't reasonably expect their explanation to be recorded.
+
+---
+
+## KI-072 — No interface exposes the admin-action audit trail recorded by ADR-0042
+
+**Severity:** Architecture gap — the data is captured but unreachable through any shipped interface
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §17 (append-only, attributable writes)
+
+### Description
+
+KI-060/ADR-0042 added `StorageBackend.get_admin_events()` and `PrincipalCredential.issued_by`/`revoked_by`, closing the *recording* half of "admin actions are unattributable." Nothing reads any of it back through REST, GraphQL, the CLI, or MCP: `get_admin_events()` has no route/query/command/tool; `CredentialOut` (`interfaces/rest.py`) and the CLI's `principal list-tokens` output don't include `issued_by`/`revoked_by` even though `PrincipalCredential` now carries both fields. The only way to answer "who created this principal" or "who issued/revoked this token" today is direct SDK/`kb.backend` access, which defeats KI-060's own stated motivation. ADR-0042 names this as "explicit future scope, not silently dropped," but no KI previously tracked it. Found in round-2 review of KI-060's PR.
+
+### Fix
+
+Add a read surface for at least one interface (REST is the natural first target, matching how other read-only queries are exposed) — a `GET /admin-events` route with `actor`/`target` filters, and extend `CredentialOut`/the CLI's token-listing output with `issued_by`/`revoked_by`. Extend to GraphQL/MCP/CLI as those surfaces need it; MCP should stay read-only per SPEC's no-direct-write-tool rule, which this doesn't change.
 
 ---
 

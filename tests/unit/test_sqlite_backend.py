@@ -15,7 +15,7 @@ from ontolith.core import Assertion, Entity, FixedClock
 from ontolith.core.errors import StorageError
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
-from ontolith.identity import Principal, PrincipalCredential
+from ontolith.identity import AdminEvent, Principal, PrincipalCredential
 from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 from ontolith.store.sqlite import SQLiteBackend
 
@@ -718,13 +718,15 @@ class TestSQLiteBackend:
             created_at=datetime(2025, 1, 1, tzinfo=UTC),
         )
         backend.put_credential(credential)
-        backend.revoke_credential("cred-1", datetime(2025, 1, 2, tzinfo=UTC))
+        backend.revoke_credential("cred-1", datetime(2025, 1, 2, tzinfo=UTC), "admin@test.com")
 
         assert backend.get_principal_by_token_hash("deadbeef" * 8) is None
 
     def test_revoke_nonexistent_credential_raises(self, backend: SQLiteBackend) -> None:
         with pytest.raises(StorageError, match="Credential not found"):
-            backend.revoke_credential("nonexistent", datetime(2025, 1, 1, tzinfo=UTC))
+            backend.revoke_credential(
+                "nonexistent", datetime(2025, 1, 1, tzinfo=UTC), "admin@test.com"
+            )
 
     def test_get_credential_by_id(self, backend: SQLiteBackend) -> None:
         credential = PrincipalCredential(
@@ -766,9 +768,176 @@ class TestSQLiteBackend:
         credentials = backend.get_credentials_for_principal("alice@test.com")
         assert {c.id for c in credentials} == {"cred-1", "cred-2"}
 
-        backend.revoke_credential("cred-1", datetime(2025, 1, 3, tzinfo=UTC))
+        backend.revoke_credential("cred-1", datetime(2025, 1, 3, tzinfo=UTC), "admin@test.com")
         assert backend.get_principal_by_token_hash("a" * 64) is None
         assert backend.get_principal_by_token_hash("b" * 64) is not None
+
+    def test_credential_issued_by_and_revoked_by_roundtrip(self, backend: SQLiteBackend) -> None:
+        credential = PrincipalCredential(
+            id="cred-1",
+            principal_id="alice@test.com",
+            token_hash="deadbeef" * 8,
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            issued_by="admin@test.com",
+        )
+        backend.put_credential(credential)
+        assert backend.get_credential("cred-1").issued_by == "admin@test.com"  # type: ignore[union-attr]
+        assert backend.get_credential("cred-1").revoked_by is None  # type: ignore[union-attr]
+
+        backend.revoke_credential("cred-1", datetime(2025, 1, 2, tzinfo=UTC), "carol@test.com")
+        assert backend.get_credential("cred-1").revoked_by == "carol@test.com"  # type: ignore[union-attr]
+
+    def test_re_revoking_credential_does_not_overwrite_revoker(
+        self, backend: SQLiteBackend
+    ) -> None:
+        backend.put_credential(
+            PrincipalCredential(
+                id="cred-1",
+                principal_id="alice@test.com",
+                token_hash="deadbeef" * 8,
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+        backend.revoke_credential("cred-1", datetime(2025, 1, 2, tzinfo=UTC), "admin@test.com")
+
+        backend.revoke_credential("cred-1", datetime(2025, 1, 3, tzinfo=UTC), "carol@test.com")
+
+        credential = backend.get_credential("cred-1")
+        assert credential is not None
+        assert credential.revoked_by == "admin@test.com"
+        assert credential.revoked_at == datetime(2025, 1, 2, tzinfo=UTC)
+
+    def test_put_and_get_admin_event(self, backend: SQLiteBackend) -> None:
+        event = AdminEvent(
+            id="event-1",
+            actor="admin@test.com",
+            action="create_principal",
+            target="alice@test.com",
+            at=datetime(2025, 1, 1, tzinfo=UTC),
+            detail="bootstrap",
+        )
+        backend.put_admin_event(event)
+
+        [retrieved] = backend.get_admin_events()
+        assert retrieved == event
+
+    def test_put_admin_event_duplicate_id_raises_storage_error(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """Covers put_admin_event's own IntegrityError -> StorageError
+        wrapper, reached via a plain duplicate-id INSERT through the port
+        (not a raw REPLACE statement against the connection directly)."""
+        event = AdminEvent(
+            id="event-1",
+            actor="admin@test.com",
+            action="create_principal",
+            target="alice@test.com",
+            at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        backend.put_admin_event(event)
+
+        with pytest.raises(StorageError, match="conflict"):
+            backend.put_admin_event(event)
+
+    def test_get_admin_events_filters(self, backend: SQLiteBackend) -> None:
+        backend.put_admin_event(
+            AdminEvent(
+                id="event-1",
+                actor="admin@test.com",
+                action="create_principal",
+                target="alice@test.com",
+                at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+        backend.put_admin_event(
+            AdminEvent(
+                id="event-2",
+                actor="carol@test.com",
+                action="apply_schema",
+                target="default:v1",
+                at=datetime(2025, 1, 2, tzinfo=UTC),
+            )
+        )
+
+        assert [e.id for e in backend.get_admin_events(actor="admin@test.com")] == ["event-1"]
+        assert [e.id for e in backend.get_admin_events(target="default:v1")] == ["event-2"]
+        assert [e.id for e in backend.get_admin_events()] == ["event-1", "event-2"]
+
+    def test_get_admin_events_tiebreaks_same_timestamp_by_id(self, backend: SQLiteBackend) -> None:
+        for event_id in ("event-b", "event-a"):
+            backend.put_admin_event(
+                AdminEvent(
+                    id=event_id,
+                    actor="admin@test.com",
+                    action="create_principal",
+                    target="alice@test.com",
+                    at=datetime(2025, 1, 1, tzinfo=UTC),
+                )
+            )
+
+        assert [e.id for e in backend.get_admin_events()] == ["event-a", "event-b"]
+
+    def test_admin_event_update_rejected(self, backend: SQLiteBackend) -> None:
+        backend.put_admin_event(
+            AdminEvent(
+                id="event-1",
+                actor="admin@test.com",
+                action="create_principal",
+                target="alice@test.com",
+                at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            backend.conn.execute(
+                "UPDATE admin_event SET actor = 'mallory' WHERE id = ?", ("event-1",)
+            )
+
+    def test_admin_event_delete_rejected(self, backend: SQLiteBackend) -> None:
+        backend.put_admin_event(
+            AdminEvent(
+                id="event-1",
+                actor="admin@test.com",
+                action="create_principal",
+                target="alice@test.com",
+                at=datetime(2025, 1, 1, tzinfo=UTC),
+            )
+        )
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            backend.conn.execute("DELETE FROM admin_event WHERE id = ?", ("event-1",))
+
+    def test_principal_credential_migration_adds_new_columns_to_existing_db(
+        self, temp_db: Path
+    ) -> None:
+        """A database file created before issued_by/revoked_by existed
+        gets them added on next open, without touching existing rows
+        (KI-060) — simulates that by building the table in its pre-KI-060
+        shape directly, bypassing SQLiteBackend's own (already-migrated)
+        schema setup."""
+        raw = sqlite3.connect(temp_db)
+        raw.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, "
+            "token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT)"
+        )
+        raw.execute(
+            "INSERT INTO principal_credential (id, principal_id, token_hash, created_at) "
+            "VALUES ('old-cred', 'alice@test.com', 'oldhash', '2025-01-01T00:00:00+00:00')"
+        )
+        raw.commit()
+        raw.close()
+
+        backend = SQLiteBackend(temp_db)
+        try:
+            columns = {
+                row[1] for row in backend.conn.execute("PRAGMA table_info(principal_credential)")
+            }
+            assert {"issued_by", "revoked_by"}.issubset(columns)
+            old = backend.get_credential("old-cred")
+            assert old is not None
+            assert old.principal_id == "alice@test.com"
+            assert old.issued_by is None
+            assert old.revoked_by is None
+        finally:
+            backend.close()
 
     def _put_proposal(self, backend: SQLiteBackend, proposal_id: str) -> None:
         backend.put_proposal(

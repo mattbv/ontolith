@@ -93,6 +93,15 @@ class PluginRegistry:
             doesn't restrict anything. Only logged on successful
             registration (the plugin actually becomes a standing
             in-process actor), not on a failed attempt.
+
+            Records a `register_plugin` `AdminEvent` on successful
+            registration (KI-060), same "only on success" timing as the
+            warning above. If this is the plugin's first registration
+            (no existing principal), `_ensure_principal`'s own
+            `create_principal(..., author=author)` call also records a
+            separate `create_principal` event — two events for one
+            `register()` call in that case, one for each distinct action
+            that actually happened.
         """
         self._kb.require_admin(author)
 
@@ -109,14 +118,17 @@ class PluginRegistry:
                 "manifest or the granted_capability passed to register()."
             )
 
-        principal_id = self._ensure_principal(manifest, effective_capability)
+        principal_id = self._ensure_principal(manifest, effective_capability, author)
         view = self._build_view(principal_id, effective_capability)
-        # Warn only once registration actually succeeds (review finding):
-        # this plugin is now live in-process with unenforced network/
-        # filesystem access, which is the claim the warning makes — a
-        # registration attempt that fails before this point never becomes
-        # a standing in-process actor at all.
+        # Warn/record only once registration actually succeeds (review
+        # finding for the warning, same reasoning extends to the audit
+        # event, KI-060): this plugin is now live in-process with
+        # unenforced network/filesystem access, which is the claim the
+        # warning makes — a registration attempt that fails before this
+        # point never becomes a standing in-process actor at all, and
+        # shouldn't be recorded as though one was created.
         self._warn_if_unenforced_capabilities_requested(manifest)
+        self._kb.record_admin_event(author, "register_plugin", manifest.name)
 
         return LoadedPlugin(
             manifest=manifest,
@@ -204,7 +216,9 @@ class PluginRegistry:
             return "read"
         return capped
 
-    def _ensure_principal(self, manifest: PluginManifest, effective_capability: str) -> str:
+    def _ensure_principal(
+        self, manifest: PluginManifest, effective_capability: str, author: str
+    ) -> str:
         """Get or create the service principal bound to this plugin, and return its ID."""
         existing = self._kb.get_principal(manifest.name)
         if existing is None:
@@ -214,6 +228,7 @@ class PluginRegistry:
                 auth_method="workload",
                 default_capability=effective_capability,
                 metadata={_PLUGIN_METADATA_MARKER: True},
+                author=author,
             )
             return principal.id
 

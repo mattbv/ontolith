@@ -35,7 +35,8 @@ from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, rout
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.policy import Decision, PolicyStrategy, Reject, RequireReview
 from ontolith.govern.proposal import Proposal, ProposalEvent
-from ontolith.identity import Principal, PrincipalCredential, min_capability
+from ontolith.identity import AdminEvent, Principal, PrincipalCredential, min_capability
+from ontolith.identity.admin_event import AdminAction
 from ontolith.query import QueryBuilder
 from ontolith.schema import SchemaIR
 from ontolith.store.base import DEFAULT_NAMESPACE, StorageBackend
@@ -265,6 +266,7 @@ class Ontology:
         default_capability: str = "propose",
         trust_level: int = 0,
         metadata: dict[str, Any] | None = None,
+        author: str | None = None,
     ) -> Principal:
         """Create a new principal.
 
@@ -276,9 +278,25 @@ class Ontology:
             default_capability: Default permission level
             trust_level: Base trust score
             metadata: Optional metadata
+            author: Principal ID of the admin creating this principal
+                (KI-060) — purely for `AdminEvent` attribution, NOT a
+                capability gate. This method still has no built-in
+                capability check by design (ADR-0022) — external callers
+                (REST, CLI) gate it themselves via `require_admin` before
+                calling, and are expected to pass that same admin id here
+                too. `None` records no event, e.g. the bootstrap case
+                where no admin exists yet to attribute to.
 
         Returns:
             Created principal
+
+        Note:
+            Opens its own `self.backend.transaction()` (to keep the
+            principal write and its `AdminEvent` atomic) — cannot be
+            called from inside an already-open transaction (e.g. a caller
+            wrapping this in its own `with kb.backend.transaction():`
+            block), same constraint every other transaction-wrapped
+            `Ontology` write method already has.
 
         Raises:
             ValidationError: kind is "ai" and owner is missing, or doesn't
@@ -315,7 +333,10 @@ class Ontology:
                     f"AI principal owner must be human or service, not ai: {principal.owner!r}"
                 )
 
-        self.backend.put_principal(principal)
+        with self.backend.transaction():
+            self.backend.put_principal(principal)
+            if author is not None:
+                self.record_admin_event(author, "create_principal", principal_id)
         return principal
 
     def get_principal(self, principal_id: str) -> Principal | None:
@@ -2801,6 +2822,41 @@ class Ontology:
         assert result is not None
         return result, action
 
+    def record_admin_event(
+        self, actor: str, action: AdminAction, target: str, *, detail: str | None = None
+    ) -> AdminEvent:
+        """Record an append-only admin-action event (KI-060, SPEC §17).
+
+        Does NOT itself check `actor`'s capability — callers are expected
+        to have already gated the action this event is documenting (e.g.
+        via `require_admin`) before calling this, the same "record, don't
+        re-gate" contract `_record_assertion_event`/`ProposalEvent`
+        recording already follow elsewhere in this class. Public (not a
+        leading-underscore helper) because `PluginRegistry.register()`
+        (a different module) needs to call it directly after a successful
+        registration, the same way it already calls the public
+        `require_admin`/`create_principal`.
+
+        Args:
+            actor: Principal ID who performed the action
+            action: Which admin action this event records
+            target: Free-text identifier of what was acted on
+            detail: Optional free-text detail
+
+        Returns:
+            The persisted AdminEvent
+        """
+        event = AdminEvent(
+            id=self.id_provider.next(),
+            actor=actor,
+            action=action,
+            target=target,
+            at=self.clock.now(),
+            detail=detail,
+        )
+        self.backend.put_admin_event(event)
+        return event
+
     def apply_schema(self, schema: SchemaIR, author: str) -> SchemaIR:
         """Persist a new schema version, capability-checked (SPEC §6).
 
@@ -2810,7 +2866,8 @@ class Ontology:
 
         This is the only governed path that reaches `StorageBackend.put_schema()` —
         without it, schema versions could be persisted with no capability check
-        by anything holding a `backend` reference directly.
+        by anything holding a `backend` reference directly. Records an
+        `AdminEvent` (KI-060) after successful application.
 
         Args:
             schema: SchemaIR to persist
@@ -2823,6 +2880,13 @@ class Ontology:
             AuthError: If the author principal is not found
             CapabilityError: If the author lacks `admin` capability
             SchemaError: If `schema.version` is not the next monotonic version
+
+        Note:
+            Opens its own `self.backend.transaction()` (to keep the
+            schema write and its `AdminEvent` atomic, KI-060) — cannot be
+            called from inside an already-open transaction, same
+            constraint every other transaction-wrapped `Ontology` write
+            method already has.
         """
         self.require_admin(author)
 
@@ -2834,7 +2898,9 @@ class Ontology:
                 f"for namespace {schema.namespace!r} (expected {expected_version})"
             )
 
-        self.backend.put_schema(schema)
+        with self.backend.transaction():
+            self.backend.put_schema(schema)
+            self.record_admin_event(author, "apply_schema", f"{schema.namespace}:v{schema.version}")
         return schema
 
     def require_admin(self, author: str) -> Principal:
@@ -2931,6 +2997,7 @@ class Ontology:
             principal_id=principal_id,
             token_hash=hash_token(raw_token),
             created_at=self.clock.now(),
+            issued_by=author,
         )
         self.backend.put_credential(credential)
         return raw_token, credential.id
@@ -2953,7 +3020,7 @@ class Ontology:
         credential = self.backend.get_credential(credential_id)
         if credential is None:
             raise NotFoundError(f"Token credential not found: {credential_id}")
-        self.backend.revoke_credential(credential_id, self.clock.now())
+        self.backend.revoke_credential(credential_id, self.clock.now(), author)
 
     def list_tokens(self, principal_id: str, author: str) -> list[PrincipalCredential]:
         """List all credentials (active and revoked) issued to a principal.
