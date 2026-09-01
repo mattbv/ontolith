@@ -153,6 +153,67 @@ a security-sensitive path (token issuance), and no non-breaking shape existed th
 redundant lookup (a two-item result object would still change every callers' unpacking pattern; a
 new `issue_token_v2` method would leave the racy path reachable indefinitely).
 
+## Update (2026-09-01, closes KI-067): `Authorization` header preferred over the `token` argument
+
+Every tool's `token` parameter is itself a credential-exposure path this ADR never named: because
+`token` is a tool *argument*, the calling model must emit it as part of every tool call — landing a
+live, long-lived bearer token (this ADR's own "Negative" section: "a leaked token grants that
+principal's access until revoked") in the model's own context window and in any MCP client's
+tool-call logging, neither of which Ontolith controls. The SSE/streamable-HTTP transports had an
+unused channel for this: the mcp SDK's own transport wiring (`ServerMessageMetadata.request_context`)
+already threads the raw Starlette request through to every tool call.
+
+**Fix:** every tool's `token` parameter became optional (`str | None = None`). A new per-server
+`_bearer_token(token)` helper (`interfaces/mcp.py`) checks
+`mcp.get_context().request_context.request` for an `Authorization` header first, falling back to
+the `token` argument only when no header is present at all (or no HTTP request exists at all, e.g.
+stdio). A header that IS present but malformed — wrong scheme, or a blank/whitespace-only value —
+does NOT fall back to the argument; it fails the call closed with an `auth_error` instead. A
+well-formed `Bearer <token>` header, when present, always wins — even over a `token` argument the
+caller also supplied — so an SSE/streamable-HTTP deployment can omit the argument entirely and keep
+the credential off the model's own context. (Round-2 review of this fix caught the original version
+silently falling back to the argument on ANY unparseable header, not just an absent one — the same
+exposure this fix exists to remove, reopened with no signal, the moment a proxy's header injection
+ever misconfigured. Fixed before merge, not left as a follow-up.)
+
+**Migration note:** a deployment sitting behind a proxy/gateway that already sets its own
+`Authorization` header for an unrelated purpose (its own bearer scheme, or a foreign token) — and
+that was previously relying on the `token` *argument* to authenticate to Ontolith — now fails
+closed instead of authenticating via the argument, since a present header always takes priority and
+a malformed or unresolvable one is never silently skipped. This is the intended tightening, not a
+bug, but it is a real behavior change for that specific setup: such a deployment must strip or
+rename the incoming header before proxying to Ontolith's MCP server.
+
+**Why not adopt the mcp SDK's built-in OAuth-shaped bearer-auth stack instead** (`FastMCP(auth=...,
+token_verifier=...)`, `RequireAuthMiddleware`/`BearerAuthBackend`): that machinery models a full
+OAuth 2.1 resource server — it requires an `issuer_url` and advertises RFC 9728 Protected Resource
+Metadata pointing at a real authorization server. Ontolith has no OAuth authorization server behind
+its per-principal API-key tokens (this ADR's own Decision), so wiring it up would mean either
+fabricating OAuth metadata endpoints with nothing real behind them, or building a full mini
+authorization server — a materially larger, out-of-scope redesign of this ADR's actual token model.
+Reading the header directly keeps the existing `AuthProvider.resolve(token) -> Principal` port
+completely unchanged.
+
+**stdio residual exposure — not closed by this fix, documented instead:** stdio has no HTTP request
+of any kind, so `token` remains the only channel there, unchanged from this ADR's original design.
+A stdio-facing principal's token still has to be configured wherever the client launches the server
+process (an environment variable or client config file, not a live tool-call argument the model
+itself emits) — a materially smaller exposure than a value the model repeats into every tool call
+and every transcript, but still not zero. Deployments running MCP over stdio should prefer
+short-lived tokens for those principals precisely because there's no way to keep the token out of
+the client's own process environment the way the header keeps it out of the *model's* context.
+
+**Residual — the argument still works even when a header is available, so the exposure is made
+avoidable, not eliminated:** an HTTP deployment cannot currently *require* the header. `token`
+remains an accepted, schema-advertised argument on every tool, so a model that already has a token
+in context can keep emitting it and it will keep authenticating (the header only wins when both are
+present *and* well-formed). A `require_header_token: bool` flag on `create_mcp_server()` that
+disables the argument fallback entirely for HTTP transports would let a deployment close this
+outright — not built here: it's an opt-in hardening a deployment could reach for once available,
+not a fix for a live vulnerability (the default behavior changes nothing on its own), so it was
+judged out of scope for this pass rather than blocking it. Tracked as KI-073 rather than left as
+ADR prose only.
+
 ## References
 
 - ADR-0008 (MCP surface — this ADR implements its "server stamps `author`" provenance claim,
@@ -162,4 +223,4 @@ new `issue_token_v2` method would leave the racy path reachable indefinitely).
   return-type change above)
 - SPEC §8.2 (Authentication), §14.4 (MCP server)
 - `identity/ports.py` (`AuthProvider`, stubbed since M0)
-- `docs/known-issues.md` KI-024 (now resolved)
+- `docs/known-issues.md` KI-024, KI-067 (both resolved), KI-073 (the deferred `require_header_token` follow-up)

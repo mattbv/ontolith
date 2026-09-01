@@ -797,6 +797,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Security
 
+- MCP tools prefer an `Authorization: Bearer <token>` HTTP header over the `token` tool argument
+  under the SSE/streamable-HTTP transports (closes KI-067, ADR-0014 update) — keeps a live
+  credential out of the calling model's own context window and any MCP client's tool-call logging.
+  `token` is now optional (`str | None = None`) on all 8 tools and remains the only channel on
+  stdio, which has no HTTP request to carry a header on. A header that IS present but malformed
+  (wrong scheme, blank value) fails the call closed rather than silently falling back to the
+  argument.
 - CI now runs `pip-audit`/`bandit`/`gitleaks`/SBOM generation (new `security.yml`, ADR-0026,
   closes KI-020) and a `griffe check` public-API breaking-change diff (informational pre-1.0, in
   `ci.yml`). Building the pass surfaced two real vulnerabilities, both fixed: `mcp` bumped to
