@@ -359,6 +359,156 @@ class TestQueryTool:
         assert "error" in result
         assert result["code"] == "validation_error"
 
+    def test_query_semantic_ranks_by_similarity(self, tmp_path: Path) -> None:
+        """KI-058: `semantic` was previously unreachable from MCP at all.
+
+        The second entity is created (and left unindexed) AFTER reindex() -
+        a real semantic search only ranks entities the vector index knows
+        about, so it must be excluded; a no-op `semantic` that silently
+        fell through to a plain, unranked entities() scan would include it
+        (count=2), which is what makes this discriminating rather than
+        vacuously passing on a single-entity KB."""
+        kb = _kb(tmp_path)
+        indexed = kb.create_entity("Person", author=HUMAN)
+        kb.propose(indexed.id, "Person.name", "Ada Lovelace", "Text", HUMAN)
+        kb.reindex()
+        kb.create_entity("Person", author=HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person",
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            semantic="Ada Lovelace",
+        )
+        assert result["count"] == 1
+        assert result["entities"][0]["id"] == indexed.id
+
+    def test_query_semantic_without_embedder_returns_validation_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.embedder = None
+        kb.create_entity("Person", author=HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person",
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            semantic="anything",
+        )
+        assert "error" in result
+        assert result["code"] == "validation_error"
+
+    def test_query_min_confidence_filters_entities(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        confident = kb.create_entity("Person", author=HUMAN)
+        unsure = kb.create_entity("Person", author=HUMAN)
+        kb.propose(confident.id, "Person.name", "Ada", "Text", HUMAN, confidence=0.9)
+        kb.propose(unsure.id, "Person.name", "Bob", "Text", HUMAN, confidence=0.1)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person",
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            min_confidence=0.5,
+        )
+        assert result["count"] == 1
+        assert result["entities"][0]["id"] == confident.id
+
+    def test_query_trust_at_least_filters_entities(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "trusted@example.com",
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            trust_level=8,
+        )
+        trusted_entity = kb.create_entity("Person", author=HUMAN)
+        untrusted_entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(trusted_entity.id, "Person.name", "Ada", "Text", "trusted@example.com")
+        kb.propose(untrusted_entity.id, "Person.name", "Bob", "Text", HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person",
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            trust_at_least=5,
+        )
+        assert result["count"] == 1
+        assert result["entities"][0]["id"] == trusted_entity.id
+
+    def test_query_limit_caps_result_count(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_entity("Person", author=HUMAN)
+        kb.create_entity("Person", author=HUMAN)
+        kb.create_entity("Person", author=HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person",
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            limit=2,
+        )
+        assert result["count"] == 2
+        assert len(result["entities"]) == 2
+
+    def test_query_as_of_reconstructs_past_state(self, tmp_path: Path) -> None:
+        """KI-058: MCP is the first of the four shipped interfaces to expose
+        bitemporal time-travel at all — REST/GraphQL/CLI still don't."""
+        kb = _kb(tmp_path)
+        kb.backend.put_schema(
+            SchemaIR(
+                namespace="default",
+                version=1,
+                concepts={
+                    "Person": ConceptDef(
+                        name="Person",
+                        properties={
+                            "title": PropertyDef(
+                                name="title", value_type="Text", temporality="time_varying"
+                            ),
+                        },
+                    ),
+                },
+            )
+        )
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.title", "Engineer", "Text", HUMAN)
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=180)
+        kb.propose(entity.id, "Person.title", "Manager", "Text", HUMAN)
+
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        past = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person",
+            token=token,
+            filters={"title": "Engineer"},
+            as_of=T0.isoformat(),
+        )
+        assert past["count"] == 1
+        assert past["entities"][0]["id"] == entity.id
+
+        now = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person", token=token, filters={"title": "Engineer"}
+        )
+        assert now["count"] == 0
+
+    def test_query_malformed_as_of_returns_validation_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_entity("Person", author=HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person",
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            as_of="not-a-timestamp",
+        )
+        assert "error" in result
+        assert result["code"] == "validation_error"
+
 
 # ---------------------------------------------------------------------------
 # ontolith.provenance

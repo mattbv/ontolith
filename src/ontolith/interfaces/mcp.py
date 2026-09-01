@@ -245,9 +245,19 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         concept: str,
         token: str | None = None,
         filters: dict[str, str] | None = None,
-        namespace: str = "default",
+        semantic: str | None = None,
+        as_of: str | None = None,
+        min_confidence: float | None = None,
+        trust_at_least: int | None = None,
+        limit: int | None = None,
     ) -> dict[str, Any]:
-        """Query entities of a concept, optionally filtered by property values.
+        """Query entities of a concept, optionally filtered/ranked/pinned in time.
+
+        Mirrors REST's ``POST /query`` and GraphQL's ``Query.query`` wiring
+        of the same ``QueryBuilder`` (SPEC §11.3, §14.4) — this tool
+        previously exposed only ``filters`` (KI-058), leaving agents, MCP's
+        own audience, with no way to use hybrid/semantic retrieval or cap
+        result size at all.
 
         Args:
             concept: Concept name to query (e.g. "Person")
@@ -265,12 +275,32 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
                 double-underscore keys (e.g. "employer__name") and any
                 suffix outside this closed operator set are not supported
                 and raise a validation_error (ADR-0027, KI-030).
-            namespace: Namespace to query (default: "default")
+            semantic: Optional query text — ranks results by vector
+                similarity (SPEC §11.3) instead of/in addition to
+                ``filters``. Requires the server's ``Ontology`` to have an
+                ``Embedder`` configured; otherwise returns a
+                validation_error.
+            as_of: Optional ISO-8601 timestamp (SPEC §11.4) — reconstructs
+                the knowledge base as it stood at that point in time
+                instead of querying current state. The first of the four
+                shipped interfaces to expose bitemporal time-travel at all
+                (REST/GraphQL/CLI don't yet — KI-058's own scope is MCP
+                only). A malformed value returns a validation_error.
+            min_confidence: Optional 0.0-1.0 floor — keep only entities
+                with at least one qualifying active assertion at or above
+                this confidence (ADR-0004: an assertion with
+                confidence=None never satisfies a numeric threshold).
+            trust_at_least: Optional floor on a qualifying assertion's
+                *effective* trust_level (min(author, acting_as) under
+                delegation, KI-047) — independent of ``min_confidence``;
+                the qualifying assertion need not be the same for both.
+            limit: Optional cap on the number of entities returned.
 
         Returns:
             Dict with "entities" list and "count", or "error" if no token
-            was resolvable, it does not resolve to a valid principal, or a
-            filter key is invalid.
+            was resolvable, it does not resolve to a valid principal, a
+            filter key is invalid, ``as_of`` doesn't parse, or ``semantic``
+            was given with no Embedder configured.
         """
         from ontolith.core.errors import AuthError, ValidationError
 
@@ -283,10 +313,25 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         except AuthError as exc:
             return {"error": str(exc), "code": "auth_error"}
 
-        builder = kb.query(concept)
+        if as_of is not None:
+            try:
+                builder = kb.as_of(as_of).query(concept)
+            except ValueError as exc:
+                return {"error": f"Invalid as_of value: {exc}", "code": "validation_error"}
+        else:
+            builder = kb.query(concept)
+
         try:
             if filters:
                 builder = builder.where(**filters)
+            if semantic is not None:
+                builder = builder.semantic(semantic)
+            if min_confidence is not None:
+                builder = builder.min_confidence(min_confidence)
+            if trust_at_least is not None:
+                builder = builder.trust_at_least(trust_at_least)
+            if limit is not None:
+                builder = builder.limit(limit)
             entities = builder.all()
         except ValidationError as exc:
             return {"error": str(exc), "code": "validation_error"}

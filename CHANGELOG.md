@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- MCP's `ontolith.query` tool gains `semantic`/`as_of`/`min_confidence`/`trust_at_least`/`limit`
+  parameters (closes KI-058, ADR-0043), mirroring REST's `POST /query`/GraphQL's `Query.query`
+  wiring into `QueryBuilder` for the first three and `limit`; `as_of` is new even to REST/GraphQL,
+  making MCP the first of the four shipped interfaces to expose bitemporal time-travel (SPEC
+  §11.4) through any route, per SPEC §14.4's own normative tool table naming it for this tool
+  specifically. **Breaking:** the tool's pre-existing `namespace` parameter was removed — it was a
+  silent no-op (`Ontology.query()` never accepted a namespace argument; namespace is hardcoded, the
+  same M1 limitation REST/GraphQL already work around by never exposing the field), so no caller
+  could have been relying on real behavior from it, but any caller passing it explicitly breaks.
 - Admin-action audit trail (closes KI-060, ADR-0042): `PrincipalCredential` gains `issued_by`/
   `revoked_by` columns (both backends, migrated in place for existing database files), populated
   from `issue_token`/`revoke_token`'s already-required `author` parameter. New `AdminEvent`
