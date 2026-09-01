@@ -24,7 +24,7 @@ from ontolith.core import Assertion, AssertionEvent, Clock, Entity, Namespace, S
 from ontolith.core.errors import StorageError, ValidationError
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
-from ontolith.identity import Principal, PrincipalCredential
+from ontolith.identity import AdminEvent, Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
 from ontolith.store.base import DEFAULT_NAMESPACE, VECTOR_SCOPES
 
@@ -176,6 +176,8 @@ class SQLiteBackend:
                 token_hash TEXT NOT NULL UNIQUE,
                 created_at TEXT NOT NULL,
                 revoked_at TEXT,
+                issued_by TEXT,
+                revoked_by TEXT,
                 FOREIGN KEY(principal_id) REFERENCES principal(id)
             )
         """)
@@ -184,6 +186,21 @@ class SQLiteBackend:
             CREATE INDEX IF NOT EXISTS idx_principal_credential_principal
             ON principal_credential(principal_id)
         """)
+
+        # KI-060: `issued_by`/`revoked_by` were added after this table was
+        # first shipped — `CREATE TABLE IF NOT EXISTS` above is a no-op
+        # against a database file that already has this table, so a
+        # pre-existing file needs an explicit, idempotent migration step.
+        # SQLite has no `ADD COLUMN IF NOT EXISTS`, so check first via
+        # PRAGMA rather than catching "duplicate column name" (which would
+        # also mask a genuine, different OperationalError).
+        existing_columns = {
+            row[1] for row in cursor.execute("PRAGMA table_info(principal_credential)")
+        }
+        if "issued_by" not in existing_columns:
+            cursor.execute("ALTER TABLE principal_credential ADD COLUMN issued_by TEXT")
+        if "revoked_by" not in existing_columns:
+            cursor.execute("ALTER TABLE principal_credential ADD COLUMN revoked_by TEXT")
 
         # Namespace registry table (SPEC §12.2, KI-022) — tracks namespaces
         # that have a schema applied or are the seeded default; NOT a
@@ -409,6 +426,70 @@ class SQLiteBackend:
             WHEN EXISTS(SELECT 1 FROM proposal_event WHERE id = NEW.id)
             BEGIN
                 SELECT RAISE(ABORT, 'proposal_event is append-only: REPLACE is not permitted');
+            END
+        """)
+
+        # Admin event table (KI-060, SPEC §17) — append-only audit log for
+        # the highest-stakes actions in the system: principal creation,
+        # schema application, plugin registration. `target` is free text,
+        # not a foreign key (see AdminEvent's own docstring for why one
+        # column can't reference three different row types). `actor` is
+        # also not a foreign key, unlike assertion_event/proposal_event's
+        # — apply_schema/register_plugin always validate `actor` via
+        # require_admin before this event is ever recorded, but
+        # create_principal's own `author` is optional and deliberately
+        # unvalidated (ADR-0022: create_principal itself has no built-in
+        # capability check), so a FOREIGN KEY here would reject a
+        # create_principal event whose caller supplied a bogus author
+        # string rather than just recording it, unlike every other write
+        # path in this file. Immutability enforced the same way as
+        # assertion_event/proposal_event (KI-066) — three triggers per
+        # table, `recursive_triggers` already ON from __init__ above.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS admin_event (
+                id TEXT PRIMARY KEY,
+                actor TEXT NOT NULL,
+                action TEXT NOT NULL CHECK(action IN (
+                    'create_principal', 'apply_schema', 'register_plugin'
+                )),
+                target TEXT NOT NULL,
+                at TEXT NOT NULL,
+                detail TEXT
+            )
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_admin_event_actor
+            ON admin_event(actor)
+        """)
+
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_admin_event_target
+            ON admin_event(target)
+        """)
+
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_admin_event_no_update
+            BEFORE UPDATE ON admin_event
+            BEGIN
+                SELECT RAISE(ABORT, 'admin_event is append-only: UPDATE is not permitted');
+            END
+        """)
+
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_admin_event_no_delete
+            BEFORE DELETE ON admin_event
+            BEGIN
+                SELECT RAISE(ABORT, 'admin_event is append-only: DELETE is not permitted');
+            END
+        """)
+
+        cursor.execute("""
+            CREATE TRIGGER IF NOT EXISTS trg_admin_event_no_replace
+            BEFORE INSERT ON admin_event
+            WHEN EXISTS(SELECT 1 FROM admin_event WHERE id = NEW.id)
+            BEGIN
+                SELECT RAISE(ABORT, 'admin_event is append-only: REPLACE is not permitted');
             END
         """)
 
@@ -739,8 +820,8 @@ class SQLiteBackend:
             cursor.execute(
                 """
                 INSERT INTO principal_credential
-                    (id, principal_id, token_hash, created_at, revoked_at)
-                VALUES (?, ?, ?, ?, ?)
+                    (id, principal_id, token_hash, created_at, revoked_at, issued_by, revoked_by)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     credential.id,
@@ -748,6 +829,8 @@ class SQLiteBackend:
                     credential.token_hash,
                     credential.created_at.isoformat(),
                     credential.revoked_at.isoformat() if credential.revoked_at else None,
+                    credential.issued_by,
+                    credential.revoked_by,
                 ),
             )
             if not self._in_transaction:
@@ -838,28 +921,95 @@ class SQLiteBackend:
             token_hash=row["token_hash"],
             created_at=datetime.fromisoformat(row["created_at"]),
             revoked_at=datetime.fromisoformat(row["revoked_at"]) if row["revoked_at"] else None,
+            issued_by=row["issued_by"],
+            revoked_by=row["revoked_by"],
         )
 
     @_synchronized
-    def revoke_credential(self, credential_id: str, revoked_at: datetime) -> None:
-        """Mark a credential as revoked. Idempotent-safe: re-revoking is a no-op update.
+    def revoke_credential(self, credential_id: str, revoked_at: datetime, revoked_by: str) -> None:
+        """Mark a credential as revoked. Idempotent-safe: re-revoking an
+        already-revoked credential is a true no-op, not a silent
+        re-stamp — it doesn't overwrite `revoked_by`/`revoked_at` with a
+        second caller's values (KI-060: that would launder the first
+        revocation's real attribution).
 
         Args:
             credential_id: Credential to revoke
             revoked_at: Timestamp of revocation
+            revoked_by: Principal ID of the admin performing the revocation
 
         Raises:
             StorageError: If the credential is not found
         """
         cursor = self.conn.cursor()
         cursor.execute(
-            "UPDATE principal_credential SET revoked_at = ? WHERE id = ?",
-            (revoked_at.isoformat(), credential_id),
+            "UPDATE principal_credential SET revoked_at = ?, revoked_by = ? "
+            "WHERE id = ? AND revoked_at IS NULL",
+            (revoked_at.isoformat(), revoked_by, credential_id),
         )
         if cursor.rowcount == 0:
-            raise StorageError(f"Credential not found: {credential_id}")
+            exists = cursor.execute(
+                "SELECT 1 FROM principal_credential WHERE id = ?", (credential_id,)
+            ).fetchone()
+            if exists is None:
+                raise StorageError(f"Credential not found: {credential_id}")
+            # Already revoked - no-op, first revocation's attribution stands.
         if not self._in_transaction:
             self.conn.commit()
+
+    @_synchronized
+    def put_admin_event(self, event: AdminEvent) -> None:
+        """Persist an append-only admin-action event (KI-060)."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO admin_event (id, actor, action, target, at, detail)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.id,
+                    event.actor,
+                    event.action,
+                    event.target,
+                    event.at.isoformat(),
+                    event.detail,
+                ),
+            )
+            if not self._in_transaction:
+                self.conn.commit()
+        except sqlite3.IntegrityError as e:
+            raise StorageError(f"Admin event conflict (id={event.id}): {e}") from e
+        except sqlite3.Error as e:
+            raise StorageError(f"Failed to persist admin event (id={event.id}): {e}") from e
+
+    @_synchronized
+    def get_admin_events(
+        self, actor: str | None = None, target: str | None = None
+    ) -> list[AdminEvent]:
+        """Retrieve admin events, optionally filtered by actor or target, oldest first."""
+        cursor = self.conn.cursor()
+        query = "SELECT * FROM admin_event WHERE 1=1"
+        params: list[str] = []
+        if actor is not None:
+            query += " AND actor = ?"
+            params.append(actor)
+        if target is not None:
+            query += " AND target = ?"
+            params.append(target)
+        query += " ORDER BY at ASC"
+        cursor.execute(query, params)
+        return [
+            AdminEvent(
+                id=row["id"],
+                actor=row["actor"],
+                action=row["action"],
+                target=row["target"],
+                at=datetime.fromisoformat(row["at"]),
+                detail=row["detail"],
+            )
+            for row in cursor.fetchall()
+        ]
 
     @_synchronized
     def put_entity(self, entity: Entity) -> None:

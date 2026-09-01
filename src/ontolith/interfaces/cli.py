@@ -106,6 +106,7 @@ def principal_create(
             owner=owner,
             default_capability=capability,
             trust_level=trust_level,
+            author=author,
         )
         typer.echo(f"Created principal: {p.id}  kind={p.kind}  capability={p.default_capability}")
     except typer.Exit:

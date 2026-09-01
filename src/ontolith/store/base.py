@@ -16,7 +16,7 @@ from typing import Any, Protocol
 from ontolith.core import Assertion, AssertionEvent, Entity, Namespace
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
-from ontolith.identity import Principal, PrincipalCredential
+from ontolith.identity import AdminEvent, Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
 
 VECTOR_SCOPES = frozenset({"entity", "assertion"})
@@ -154,15 +154,42 @@ class StorageBackend(Protocol):
         """
         ...
 
-    def revoke_credential(self, credential_id: str, revoked_at: datetime) -> None:
+    def revoke_credential(self, credential_id: str, revoked_at: datetime, revoked_by: str) -> None:
         """Mark a credential as revoked.
 
         Args:
             credential_id: Credential to revoke
             revoked_at: Timestamp of revocation
+            revoked_by: Principal ID of the admin performing the
+                revocation (KI-060)
 
         Raises:
             StorageError: If the credential is not found
+        """
+        ...
+
+    def put_admin_event(self, event: AdminEvent) -> None:
+        """Persist an append-only admin-action event (KI-060, SPEC §17).
+
+        Args:
+            event: AdminEvent to persist
+
+        Raises:
+            StorageError: If persistence fails
+        """
+        ...
+
+    def get_admin_events(
+        self, actor: str | None = None, target: str | None = None
+    ) -> list[AdminEvent]:
+        """Retrieve admin events, optionally filtered by actor or target.
+
+        Args:
+            actor: Filter to events performed by this principal ID
+            target: Filter to events against this target
+
+        Returns:
+            Matching events, oldest first
         """
         ...
 
