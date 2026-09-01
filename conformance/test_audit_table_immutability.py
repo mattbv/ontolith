@@ -1,6 +1,6 @@
-"""Conformance vector: audit table immutability (SPEC §17, KI-066).
+"""Conformance vector: audit table immutability (SPEC §17, KI-066/KI-060).
 
-SPEC §17: "the audit trail MUST NOT be mutable." Prior to this KI, that was
+SPEC §17: "the audit trail MUST NOT be mutable." Prior to KI-066, that was
 enforced only by StorageBackend's port surface exposing no update/delete
 method for `assertion_event`/`proposal_event` — a convention any code
 holding the raw connection could bypass. SQLiteBackend now backs this with
@@ -14,6 +14,12 @@ defense in depth, but is NOT load-bearing for the REPLACE case: the
 regardless of pragma state, unlike the pragma, which is per-*connection*
 and doesn't follow a second raw connection to the same file (found in
 review round 2 — see `TestSecondConnectionCannotBypassEitherTrigger`).
+
+`admin_event` (KI-060) reuses the identical three-trigger mechanism —
+covered here too (found missing in KI-060's own review: the first version
+of this fix shipped `admin_event`'s triggers without extending this file
+to cover them, the exact "one of N triggers goes unpinned" class of gap
+KI-066 needed a third round to catch on the original two tables).
 
 DuckDB has no `CREATE TRIGGER` support at all (verified against 1.5.4) —
 DuckDBBackend's own docstring documents this as a known, currently
@@ -65,6 +71,18 @@ def _seed_proposal_event(backend: StorageBackend) -> str:
     proposal, _decision = kb.propose(entity.id, "Person.name", "Ada", "Text", "alice@example.com")
     kb.request_changes(proposal.id, "carol@example.com", reason="needs a source")
     [event] = kb.backend.get_proposal_events(proposal.id)
+    return event.id
+
+
+def _seed_admin_event(backend: StorageBackend) -> str:
+    """Creates a principal with an author (recording a real admin_event row
+    via Ontology.record_admin_event) and returns the event's id."""
+    kb = Ontology(backend, clock=FixedClock(T0), id_provider=SequentialIdProvider("cv"))
+    kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+    kb.create_principal(
+        "alice@example.com", kind="human", default_capability="write", author="admin@example.com"
+    )
+    [event] = kb.backend.get_admin_events(target="alice@example.com")
     return event.id
 
 
@@ -191,6 +209,58 @@ class TestSQLiteAuditTablesAreImmutable:
         finally:
             backend.close()
 
+    def test_admin_event_update_rejected(self, tmp_path: Path) -> None:
+        import sqlite3
+
+        from ontolith.store.sqlite import SQLiteBackend
+
+        backend = SQLiteBackend(tmp_path / "test.db")
+        try:
+            event_id = _seed_admin_event(backend)
+            with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                backend.conn.execute(
+                    "UPDATE admin_event SET actor = 'mallory' WHERE id = ?", (event_id,)
+                )
+        finally:
+            backend.close()
+
+    def test_admin_event_delete_rejected(self, tmp_path: Path) -> None:
+        import sqlite3
+
+        from ontolith.store.sqlite import SQLiteBackend
+
+        backend = SQLiteBackend(tmp_path / "test.db")
+        try:
+            event_id = _seed_admin_event(backend)
+            with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                backend.conn.execute("DELETE FROM admin_event WHERE id = ?", (event_id,))
+        finally:
+            backend.close()
+
+    def test_admin_event_replace_rejected(self, tmp_path: Path) -> None:
+        """Same REPLACE-bypass shape and same "REPLACE is not permitted"
+        match precision as test_assertion_event_replace_rejected, for
+        admin_event (KI-060)."""
+        import sqlite3
+
+        from ontolith.store.sqlite import SQLiteBackend
+
+        backend = SQLiteBackend(tmp_path / "test.db")
+        try:
+            event_id = _seed_admin_event(backend)
+            with pytest.raises(sqlite3.IntegrityError, match="REPLACE is not permitted"):
+                backend.conn.execute(
+                    """
+                    INSERT OR REPLACE INTO admin_event
+                        (id, actor, action, target, at)
+                    SELECT id, 'mallory', action, target, at
+                    FROM admin_event WHERE id = ?
+                    """,
+                    (event_id,),
+                )
+        finally:
+            backend.close()
+
     def test_assertion_event_unqualified_delete_rejected(self, tmp_path: Path) -> None:
         """A bare `DELETE FROM assertion_event` (no WHERE) is the most
         direct "wipe the log" statement, and the one SQLite's truncate
@@ -224,11 +294,13 @@ class TestSecondConnectionCannotBypassEitherTrigger:
     deliberately do NOT set `recursive_triggers`, to prove the schema-level
     trigger is what's actually doing the work.
 
-    Both tables get all three operations (UPDATE/DELETE/REPLACE) from the
-    second connection - round 3 review found the first version of this
+    All three tables get all three operations (UPDATE/DELETE/REPLACE) from
+    the second connection - round 3 review found the first version of this
     class only exercised REPLACE for assertion_event and only
     UPDATE/DELETE for proposal_event, leaving each table's REPLACE-from-a-
-    second-connection path only half covered."""
+    second-connection path only half covered. `admin_event` (KI-060) was
+    missing from this class entirely in KI-060's own first review round —
+    same gap, third table."""
 
     def test_assertion_event_second_connection_rejected(self, tmp_path: Path) -> None:
         import sqlite3
@@ -286,6 +358,38 @@ class TestSecondConnectionCannotBypassEitherTrigger:
                             (id, proposal_id, actor, type, detail, at)
                         SELECT id, proposal_id, actor, type, 'TAMPERED', at
                         FROM proposal_event WHERE id = ?
+                        """,
+                        (event_id,),
+                    )
+            finally:
+                second_conn.close()
+        finally:
+            backend.close()
+
+    def test_admin_event_second_connection_rejected(self, tmp_path: Path) -> None:
+        import sqlite3
+
+        from ontolith.store.sqlite import SQLiteBackend
+
+        backend = SQLiteBackend(tmp_path / "test.db")
+        try:
+            event_id = _seed_admin_event(backend)
+            second_conn = sqlite3.connect(backend.path)
+            try:
+                assert second_conn.execute("PRAGMA recursive_triggers").fetchone()[0] == 0
+                with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                    second_conn.execute(
+                        "UPDATE admin_event SET actor = 'mallory' WHERE id = ?", (event_id,)
+                    )
+                with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+                    second_conn.execute("DELETE FROM admin_event WHERE id = ?", (event_id,))
+                with pytest.raises(sqlite3.IntegrityError, match="REPLACE is not permitted"):
+                    second_conn.execute(
+                        """
+                        INSERT OR REPLACE INTO admin_event
+                            (id, actor, action, target, at)
+                        SELECT id, 'mallory', action, target, at
+                        FROM admin_event WHERE id = ?
                         """,
                         (event_id,),
                     )
@@ -359,5 +463,24 @@ class TestDuckDBAuditTablesAreCurrentlyMutable:
             ).fetchone()
             assert row is not None
             assert row[0] == "flagged"
+        finally:
+            backend.close()
+
+    def test_admin_event_update_currently_succeeds(self, tmp_path: Path) -> None:
+        """Symmetry with the assertion_event/proposal_event DuckDB
+        coverage above, for admin_event (KI-060)."""
+        from ontolith.store.duckdb import DuckDBBackend
+
+        backend = DuckDBBackend(tmp_path / "test.db")
+        try:
+            event_id = _seed_admin_event(backend)
+            backend.conn.execute(
+                "UPDATE admin_event SET actor = 'mallory' WHERE id = ?", [event_id]
+            )
+            row = backend.conn.execute(
+                "SELECT actor FROM admin_event WHERE id = ?", [event_id]
+            ).fetchone()
+            assert row is not None
+            assert row[0] == "mallory"
         finally:
             backend.close()

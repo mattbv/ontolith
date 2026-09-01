@@ -1,9 +1,10 @@
 """Capability-scoped facades over Ontology for plugin code (ADR-0015).
 
 ReadOnlyView and WriteView expose only a safe method subset of Ontology.
-Admin-only methods (issue_token, apply_schema, create_principal,
-accept_proposal, reject_proposal, resolve_contradiction, flag_contradiction)
-and the direct-write bypass methods (assert_literal, assert_ref) are
+Admin-only methods (issue_token, revoke_token, apply_schema, create_principal,
+record_admin_event, accept_proposal, reject_proposal, resolve_contradiction,
+flag_contradiction) and the direct-write bypass methods (assert_literal,
+assert_ref) are
 STRUCTURALLY ABSENT — not runtime-checked — so a plugin using the intended
 API surface cannot reach them, and the omission cannot regress silently the
 way a runtime check could if someone forgot to call it.

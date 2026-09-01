@@ -747,6 +747,23 @@ class TestDuckDBBackend:
         [retrieved] = backend.get_admin_events()
         assert retrieved == event
 
+    def test_put_admin_event_duplicate_id_raises_storage_error(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """Covers put_admin_event's own IntegrityError -> StorageError
+        wrapper."""
+        event = AdminEvent(
+            id="event-1",
+            actor="admin@test.com",
+            action="create_principal",
+            target="alice@test.com",
+            at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        backend.put_admin_event(event)
+
+        with pytest.raises(StorageError, match="conflict"):
+            backend.put_admin_event(event)
+
     def test_get_admin_events_filters(self, backend: DuckDBBackend) -> None:
         backend.put_admin_event(
             AdminEvent(

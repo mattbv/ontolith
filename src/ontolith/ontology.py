@@ -290,6 +290,14 @@ class Ontology:
         Returns:
             Created principal
 
+        Note:
+            Opens its own `self.backend.transaction()` (to keep the
+            principal write and its `AdminEvent` atomic) — cannot be
+            called from inside an already-open transaction (e.g. a caller
+            wrapping this in its own `with kb.backend.transaction():`
+            block), same constraint every other transaction-wrapped
+            `Ontology` write method already has.
+
         Raises:
             ValidationError: kind is "ai" and owner is missing, or doesn't
                 name an existing human/service principal (SPEC §8.1: AI
@@ -2872,6 +2880,13 @@ class Ontology:
             AuthError: If the author principal is not found
             CapabilityError: If the author lacks `admin` capability
             SchemaError: If `schema.version` is not the next monotonic version
+
+        Note:
+            Opens its own `self.backend.transaction()` (to keep the
+            schema write and its `AdminEvent` atomic, KI-060) — cannot be
+            called from inside an already-open transaction, same
+            constraint every other transaction-wrapped `Ontology` write
+            method already has.
         """
         self.require_admin(author)
 

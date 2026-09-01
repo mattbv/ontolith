@@ -864,7 +864,7 @@ class DuckDBBackend:
         if target is not None:
             query += " AND target = ?"
             params.append(target)
-        query += ' ORDER BY "at" ASC'
+        query += ' ORDER BY "at" ASC, id ASC'
         cursor = self.conn.execute(query, params)
         return [
             self._row_to_admin_event(self._row_to_dict(cursor, row)) for row in cursor.fetchall()
