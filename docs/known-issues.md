@@ -1470,19 +1470,19 @@ Either accumulate a per-extension rationale somewhere retrievable (e.g. a list i
 
 ---
 
-## KI-072 — No interface exposes the admin-action audit trail recorded by ADR-0042
+## KI-072 — No interface exposes the admin-action audit trail recorded by ADR-0042 ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — the data is captured but unreachable through any shipped interface
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved via an ADR-0042 update
 **SPEC reference:** SPEC §17 (append-only, attributable writes)
 
 ### Description
 
-KI-060/ADR-0042 added `StorageBackend.get_admin_events()` and `PrincipalCredential.issued_by`/`revoked_by`, closing the *recording* half of "admin actions are unattributable." Nothing reads any of it back through REST, GraphQL, the CLI, or MCP: `get_admin_events()` has no route/query/command/tool; `CredentialOut` (`interfaces/rest.py`) and the CLI's `principal list-tokens` output don't include `issued_by`/`revoked_by` even though `PrincipalCredential` now carries both fields. The only way to answer "who created this principal" or "who issued/revoked this token" today is direct SDK/`kb.backend` access, which defeats KI-060's own stated motivation. ADR-0042 names this as "explicit future scope, not silently dropped," but no KI previously tracked it. Found in round-2 review of KI-060's PR.
+KI-060/ADR-0042 added `StorageBackend.get_admin_events()` and `PrincipalCredential.issued_by`/`revoked_by`, closing the *recording* half of "admin actions are unattributable." Nothing read any of it back through REST, GraphQL, the CLI, or MCP: `get_admin_events()` had no route/query/command/tool; `CredentialOut` (`interfaces/rest.py`) and the CLI's `principal list-tokens` output didn't include `issued_by`/`revoked_by` even though `PrincipalCredential` carried both fields. The only way to answer "who created this principal" or "who issued/revoked this token" was direct SDK/`kb.backend` access, which defeated KI-060's own stated motivation. ADR-0042 named this as "explicit future scope, not silently dropped," but no KI previously tracked it. Found in round-2 review of KI-060's PR.
 
 ### Fix
 
-Add a read surface for at least one interface (REST is the natural first target, matching how other read-only queries are exposed) — a `GET /admin-events` route with `actor`/`target` filters, and extend `CredentialOut`/the CLI's token-listing output with `issued_by`/`revoked_by`. Extend to GraphQL/MCP/CLI as those surfaces need it; MCP should stay read-only per SPEC's no-direct-write-tool rule, which this doesn't change.
+New `Ontology.get_admin_events(author, *, actor=None, target=None)`, admin-gated the same way `list_tokens`/`list_principals` already are. REST gets `GET /admin-events` with optional `actor`/`target` query parameters and a new `AdminEventOut` model; `CredentialOut` gains `issued_by`/`revoked_by`. CLI gets a new `ontolith admin-events list [--actor] [--target] --author <id>` command, and `principal list-tokens`'s output line now shows who issued/revoked each credential. GraphQL/MCP left for their own future scope, per this KI's own "extend as those surfaces need it" — MCP specifically because `get_admin_events()`'s admin-gating would make it the first MCP tool requiring `admin` capability rather than `read`/`propose`, a genuine new precedent not worth spinning up speculatively.
 
 ---
 

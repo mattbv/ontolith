@@ -421,6 +421,19 @@ class CredentialOut(BaseModel):
     principal_id: str
     created_at: str
     revoked_at: str | None
+    issued_by: str | None
+    revoked_by: str | None
+
+
+class AdminEventOut(BaseModel):
+    """A single recorded admin-action event (KI-060/KI-072, ADR-0042)."""
+
+    id: str
+    actor: str
+    action: str
+    target: str
+    at: str
+    detail: str | None
 
 
 class NamespaceOut(BaseModel):
@@ -1172,6 +1185,8 @@ def create_rest_app(
                 principal_id=c.principal_id,
                 created_at=c.created_at.isoformat(),
                 revoked_at=c.revoked_at.isoformat() if c.revoked_at else None,
+                issued_by=c.issued_by,
+                revoked_by=c.revoked_by,
             )
             for c in credentials
         ]
@@ -1201,6 +1216,36 @@ def create_rest_app(
         if credential is None or credential.principal_id != principal_id:
             raise NotFoundError(f"Credential {credential_id!r} not found for {principal_id!r}")
         kb.revoke_token(credential_id, author=principal.id)
+
+    # ------------------------------------------------------------------
+    # GET /admin-events
+    # ------------------------------------------------------------------
+
+    @app.get("/admin-events")
+    def list_admin_events_route(
+        actor: str | None = None,
+        target: str | None = None,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> list[AdminEventOut]:
+        """List recorded admin-action events (create_principal/apply_schema/
+        register_plugin), optionally filtered by actor or target (KI-072,
+        ADR-0042). Requires admin capability — closes the read half of
+        KI-060's audit trail: `issued_by`/`revoked_by` on GET
+        /principals/{id}/tokens covers token issuance/revocation, this
+        route covers the other three admin actions.
+        """
+        events = kb.get_admin_events(author=principal.id, actor=actor, target=target)
+        return [
+            AdminEventOut(
+                id=e.id,
+                actor=e.actor,
+                action=e.action,
+                target=e.target,
+                at=e.at.isoformat(),
+                detail=e.detail,
+            )
+            for e in events
+        ]
 
     # ------------------------------------------------------------------
     # GET /namespaces

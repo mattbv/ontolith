@@ -1743,6 +1743,22 @@ class TestTokenRoutes:
         assert "token" not in body[0]
         assert "id" in body[0]
 
+    def test_list_tokens_includes_issued_by_and_revoked_by(self, tmp_path: Path) -> None:
+        """KI-072: the audit trail's read half - who issued/revoked this
+        credential must be visible through the same route that lists it."""
+        kb = _kb(tmp_path)
+        _, credential_id = kb.issue_token(HUMAN, author=ADMIN)
+        kb.revoke_token(credential_id, author=ADMIN)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
+
+        response = client.get(f"/principals/{HUMAN}/tokens", headers=_auth(token))
+
+        assert response.status_code == 200
+        [credential] = [c for c in response.json() if c["id"] == credential_id]
+        assert credential["issued_by"] == ADMIN
+        assert credential["revoked_by"] == ADMIN
+
     def test_list_tokens_requires_auth(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         client, _ = _client(kb)
@@ -1824,6 +1840,75 @@ class TestTokenRoutes:
 
         # The credential is untouched - still resolves.
         assert kb.list_tokens(HUMAN, author=ADMIN)[0].revoked_at is None
+
+
+# ---------------------------------------------------------------------------
+# GET /admin-events
+# ---------------------------------------------------------------------------
+
+
+class TestAdminEventsRoute:
+    def test_lists_recorded_events(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "erin@example.com", kind="human", default_capability="write", author=ADMIN
+        )
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
+
+        response = client.get("/admin-events", headers=_auth(token))
+
+        assert response.status_code == 200
+        [event] = [e for e in response.json() if e["target"] == "erin@example.com"]
+        assert event["actor"] == ADMIN
+        assert event["action"] == "create_principal"
+
+    def test_filters_by_actor(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "carol@example.com", kind="human", default_capability="admin", author=ADMIN
+        )
+        kb.create_principal(
+            "dave@example.com", kind="human", default_capability="write", author="carol@example.com"
+        )
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
+
+        response = client.get(
+            "/admin-events", params={"actor": "carol@example.com"}, headers=_auth(token)
+        )
+
+        assert response.status_code == 200
+        assert [e["target"] for e in response.json()] == ["dave@example.com"]
+
+    def test_filters_by_target(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "carol@example.com", kind="human", default_capability="write", author=ADMIN
+        )
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
+
+        response = client.get(
+            "/admin-events", params={"target": "carol@example.com"}, headers=_auth(token)
+        )
+
+        assert response.status_code == 200
+        assert [e["actor"] for e in response.json()] == [ADMIN]
+
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        response = client.get("/admin-events")
+        assert response.status_code == 401
+
+    def test_non_admin_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN itself: write, not admin
+        response = client.get("/admin-events", headers=_auth(token))
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
 
 
 # ---------------------------------------------------------------------------

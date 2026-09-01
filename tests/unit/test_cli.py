@@ -311,6 +311,32 @@ class TestPrincipalTokens:
         assert "active" in result.output
         assert raw_token not in result.output
 
+    def test_list_tokens_shows_issued_by_and_revoked_by(self, temp_db: Path) -> None:
+        """KI-072: the audit trail's read half - who issued/revoked this
+        credential must be visible from the CLI's own listing, not just
+        the REST route."""
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        _, credential_id = kb.issue_token("alice@example.com", author="admin@example.com")
+        kb.revoke_token(credential_id, author="admin@example.com")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "principal",
+                "list-tokens",
+                "alice@example.com",
+                "--author",
+                "admin@example.com",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "by admin@example.com" in result.output
+
     def test_list_tokens_no_credentials_message(self, temp_db: Path) -> None:
         kb = Ontology.connect(temp_db)
         kb.create_principal("alice@example.com", kind="human", default_capability="write")
@@ -1551,6 +1577,85 @@ class TestSchemaMigrate:
                 "--author",
                 writer.id,
             ],
+        )
+        assert result.exit_code == 1
+        assert "lacks admin capability" in result.output
+
+
+class TestAdminEventsList:
+    """KI-072: `ontolith admin-events list` - the read half of KI-060's
+    audit trail for create_principal/apply_schema/register_plugin (token
+    issuance/revocation are covered by `principal list-tokens` instead,
+    see TestPrincipalTokens)."""
+
+    def test_lists_recorded_events(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        kb.create_principal(
+            "erin@example.com", kind="human", default_capability="write", author="admin@example.com"
+        )
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "admin-events", "list", "--author", "admin@example.com"],
+        )
+        assert result.exit_code == 0
+        assert "erin@example.com" in result.output
+        assert "create_principal" in result.output
+        assert "admin@example.com" in result.output
+
+    def test_filters_by_target(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        kb.create_principal(
+            "erin@example.com", kind="human", default_capability="write", author="admin@example.com"
+        )
+        kb.create_principal(
+            "frank@example.com",
+            kind="human",
+            default_capability="write",
+            author="admin@example.com",
+        )
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "admin-events",
+                "list",
+                "--author",
+                "admin@example.com",
+                "--target",
+                "erin@example.com",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "erin@example.com" in result.output
+        assert "frank@example.com" not in result.output
+
+    def test_no_events_message(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "admin-events", "list", "--author", "admin@example.com"],
+        )
+        assert result.exit_code == 0
+        assert "No admin events recorded" in result.output
+
+    def test_non_admin_author_exits_nonzero(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "admin-events", "list", "--author", "alice@example.com"],
         )
         assert result.exit_code == 1
         assert "lacks admin capability" in result.output
