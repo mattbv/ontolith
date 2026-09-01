@@ -27,13 +27,16 @@ admin``), so any successfully authenticated principal already clears the
 Token transport (KI-067): every tool still accepts an optional ``token``
 argument, but under the SSE/streamable-HTTP transports the server prefers
 an ``Authorization: Bearer <token>`` HTTP header when the transport supplies
-one, falling back to the argument only when no header is present. Prefer
-the header: the argument must be emitted by the calling model as part of
-the tool call itself, landing it in the model's own context window and any
-MCP client's tool-call logging; the header travels on the transport
-connection instead, out of the model's context entirely. stdio has no HTTP
-request at all, so ``token`` remains the only channel there — ADR-0014
-recommends short-lived tokens for stdio-facing principals for that reason.
+one, falling back to the argument only when no header is present at all.
+Prefer the header: the argument must be emitted by the calling model as
+part of the tool call itself, landing it in the model's own context window
+and any MCP client's tool-call logging; the header travels on the transport
+connection instead, out of the model's context entirely. A header that IS
+present but malformed (wrong scheme, or a blank value) fails the call
+closed rather than silently falling back to the argument — see
+``_bearer_token``'s docstring for why. stdio has no HTTP request at all, so
+``token`` remains the only channel there — ADR-0014 recommends short-lived
+tokens for stdio-facing principals for that reason.
 
 Usage:
     from ontolith.identity.token_auth import TokenAuthProvider
@@ -70,10 +73,20 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     """
     mcp: FastMCP = FastMCP(name)
 
-    def _bearer_token(token: str | None) -> str | None:
+    def _bearer_token(token: str | None) -> tuple[str | None, str | None]:
         """Resolve the caller's bearer token for the current tool call,
         preferring the ``Authorization`` HTTP header over the ``token``
         argument (KI-067, ADR-0014 — see module docstring).
+
+        Returns ``(resolved_token, error_message)`` — exactly one is
+        non-``None``. A *present but malformed* header (wrong scheme, or a
+        blank/whitespace-only value) fails closed with an error message and
+        does NOT fall back to the ``token`` argument: silently accepting the
+        argument whenever a proxy's header injection happens to misconfigure
+        would reopen the exact exposure this fix removes, with no signal
+        that it happened. An *absent* header (or no HTTP request context at
+        all — see below) is not malformed, just missing, and does fall back
+        to the argument as before.
 
         ``mcp.get_context().request_context.request`` is the raw Starlette
         request under the SSE/streamable-HTTP transports (the mcp SDK's own
@@ -81,7 +94,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         request exists) and accessing ``.request_context`` itself raises
         ``ValueError`` when called outside any live request at all (e.g. a
         test invoking a tool's ``.fn`` directly) — both cases fall back to
-        the ``token`` argument unchanged.
+        the ``token`` argument, same as a live request with no header.
         """
         try:
             request = mcp.get_context().request_context.request
@@ -89,11 +102,15 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             request = None
         if request is not None:
             auth_header = request.headers.get("authorization")
-            if auth_header:
+            if auth_header is not None:
                 scheme, _, value = auth_header.partition(" ")
-                if scheme.lower() == "bearer" and value:
-                    return value
-        return token
+                value = value.strip()
+                if scheme.lower() != "bearer" or not value:
+                    return None, "Malformed Authorization header"
+                return value, None
+        if token is None:
+            return None, "No bearer token provided"
+        return token, None
 
     # ------------------------------------------------------------------
     # ontolith.schema — list concepts and their properties/relations
@@ -118,9 +135,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         """
         from ontolith.core.errors import AuthError
 
-        token = _bearer_token(token)
-        if token is None:
-            return {"error": "No bearer token provided", "code": "auth_error"}
+        token, token_error = _bearer_token(token)
+        if token_error is not None:
+            return {"error": token_error, "code": "auth_error"}
+        assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             auth_provider.resolve(token)
         except AuthError as exc:
@@ -181,9 +199,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         """
         from ontolith.core.errors import AuthError
 
-        token = _bearer_token(token)
-        if token is None:
-            return {"error": "No bearer token provided", "code": "auth_error"}
+        token, token_error = _bearer_token(token)
+        if token_error is not None:
+            return {"error": token_error, "code": "auth_error"}
+        assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             auth_provider.resolve(token)
         except AuthError as exc:
@@ -255,9 +274,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         """
         from ontolith.core.errors import AuthError, ValidationError
 
-        token = _bearer_token(token)
-        if token is None:
-            return {"error": "No bearer token provided", "code": "auth_error"}
+        token, token_error = _bearer_token(token)
+        if token_error is not None:
+            return {"error": token_error, "code": "auth_error"}
+        assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             auth_provider.resolve(token)
         except AuthError as exc:
@@ -309,9 +329,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         """
         from ontolith.core.errors import AuthError
 
-        token = _bearer_token(token)
-        if token is None:
-            return {"error": "No bearer token provided", "code": "auth_error"}
+        token, token_error = _bearer_token(token)
+        if token_error is not None:
+            return {"error": token_error, "code": "auth_error"}
+        assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             auth_provider.resolve(token)
         except AuthError as exc:
@@ -432,9 +453,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
                 "code": "validation_error",
             }
 
-        token = _bearer_token(token)
-        if token is None:
-            return {"error": "No bearer token provided", "code": "auth_error"}
+        token, token_error = _bearer_token(token)
+        if token_error is not None:
+            return {"error": token_error, "code": "auth_error"}
+        assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             author = auth_provider.resolve(token).id
         except AuthError as exc:
@@ -534,9 +556,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         """
         from ontolith.core.errors import AuthError, CapabilityError
 
-        token = _bearer_token(token)
-        if token is None:
-            return {"error": "No bearer token provided", "code": "auth_error"}
+        token, token_error = _bearer_token(token)
+        if token_error is not None:
+            return {"error": token_error, "code": "auth_error"}
+        assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             author = auth_provider.resolve(token).id
         except AuthError as exc:
@@ -595,9 +618,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         """
         from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
 
-        token = _bearer_token(token)
-        if token is None:
-            return {"error": "No bearer token provided", "code": "auth_error"}
+        token, token_error = _bearer_token(token)
+        if token_error is not None:
+            return {"error": token_error, "code": "auth_error"}
+        assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             author = auth_provider.resolve(token).id
         except AuthError as exc:
@@ -658,9 +682,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         """
         from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
 
-        token = _bearer_token(token)
-        if token is None:
-            return {"error": "No bearer token provided", "code": "auth_error"}
+        token, token_error = _bearer_token(token)
+        if token_error is not None:
+            return {"error": token_error, "code": "auth_error"}
+        assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             author = auth_provider.resolve(token).id
         except AuthError as exc:

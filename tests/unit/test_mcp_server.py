@@ -1,6 +1,6 @@
 """Unit tests for the MCP server (ADR-0008, ADR-0014).
 
-Verifies that all 7 tools return the correct structure, that the no-write
+Verifies that all 8 tools return the correct structure, that the no-write
 invariant holds, and that the acting principal is always resolved from a
 verified bearer token (ADR-0014), never a caller-supplied ID. Tests run
 against a real in-memory SQLite KB.
@@ -8,6 +8,7 @@ against a real in-memory SQLite KB.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -74,6 +75,42 @@ def _http_request(authorization: str | None) -> Iterator[None]:
         yield
     finally:
         request_ctx.reset(reset_token)
+
+
+async def _call_tool_over_real_transport(
+    mcp: object, tool_name: str, arguments: dict[str, object], authorization: str | None
+) -> object:
+    """Drive one tool call through the real streamable-HTTP ASGI transport —
+    a genuine JSON-RPC initialize handshake, real session management, and an
+    actual `Authorization` header on an in-process HTTP request — instead of
+    `_http_request`'s faked `RequestContext`. Closes the gap where the fake
+    could silently drift from the SDK's real wiring while every faked-context
+    test kept passing (KI-067 review). Uses `httpx` (not this repo's `httpx2`
+    used elsewhere in this file) because `mcp.client.streamable_http` is
+    itself built on plain `httpx`, not `httpx2`.
+    """
+    import httpx
+    from mcp.client.session import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    app = mcp.streamable_http_app()  # type: ignore[attr-defined]
+
+    headers = {"Authorization": authorization} if authorization is not None else {}
+    # DNS-rebinding protection (mcp SDK default) rejects a bare "localhost"
+    # Host header with no port — base_url must include one.
+    http_client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://localhost:8000", headers=headers
+    )
+
+    async with mcp.session_manager.run():  # type: ignore[attr-defined]
+        async with http_client:
+            async with streamable_http_client(
+                "http://localhost:8000/mcp", http_client=http_client
+            ) as (read, write, _get_session_id):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    result = await session.call_tool(tool_name, arguments)
+                    return result.structuredContent
 
 
 # ---------------------------------------------------------------------------
@@ -1127,16 +1164,55 @@ class TestBearerTokenTransport:
 
         assert result == {"concepts": []}
 
-    def test_malformed_header_falls_back_to_token_argument(self, tmp_path: Path) -> None:
+    def test_malformed_header_fails_closed_ignoring_token_argument(self, tmp_path: Path) -> None:
         """A header present but not a well-formed `Bearer <token>` value
-        (wrong scheme here) doesn't silently authenticate as nothing — it
-        falls back to the argument, same as no header at all."""
+        (wrong scheme here) does NOT fall back to the argument, even though
+        the argument is valid — silently falling back on a malformed header
+        would reopen the exposure KI-067 removes. Fails closed instead."""
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
         token = kb.issue_token(HUMAN, author=ADMIN)[0]
 
         with _http_request("Basic dXNlcjpwYXNz"):
             result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=token)
+
+        assert result == {"error": "Malformed Authorization header", "code": "auth_error"}
+
+    def test_empty_bearer_value_fails_closed(self, tmp_path: Path) -> None:
+        """`Authorization: Bearer` with no value at all (not just a wrong
+        scheme) also fails closed rather than falling back."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request("Bearer"):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=token)
+
+        assert result == {"error": "Malformed Authorization header", "code": "auth_error"}
+
+    def test_uppercase_bearer_scheme_authenticates(self, tmp_path: Path) -> None:
+        """The scheme match is case-insensitive (RFC 7235) — pins the
+        `.lower()` explicitly, not just implicitly via the lowercase-scheme
+        tests above."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request(f"BEARER {token}"):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn()
+
+        assert result == {"concepts": []}
+
+    def test_extra_whitespace_before_token_is_stripped(self, tmp_path: Path) -> None:
+        """`Bearer  <token>` (double space, RFC 7235 permits BWS) still
+        authenticates instead of silently failing closed on a value with
+        leading whitespace."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request(f"Bearer  {token}"):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn()
 
         assert result == {"concepts": []}
 
@@ -1209,3 +1285,42 @@ class TestBearerTokenTransport:
         for tool_name, kwargs in calls.items():
             result = mcp._tool_manager.get_tool(tool_name).fn(**kwargs)
             assert result == {"error": "No bearer token provided", "code": "auth_error"}, tool_name
+
+    def test_header_authenticates_over_real_streamable_http_transport(self, tmp_path: Path) -> None:
+        """Every test above drives `_bearer_token` through `_http_request`'s
+        faked `RequestContext` — fast and deterministic, but only as good as
+        the fake staying an accurate stand-in for the SDK's real wiring. This
+        one instead runs the real streamable-HTTP ASGI app end to end."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        result = asyncio.run(
+            _call_tool_over_real_transport(mcp, "ontolith.schema", {}, f"Bearer {token}")
+        )
+
+        assert result == {"concepts": []}
+
+    def test_no_header_falls_back_to_argument_over_real_transport(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        result = asyncio.run(
+            _call_tool_over_real_transport(mcp, "ontolith.schema", {"token": token}, None)
+        )
+
+        assert result == {"concepts": []}
+
+    def test_malformed_header_fails_closed_over_real_transport(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        result = asyncio.run(
+            _call_tool_over_real_transport(
+                mcp, "ontolith.schema", {"token": token}, "Basic dXNlcjpwYXNz"
+            )
+        )
+
+        assert result == {"error": "Malformed Authorization header", "code": "auth_error"}

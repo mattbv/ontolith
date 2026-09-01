@@ -165,11 +165,16 @@ already threads the raw Starlette request through to every tool call.
 
 **Fix:** every tool's `token` parameter became optional (`str | None = None`). A new per-server
 `_bearer_token(token)` helper (`interfaces/mcp.py`) checks
-`mcp.get_context().request_context.request` for an `Authorization: Bearer <token>` header first,
-falling back to the `token` argument only when no header is present (or no HTTP request exists at
-all, e.g. stdio). The header, when present, always wins — even over a `token` argument the caller
-also supplied — so an SSE/streamable-HTTP deployment can omit the argument entirely and keep the
-credential off the model's own context.
+`mcp.get_context().request_context.request` for an `Authorization` header first, falling back to
+the `token` argument only when no header is present at all (or no HTTP request exists at all, e.g.
+stdio). A header that IS present but malformed — wrong scheme, or a blank/whitespace-only value —
+does NOT fall back to the argument; it fails the call closed with an `auth_error` instead. A
+well-formed `Bearer <token>` header, when present, always wins — even over a `token` argument the
+caller also supplied — so an SSE/streamable-HTTP deployment can omit the argument entirely and keep
+the credential off the model's own context. (Round-2 review of this fix caught the original version
+silently falling back to the argument on ANY unparseable header, not just an absent one — the same
+exposure this fix exists to remove, reopened with no signal, the moment a proxy's header injection
+ever misconfigured. Fixed before merge, not left as a follow-up.)
 
 **Why not adopt the mcp SDK's built-in OAuth-shaped bearer-auth stack instead** (`FastMCP(auth=...,
 token_verifier=...)`, `RequireAuthMiddleware`/`BearerAuthBackend`): that machinery models a full
@@ -189,6 +194,16 @@ itself emits) — a materially smaller exposure than a value the model repeats i
 and every transcript, but still not zero. Deployments running MCP over stdio should prefer
 short-lived tokens for those principals precisely because there's no way to keep the token out of
 the client's own process environment the way the header keeps it out of the *model's* context.
+
+**Residual — the argument still works even when a header is available, so the exposure is made
+avoidable, not eliminated:** an HTTP deployment cannot currently *require* the header. `token`
+remains an accepted, schema-advertised argument on every tool, so a model that already has a token
+in context can keep emitting it and it will keep authenticating (the header only wins when both are
+present *and* well-formed). A `require_header_token: bool` flag on `create_mcp_server()` that
+disables the argument fallback entirely for HTTP transports would let a deployment close this
+outright — not built here, since KI-067's own Fix text scoped this pass to making the header path
+available and preferred, not to removing the argument path. Left as a named follow-up rather than
+silently left unaddressed.
 
 ## References
 
