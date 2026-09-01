@@ -13,16 +13,27 @@ Tools (ADR-0008, plus resubmit added for KI-027, retract added for KI-057/ADR-00
   ontolith.resubmit         — resubmit a changes_requested proposal (NOT write)
   ontolith.retract          — propose retraction of an assertion (NOT write)
 
-Authentication (ADR-0014): every tool, reads included, takes a bearer
-``token``. The server resolves the token to a Principal via the injected
-AuthProvider — the acting principal is always server-derived from a verified
-credential, never client-asserted. One server (one AuthProvider/backend) can
-serve many principals, each with their own issued token
-(``kb.issue_token(principal_id, author=admin_id)`` via SDK/CLI — requires the
-issuing author to hold `admin` capability). Read tools require no further
-capability check beyond a resolved principal: capability is a total order
-(SPEC §8.3, ``read < propose < write < review < admin``), so any successfully
-authenticated principal already clears the "read" floor.
+Authentication (ADR-0014): every tool, reads included, resolves a bearer
+token to a Principal via the injected AuthProvider — the acting principal is
+always server-derived from a verified credential, never client-asserted. One
+server (one AuthProvider/backend) can serve many principals, each with their
+own issued token (``kb.issue_token(principal_id, author=admin_id)`` via
+SDK/CLI — requires the issuing author to hold `admin` capability). Read
+tools require no further capability check beyond a resolved principal:
+capability is a total order (SPEC §8.3, ``read < propose < write < review <
+admin``), so any successfully authenticated principal already clears the
+"read" floor.
+
+Token transport (KI-067): every tool still accepts an optional ``token``
+argument, but under the SSE/streamable-HTTP transports the server prefers
+an ``Authorization: Bearer <token>`` HTTP header when the transport supplies
+one, falling back to the argument only when no header is present. Prefer
+the header: the argument must be emitted by the calling model as part of
+the tool call itself, landing it in the model's own context window and any
+MCP client's tool-call logging; the header travels on the transport
+connection instead, out of the model's context entirely. stdio has no HTTP
+request at all, so ``token`` remains the only channel there — ADR-0014
+recommends short-lived tokens for stdio-facing principals for that reason.
 
 Usage:
     from ontolith.identity.token_auth import TokenAuthProvider
@@ -59,26 +70,57 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     """
     mcp: FastMCP = FastMCP(name)
 
+    def _bearer_token(token: str | None) -> str | None:
+        """Resolve the caller's bearer token for the current tool call,
+        preferring the ``Authorization`` HTTP header over the ``token``
+        argument (KI-067, ADR-0014 — see module docstring).
+
+        ``mcp.get_context().request_context.request`` is the raw Starlette
+        request under the SSE/streamable-HTTP transports (the mcp SDK's own
+        ``ServerMessageMetadata`` wiring); it's ``None`` under stdio (no HTTP
+        request exists) and accessing ``.request_context`` itself raises
+        ``ValueError`` when called outside any live request at all (e.g. a
+        test invoking a tool's ``.fn`` directly) — both cases fall back to
+        the ``token`` argument unchanged.
+        """
+        try:
+            request = mcp.get_context().request_context.request
+        except ValueError:
+            request = None
+        if request is not None:
+            auth_header = request.headers.get("authorization")
+            if auth_header:
+                scheme, _, value = auth_header.partition(" ")
+                if scheme.lower() == "bearer" and value:
+                    return value
+        return token
+
     # ------------------------------------------------------------------
     # ontolith.schema — list concepts and their properties/relations
     # ------------------------------------------------------------------
 
     @mcp.tool(name="ontolith.schema")
-    def schema_tool(token: str, namespace: str = "default") -> dict[str, Any]:
+    def schema_tool(token: str | None = None, namespace: str = "default") -> dict[str, Any]:
         """Return the schema (concepts, properties, and relations) for a namespace.
 
         Args:
-            token: Bearer token identifying the calling principal (ADR-0014)
+            token: Bearer token identifying the calling principal (ADR-0014).
+                Optional: an ``Authorization`` header takes priority when the
+                transport supplies one (KI-067, see module docstring); this
+                argument is the fallback, and the only channel on stdio.
             namespace: Namespace to inspect (default: "default")
 
         Returns:
             Dict with "concepts" key listing concept names, their property
             definitions, and their relation definitions from the active
-            schema version (SPEC §14.4), or "error" if the token does not
-            resolve to a valid principal.
+            schema version (SPEC §14.4), or "error" if no token was
+            resolvable or it does not resolve to a valid principal.
         """
         from ontolith.core.errors import AuthError
 
+        token = _bearer_token(token)
+        if token is None:
+            return {"error": "No bearer token provided", "code": "auth_error"}
         try:
             auth_provider.resolve(token)
         except AuthError as exc:
@@ -122,19 +164,26 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     # ------------------------------------------------------------------
 
     @mcp.tool(name="ontolith.get")
-    def get_tool(entity_id: str, token: str) -> dict[str, Any]:
+    def get_tool(entity_id: str, token: str | None = None) -> dict[str, Any]:
         """Fetch an entity and its currently active assertions.
 
         Args:
             entity_id: Entity ID to retrieve
-            token: Bearer token identifying the calling principal (ADR-0014)
+            token: Bearer token identifying the calling principal (ADR-0014).
+                Optional: an ``Authorization`` header takes priority when the
+                transport supplies one (KI-067, see module docstring); this
+                argument is the fallback, and the only channel on stdio.
 
         Returns:
-            Dict with "entity" and "assertions" keys, or "error" if not found
-            or the token does not resolve to a valid principal.
+            Dict with "entity" and "assertions" keys, or "error" if not found,
+            no token was resolvable, or it does not resolve to a valid
+            principal.
         """
         from ontolith.core.errors import AuthError
 
+        token = _bearer_token(token)
+        if token is None:
+            return {"error": "No bearer token provided", "code": "auth_error"}
         try:
             auth_provider.resolve(token)
         except AuthError as exc:
@@ -175,7 +224,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     @mcp.tool(name="ontolith.query")
     def query_tool(
         concept: str,
-        token: str,
+        token: str | None = None,
         filters: dict[str, str] | None = None,
         namespace: str = "default",
     ) -> dict[str, Any]:
@@ -183,7 +232,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         Args:
             concept: Concept name to query (e.g. "Person")
-            token: Bearer token identifying the calling principal (ADR-0014)
+            token: Bearer token identifying the calling principal (ADR-0014).
+                Optional: an ``Authorization`` header takes priority when the
+                transport supplies one (KI-067, see module docstring); this
+                argument is the fallback, and the only channel on stdio.
             filters: Optional dict of property/relation name → value
                 (equality) — a relation filter matches the relation's
                 target entity id (e.g. {"employer": "org-123"}) — or
@@ -197,11 +249,15 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             namespace: Namespace to query (default: "default")
 
         Returns:
-            Dict with "entities" list and "count", or "error" if the token
-            does not resolve to a valid principal or a filter key is invalid.
+            Dict with "entities" list and "count", or "error" if no token
+            was resolvable, it does not resolve to a valid principal, or a
+            filter key is invalid.
         """
         from ontolith.core.errors import AuthError, ValidationError
 
+        token = _bearer_token(token)
+        if token is None:
+            return {"error": "No bearer token provided", "code": "auth_error"}
         try:
             auth_provider.resolve(token)
         except AuthError as exc:
@@ -233,22 +289,29 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     # ------------------------------------------------------------------
 
     @mcp.tool(name="ontolith.provenance")
-    def provenance_tool(assertion_id: str, token: str) -> dict[str, Any]:
+    def provenance_tool(assertion_id: str, token: str | None = None) -> dict[str, Any]:
         """Return the full provenance record for a single assertion.
 
         Args:
             assertion_id: Assertion ID to inspect
-            token: Bearer token identifying the calling principal (ADR-0014)
+            token: Bearer token identifying the calling principal (ADR-0014).
+                Optional: an ``Authorization`` header takes priority when the
+                transport supplies one (KI-067, see module docstring); this
+                argument is the fallback, and the only channel on stdio.
 
         Returns:
             Dict with assertion details including author, confidence, source,
             rationale, proposal link, temporal fields, and superseded_ids
             (the full predecessor set this assertion superseded — supersedes
             alone only records the first, see KI-008), or "error" if not
-            found or the token does not resolve to a valid principal.
+            found, no token was resolvable, or it does not resolve to a
+            valid principal.
         """
         from ontolith.core.errors import AuthError
 
+        token = _bearer_token(token)
+        if token is None:
+            return {"error": "No bearer token provided", "code": "auth_error"}
         try:
             auth_provider.resolve(token)
         except AuthError as exc:
@@ -305,7 +368,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     def propose_tool(
         subject: str,
         predicate: str,
-        token: str,
+        token: str | None = None,
         value: str | None = None,
         value_type: str | None = None,
         target: str | None = None,
@@ -343,7 +406,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         Args:
             subject: Entity ID to assert about
             predicate: Predicate name (e.g. "Person.name" or "Person.employer")
-            token: Bearer token identifying the calling principal (ADR-0014)
+            token: Bearer token identifying the calling principal (ADR-0014).
+                Optional: an ``Authorization`` header takes priority when the
+                transport supplies one (KI-067, see module docstring); this
+                argument is the fallback, and the only channel on stdio.
             value: Literal value to assert (mutually exclusive with target)
             value_type: Type of value (e.g. "Text", "Integer", "Date"); required with value
             target: Target entity ID for a relation (mutually exclusive with value)
@@ -366,6 +432,9 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
                 "code": "validation_error",
             }
 
+        token = _bearer_token(token)
+        if token is None:
+            return {"error": "No bearer token provided", "code": "auth_error"}
         try:
             author = auth_provider.resolve(token).id
         except AuthError as exc:
@@ -424,7 +493,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     @mcp.tool(name="ontolith.retract")
     def retract_tool(
         assertion_id: str,
-        token: str,
+        token: str | None = None,
         acting_as: str | None = None,
     ) -> dict[str, Any]:
         """Propose retraction of an assertion through the governed
@@ -441,7 +510,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         Args:
             assertion_id: ID of the assertion to retract
-            token: Bearer token identifying the calling principal (ADR-0014)
+            token: Bearer token identifying the calling principal (ADR-0014).
+                Optional: an ``Authorization`` header takes priority when the
+                transport supplies one (KI-067, see module docstring); this
+                argument is the fallback, and the only channel on stdio.
             acting_as: Optional principal ID being acted on behalf of (delegation)
 
         Returns:
@@ -462,6 +534,9 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         """
         from ontolith.core.errors import AuthError, CapabilityError
 
+        token = _bearer_token(token)
+        if token is None:
+            return {"error": "No bearer token provided", "code": "auth_error"}
         try:
             author = auth_provider.resolve(token).id
         except AuthError as exc:
@@ -493,7 +568,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     def flag_contradiction_tool(
         assertion_id_a: str,
         assertion_id_b: str,
-        token: str,
+        token: str | None = None,
         rationale: str | None = None,
     ) -> dict[str, Any]:
         """Flag two assertions as contradictory and route them to review.
@@ -509,7 +584,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         Args:
             assertion_id_a: First conflicting assertion ID
             assertion_id_b: Second conflicting assertion ID
-            token: Bearer token identifying the calling principal (ADR-0014)
+            token: Bearer token identifying the calling principal (ADR-0014).
+                Optional: an ``Authorization`` header takes priority when the
+                transport supplies one (KI-067, see module docstring); this
+                argument is the fallback, and the only channel on stdio.
             rationale: Optional explanation of the contradiction
 
         Returns:
@@ -517,6 +595,9 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         """
         from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
 
+        token = _bearer_token(token)
+        if token is None:
+            return {"error": "No bearer token provided", "code": "auth_error"}
         try:
             author = auth_provider.resolve(token).id
         except AuthError as exc:
@@ -549,7 +630,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
     # ------------------------------------------------------------------
 
     @mcp.tool(name="ontolith.resubmit")
-    def resubmit_tool(proposal_id: str, token: str) -> dict[str, Any]:
+    def resubmit_tool(proposal_id: str, token: str | None = None) -> dict[str, Any]:
         """Resubmit a proposal after changes were requested (KI-027).
 
         Re-evaluates policy against a fresh view of the knowledge base,
@@ -566,7 +647,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         Args:
             proposal_id: ID of the proposal to resubmit
-            token: Bearer token identifying the calling principal (ADR-0014)
+            token: Bearer token identifying the calling principal (ADR-0014).
+                Optional: an ``Authorization`` header takes priority when the
+                transport supplies one (KI-067, see module docstring); this
+                argument is the fallback, and the only channel on stdio.
 
         Returns:
             Dict with "proposal" (id, state, policy_reason, decided_at) and
@@ -574,6 +658,9 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         """
         from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
 
+        token = _bearer_token(token)
+        if token is None:
+            return {"error": "No bearer token provided", "code": "auth_error"}
         try:
             author = auth_provider.resolve(token).id
         except AuthError as exc:

@@ -10,6 +10,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- MCP tools prefer an `Authorization: Bearer <token>` HTTP header over the `token` tool argument
+  under the SSE/streamable-HTTP transports (closes KI-067, ADR-0014 update) — keeps a live
+  credential out of the calling model's own context window and any MCP client's tool-call logging.
+  `token` is now optional (`str | None = None`) on all 8 tools and remains the only channel on
+  stdio, which has no HTTP request to carry a header on.
 - CLI `ontolith contradiction flag <id_a> <id_b> --author <id> [--rationale <text>]` and
   `ontolith contradiction resolve <id> --winner <assertion_id> --reviewer <id>` (closes KI-063) —
   the CLI was the only one of the four shipped interfaces with no contradiction write surface at

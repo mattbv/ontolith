@@ -1390,19 +1390,19 @@ Added `BEFORE UPDATE`/`BEFORE DELETE` triggers on `assertion_event` and `proposa
 
 ---
 
-## KI-067 — MCP tools take bearer tokens as arguments, placing a live credential in model context
+## KI-067 — MCP tools take bearer tokens as arguments, placing a live credential in model context ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — credential-exposure surface outside Ontolith's own logging
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved via an ADR-0014 update
 **SPEC reference:** ADR-0014 (bearer-token authentication)
 
 ### Description
 
-Every MCP tool (`interfaces/mcp.py`) takes `token: str` as a parameter rather than reading it from a transport-level header. Because the token is a tool *argument*, the calling model must emit it in every tool call — it therefore lands in the model's context window, conversation transcripts, and any MCP client's own tool-call logging, none of which Ontolith controls. ADR-0014 discusses token hashing and revocation but never names this exposure path. Tokens are also long-lived (no expiry — ADR-0014 states a leaked token grants access "until revoked"), making a transcript-embedded token a durable liability. The SSE transport (`mcp.py`, `mcp.run("sse")`) has a header channel available and unused.
+Every MCP tool (`interfaces/mcp.py`) took `token: str` as a required parameter rather than reading it from a transport-level header. Because the token was a tool *argument*, the calling model had to emit it in every tool call — landing it in the model's context window, conversation transcripts, and any MCP client's own tool-call logging, none of which Ontolith controls. ADR-0014 discussed token hashing and revocation but never named this exposure path. Tokens are also long-lived (no expiry — ADR-0014 states a leaked token grants access "until revoked"), making a transcript-embedded token a durable liability. The SSE/streamable-HTTP transports had a header channel available and unused.
 
 ### Fix
 
-For SSE, read the token from an `Authorization` header instead of a tool argument. At minimum, document the stdio exposure in ADR-0014 and recommend short-lived tokens for MCP-facing principals.
+`token` became optional (`str | None = None`) on all 8 tools. A new `_bearer_token()` helper reads `mcp.get_context().request_context.request` — the raw Starlette request the mcp SDK's own transport wiring already threads through to every tool call under SSE/streamable-HTTP — and prefers its `Authorization: Bearer <token>` header over the `token` argument, falling back to the argument only when no header is present (including stdio, which has no HTTP request at all). Not adopted: the mcp SDK's built-in OAuth-shaped bearer-auth stack (`FastMCP(auth=..., token_verifier=...)`) — it models a full OAuth 2.1 resource server (requires an `issuer_url`, advertises RFC 9728 metadata) with nothing real behind it in Ontolith's per-principal API-key model, so reading the header directly instead keeps `AuthProvider.resolve()` unchanged. stdio's exposure isn't closed by this fix (no header channel exists there) — documented in ADR-0014 as a residual, smaller-but-nonzero risk, with short-lived tokens recommended for stdio-facing principals.
 
 ---
 

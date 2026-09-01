@@ -8,8 +8,15 @@ against a real in-memory SQLite KB.
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+
+from mcp.server.lowlevel.server import request_ctx
+from mcp.shared.context import RequestContext
+from starlette.datastructures import Headers
 
 from ontolith import Ontology
 from ontolith.core import Assertion, FixedClock, FixedIdProvider
@@ -41,6 +48,32 @@ def _kb(tmp_path: Path) -> Ontology:
 def _server(kb: Ontology) -> tuple:
     auth_provider = TokenAuthProvider(kb.backend)
     return create_mcp_server(kb, auth_provider), auth_provider
+
+
+@contextlib.contextmanager
+def _http_request(authorization: str | None) -> Iterator[None]:
+    """Simulate a tool call arriving over the SSE/streamable-HTTP transport
+    with the given raw `Authorization` header value (KI-067) — mirrors the
+    mcp SDK's own `ServerMessageMetadata(request_context=<starlette Request>)`
+    wiring, which `create_mcp_server`'s `_bearer_token` helper reads via
+    `mcp.get_context().request_context.request`. `authorization=None` means
+    a live HTTP request with no such header at all — distinct from no HTTP
+    request/context existing (the plain `.fn(...)` call outside this context
+    manager, which every pre-KI-067 test in this file already exercises)."""
+    headers = Headers({"Authorization": authorization} if authorization is not None else {})
+    fake_request = SimpleNamespace(headers=headers)
+    ctx = RequestContext(
+        request_id="test-request",
+        meta=None,
+        session=None,
+        lifespan_context=None,
+        request=fake_request,
+    )
+    reset_token = request_ctx.set(ctx)
+    try:
+        yield
+    finally:
+        request_ctx.reset(reset_token)
 
 
 # ---------------------------------------------------------------------------
@@ -1045,3 +1078,134 @@ class TestRetractTool:
 
         assert "error" in result
         assert result["code"] == "capability_error"
+
+
+# ---------------------------------------------------------------------------
+# Bearer-token transport (KI-067): Authorization header vs. `token` argument
+# ---------------------------------------------------------------------------
+
+
+class TestBearerTokenTransport:
+    """The `token` argument still works everywhere (every test above uses
+    it, unchanged) — these pin the new SSE/streamable-HTTP behavior: an
+    `Authorization` header, when the transport supplies one, is preferred
+    over the argument, keeping a live credential out of the calling model's
+    own tool-call arguments."""
+
+    def test_header_only_authenticates_without_token_argument(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request(f"Bearer {token}"):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn()
+
+        assert result == {"concepts": []}
+
+    def test_header_takes_priority_over_token_argument(self, tmp_path: Path) -> None:
+        """A valid header authenticates even when the `token` argument is
+        garbage — the header wins, not the argument."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request(f"Bearer {token}"):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn(token="not-a-real-token")
+
+        assert result == {"concepts": []}
+
+    def test_no_header_falls_back_to_token_argument(self, tmp_path: Path) -> None:
+        """A live HTTP request with no Authorization header at all (as
+        opposed to no HTTP request/context existing) still falls back to
+        the argument, same as stdio."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request(None):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=token)
+
+        assert result == {"concepts": []}
+
+    def test_malformed_header_falls_back_to_token_argument(self, tmp_path: Path) -> None:
+        """A header present but not a well-formed `Bearer <token>` value
+        (wrong scheme here) doesn't silently authenticate as nothing — it
+        falls back to the argument, same as no header at all."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request("Basic dXNlcjpwYXNz"):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=token)
+
+        assert result == {"concepts": []}
+
+    def test_no_header_and_no_token_argument_returns_auth_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+
+        with _http_request(None):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn()
+
+        assert result == {"error": "No bearer token provided", "code": "auth_error"}
+
+    def test_no_context_and_no_token_argument_returns_auth_error(self, tmp_path: Path) -> None:
+        """Outside any request context at all (e.g. stdio, or a direct
+        `.fn()` call as every other test in this file makes) — distinct
+        from test_no_header_and_no_token_argument_returns_auth_error's live
+        HTTP request with an absent header."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+
+        result = mcp._tool_manager.get_tool("ontolith.schema").fn()
+
+        assert result == {"error": "No bearer token provided", "code": "auth_error"}
+
+    def test_header_authenticates_a_write_tool(self, tmp_path: Path) -> None:
+        """Not just the read tools — the `author = auth_provider.resolve
+        (token).id` shape (propose/retract/flag_contradiction/resubmit) is
+        wired the same way."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request(f"Bearer {token}"):
+            result = mcp._tool_manager.get_tool("ontolith.propose").fn(
+                subject=entity.id, predicate="Person.name", value="Ada", value_type="Text"
+            )
+
+        assert result["proposal"]["state"] == "auto_accepted"
+
+    def test_no_token_returns_auth_error_for_every_tool(self, tmp_path: Path) -> None:
+        """Each of the 8 tools gained its own `if token is None` branch
+        (KI-067) — not just ontolith.schema's, exercised above."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        proposal, _ = kb.propose(
+            entity.id, "Person.born", "1815-12-10", "Date", AI, model="test-model-v1"
+        )
+        kb.request_changes(proposal.id, REVIEWER)
+
+        mcp, _ = _server(kb)
+        calls = {
+            "ontolith.get": {"entity_id": entity.id},
+            "ontolith.query": {"concept": "Person"},
+            "ontolith.provenance": {"assertion_id": assertion.id},
+            "ontolith.propose": {
+                "subject": entity.id,
+                "predicate": "Person.name",
+                "value": "Ada",
+                "value_type": "Text",
+            },
+            "ontolith.retract": {"assertion_id": assertion.id},
+            "ontolith.flag_contradiction": {
+                "assertion_id_a": assertion.id,
+                "assertion_id_b": assertion.id,
+            },
+            "ontolith.resubmit": {"proposal_id": proposal.id},
+        }
+        for tool_name, kwargs in calls.items():
+            result = mcp._tool_manager.get_tool(tool_name).fn(**kwargs)
+            assert result == {"error": "No bearer token provided", "code": "auth_error"}, tool_name
