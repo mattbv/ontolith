@@ -201,6 +201,13 @@ class QueryBuilder:
         ascending distance to `text`'s embedding. Combine with `.where()` to
         intersect with symbolic filters, preserving vector rank order.
 
+        Combined with `.as_of()`: an entity that didn't exist yet at that
+        point in time is excluded (KI-058), but the ranking itself is not
+        bitemporal — the vector index holds one embedding per entity, as of
+        whenever `Ontology.reindex()` was last called, with no historical
+        versions. Results are always ranked by an entity's *current*
+        embedded content, never its content as it stood at `as_of_time`.
+
         Args:
             text: Query text, embedded via this builder's Embedder.
 
@@ -324,6 +331,19 @@ class QueryBuilder:
 
         Raises:
             ValidationError: No Embedder was configured on this QueryBuilder.
+
+        Note (KI-058, found exposing `.as_of()` through MCP for the first
+        time — no prior interface combined the two): this only closes the
+        "entity didn't exist yet at `as_of_time`" gap, via the same
+        `created_at <= as_of_time` check `.entities()` already applies. It
+        does NOT make semantic search itself bitemporal — the vector index
+        holds one embedding per entity, generated at whatever point
+        `Ontology.reindex()` was last called, with no historical versions.
+        `.semantic()` combined with `.as_of()` therefore always ranks by
+        the entity's *current* embedded content, never its content as it
+        stood at `as_of_time` — a structural limitation of the vector
+        index having no temporal dimension, not something this method can
+        patch around.
         """
         if self._embedder is None:
             raise ValidationError(
@@ -349,6 +369,14 @@ class QueryBuilder:
             }
             ranked_ids = [entity_id for entity_id in ranked_ids if entity_id in symbolic_ids]
 
+        # No .where() to intersect with: the as_of-existence check ("did
+        # this entity exist yet at as_of_time?") that entities_where() would
+        # otherwise apply happens below instead, per-candidate against the
+        # entity row the loop already fetches — not via a second full-concept
+        # scan, which would cost O(concept size) per call regardless of the
+        # (already-bounded) candidate count (KI-058 review, round 2: an
+        # earlier version here did do a full entities(as_of_time=...) scan
+        # and measured a 25x regression at 20k entities).
         entities = []
         for entity_id in ranked_ids:
             entity = self._backend.get_entity(entity_id)
@@ -356,6 +384,7 @@ class QueryBuilder:
                 entity is not None
                 and entity.namespace == self._namespace
                 and entity.concept == self._concept
+                and (self._as_of_time is None or entity.created_at <= self._as_of_time)
             ):
                 entities.append(entity)
         return entities

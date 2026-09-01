@@ -1238,21 +1238,21 @@ Added `POST /assertions/{id}/retract` (REST, `acting_as` as an optional query pa
 
 ---
 
-## KI-058 — MCP's `ontolith.query` tool has none of the hybrid-retrieval or time-travel parameters REST/GraphQL expose
+## KI-058 — MCP's `ontolith.query` tool has none of the hybrid-retrieval or time-travel parameters REST/GraphQL expose ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — agents (MCP's own audience) cannot use semantic retrieval at all
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved via ADR-0043
 **SPEC reference:** SPEC §14.4 (`ontolith.query | {namespace, concept, where?, semantic?, as_of?, min_confidence?, limit?}`), §11.3 (hybrid retrieval)
 
 ### Description
 
-`query_tool(concept, token, filters=None, namespace="default")` (`interfaces/mcp.py:174-228`) accepts only `concept`, `token`, `filters`, `namespace`. It has no `semantic`, `min_confidence`, `trust_at_least`, `as_of`, or `limit` parameters — none of the hybrid-retrieval capability `QueryBuilder` gained in M3 (KI-018, KI-037/KI-047's confidence/trust filters) is reachable from MCP, and there is no way to cap result size via MCP at all. REST's `POST /query` and GraphQL's `Query.query` both wire `semantic`, `min_confidence`, `trust_at_least`, and `limit` straight into the same `QueryBuilder`; MCP does not. SPEC §14.4's own normative tool table names `semantic`, `as_of`, and `min_confidence` explicitly, and ADR-0008 itself describes the tool as "Symbolic + semantic retrieval."
+`query_tool(concept, token, filters=None, namespace="default")` (`interfaces/mcp.py:174-228`) accepted only `concept`, `token`, `filters`, `namespace`. It had no `semantic`, `min_confidence`, `trust_at_least`, `as_of`, or `limit` parameters — none of the hybrid-retrieval capability `QueryBuilder` gained in M3 (KI-018, KI-037/KI-047's confidence/trust filters) was reachable from MCP, and there was no way to cap result size via MCP at all. REST's `POST /query` and GraphQL's `Query.query` both wire `semantic`, `min_confidence`, `trust_at_least`, and `limit` straight into the same `QueryBuilder`; MCP did not. SPEC §14.4's own normative tool table names `semantic`, `as_of`, and `min_confidence` explicitly, and ADR-0008 itself describes the tool as "Symbolic + semantic retrieval."
 
 Found at the M3 milestone boundary specifically because it requires comparing MCP against REST/GraphQL side by side — no single PR review (KI-018's hybrid-retrieval PR didn't touch MCP; the M2 MCP PR predates hybrid retrieval entirely) would surface it.
 
 ### Fix
 
-Add `semantic`, `as_of`, `min_confidence`, `trust_at_least`, `limit` parameters to `query_tool`, mirroring REST/GraphQL's `QueryBuilder` wiring; update the tool's docstring, which currently documents only `filters`.
+Added `semantic`, `as_of`, `min_confidence`, `trust_at_least`, `limit` parameters to `query_tool`, mirroring REST/GraphQL's `QueryBuilder` wiring for the first, third, fourth, and fifth (ADR-0043) — `as_of` is new even to REST/GraphQL, added to MCP alone per SPEC §14.4's own normative tool table naming it for this tool specifically. Also removed the tool's pre-existing `namespace` parameter: `Ontology.query()` never accepted one (namespace is hardcoded, an M1 limitation REST/GraphQL already work around by not exposing the field at all), so it was silently doing nothing on every call — schema-visible, not runtime-breaking (FastMCP drops unrecognized arguments rather than rejecting the call). While adding `as_of` support, found and fixed a related bitemporal-correctness gap: `QueryBuilder.semantic()` combined with `.as_of()` but no `.where()` filter ignored `as_of_time` entirely, returning entities that didn't exist yet at that point in time — unreachable before this KI, since no prior interface ever exposed `as_of` at all.
 
 ---
 
