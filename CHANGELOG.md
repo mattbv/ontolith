@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   required `revoked_by: str` parameter — any external `StorageBackend` implementation must update
   its signature. Also fixed along the way: re-revoking an already-revoked credential was silently
   overwriting `revoked_by` on a second call (attribution laundering) — now a true no-op.
+  **Behavior change:** `apply_schema`/`create_principal` now open their own transaction (to keep
+  the governed write and its `AdminEvent` atomic), so calling either from inside a caller's own
+  `with kb.backend.transaction():` block now raises `StorageError` instead of composing — matches
+  the constraint 11 other `Ontology` write methods already had.
 - CLI `ontolith contradiction flag <id_a> <id_b> --author <id> [--rationale <text>]` and
   `ontolith contradiction resolve <id> --winner <assertion_id> --reviewer <id>` (closes KI-063) —
   the CLI was the only one of the four shipped interfaces with no contradiction write surface at

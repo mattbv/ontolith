@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from conformance.conftest import KbFactory
+from conformance.conftest import _BACKEND_FACTORIES, KbFactory
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
 from ontolith.core.errors import CapabilityError, StorageError
@@ -121,10 +121,9 @@ class _FailingAdminEventBackend:
         return getattr(self._real, name)
 
 
-def test_apply_schema_rolls_back_on_event_write_failure(tmp_path: Path) -> None:
-    from ontolith.store.sqlite import SQLiteBackend
-
-    real = SQLiteBackend(tmp_path / "test.db")
+@pytest.mark.parametrize("backend_name", sorted(_BACKEND_FACTORIES))
+def test_apply_schema_rolls_back_on_event_write_failure(tmp_path: Path, backend_name: str) -> None:
+    real = _BACKEND_FACTORIES[backend_name](tmp_path / "test.db", None)
     try:
         kb = Ontology(
             _FailingAdminEventBackend(real),  # type: ignore[arg-type]
@@ -142,10 +141,11 @@ def test_apply_schema_rolls_back_on_event_write_failure(tmp_path: Path) -> None:
         real.close()
 
 
-def test_create_principal_rolls_back_on_event_write_failure(tmp_path: Path) -> None:
-    from ontolith.store.sqlite import SQLiteBackend
-
-    real = SQLiteBackend(tmp_path / "test.db")
+@pytest.mark.parametrize("backend_name", sorted(_BACKEND_FACTORIES))
+def test_create_principal_rolls_back_on_event_write_failure(
+    tmp_path: Path, backend_name: str
+) -> None:
+    real = _BACKEND_FACTORIES[backend_name](tmp_path / "test.db", None)
     try:
         kb = Ontology(
             _FailingAdminEventBackend(real),  # type: ignore[arg-type]

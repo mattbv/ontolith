@@ -788,6 +788,20 @@ class TestDuckDBBackend:
         assert [e.id for e in backend.get_admin_events(target="default:v1")] == ["event-2"]
         assert [e.id for e in backend.get_admin_events()] == ["event-1", "event-2"]
 
+    def test_get_admin_events_tiebreaks_same_timestamp_by_id(self, backend: DuckDBBackend) -> None:
+        for event_id in ("event-b", "event-a"):
+            backend.put_admin_event(
+                AdminEvent(
+                    id=event_id,
+                    actor="admin@test.com",
+                    action="create_principal",
+                    target="alice@test.com",
+                    at=datetime(2025, 1, 1, tzinfo=UTC),
+                )
+            )
+
+        assert [e.id for e in backend.get_admin_events()] == ["event-a", "event-b"]
+
     def test_admin_event_update_and_delete_currently_succeed(self, backend: DuckDBBackend) -> None:
         """Documents the KI-066 asymmetry for this new table too: DuckDB
         has no CREATE TRIGGER support at all, so admin_event has no
