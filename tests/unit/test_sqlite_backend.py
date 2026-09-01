@@ -821,6 +821,24 @@ class TestSQLiteBackend:
         [retrieved] = backend.get_admin_events()
         assert retrieved == event
 
+    def test_put_admin_event_duplicate_id_raises_storage_error(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """Covers put_admin_event's own IntegrityError -> StorageError
+        wrapper, reached via a plain duplicate-id INSERT through the port
+        (not a raw REPLACE statement against the connection directly)."""
+        event = AdminEvent(
+            id="event-1",
+            actor="admin@test.com",
+            action="create_principal",
+            target="alice@test.com",
+            at=datetime(2025, 1, 1, tzinfo=UTC),
+        )
+        backend.put_admin_event(event)
+
+        with pytest.raises(StorageError, match="conflict"):
+            backend.put_admin_event(event)
+
     def test_get_admin_events_filters(self, backend: SQLiteBackend) -> None:
         backend.put_admin_event(
             AdminEvent(

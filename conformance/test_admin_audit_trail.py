@@ -17,13 +17,14 @@ file already has the entry-point-patching fixtures it needs.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
 from conformance.conftest import KbFactory
 from ontolith import Ontology
 from ontolith.core import FixedClock, FixedIdProvider
-from ontolith.core.errors import CapabilityError
+from ontolith.core.errors import CapabilityError, StorageError
 from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 
 T0 = datetime(2025, 1, 1, tzinfo=UTC)
@@ -81,10 +82,15 @@ def test_apply_schema_records_event(make_kb: KbFactory) -> None:
     assert event.target == "default:v1"
 
 
-def test_apply_schema_event_and_write_share_one_transaction(make_kb: KbFactory) -> None:
+def test_apply_schema_capability_failure_records_no_event(make_kb: KbFactory) -> None:
     """A capability failure aborts before either write happens - no
     partial state where the schema applied but no event was recorded, or
-    vice versa."""
+    vice versa. NOTE: this only proves the pre-transaction require_admin
+    check aborts early - it does NOT exercise a failure *between* the two
+    writes inside the transaction. See
+    test_apply_schema_rolls_back_on_event_write_failure below for that
+    (found missing in review: a version with no `with
+    self.backend.transaction():` wrapper at all still passed this test)."""
     kb = _kb_with_admin(make_kb)
     kb.create_principal("alice@example.com", kind="human", default_capability="write")
     schema = SchemaIR(namespace="default", version=1, concepts={})
@@ -94,6 +100,67 @@ def test_apply_schema_event_and_write_share_one_transaction(make_kb: KbFactory) 
 
     assert kb.backend.get_schema("default") is None
     assert kb.backend.get_admin_events() == []
+
+
+class _FailingAdminEventBackend:
+    """Wraps a real StorageBackend, making put_admin_event raise -
+    injects a failure *between* apply_schema/create_principal's two
+    writes (the underlying put_schema/put_principal, and the paired
+    AdminEvent) to prove they actually share one transaction, not just
+    that a pre-write capability check aborts early. Forwards every other
+    call to the wrapped backend via __getattr__, including transaction()/
+    begin()/commit()/rollback() - only put_admin_event is overridden."""
+
+    def __init__(self, real: object) -> None:
+        self._real = real
+
+    def put_admin_event(self, event: object) -> None:
+        raise StorageError("simulated admin_event write failure")
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+def test_apply_schema_rolls_back_on_event_write_failure(tmp_path: Path) -> None:
+    from ontolith.store.sqlite import SQLiteBackend
+
+    real = SQLiteBackend(tmp_path / "test.db")
+    try:
+        kb = Ontology(
+            _FailingAdminEventBackend(real),  # type: ignore[arg-type]
+            clock=FixedClock(T0),
+            id_provider=FixedIdProvider([f"id-{i}" for i in range(10)]),
+        )
+        kb.create_principal(ADMIN, kind="human", default_capability="admin")
+        schema = SchemaIR(namespace="default", version=1, concepts={})
+
+        with pytest.raises(StorageError, match="simulated"):
+            kb.apply_schema(schema, author=ADMIN)
+
+        assert real.get_schema("default") is None
+    finally:
+        real.close()
+
+
+def test_create_principal_rolls_back_on_event_write_failure(tmp_path: Path) -> None:
+    from ontolith.store.sqlite import SQLiteBackend
+
+    real = SQLiteBackend(tmp_path / "test.db")
+    try:
+        kb = Ontology(
+            _FailingAdminEventBackend(real),  # type: ignore[arg-type]
+            clock=FixedClock(T0),
+            id_provider=FixedIdProvider([f"id-{i}" for i in range(10)]),
+        )
+
+        with pytest.raises(StorageError, match="simulated"):
+            kb.create_principal(
+                "alice@example.com", kind="human", default_capability="write", author=ADMIN
+            )
+
+        assert real.get_principal("alice@example.com") is None
+    finally:
+        real.close()
 
 
 def test_issue_token_records_issued_by(make_kb: KbFactory) -> None:

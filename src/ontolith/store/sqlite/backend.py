@@ -997,7 +997,7 @@ class SQLiteBackend:
         if target is not None:
             query += " AND target = ?"
             params.append(target)
-        query += " ORDER BY at ASC"
+        query += " ORDER BY at ASC, id ASC"
         cursor.execute(query, params)
         return [
             AdminEvent(
