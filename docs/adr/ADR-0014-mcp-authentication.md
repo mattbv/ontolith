@@ -55,7 +55,9 @@ spoofing vulnerability above, since there was no capability to spoof, only a mis
 was scoped and, per SPEC §8.3 ("`read`/`query`: required for any retrieval"), required
 auth on its own read routes — making MCP's gap visible by direct comparison. All four
 read tools now take `token: str`, resolve it via the same `AuthProvider.resolve()`, and
-return `{"error": ..., "code": "auth_error"}` on failure — identical shape to
+return `{"error": ..., "code": "AUTH_ERROR"}` on failure (KI-059 later fixed this to read
+`AuthError.code` rather than a hand-written literal — see that KI's own entry for why the literal
+existed at all) — identical shape to
 `ontolith.propose`'s existing auth-failure path. No new capability-tier logic was
 needed: capability is a total order (`read < propose < write < review < admin`, SPEC
 §8.3), so any principal a token resolves to already clears the "read" floor —

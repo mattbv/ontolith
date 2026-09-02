@@ -102,3 +102,59 @@ class TestNotFoundErrorCodeParity:
         codes = _codes_for_missing_entity(kb, good_headers, token=token)
 
         assert codes == {"rest": "NOT_FOUND", "graphql": "NOT_FOUND", "mcp": "NOT_FOUND"}
+
+
+_FLAG_CONTRADICTION_MUTATION = """
+mutation($a: String!, $b: String!) {
+  flagContradiction(assertionIdA: $a, assertionIdB: $b) {
+    action
+  }
+}
+"""
+
+
+class TestCapabilityErrorCodeParity:
+    """Same underlying exception type (CapabilityError, from a read-only
+    principal attempting flag_contradiction, an explicitly >= propose
+    action per its own docstring), across all three interfaces — the
+    other of the two error shapes MCP used to hand-write (alongside
+    not-found) that the two classes above don't exercise."""
+
+    def test_all_three_interfaces_report_the_same_code(self, kb: Ontology) -> None:
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion_a = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        assertion_b = kb.assert_literal(entity.id, "Person.name", "Ava", "Text", HUMAN)
+        kb.create_principal(
+            "readonly@example.com", kind="human", default_capability="read", author=ADMIN
+        )
+        token, _ = kb.issue_token("readonly@example.com", author=ADMIN)
+        headers = {"Authorization": f"Bearer {token}"}
+        auth_provider = TokenAuthProvider(kb.backend)
+
+        rest_client = TestClient(create_rest_app(kb, auth_provider))
+        rest_response = rest_client.post(
+            "/contradictions/flag",
+            json={"assertion_id_a": assertion_a.id, "assertion_id_b": assertion_b.id},
+            headers=headers,
+        )
+        rest_code: str = rest_response.json()["code"]
+
+        graphql_client = TestClient(create_graphql_app(kb, auth_provider))
+        graphql_response = graphql_client.post(
+            "/graphql",
+            json={
+                "query": _FLAG_CONTRADICTION_MUTATION,
+                "variables": {"a": assertion_a.id, "b": assertion_b.id},
+            },
+            headers=headers,
+        )
+        assert graphql_response.status_code == 200
+        graphql_code: str = graphql_response.json()["errors"][0]["extensions"]["code"]
+
+        mcp = create_mcp_server(kb, auth_provider)
+        mcp_result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
+            assertion_id_a=assertion_a.id, assertion_id_b=assertion_b.id, token=token
+        )
+        mcp_code: str = mcp_result["code"]
+
+        assert rest_code == graphql_code == mcp_code == "CAPABILITY_ERROR"
