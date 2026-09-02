@@ -1580,13 +1580,22 @@ class DuckDBBackend:
         self,
         contradiction_id: str,
         member_ids: list[str],
+        metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Add member IDs to an existing open contradiction."""
+        """Add member IDs to an existing open contradiction (KI-071:
+        optionally replace metadata too, in the same UPDATE)."""
         try:
-            cursor = self.conn.execute(
-                "UPDATE contradiction SET member_ids = ? WHERE id = ? RETURNING id",
-                [json.dumps(member_ids), contradiction_id],
-            )
+            if metadata is not None:
+                cursor = self.conn.execute(
+                    "UPDATE contradiction SET member_ids = ?, metadata = ? WHERE id = ? "
+                    "RETURNING id",
+                    [json.dumps(member_ids), json.dumps(metadata), contradiction_id],
+                )
+            else:
+                cursor = self.conn.execute(
+                    "UPDATE contradiction SET member_ids = ? WHERE id = ? RETURNING id",
+                    [json.dumps(member_ids), contradiction_id],
+                )
             if not cursor.fetchall():
                 raise StorageError(f"Contradiction not found: {contradiction_id}")
         except duckdb.Error as e:

@@ -2726,7 +2726,15 @@ class Ontology:
             assertion_id_a: First conflicting assertion ID
             assertion_id_b: Second conflicting assertion ID
             author: Principal ID raising the flag
-            rationale: Optional explanation of the contradiction
+            rationale: Optional explanation of the contradiction. Recorded
+                in ``Contradiction.metadata["rationale_history"]`` — a list
+                of ``{"rationale", "actor", "at"}`` entries, one per call
+                that supplied a non-``None`` rationale, whether that call
+                created the contradiction or extended an already-open one
+                (KI-071: previously silently dropped on the "extend"
+                branch). A call with ``rationale=None`` never appends —
+                extending membership without an explanation adds no entry,
+                it doesn't overwrite the history with a blank one.
 
         Returns:
             (Contradiction, action) where action is "created" or "extended"
@@ -2791,7 +2799,19 @@ class Ontology:
 
             if existing is not None:
                 merged = list(dict.fromkeys(existing.member_ids + [assertion_id_a, assertion_id_b]))
-                self.backend.update_contradiction_members(existing.id, merged)
+                # KI-071: rationale was previously silently dropped on this
+                # branch - `existing.metadata` was never touched at all.
+                # Appended, not overwritten: a rationale-less extend
+                # (rationale is None) leaves prior history exactly as it
+                # was, so `metadata` stays None and this UPDATE doesn't
+                # even touch that column (matches update_contradiction_
+                # members' own "None means untouched" contract).
+                metadata = None
+                if rationale is not None:
+                    history = list(existing.metadata.get("rationale_history", []))
+                    history.append({"rationale": rationale, "actor": author, "at": now.isoformat()})
+                    metadata = {**existing.metadata, "rationale_history": history}
+                self.backend.update_contradiction_members(existing.id, merged, metadata=metadata)
                 contradiction_id = existing.id
                 action = "extended"
             else:
@@ -2829,7 +2849,19 @@ class Ontology:
                         state="open",
                         created_at=now,
                         raised_by=author,
-                        metadata={"rationale": rationale} if rationale else {},
+                        # KI-071: same rationale_history shape the "extend"
+                        # branch above appends to, so a reader never has to
+                        # special-case "the first entry lives under a
+                        # different key than the rest".
+                        metadata=(
+                            {
+                                "rationale_history": [
+                                    {"rationale": rationale, "actor": author, "at": now.isoformat()}
+                                ]
+                            }
+                            if rationale is not None
+                            else {}
+                        ),
                     )
                 )
                 action = "created"

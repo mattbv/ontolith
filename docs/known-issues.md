@@ -1454,7 +1454,7 @@ Either apply the same `<N.0` convention to the remaining direct dependencies (`p
 
 ---
 
-## KI-071 — `flag_contradiction()`'s `rationale` is silently dropped when extending an already-open contradiction
+## KI-071 — `flag_contradiction()`'s `rationale` is silently dropped when extending an already-open contradiction ✓ RESOLVED (Backlog)
 
 **Severity:** Data-loss gap — a caller-supplied explanation is silently discarded, not rejected or errored
 **Milestone target:** Backlog
@@ -1466,7 +1466,7 @@ Either apply the same `<N.0` convention to the remaining direct dependencies (`p
 
 ### Fix
 
-Either accumulate a per-extension rationale somewhere retrievable (e.g. a list in `metadata`, or a new `ContradictionEvent`-shaped record mirroring how `ProposalEvent` tracks proposal-lifecycle actions), or explicitly document that `rationale` is create-only and have every interface's help/docstring say so, so a caller extending a contradiction doesn't reasonably expect their explanation to be recorded.
+Both branches now write into the same unified `metadata["rationale_history"]` shape: a list of `{"rationale", "actor", "at"}` entries, one per call that supplied a non-`None` rationale, whether that call created the contradiction or extended an already-open one. `create` seeds the list with one entry (or leaves `metadata` empty, as before, when no rationale is given); `extend` reads the existing list (defaulting to `[]` if the contradiction had none yet), appends, and writes the full dict back — a rationale-less extend appends nothing and leaves prior history untouched. This required extending the storage port: `StorageBackend.update_contradiction_members(contradiction_id, member_ids, metadata=None)` gained an optional `metadata` parameter that replaces the metadata blob wholesale when given (matching `member_ids`' own full-replacement convention) and leaves it alone when omitted — implemented identically in both SQLite and DuckDB, each folding the metadata column into the same single `UPDATE`. `Contradiction.metadata` was undocumented/unexposed by every interface before this, so no external consumer depended on the old single-`"rationale"`-key shape from the `create` path; that shape was unified into `rationale_history` too rather than kept as a special case for entry #1.
 
 ---
 

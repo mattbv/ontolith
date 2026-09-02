@@ -752,12 +752,20 @@ class StorageBackend(Protocol):
         self,
         contradiction_id: str,
         member_ids: list[str],
+        metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Replace the member_ids list on an existing contradiction.
+        """Replace the member_ids list (and, optionally, the metadata blob)
+        on an existing contradiction (KI-071).
 
         Args:
             contradiction_id: Contradiction to update
             member_ids: New full list of member assertion IDs
+            metadata: If given, replaces the contradiction's metadata blob
+                wholesale — the caller is expected to pass the complete
+                desired dict (e.g. built from a fresh read plus one
+                appended entry), matching member_ids' own
+                full-replacement convention rather than a merge/delta.
+                ``None`` (the default) leaves metadata untouched.
         """
         ...
 
