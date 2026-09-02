@@ -3,7 +3,7 @@
 **Status**: Accepted
 **Date**: 2026-09-01
 **Deciders**: Ontolith Core Team
-**Related**: SPEC §17 ("all writes, proposal decisions, and resolutions are append-only and attributable"), ADR-0011 (accountable-owner DB-layer defense-in-depth), ADR-0014 (bearer-token authentication), ADR-0022 (`create_principal` has no built-in capability check), ADR-0041 (audit-table immutability triggers — `admin_event` reuses the identical mechanism), KI-053/KI-054 (the admin-capability gaps this audit trail would have helped investigate), KI-060
+**Related**: SPEC §17 ("all writes, proposal decisions, and resolutions are append-only and attributable"), ADR-0011 (accountable-owner DB-layer defense-in-depth), ADR-0014 (bearer-token authentication), ADR-0021 (REST interface — `GET /admin-events` route added by the KI-072 update), ADR-0022 (`create_principal` has no built-in capability check), ADR-0039 (retract's query-param precedent, reused for `actor`/`target`), ADR-0041 (audit-table immutability triggers — `admin_event` reuses the identical mechanism), KI-053/KI-054 (the admin-capability gaps this audit trail would have helped investigate), KI-060, KI-072
 
 ---
 
@@ -45,7 +45,7 @@ REST's `POST /principals` route and the CLI's `principal create` command were bo
 
 **Negative / follow-ups:**
 - **Breaking**: `StorageBackend.revoke_credential()` gained a required `revoked_by: str` parameter — any external `StorageBackend` implementation must update its signature.
-- No REST/GraphQL/CLI/MCP surface exposes `get_admin_events()` yet — this ADR is scoped to *recording* the trail (what KI-060's own Fix text asked for), not to querying it through any production interface. Left as explicit future scope, not silently dropped.
+- ~~No REST/GraphQL/CLI/MCP surface exposes `get_admin_events()` yet — this ADR is scoped to *recording* the trail (what KI-060's own Fix text asked for), not to querying it through any production interface. Left as explicit future scope, not silently dropped.~~ **Closed by KI-072 — see Update below.**
 - `create_principal`'s `author` param is optional and unvalidated by the method itself — a caller that passes a nonexistent principal id gets an event recorded with that bogus actor, no error. This matches the method's own pre-existing "no built-in capability check" posture (ADR-0022) rather than introducing a new validation surface inconsistent with it.
 - Plugin registration's "two events for a first-time registration, one for a re-registration" shape is a real asymmetry a consumer of `get_admin_events()` needs to know about — documented in `PluginRegistry.register()`'s own docstring, not hidden.
 - **`create_principal`/`apply_schema` now open their own `self.backend.transaction()` (to keep the governed write and its `AdminEvent` atomic) — found in review to be a real, undocumented behavior change**: neither method previously opened a transaction of its own (they called `put_principal`/`put_schema` directly), so a caller could previously compose either inside its own `with kb.backend.transaction():` block; that now raises `StorageError` ("cannot start a transaction within a transaction"), reproduced independently in both backends. This is not a new *pattern* in this codebase — 11 of `Ontology`'s other write methods already require being called standalone, for the identical reason — but it is a real change for these two specific methods, and no test previously pinned either the old composability or the new constraint. Documented explicitly in both methods' own docstrings (`Note:` sections) rather than left implicit. Not fixed by making `StorageBackend.transaction()` reentrant — that would be a materially larger change to the transaction primitive itself, out of scope for this KI, and no other codebase caller currently needs it.
@@ -56,3 +56,44 @@ REST's `POST /principals` route and the CLI's `principal create` command were bo
 - **Every external caller (REST, CLI, PluginRegistry) records its own event after calling `create_principal`, leaving the method's signature untouched**: rejected — see Rationale; this was the KI's own named alternative, judged less robust than baking attribution into the method as an optional parameter.
 - **One unified event table/mechanism for all four actions, including token issuance/revocation**: rejected — see Rationale; `PrincipalCredential` already has a natural home for its own attribution, and duplicating it into a second table would be redundant, not more complete.
 - **A FOREIGN KEY on `admin_event.actor` referencing `principal(id)`, matching `assertion_event`/`proposal_event`**: rejected — `create_principal`'s `author` is deliberately optional and unvalidated (ADR-0022), so a FK would reject a legitimate (if attacker-supplied) event write that every other part of this design treats as "record what you're given."
+
+## Update (2026-09-01, closes KI-072): REST and CLI read surfaces for the audit trail
+
+The gap this ADR's own Consequences named — `get_admin_events()` recorded but unreachable through
+any interface — is closed for REST and the CLI (GraphQL/MCP left for their own future scope, per
+KI-072's own Fix text: "extend to GraphQL/MCP/CLI as those surfaces need it").
+
+**`Ontology.get_admin_events(author, *, actor=None, target=None)`** — new, admin-gated the same way
+`list_tokens`/`list_principals` already are (`self.require_admin(author)` first, matching the
+project's existing "record, don't re-gate on read" precedent for this admin-tier data: reading who
+did an admin action is itself sensitive, so it gets the same floor as issuing/listing credentials,
+not the lower bar ordinary read tools clear). Thin wrapper over the already-built
+`StorageBackend.get_admin_events(actor=, target=)` — no new port method, no new domain logic.
+
+**REST**: `GET /admin-events`, optional `actor`/`target` query parameters (mirrors
+`GET /contradictions`'s `state` query-param precedent for a similarly small set of optional
+filters, same reasoning ADR-0039 already used for `retract`'s `acting_as`). New `AdminEventOut`
+response model. `CredentialOut` (`GET /principals/{id}/tokens`) gains `issued_by`/`revoked_by` —
+`PrincipalCredential` has carried both fields since KI-060, but the REST response model never
+surfaced them.
+
+**CLI**: new `ontolith admin-event list [--actor] [--target] --author <id>` command (a new
+top-level `admin-event` Typer sub-app, matching `namespace`/`schema`'s existing pattern of one
+sub-app per noun) — thin wrapper around the same `Ontology.get_admin_events()`. `principal
+list-tokens`'s existing output line extended to show `issued_by`/`revoked_by` alongside each
+credential's id/timestamps/status.
+
+**Why REST and CLI, not GraphQL/MCP too:** REST is explicitly named as "the natural first target"
+in KI-072's own Fix text (matching how other read-only queries are exposed); CLI was added because
+it directly serves this KI's own motivation (an operator investigating "who did this" is a CLI-first
+workflow, and the marginal cost was one more thin wrapper over a method REST already needed). MCP
+is deliberately not extended: SPEC's no-direct-write-tool rule doesn't block a new *read* tool, but
+`get_admin_events()`'s admin-gating would make it the first MCP tool requiring `admin` capability
+rather than `read`/`propose` (every existing MCP tool sits at one of those two tiers) — a genuine
+new precedent, not a mechanical port of the REST route, and better decided if/when an actual MCP
+consumer needs it rather than spun up speculatively here. GraphQL is left out purely on scope, not
+precedent — `Query.principals` (admin-tier, gated inside `Ontology.list_principals`, the exact
+shape an `adminEvents` query would take) and `Query.contradictions`'s optional-filter arguments
+already establish everything a GraphQL equivalent would need; it just wasn't built in this pass.
+Round-1 review of this ADR update caught an earlier draft claiming GraphQL had no precedent to
+extend, which was wrong — corrected here.

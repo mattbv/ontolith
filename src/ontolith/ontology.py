@@ -2857,6 +2857,36 @@ class Ontology:
         self.backend.put_admin_event(event)
         return event
 
+    def get_admin_events(
+        self, author: str, *, actor: str | None = None, target: str | None = None
+    ) -> list[AdminEvent]:
+        """List recorded admin events, optionally filtered (KI-072, SPEC §17).
+
+        The only way to answer "who created this principal" or "who
+        applied this schema" without direct SDK/`kb.backend` access — the
+        gap KI-072 closes, `record_admin_event` having closed the
+        recording half back in KI-060. Admin-gated the same way
+        `list_tokens` is: an admin action's audit trail is itself
+        sensitive (it records who did what, to what), so reading it back
+        is scoped the same as issuing/listing tokens, not open to any
+        authenticated principal the way ordinary read tools are.
+
+        Args:
+            author: Principal ID performing the lookup — must hold `admin`
+                capability
+            actor: Filter to events performed by this principal ID
+            target: Filter to events against this target
+
+        Returns:
+            Matching events, oldest first
+
+        Raises:
+            AuthError: `author` does not name an existing principal
+            CapabilityError: `author` lacks admin capability
+        """
+        self.require_admin(author)
+        return self.backend.get_admin_events(actor=actor, target=target)
+
     def apply_schema(self, schema: SchemaIR, author: str) -> SchemaIR:
         """Persist a new schema version, capability-checked (SPEC §6).
 

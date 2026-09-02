@@ -160,3 +160,65 @@ class TestTokenIssuanceRequiresAdmin:
     def test_list_tokens_rejects_non_admin_author(self, kb: Ontology) -> None:
         with pytest.raises(CapabilityError, match="lacks admin capability"):
             kb.list_tokens("alice@example.com", author="alice@example.com")
+
+
+class TestOntologyGetAdminEvents:
+    """KI-072: Ontology.get_admin_events(), the read half of KI-060's audit
+    trail — REST's GET /admin-events and the CLI's `admin-events list`
+    both wrap this."""
+
+    def test_get_admin_events_reflects_create_principal(self, kb: Ontology) -> None:
+        kb.create_principal(
+            "bob@example.com", kind="human", default_capability="write", author=ADMIN
+        )
+
+        events = kb.get_admin_events(author=ADMIN)
+
+        [event] = [e for e in events if e.target == "bob@example.com"]
+        assert event.actor == ADMIN
+        assert event.action == "create_principal"
+
+    def test_get_admin_events_filters_by_actor_and_target(self, kb: Ontology) -> None:
+        kb.create_principal(
+            "carol@example.com", kind="human", default_capability="admin", author=ADMIN
+        )
+        kb.create_principal(
+            "dave@example.com", kind="human", default_capability="write", author="carol@example.com"
+        )
+
+        by_actor = kb.get_admin_events(author=ADMIN, actor="carol@example.com")
+        assert [e.target for e in by_actor] == ["dave@example.com"]
+
+        by_target = kb.get_admin_events(author=ADMIN, target="carol@example.com")
+        assert [e.actor for e in by_target] == [ADMIN]
+
+    def test_get_admin_events_returns_oldest_first(self, kb: Ontology) -> None:
+        """Docstring-promised ordering (matching the backend's own ORDER BY
+        at ASC, id ASC) - REST/CLI both ship this order unchanged, so a
+        regression here would silently reach both."""
+        kb.create_principal(
+            "carol@example.com", kind="human", default_capability="write", author=ADMIN
+        )
+        kb.create_principal(
+            "dave@example.com", kind="human", default_capability="write", author=ADMIN
+        )
+        kb.create_principal(
+            "erin@example.com", kind="human", default_capability="write", author=ADMIN
+        )
+
+        events = kb.get_admin_events(author=ADMIN)
+
+        targets = [e.target for e in events]
+        assert targets.index("carol@example.com") < targets.index("dave@example.com")
+        assert targets.index("dave@example.com") < targets.index("erin@example.com")
+
+    def test_get_admin_events_empty_when_none_recorded(self, kb: Ontology) -> None:
+        assert kb.get_admin_events(author=ADMIN) == []
+
+    def test_get_admin_events_rejects_non_admin_author(self, kb: Ontology) -> None:
+        with pytest.raises(CapabilityError, match="lacks admin capability"):
+            kb.get_admin_events(author="alice@example.com")
+
+    def test_get_admin_events_rejects_unknown_author(self, kb: Ontology) -> None:
+        with pytest.raises(AuthError, match="Principal not found"):
+            kb.get_admin_events(author="nobody@example.com")

@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- Read surface for the admin-action audit trail (closes KI-072, ADR-0042 update): new
+  `Ontology.get_admin_events(author, *, actor=None, target=None)`, admin-gated the same way
+  `list_tokens`/`list_principals` already are. REST gets `GET /admin-events` (`actor`/`target`
+  query filters, new `AdminEventOut` model) and `CredentialOut` gains `issued_by`/`revoked_by`. CLI
+  gets `ontolith admin-event list [--actor] [--target] --author <id>`, and `principal
+  list-tokens`'s output now shows who issued/revoked each credential. GraphQL/MCP left for their
+  own future scope — MCP specifically, since admin-gating this would make it the first MCP tool
+  requiring `admin` capability rather than `read`/`propose`.
 - MCP's `ontolith.query` tool gains `semantic`/`as_of`/`min_confidence`/`trust_at_least`/`limit`
   parameters (closes KI-058, ADR-0043), mirroring REST's `POST /query`/GraphQL's `Query.query`
   wiring into `QueryBuilder` for the first three and `limit`; `as_of` is new even to REST/GraphQL,

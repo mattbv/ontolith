@@ -21,12 +21,14 @@ proposal_app = typer.Typer(help="Inspect and act on proposals.", no_args_is_help
 contradiction_app = typer.Typer(help="Inspect and act on contradictions.", no_args_is_help=True)
 namespace_app = typer.Typer(help="Inspect namespaces.", no_args_is_help=True)
 schema_app = typer.Typer(help="Inspect and apply the schema.", no_args_is_help=True)
+admin_event_app = typer.Typer(help="Inspect admin-action audit events.", no_args_is_help=True)
 app.add_typer(principal_app, name="principal")
 app.add_typer(entity_app, name="entity")
 app.add_typer(proposal_app, name="proposal")
 app.add_typer(contradiction_app, name="contradiction")
 app.add_typer(namespace_app, name="namespace")
 app.add_typer(schema_app, name="schema")
+app.add_typer(admin_event_app, name="admin-event")
 
 # Module-level DB path, set by the root callback before any command runs.
 _db_path: Path = Path("ontolith.db")
@@ -205,8 +207,13 @@ def principal_list_tokens(
             typer.echo(f"No credentials issued for {principal_id}.")
             return
         for c in credentials:
-            status = f"revoked at {c.revoked_at.isoformat()}" if c.revoked_at else "active"
-            typer.echo(f"{c.id}  issued={c.created_at.isoformat()}  {status}")
+            if c.revoked_at:
+                revoked_by = f" by {c.revoked_by}" if c.revoked_by else ""
+                status = f"revoked at {c.revoked_at.isoformat()}{revoked_by}"
+            else:
+                status = "active"
+            issued_by = f" by {c.issued_by}" if c.issued_by else ""
+            typer.echo(f"{c.id}  issued={c.created_at.isoformat()}{issued_by}  {status}")
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
@@ -775,6 +782,44 @@ def schema_migrate(
         schema = from_yaml(text)
         applied = kb.apply_schema(schema, author=author)
         typer.echo(f"Applied schema: namespace={applied.namespace}  version={applied.version}")
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
+# ─── admin-event ───────────────────────────────────────────────────────────────
+
+
+@admin_event_app.command("list")
+def admin_events_list(
+    author: Annotated[
+        str, typer.Option("--author", help="Admin-capability principal performing the lookup.")
+    ],
+    actor: Annotated[
+        str | None, typer.Option("--actor", help="Filter to events performed by this principal.")
+    ] = None,
+    target: Annotated[
+        str | None, typer.Option("--target", help="Filter to events against this target.")
+    ] = None,
+) -> None:
+    """List recorded admin-action events: create_principal/apply_schema/
+    register_plugin (KI-072, ADR-0042).
+
+    Token issuance/revocation aren't included here — see `principal
+    list-tokens`'s `issued_by`/`revoked_by` columns for those. Requires
+    the `--author` principal to hold `admin` capability.
+    """
+    kb = _kb()
+    try:
+        events = kb.get_admin_events(author=author, actor=actor, target=target)
+        if not events:
+            typer.echo("No admin events recorded.")
+            return
+        for e in events:
+            detail = f"  {e.detail}" if e.detail else ""
+            typer.echo(f"{e.at.isoformat()}  {e.actor}  {e.action}  target={e.target}{detail}")
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
