@@ -114,7 +114,10 @@ _logger = logging.getLogger(__name__)
 # subclass of StorageError/PluginError specifically, without needing this
 # tuple updated - but a brand-new OntolithError direct subclass that ISN'T
 # one of those two still fails open (unredacted) here, same as it would
-# anywhere isinstance is used for this kind of check.
+# anywhere isinstance is used for this kind of check - a real divergence
+# from REST, whose .get(type(exc), 500) defaults an unrecognized exact
+# type to 500 and therefore redacts it: REST fails closed for exactly the
+# case this isinstance check fails open on.
 _REDACT_MESSAGE_FOR: tuple[type[OntolithError], ...] = (StorageError, PluginError)
 _GENERIC_SERVER_ERROR_MESSAGE = "An internal error occurred"
 

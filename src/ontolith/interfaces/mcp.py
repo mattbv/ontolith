@@ -84,7 +84,10 @@ _logger = logging.getLogger(__name__)
 # direct subclass that ISN'T one of those two still fails open
 # (unredacted) here, same as it would anywhere isinstance is used for
 # this kind of check. Matches GraphQL's own _REDACT_MESSAGE_FOR precedent
-# exactly (including that same fails-open case for a genuinely new type).
+# exactly (including that same fails-open case for a genuinely new type)
+# - a real divergence from REST, whose .get(type(exc), 500) defaults an
+# unrecognized exact type to 500 and therefore redacts it: REST fails
+# closed for exactly the case this isinstance check fails open on.
 _REDACT_MESSAGE_FOR: tuple[type[OntolithError], ...] = (StorageError, PluginError)
 _GENERIC_SERVER_ERROR_MESSAGE = "An internal error occurred"
 

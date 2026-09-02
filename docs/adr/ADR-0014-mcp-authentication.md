@@ -251,19 +251,32 @@ call stack), which works but adds no value over calling `_error_response()` dire
 of detection — the tool already knows it's returning early either way, and an explicit
 `return _error_response(...)` is one line, not two.
 
-**Review-driven follow-up:** the blanket handler turned a pre-existing mislabel in
+**Review-driven follow-up (round 1):** the blanket handler turned a pre-existing mislabel in
 `Ontology.retract()` into an information-destroying one. An unknown `assertion_id` has always
 fallen through to the backend's generic `set_assertion_status`, whose "no row updated" case raises
 `StorageError` — meant for a genuine storage fault on a *known-good* id, not this caller-supplied
 bad-id case. Before this ADR, that `StorageError`'s message ("Assertion not found: ...") still
 reached the caller unredacted, so the mislabel was cosmetic (wrong code, right text). Once
 `_error_response()` started redacting every `StorageError`, the same caller-supplied bad id now got
-"An internal error occurred" — a client-actionable error made opaque. Fixed at the source:
-`Ontology.retract()` now checks `get_assertion(assertion_id) is None` explicitly and raises
-`NotFoundError` before ever reaching `set_assertion_status`, matching `flag_contradiction`'s
-existing precedent for the same shape. This is a behavior change on every interface that calls
-`retract()`, not just MCP — REST/GraphQL/CLI all now report an unknown assertion as a client error
-(404 on REST) instead of a 500/opaque failure.
+"An internal error occurred" — a client-actionable error made opaque.
+
+**Review-driven follow-up (round 2):** round 1's first fix checked `get_assertion(assertion_id) is
+None` only inside the auto-accept write transaction, so it never ran on the review-routed path —
+exactly the one an AI/MCP caller takes, since `ThresholdPolicy` always routes AI principals to
+review (ADR-0003). An unknown id from an AI caller still produced no error at all: a phantom
+`require_review` proposal was created and silently persisted, and if a reviewer later accepted it,
+`_replay_proposal_operations` hit a bare `assert retracted is not None`, escaping as an uncaught,
+blank-message `AssertionError` — worse than the redacted `StorageError` this ADR set out to fix.
+Fixed properly: `retract()` now checks existence unconditionally, before a proposal is even
+created or policy evaluated, raising `NotFoundError` up front regardless of how policy would route
+it — matching `flag_contradiction`'s existing precedent, and safe to check once outside any
+transaction since assertion existence is permanent (append-only, SPEC §5). The now-unreachable
+`assert` inside `_replay_proposal_operations` was also hardened into a real `NotFoundError`, as a
+backstop against any future path that might replay a proposal built some other way. This is a
+behavior change on every interface that calls `retract()`, not just MCP — REST now reports an
+unknown assertion as 404 rather than 500, and GraphQL's `errors` array carries `NOT_FOUND` rather
+than a redacted `STORAGE_ERROR`; the CLI's plain-text output changes wording only, since it already
+printed the underlying exception's message unredacted either way.
 
 **Recorded trade-off (not a defect):** FastMCP only marks a tool call `isError=True` when the tool
 *raises*; a returned `{"error", ...}` dict is a successful call carrying an error payload. Because

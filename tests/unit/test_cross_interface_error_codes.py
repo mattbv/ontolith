@@ -165,7 +165,10 @@ class _FailingSchemaBackend:
     StorageError whose message interpolates fake internal detail — the
     shared vehicle below for triggering a genuine 5xx-class fault
     identically across all three interfaces (mirrors
-    test_mcp_server.py's own copy of this fixture)."""
+    test_mcp_server.py's own copy of this fixture, but with a non-empty
+    ``detail`` — unlike the message, `detail` is never redacted by any of
+    the three interfaces, so an empty dict here couldn't distinguish
+    "propagated correctly" from "an interface silently drops it")."""
 
     def __init__(self, real: object) -> None:
         self._real = real
@@ -173,7 +176,10 @@ class _FailingSchemaBackend:
     def get_schema(self, namespace: str) -> object:
         from ontolith.core.errors import StorageError
 
-        raise StorageError("sqlite3.OperationalError: database is locked (fd=7, pid=12345)")
+        raise StorageError(
+            "sqlite3.OperationalError: database is locked (fd=7, pid=12345)",
+            detail={"sqlite_errno": 5},
+        )
 
     def __getattr__(self, name: str) -> object:
         return getattr(self._real, name)
@@ -220,11 +226,13 @@ class TestStorageErrorRedactionParity:
         )
         generic = "An internal error occurred"
         assert rest_body["message"] == graphql_error["message"] == mcp_result["error"] == generic
+        # detail is never redacted (only the message is) — each interface
+        # must still forward it unchanged, unlike the generic message
         for detail in (
             rest_body["detail"],
             graphql_error["extensions"]["detail"],
             mcp_result["detail"],
         ):
-            assert detail == {}
+            assert detail == {"sqlite_errno": 5}
         assert "database is locked" not in rest_response.text
         assert "database is locked" not in graphql_response.text
