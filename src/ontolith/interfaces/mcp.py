@@ -137,12 +137,12 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": "auth_error"}
+            return {"error": token_error, "code": AuthError.code}
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             auth_provider.resolve(token)
         except AuthError as exc:
-            return {"error": str(exc), "code": "auth_error"}
+            return {"error": str(exc), "code": exc.code}
 
         ir = kb.backend.get_schema(namespace)
         if ir is None:
@@ -197,20 +197,20 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             no token was resolvable, or it does not resolve to a valid
             principal.
         """
-        from ontolith.core.errors import AuthError
+        from ontolith.core.errors import AuthError, NotFoundError
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": "auth_error"}
+            return {"error": token_error, "code": AuthError.code}
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             auth_provider.resolve(token)
         except AuthError as exc:
-            return {"error": str(exc), "code": "auth_error"}
+            return {"error": str(exc), "code": exc.code}
 
         entity = kb.backend.get_entity(entity_id)
         if entity is None:
-            return {"error": f"Entity {entity_id!r} not found"}
+            return {"error": f"Entity {entity_id!r} not found", "code": NotFoundError.code}
 
         assertions = kb.backend.assertions(subject=entity_id, status="active")
         return {
@@ -312,18 +312,18 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": "auth_error"}
+            return {"error": token_error, "code": AuthError.code}
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             auth_provider.resolve(token)
         except AuthError as exc:
-            return {"error": str(exc), "code": "auth_error"}
+            return {"error": str(exc), "code": exc.code}
 
         if as_of is not None:
             try:
                 builder = kb.as_of(as_of).query(concept)
             except ValueError as exc:
-                return {"error": f"Invalid as_of value: {exc}", "code": "validation_error"}
+                return {"error": f"Invalid as_of value: {exc}", "code": ValidationError.code}
         else:
             builder = kb.query(concept)
 
@@ -340,7 +340,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
                 builder = builder.limit(limit)
             entities = builder.all()
         except ValidationError as exc:
-            return {"error": str(exc), "code": "validation_error"}
+            return {"error": str(exc), "code": exc.code}
         return {
             "concept": concept,
             "count": len(entities),
@@ -378,20 +378,20 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             found, no token was resolvable, or it does not resolve to a
             valid principal.
         """
-        from ontolith.core.errors import AuthError
+        from ontolith.core.errors import AuthError, NotFoundError
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": "auth_error"}
+            return {"error": token_error, "code": AuthError.code}
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             auth_provider.resolve(token)
         except AuthError as exc:
-            return {"error": str(exc), "code": "auth_error"}
+            return {"error": str(exc), "code": exc.code}
 
         match = kb.backend.get_assertion(assertion_id)
         if match is None:
-            return {"error": f"Assertion {assertion_id!r} not found"}
+            return {"error": f"Assertion {assertion_id!r} not found", "code": NotFoundError.code}
 
         review_events = (
             [
@@ -501,17 +501,17 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         if has_literal == has_ref:
             return {
                 "error": "Provide exactly one of (value and value_type) or target",
-                "code": "validation_error",
+                "code": ValidationError.code,
             }
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": "auth_error"}
+            return {"error": token_error, "code": AuthError.code}
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             author = auth_provider.resolve(token).id
         except AuthError as exc:
-            return {"error": str(exc), "code": "auth_error"}
+            return {"error": str(exc), "code": exc.code}
 
         try:
             if has_ref:
@@ -542,11 +542,11 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
                     model=model,
                 )
         except AuthError as exc:
-            return {"error": str(exc), "code": "auth_error"}
+            return {"error": str(exc), "code": exc.code}
         except CapabilityError as exc:
-            return {"error": str(exc), "code": "capability_error"}
+            return {"error": str(exc), "code": exc.code}
         except ValidationError as exc:
-            return {"error": str(exc), "code": "validation_error"}
+            return {"error": str(exc), "code": exc.code}
 
         return {
             "proposal": {
@@ -609,19 +609,19 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": "auth_error"}
+            return {"error": token_error, "code": AuthError.code}
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             author = auth_provider.resolve(token).id
         except AuthError as exc:
-            return {"error": str(exc), "code": "auth_error"}
+            return {"error": str(exc), "code": exc.code}
 
         try:
             proposal, decision = kb.retract(assertion_id, author=author, acting_as=acting_as)
         except AuthError as exc:
-            return {"error": str(exc), "code": "auth_error"}
+            return {"error": str(exc), "code": exc.code}
         except CapabilityError as exc:
-            return {"error": str(exc), "code": "capability_error"}
+            return {"error": str(exc), "code": exc.code}
 
         return {
             "proposal": {
@@ -671,25 +671,25 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": "auth_error"}
+            return {"error": token_error, "code": AuthError.code}
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             author = auth_provider.resolve(token).id
         except AuthError as exc:
-            return {"error": str(exc), "code": "auth_error"}
+            return {"error": str(exc), "code": exc.code}
 
         try:
             contradiction, action = kb.flag_contradiction(
                 assertion_id_a, assertion_id_b, author, rationale=rationale
             )
         except AuthError as exc:
-            return {"error": str(exc), "code": "auth_error"}
+            return {"error": str(exc), "code": exc.code}
         except CapabilityError as exc:
-            return {"error": str(exc), "code": "capability_error"}
+            return {"error": str(exc), "code": exc.code}
         except NotFoundError as exc:
-            return {"error": str(exc), "code": "not_found"}
+            return {"error": str(exc), "code": exc.code}
         except ValidationError as exc:
-            return {"error": str(exc), "code": "validation_error"}
+            return {"error": str(exc), "code": exc.code}
 
         return {
             "contradiction_id": contradiction.id,
@@ -735,23 +735,23 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": "auth_error"}
+            return {"error": token_error, "code": AuthError.code}
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             author = auth_provider.resolve(token).id
         except AuthError as exc:
-            return {"error": str(exc), "code": "auth_error"}
+            return {"error": str(exc), "code": exc.code}
 
         try:
             proposal, decision = kb.resubmit(proposal_id, author)
         except AuthError as exc:
-            return {"error": str(exc), "code": "auth_error"}
+            return {"error": str(exc), "code": exc.code}
         except CapabilityError as exc:
-            return {"error": str(exc), "code": "capability_error"}
+            return {"error": str(exc), "code": exc.code}
         except NotFoundError as exc:
-            return {"error": str(exc), "code": "not_found"}
+            return {"error": str(exc), "code": exc.code}
         except ValidationError as exc:
-            return {"error": str(exc), "code": "validation_error"}
+            return {"error": str(exc), "code": exc.code}
 
         return {
             "proposal": {

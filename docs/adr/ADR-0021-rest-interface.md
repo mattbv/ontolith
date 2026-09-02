@@ -83,8 +83,10 @@ rather than this factory deciding unilaterally.
 `@app.exception_handler(OntolithError)` maps every error subtype to an HTTP
 status and a body `{"code": exc.code, "message": exc.message, "detail":
 exc.detail}` (SPEC §16). This is a strict improvement over `mcp.py`'s
-current per-call-site duplication (`{"error": str(exc), "code":
-"auth_error"}` repeated at each tool, and `.detail` dropped entirely).
+per-call-site duplication (`{"error": str(exc), "code": exc.code}` repeated
+at each tool — KI-059 fixed the *code value* to match this table, but the
+duplication itself, and `.detail` being dropped entirely, remain; KI-074
+tracks closing that gap the same way REST/GraphQL already have).
 
 | Error | HTTP status |
 |---|---|

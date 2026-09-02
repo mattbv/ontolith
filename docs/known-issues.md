@@ -1256,19 +1256,19 @@ Added `semantic`, `as_of`, `min_confidence`, `trust_at_least`, `limit` parameter
 
 ---
 
-## KI-059 — MCP's error `code` values diverge from the taxonomy REST and GraphQL share
+## KI-059 — MCP's error `code` values diverge from the taxonomy REST and GraphQL share ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — breaks cross-interface client error-handling reuse
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §16 (stable, machine-readable error codes)
 
 ### Description
 
-19 call sites in `interfaces/mcp.py` hand-write `{"error": str(exc), "code": "auth_error"}` / `"capability_error"` / `"validation_error"` / `"not_found"` rather than reading `exc.code` off the caught `OntolithError`. `core/errors.py` defines the actual codes as `ONTOLITH_ERROR`, `SCHEMA_ERROR`, `VALIDATION_ERROR`, `AUTH_ERROR`, `CAPABILITY_ERROR`, `POLICY_DENIED`, `CONFLICT_ERROR`, `NOT_FOUND`, `STORAGE_ERROR`, `PLUGIN_ERROR`. REST (`rest.py:494`, `ErrorOut(code=exc.code, ...)`) and GraphQL (`graphql.py:873`, `error.extensions = {"code": original.code, ...}`) both pass `exc.code` through unmodified, so the taxonomy is genuinely identical between those two — MCP alone diverges, both in casing (`auth_error` vs `AUTH_ERROR`) and, for not-found, in the literal string used (`not_found` vs `NOT_FOUND`). The divergence was introduced piecemeal starting with KI-024 and never reconciled once REST/GraphQL's shared convention formed afterward — exactly the kind of drift only visible once all three interfaces exist and are compared directly.
+32 call sites in `interfaces/mcp.py` hand-wrote `{"error": str(exc), "code": "auth_error"}` / `"capability_error"` / `"validation_error"` / `"not_found"` rather than reading `exc.code` off the caught `OntolithError` (two further sites, `get_tool`/`provenance_tool`'s "not found" paths, had no `code` key at all — found while fixing this). `core/errors.py` defines the actual codes as `ONTOLITH_ERROR`, `SCHEMA_ERROR`, `VALIDATION_ERROR`, `AUTH_ERROR`, `CAPABILITY_ERROR`, `POLICY_DENIED`, `CONFLICT_ERROR`, `NOT_FOUND`, `STORAGE_ERROR`, `PLUGIN_ERROR`. REST (`rest.py:494`, `ErrorOut(code=exc.code, ...)`) and GraphQL (`graphql.py:873`, `error.extensions = {"code": original.code, ...}`) both pass `exc.code` through unmodified, so the taxonomy was genuinely identical between those two — MCP alone diverged, both in casing (`auth_error` vs `AUTH_ERROR`) and, for not-found, in the literal string used (`not_found` vs `NOT_FOUND`). The divergence was introduced piecemeal starting with KI-024 and never reconciled once REST/GraphQL's shared convention formed afterward — exactly the kind of drift only visible once all three interfaces exist and are compared directly.
 
 ### Fix
 
-Replace every hand-written `"code": "..."` literal in `mcp.py` with `exc.code` from the caught `OntolithError` instance. Add a cross-interface regression test asserting REST, GraphQL, and MCP all return the same `code` string for the same underlying exception type.
+Replaced every hand-written `"code": "..."` literal in `mcp.py` with `exc.code` from the caught `OntolithError` instance, or the exception class's own `.code` attribute (e.g. `ValidationError.code`) for the handful of sites with no exception instance in scope (a synthesized validation error, and `_bearer_token()`'s own auth-shaped error strings) — matching REST's own precedent for its equivalent case (`RequestValidationError`, mapped via `ValidationError.code`). Also found and fixed along the way: `get_tool`/`provenance_tool`'s "not found" paths had no `code` key at all, not just the wrong casing. Added `tests/unit/test_cross_interface_error_codes.py`, a cross-interface regression test asserting REST, GraphQL, and MCP all return the same `code` string for the same underlying exception type (`AuthError`, `NotFoundError`), sharing one `Ontology`/`AuthProvider` across all three the way a real deployment would.
 
 ---
 
@@ -1499,6 +1499,22 @@ KI-067/ADR-0014 made every MCP tool's `token` argument optional and prefer a tra
 ### Fix
 
 Add an opt-in `require_header_token: bool = False` parameter to `create_mcp_server()` that, when set, makes `_bearer_token()` return the "No bearer token provided"/"Malformed Authorization header" errors even for a live HTTP request whose header is absent — i.e. disables the argument fallback entirely for HTTP transports (stdio, which has no header channel at all, would need its own carve-out or would simply be unusable with the flag set, which is fine since stdio-facing principals already need the argument). Not built as part of KI-067 itself — that KI's own Fix text scoped it to making the header path available and preferred, and this is a strictly opt-in hardening a deployment reaches for once available, not a fix for a live vulnerability.
+
+---
+
+## KI-074 — MCP still hand-catches errors per tool instead of one blanket mapping; 5 of 10 taxonomy codes are unreachable from MCP
+
+**Severity:** Architecture gap — MCP diverges from REST/GraphQL's error-handling architecture, not just the values KI-059 fixed
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §16 (stable, machine-readable error codes)
+
+### Description
+
+KI-059 fixed MCP's error `code` *values* to match `exc.code`, but left the *mechanism* untouched: REST installs one `@app.exception_handler(OntolithError)` with a `_STATUS_BY_ERROR_TYPE` mapping covering the whole taxonomy (`SchemaError`, `PolicyDenied`, `ConflictError`, `StorageError`, `PluginError` included), and GraphQL has an equivalent blanket extension; `interfaces/mcp.py` still hand-catches only `AuthError`/`CapabilityError`/`NotFoundError`/`ValidationError` per call site. A `SchemaError`, `PolicyDenied`, `ConflictError`, `StorageError`, or `PluginError` escaping any MCP tool is not converted to `{"error", "code"}` at all — it propagates as an unstructured MCP protocol exception with no taxonomy code, and (for `StorageError`/`PluginError` specifically) without the message redaction both REST and GraphQL apply to avoid leaking internal exception text. The response *shape* also still diverges even where the code now matches: MCP returns `{"error": str(exc), "code": ...}` while REST/GraphQL return `{"code", "message", "detail"}` — `exc.detail` is dropped entirely on the MCP side. Found in review of KI-059's own fix.
+
+### Fix
+
+Give `create_mcp_server()` a single error-handling path analogous to REST's `_STATUS_BY_ERROR_TYPE`/`_handle_ontolith_error` — likely a small helper each tool's outer `try/except OntolithError as exc` delegates to, returning `{"code": exc.code, "message": exc.message, "detail": exc.detail}` (or MCP's existing `"error"`/`"code"` shape extended with `"detail"`) for every taxonomy member, with the same `StorageError`/`PluginError` message redaction REST/GraphQL already apply. Closes the remaining 5-of-10 unreachable-code gap and the shape divergence in one pass.
 
 ---
 
