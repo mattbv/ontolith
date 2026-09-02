@@ -132,7 +132,7 @@ class TestSchemaTool:
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.schema").fn(token="not-a-real-token")
         assert "error" in result
-        assert result["code"] == "auth_error"
+        assert result["code"] == "AUTH_ERROR"
 
     def test_schema_returns_concepts_and_properties(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -267,6 +267,7 @@ class TestGetTool:
             entity_id="does-not-exist", token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
         assert "error" in result
+        assert result["code"] == "NOT_FOUND"
 
     def test_get_invalid_token_returns_auth_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -276,7 +277,7 @@ class TestGetTool:
             entity_id=entity.id, token="not-a-real-token"
         )
         assert "error" in result
-        assert result["code"] == "auth_error"
+        assert result["code"] == "AUTH_ERROR"
 
     def test_get_excludes_non_active_assertions(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -343,7 +344,7 @@ class TestQueryTool:
             concept="Person", token="not-a-real-token"
         )
         assert "error" in result
-        assert result["code"] == "auth_error"
+        assert result["code"] == "AUTH_ERROR"
 
     def test_query_dunder_filter_key_returns_validation_error(self, tmp_path: Path) -> None:
         """A relation-traversal-shaped key fails loudly instead of returning an empty result (KI-030)."""
@@ -357,7 +358,7 @@ class TestQueryTool:
             filters={"employer__name": "Acme Corp"},
         )
         assert "error" in result
-        assert result["code"] == "validation_error"
+        assert result["code"] == "VALIDATION_ERROR"
 
     def test_query_semantic_restricts_to_indexed_entities(self, tmp_path: Path) -> None:
         """KI-058: `semantic` was previously unreachable from MCP at all.
@@ -466,7 +467,7 @@ class TestQueryTool:
             semantic="anything",
         )
         assert "error" in result
-        assert result["code"] == "validation_error"
+        assert result["code"] == "VALIDATION_ERROR"
 
     def test_query_min_confidence_filters_entities(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -578,7 +579,7 @@ class TestQueryTool:
             as_of="not-a-timestamp",
         )
         assert "error" in result
-        assert result["code"] == "validation_error"
+        assert result["code"] == "VALIDATION_ERROR"
 
 
 # ---------------------------------------------------------------------------
@@ -666,6 +667,7 @@ class TestProvenanceTool:
             assertion_id="nonexistent", token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
         assert "error" in result
+        assert result["code"] == "NOT_FOUND"
 
     def test_provenance_invalid_token_returns_auth_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -674,7 +676,7 @@ class TestProvenanceTool:
             assertion_id="nonexistent", token="not-a-real-token"
         )
         assert "error" in result
-        assert result["code"] == "auth_error"
+        assert result["code"] == "AUTH_ERROR"
 
     def test_provenance_reachable_for_retracted_assertion(self, tmp_path: Path) -> None:
         """Provenance must be resolvable for non-active assertions too — that's
@@ -796,7 +798,7 @@ class TestProposeTool:
             token=kb.issue_token(AI, author=ADMIN)[0],
         )
         assert "error" in result
-        assert result["code"] == "validation_error"
+        assert result["code"] == "VALIDATION_ERROR"
 
     def test_propose_ai_requires_review(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -830,7 +832,7 @@ class TestProposeTool:
             token="not-a-real-token",
         )
         assert "error" in result
-        assert result["code"] == "auth_error"
+        assert result["code"] == "AUTH_ERROR"
 
     def test_propose_revoked_token_returns_auth_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -847,7 +849,7 @@ class TestProposeTool:
             token=token,
         )
         assert "error" in result
-        assert result["code"] == "auth_error"
+        assert result["code"] == "AUTH_ERROR"
 
     def test_propose_unauthorized_delegation_returns_capability_error(self, tmp_path: Path) -> None:
         """acting_as a principal that isn't the author's owner is rejected (ADR-0003)."""
@@ -868,7 +870,7 @@ class TestProposeTool:
             model="test-model-v1",
         )
         assert "error" in result
-        assert result["code"] == "capability_error"
+        assert result["code"] == "CAPABILITY_ERROR"
 
     def test_propose_does_not_expose_direct_write(self, tmp_path: Path) -> None:
         """MCP propose tool must not bypass policy — AI assertions need review."""
@@ -922,7 +924,7 @@ class TestProposeTool:
         )
 
         assert "error" in result
-        assert result["code"] == "validation_error"
+        assert result["code"] == "VALIDATION_ERROR"
 
     def test_propose_both_value_and_target_returns_validation_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -940,7 +942,7 @@ class TestProposeTool:
         )
 
         assert "error" in result
-        assert result["code"] == "validation_error"
+        assert result["code"] == "VALIDATION_ERROR"
 
     def test_no_write_tool_registered(self, tmp_path: Path) -> None:
         """ADR-0008: no direct write, update, or delete tool must be registered."""
@@ -1037,7 +1039,7 @@ class TestFlagContradictionTool:
             token="not-a-real-token",
         )
         assert "error" in result
-        assert result["code"] == "auth_error"
+        assert result["code"] == "AUTH_ERROR"
 
     def test_flag_read_only_principal_returns_capability_error(self, tmp_path: Path) -> None:
         """Previously flag_contradiction had NO capability check at all — any
@@ -1074,7 +1076,7 @@ class TestFlagContradictionTool:
             token=kb.issue_token("readonly@example.com", author=ADMIN)[0],
         )
         assert "error" in result
-        assert result["code"] == "capability_error"
+        assert result["code"] == "CAPABILITY_ERROR"
 
     def test_flag_assertion_a_not_found_returns_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -1089,7 +1091,7 @@ class TestFlagContradictionTool:
             token=kb.issue_token(HUMAN, author=ADMIN)[0],
         )
         assert "error" in result
-        assert result["code"] == "not_found"
+        assert result["code"] == "NOT_FOUND"
 
     def test_flag_assertion_b_not_found_returns_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -1104,7 +1106,7 @@ class TestFlagContradictionTool:
             token=kb.issue_token(HUMAN, author=ADMIN)[0],
         )
         assert "error" in result
-        assert result["code"] == "not_found"
+        assert result["code"] == "NOT_FOUND"
 
     def test_flag_extends_existing_contradiction(self, tmp_path: Path) -> None:
         """A third conflicting assertion extends the open contradiction rather than
@@ -1181,7 +1183,7 @@ class TestResubmitTool:
         )
 
         assert "error" in result
-        assert result["code"] == "capability_error"
+        assert result["code"] == "CAPABILITY_ERROR"
 
     def test_resubmit_unknown_proposal_returns_not_found(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -1192,7 +1194,7 @@ class TestResubmitTool:
         )
 
         assert "error" in result
-        assert result["code"] == "not_found"
+        assert result["code"] == "NOT_FOUND"
 
     def test_resubmit_wrong_state_returns_validation_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -1206,7 +1208,7 @@ class TestResubmitTool:
         )
 
         assert "error" in result
-        assert result["code"] == "validation_error"
+        assert result["code"] == "VALIDATION_ERROR"
 
     def test_resubmit_invalid_token_returns_auth_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -1221,7 +1223,7 @@ class TestResubmitTool:
         )
 
         assert "error" in result
-        assert result["code"] == "auth_error"
+        assert result["code"] == "AUTH_ERROR"
 
 
 # ---------------------------------------------------------------------------
@@ -1297,7 +1299,7 @@ class TestRetractTool:
         )
 
         assert "error" in result
-        assert result["code"] == "auth_error"
+        assert result["code"] == "AUTH_ERROR"
 
     def test_retract_invalid_token_returns_auth_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -1311,7 +1313,7 @@ class TestRetractTool:
         )
 
         assert "error" in result
-        assert result["code"] == "auth_error"
+        assert result["code"] == "AUTH_ERROR"
 
     def test_party_to_contradiction_returns_capability_error(self, tmp_path: Path) -> None:
         """KI-033: a party to an open contradiction can't retract the
@@ -1335,7 +1337,7 @@ class TestRetractTool:
         )
 
         assert "error" in result
-        assert result["code"] == "capability_error"
+        assert result["code"] == "CAPABILITY_ERROR"
 
 
 # ---------------------------------------------------------------------------
@@ -1388,7 +1390,7 @@ class TestBearerTokenTransport:
         with _http_request("Bearer not-a-real-token"):
             result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=valid_token)
 
-        assert result == {"error": "Invalid or revoked token", "code": "auth_error"}
+        assert result == {"error": "Invalid or revoked token", "code": "AUTH_ERROR"}
 
     def test_no_header_falls_back_to_token_argument(self, tmp_path: Path) -> None:
         """A live HTTP request with no Authorization header at all (as
@@ -1415,7 +1417,7 @@ class TestBearerTokenTransport:
         with _http_request("Basic dXNlcjpwYXNz"):
             result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=token)
 
-        assert result == {"error": "Malformed Authorization header", "code": "auth_error"}
+        assert result == {"error": "Malformed Authorization header", "code": "AUTH_ERROR"}
 
     def test_empty_bearer_value_fails_closed(self, tmp_path: Path) -> None:
         """`Authorization: Bearer` with no value at all (not just a wrong
@@ -1427,7 +1429,7 @@ class TestBearerTokenTransport:
         with _http_request("Bearer"):
             result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=token)
 
-        assert result == {"error": "Malformed Authorization header", "code": "auth_error"}
+        assert result == {"error": "Malformed Authorization header", "code": "AUTH_ERROR"}
 
     def test_uppercase_bearer_scheme_authenticates(self, tmp_path: Path) -> None:
         """The scheme match is case-insensitive (RFC 7235) — pins the
@@ -1462,7 +1464,7 @@ class TestBearerTokenTransport:
         with _http_request(None):
             result = mcp._tool_manager.get_tool("ontolith.schema").fn()
 
-        assert result == {"error": "No bearer token provided", "code": "auth_error"}
+        assert result == {"error": "No bearer token provided", "code": "AUTH_ERROR"}
 
     def test_no_context_and_no_token_argument_returns_auth_error(self, tmp_path: Path) -> None:
         """Outside any request context at all (e.g. stdio, or a direct
@@ -1474,7 +1476,7 @@ class TestBearerTokenTransport:
 
         result = mcp._tool_manager.get_tool("ontolith.schema").fn()
 
-        assert result == {"error": "No bearer token provided", "code": "auth_error"}
+        assert result == {"error": "No bearer token provided", "code": "AUTH_ERROR"}
 
     def test_header_authenticates_a_write_tool(self, tmp_path: Path) -> None:
         """Not just the read tools — the `author = auth_provider.resolve
@@ -1523,7 +1525,7 @@ class TestBearerTokenTransport:
         }
         for tool_name, kwargs in calls.items():
             result = mcp._tool_manager.get_tool(tool_name).fn(**kwargs)
-            assert result == {"error": "No bearer token provided", "code": "auth_error"}, tool_name
+            assert result == {"error": "No bearer token provided", "code": "AUTH_ERROR"}, tool_name
 
     def test_header_authenticates_over_real_streamable_http_transport(self, tmp_path: Path) -> None:
         """Every test above drives `_bearer_token` through `_http_request`'s
@@ -1562,4 +1564,4 @@ class TestBearerTokenTransport:
             )
         )
 
-        assert result == {"error": "Malformed Authorization header", "code": "auth_error"}
+        assert result == {"error": "Malformed Authorization header", "code": "AUTH_ERROR"}

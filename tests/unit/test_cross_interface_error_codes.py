@@ -1,0 +1,104 @@
+"""Cross-interface error-code taxonomy regression (KI-059, SPEC §16).
+
+REST (`ErrorOut(code=exc.code, ...)`) and GraphQL (`extensions = {"code":
+original.code, ...}`) both pass an `OntolithError`'s own `.code` straight
+through unmodified. MCP used to hand-write its own lowercase literals
+(`"auth_error"` etc.) instead, diverging from both in casing and, for
+not-found, in the literal string itself. These tests drive the *same*
+underlying exception type through all three interfaces — sharing one
+`Ontology`/`AuthProvider`, the way a real deployment exposes all three over
+one backend — and assert they return the identical `code` string. A
+regression here means the taxonomy has drifted again, exactly the class of
+gap that motivated KI-059.
+"""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from ontolith import Ontology
+from ontolith.core import FixedClock, FixedIdProvider
+from ontolith.identity.token_auth import TokenAuthProvider
+from ontolith.interfaces.graphql import create_graphql_app
+from ontolith.interfaces.mcp import create_mcp_server
+from ontolith.interfaces.rest import create_rest_app
+
+T0 = datetime(2025, 1, 1, tzinfo=UTC)
+HUMAN = "alice@example.com"
+ADMIN = "admin@example.com"
+
+
+@pytest.fixture
+def kb(tmp_path: Path) -> Ontology:
+    """One Ontology shared by all three interfaces below — matches how a
+    real deployment exposes REST/GraphQL/MCP over the same backend, and
+    means a token issued once resolves identically against all three."""
+    clock = FixedClock(T0)
+    ids = FixedIdProvider([f"id-{i}" for i in range(50)])
+    kb = Ontology.connect(tmp_path / "shared.db", clock=clock, id_provider=ids)
+    kb.create_principal(HUMAN, kind="human", auth_method="oidc", default_capability="write")
+    kb.create_principal(ADMIN, kind="human", auth_method="oidc", default_capability="admin")
+    return kb
+
+
+def _codes_for_missing_entity(
+    kb: Ontology, headers: dict[str, str], token: str | None
+) -> dict[str, str]:
+    """Query the same nonexistent entity id through all three interfaces,
+    returning each one's reported `code`."""
+    auth_provider = TokenAuthProvider(kb.backend)
+
+    rest_client = TestClient(create_rest_app(kb, auth_provider))
+    rest_response = rest_client.get("/entities/does-not-exist", headers=headers)
+    rest_code: str = rest_response.json()["code"]
+
+    graphql_client = TestClient(create_graphql_app(kb, auth_provider))
+    graphql_response = graphql_client.post(
+        "/graphql",
+        json={"query": '{ entity(id: "does-not-exist") { id } }'},
+        headers=headers,
+    )
+    assert graphql_response.status_code == 200
+    graphql_code: str = graphql_response.json()["errors"][0]["extensions"]["code"]
+
+    mcp = create_mcp_server(kb, auth_provider)
+    mcp_result = mcp._tool_manager.get_tool("ontolith.get").fn(
+        entity_id="does-not-exist", token=token
+    )
+    mcp_code: str = mcp_result["code"]
+
+    return {"rest": rest_code, "graphql": graphql_code, "mcp": mcp_code}
+
+
+class TestAuthErrorCodeParity:
+    """Same underlying exception type (AuthError, from a bad bearer token),
+    triggered through the auth layer every one of the three interfaces
+    shares, must produce the same code everywhere."""
+
+    def test_all_three_interfaces_report_the_same_code(self, kb: Ontology) -> None:
+        bad_headers = {"Authorization": "Bearer not-a-real-token"}
+
+        codes = _codes_for_missing_entity(kb, bad_headers, token="not-a-real-token")
+
+        assert codes == {"rest": "AUTH_ERROR", "graphql": "AUTH_ERROR", "mcp": "AUTH_ERROR"}
+
+
+class TestNotFoundErrorCodeParity:
+    """Same underlying exception type (NotFoundError, from a missing
+    entity), triggered through each interface's own entity-lookup route —
+    REST's GET /entities/{id} raises NotFoundError directly; MCP's
+    ontolith.get checks for None and returns a matching code by hand
+    (KI-059 also closed a gap here: this path previously had no code key
+    at all, not just the wrong casing)."""
+
+    def test_all_three_interfaces_report_the_same_code(self, kb: Ontology) -> None:
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        good_headers = {"Authorization": f"Bearer {token}"}
+
+        codes = _codes_for_missing_entity(kb, good_headers, token=token)
+
+        assert codes == {"rest": "NOT_FOUND", "graphql": "NOT_FOUND", "mcp": "NOT_FOUND"}

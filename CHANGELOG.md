@@ -349,6 +349,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- MCP's error `code` values now match REST/GraphQL's shared taxonomy (closes KI-059, SPEC §16):
+  19 hand-written lowercase literals (`"auth_error"`, `"not_found"`, etc.) in `interfaces/mcp.py`
+  replaced with `exc.code` from the caught `OntolithError` (or the exception class's own `.code`
+  attribute where no instance is in scope), matching what REST/GraphQL already pass through
+  unmodified. Also found and fixed along the way: `ontolith.get`/`ontolith.provenance`'s
+  "not found" responses had no `code` key at all, not just the wrong casing. New
+  `tests/unit/test_cross_interface_error_codes.py` asserts REST, GraphQL, and MCP all report the
+  same code for the same underlying exception type, sharing one backend across all three.
 - Bitemporal-correctness gap in `QueryBuilder.semantic()`, found while adding MCP's `as_of`
   support (KI-058): combined with `.as_of()` but no `.where()` filter, semantic search previously
   ignored `as_of_time` entirely, returning entities that didn't exist yet at that point in time. No
