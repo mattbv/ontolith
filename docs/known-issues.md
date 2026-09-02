@@ -1502,19 +1502,19 @@ Add an opt-in `require_header_token: bool = False` parameter to `create_mcp_serv
 
 ---
 
-## KI-074 — MCP still hand-catches errors per tool instead of one blanket mapping; 5 of 10 taxonomy codes are unreachable from MCP
+## KI-074 — MCP still hand-catches errors per tool instead of one blanket mapping; 5 of 10 taxonomy codes are unreachable from MCP ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — MCP diverges from REST/GraphQL's error-handling architecture, not just the values KI-059 fixed
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved via an ADR-0014 update
 **SPEC reference:** SPEC §16 (stable, machine-readable error codes)
 
 ### Description
 
-KI-059 fixed MCP's error `code` *values* to match `exc.code`, but left the *mechanism* untouched: REST installs one `@app.exception_handler(OntolithError)` with a `_STATUS_BY_ERROR_TYPE` mapping covering the whole taxonomy (`SchemaError`, `PolicyDenied`, `ConflictError`, `StorageError`, `PluginError` included), and GraphQL has an equivalent blanket extension; `interfaces/mcp.py` still hand-catches only `AuthError`/`CapabilityError`/`NotFoundError`/`ValidationError` per call site. A `SchemaError`, `PolicyDenied`, `ConflictError`, `StorageError`, or `PluginError` escaping any MCP tool is not converted to `{"error", "code"}` at all — it propagates as an unstructured MCP protocol exception with no taxonomy code, and (for `StorageError`/`PluginError` specifically) without the message redaction both REST and GraphQL apply to avoid leaking internal exception text. The response *shape* also still diverges even where the code now matches: MCP returns `{"error": str(exc), "code": ...}` while REST/GraphQL return `{"code", "message", "detail"}` — `exc.detail` is dropped entirely on the MCP side. Found in review of KI-059's own fix.
+KI-059 fixed MCP's error `code` *values* to match `exc.code`, but left the *mechanism* untouched: REST installs one `@app.exception_handler(OntolithError)` with a `_STATUS_BY_ERROR_TYPE` mapping covering the whole taxonomy (`SchemaError`, `PolicyDenied`, `ConflictError`, `StorageError`, `PluginError` included), and GraphQL has an equivalent blanket extension; `interfaces/mcp.py` still hand-caught only `AuthError`/`CapabilityError`/`NotFoundError`/`ValidationError` per call site. A `SchemaError`, `PolicyDenied`, `ConflictError`, `StorageError`, or `PluginError` escaping any MCP tool was not converted to `{"error", "code"}` at all — it propagated as an unstructured MCP protocol exception with no taxonomy code, and (for `StorageError`/`PluginError` specifically) without the message redaction both REST and GraphQL apply to avoid leaking internal exception text. The response *shape* also still diverged even where the code matched: MCP returned `{"error": str(exc), "code": ...}` while REST/GraphQL return `{"code", "message", "detail"}` — `exc.detail` was dropped entirely on the MCP side. Found in review of KI-059's own fix.
 
 ### Fix
 
-Give `create_mcp_server()` a single error-handling path analogous to REST's `_STATUS_BY_ERROR_TYPE`/`_handle_ontolith_error` — likely a small helper each tool's outer `try/except OntolithError as exc` delegates to, returning `{"code": exc.code, "message": exc.message, "detail": exc.detail}` (or MCP's existing `"error"`/`"code"` shape extended with `"detail"`) for every taxonomy member, with the same `StorageError`/`PluginError` message redaction REST/GraphQL already apply. Closes the remaining 5-of-10 unreachable-code gap and the shape divergence in one pass.
+New module-level `_error_response(exc: OntolithError) -> dict[str, Any]` — the MCP equivalent of REST's `_handle_ontolith_error`/GraphQL's `process_errors` override — redacts `StorageError`/`PluginError` messages via `isinstance` (matching GraphQL's own `_REDACT_MESSAGE_FOR` precedent, since MCP has no HTTP status to key a REST-style exact-type dict off) and returns `{"error", "code", "detail"}` uniformly. Every tool now wraps its entire body in one `try: ... except OntolithError as exc: return _error_response(exc)`, replacing every per-type `except` clause; the remaining non-exception error paths (a synthesized validation message, a manual `is None` not-found check, `_bearer_token`'s own auth-shaped strings) now construct a real exception instance and route it through the same helper, closing the shape divergence completely, not just the code values KI-059 closed. ADR-0014 update.
 
 ---
 

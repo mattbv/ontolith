@@ -1390,7 +1390,7 @@ class TestBearerTokenTransport:
         with _http_request("Bearer not-a-real-token"):
             result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=valid_token)
 
-        assert result == {"error": "Invalid or revoked token", "code": "AUTH_ERROR"}
+        assert result == {"error": "Invalid or revoked token", "code": "AUTH_ERROR", "detail": {}}
 
     def test_no_header_falls_back_to_token_argument(self, tmp_path: Path) -> None:
         """A live HTTP request with no Authorization header at all (as
@@ -1417,7 +1417,11 @@ class TestBearerTokenTransport:
         with _http_request("Basic dXNlcjpwYXNz"):
             result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=token)
 
-        assert result == {"error": "Malformed Authorization header", "code": "AUTH_ERROR"}
+        assert result == {
+            "error": "Malformed Authorization header",
+            "code": "AUTH_ERROR",
+            "detail": {},
+        }
 
     def test_empty_bearer_value_fails_closed(self, tmp_path: Path) -> None:
         """`Authorization: Bearer` with no value at all (not just a wrong
@@ -1429,7 +1433,11 @@ class TestBearerTokenTransport:
         with _http_request("Bearer"):
             result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=token)
 
-        assert result == {"error": "Malformed Authorization header", "code": "AUTH_ERROR"}
+        assert result == {
+            "error": "Malformed Authorization header",
+            "code": "AUTH_ERROR",
+            "detail": {},
+        }
 
     def test_uppercase_bearer_scheme_authenticates(self, tmp_path: Path) -> None:
         """The scheme match is case-insensitive (RFC 7235) — pins the
@@ -1464,7 +1472,7 @@ class TestBearerTokenTransport:
         with _http_request(None):
             result = mcp._tool_manager.get_tool("ontolith.schema").fn()
 
-        assert result == {"error": "No bearer token provided", "code": "AUTH_ERROR"}
+        assert result == {"error": "No bearer token provided", "code": "AUTH_ERROR", "detail": {}}
 
     def test_no_context_and_no_token_argument_returns_auth_error(self, tmp_path: Path) -> None:
         """Outside any request context at all (e.g. stdio, or a direct
@@ -1476,7 +1484,7 @@ class TestBearerTokenTransport:
 
         result = mcp._tool_manager.get_tool("ontolith.schema").fn()
 
-        assert result == {"error": "No bearer token provided", "code": "AUTH_ERROR"}
+        assert result == {"error": "No bearer token provided", "code": "AUTH_ERROR", "detail": {}}
 
     def test_header_authenticates_a_write_tool(self, tmp_path: Path) -> None:
         """Not just the read tools — the `author = auth_provider.resolve
@@ -1525,7 +1533,11 @@ class TestBearerTokenTransport:
         }
         for tool_name, kwargs in calls.items():
             result = mcp._tool_manager.get_tool(tool_name).fn(**kwargs)
-            assert result == {"error": "No bearer token provided", "code": "AUTH_ERROR"}, tool_name
+            assert result == {
+                "error": "No bearer token provided",
+                "code": "AUTH_ERROR",
+                "detail": {},
+            }, tool_name
 
     def test_header_authenticates_over_real_streamable_http_transport(self, tmp_path: Path) -> None:
         """Every test above drives `_bearer_token` through `_http_request`'s
@@ -1564,4 +1576,99 @@ class TestBearerTokenTransport:
             )
         )
 
-        assert result == {"error": "Malformed Authorization header", "code": "AUTH_ERROR"}
+        assert result == {
+            "error": "Malformed Authorization header",
+            "code": "AUTH_ERROR",
+            "detail": {},
+        }
+
+
+# ---------------------------------------------------------------------------
+# Blanket OntolithError handling (KI-074)
+# ---------------------------------------------------------------------------
+
+
+class _FailingSchemaBackend:
+    """Wraps a real StorageBackend, making get_schema raise a StorageError
+    whose message interpolates fake internal detail - injects a failure
+    from a taxonomy member no tool previously caught by name (StorageError
+    was never in any per-tool except clause pre-KI-074), to prove the new
+    blanket handler actually reaches it. Forwards every other call to the
+    wrapped backend via __getattr__."""
+
+    def __init__(self, real: object) -> None:
+        self._real = real
+
+    def get_schema(self, namespace: str) -> object:
+        from ontolith.core.errors import StorageError
+
+        raise StorageError("sqlite3.OperationalError: database is locked (fd=7, pid=12345)")
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+class TestBlanketErrorHandling:
+    """KI-074: every tool now catches the full OntolithError taxonomy via
+    one shared _error_response() helper, not just the 4 types each tool
+    used to hand-catch — and StorageError/PluginError messages are
+    redacted the same way REST/GraphQL's own blanket handlers already do."""
+
+    def test_storage_error_reaches_the_blanket_handler_redacted(self, tmp_path: Path) -> None:
+        from ontolith.store.sqlite import SQLiteBackend
+
+        real = SQLiteBackend(tmp_path / "test.db")
+        try:
+            kb = Ontology(
+                _FailingSchemaBackend(real),  # type: ignore[arg-type]
+                clock=FixedClock(T0),
+                id_provider=FixedIdProvider([f"id-{i}" for i in range(10)]),
+            )
+            kb.create_principal(HUMAN, kind="human", default_capability="admin")
+            mcp, _ = _server(kb)
+
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn(
+                token=kb.issue_token(HUMAN, author=HUMAN)[0]
+            )
+
+            assert result["code"] == "STORAGE_ERROR"
+            assert result["error"] == "An internal error occurred"
+            assert "database is locked" not in result["error"]
+            assert result["detail"] == {}
+        finally:
+            real.close()
+
+    def test_capability_error_still_reaches_response_via_blanket_handler(
+        self, tmp_path: Path
+    ) -> None:
+        """CapabilityError was one of the 4 types each tool already caught
+        by name pre-KI-074 - pins that consolidating every except clause
+        into one `except OntolithError` didn't silently drop coverage for
+        the types that already worked."""
+        kb = _kb(tmp_path)
+        kb.create_principal("readonly@example.com", kind="human", default_capability="read")
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion_a = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        assertion_b = kb.assert_literal(entity.id, "Person.name", "Ava", "Text", HUMAN)
+        mcp, _ = _server(kb)
+
+        result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
+            assertion_id_a=assertion_a.id,
+            assertion_id_b=assertion_b.id,
+            token=kb.issue_token("readonly@example.com", author=ADMIN)[0],
+        )
+
+        assert result["code"] == "CAPABILITY_ERROR"
+        assert "detail" in result
+
+    def test_non_redacted_error_message_passes_through_unchanged(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+
+        result = mcp._tool_manager.get_tool("ontolith.get").fn(
+            entity_id="does-not-exist", token=kb.issue_token(HUMAN, author=ADMIN)[0]
+        )
+
+        assert result["code"] == "NOT_FOUND"
+        assert result["error"] == "Entity 'does-not-exist' not found"
+        assert result["detail"] == {}

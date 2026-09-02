@@ -38,6 +38,16 @@ closed rather than silently falling back to the argument — see
 ``token`` remains the only channel there — ADR-0014 recommends short-lived
 tokens for stdio-facing principals for that reason.
 
+Error handling (KI-059, KI-074, SPEC §16): every tool wraps its body in one
+``except OntolithError as exc: return _error_response(exc)``, the MCP
+equivalent of REST's single ``@app.exception_handler(OntolithError)`` and
+GraphQL's single ``process_errors`` override — not a per-tool, per-exception-
+type catch, which previously left some taxonomy members unreachable and let
+the ``code`` values drift from REST/GraphQL's own. ``_error_response()``
+returns ``{"error", "code", "detail"}`` for every taxonomy member, redacting
+``StorageError``/``PluginError`` messages the same way those two interfaces
+already do (they interpolate raw internal exception text).
+
 Usage:
     from ontolith.identity.token_auth import TokenAuthProvider
     from ontolith.interfaces.mcp import create_mcp_server
@@ -48,13 +58,52 @@ Usage:
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from mcp.server.fastmcp import FastMCP
 
+from ontolith.core.errors import OntolithError, PluginError, StorageError
+
 if TYPE_CHECKING:
     from ontolith.identity.ports import AuthProvider
     from ontolith.ontology import Ontology
+
+_logger = logging.getLogger(__name__)
+
+# StorageError/PluginError messages interpolate raw internal exception text
+# (e.g. sqlite3 constraint/transaction-state details) - redacted in the
+# response the same way REST's _handle_ontolith_error/GraphQL's
+# process_errors override already do; the real message is logged
+# server-side instead (SPEC §16 still gets a stable `code`, just not the
+# raw text). isinstance, not exact type (unlike REST's _STATUS_BY_ERROR_TYPE
+# dict, which is keyed by exact type because it also has to pick an HTTP
+# status - MCP has no status channel to key off), so a future OntolithError
+# subclass fails closed (redacted) rather than open - matches GraphQL's own
+# _REDACT_MESSAGE_FOR precedent exactly.
+_REDACT_MESSAGE_FOR: tuple[type[OntolithError], ...] = (StorageError, PluginError)
+_GENERIC_SERVER_ERROR_MESSAGE = "An internal error occurred"
+
+
+def _error_response(exc: OntolithError) -> dict[str, Any]:
+    """Map any OntolithError to this module's ``{"error", "code", "detail"}``
+    shape (SPEC §16, KI-074) — the single place every tool's error dict is
+    built, closing both the "5 of 10 taxonomy codes unreachable from MCP"
+    gap and the "detail dropped entirely" shape divergence REST/GraphQL
+    don't have. Every tool wraps its whole body (after token resolution,
+    which isn't itself an ``OntolithError`` — see ``_bearer_token``) in one
+    ``except OntolithError as exc: return _error_response(exc)``, the MCP
+    equivalent of REST's single ``@app.exception_handler(OntolithError)``
+    and GraphQL's single ``process_errors`` override — not a per-call-site
+    try/except per exception type, which is what let KI-059's drift and
+    this gap both happen unnoticed for as long as they did.
+    """
+    if isinstance(exc, _REDACT_MESSAGE_FOR):
+        _logger.error("%s: %s", exc.code, exc.message)
+        message = _GENERIC_SERVER_ERROR_MESSAGE
+    else:
+        message = exc.message
+    return {"error": message, "code": exc.code, "detail": exc.detail}
 
 
 def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "ontolith") -> FastMCP:
@@ -137,14 +186,13 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": AuthError.code}
+            return _error_response(AuthError(token_error))
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             auth_provider.resolve(token)
-        except AuthError as exc:
-            return {"error": str(exc), "code": exc.code}
-
-        ir = kb.backend.get_schema(namespace)
+            ir = kb.backend.get_schema(namespace)
+        except OntolithError as exc:
+            return _error_response(exc)
         if ir is None:
             return {"concepts": []}
         concepts = []
@@ -201,18 +249,16 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": AuthError.code}
+            return _error_response(AuthError(token_error))
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             auth_provider.resolve(token)
-        except AuthError as exc:
-            return {"error": str(exc), "code": exc.code}
-
-        entity = kb.backend.get_entity(entity_id)
-        if entity is None:
-            return {"error": f"Entity {entity_id!r} not found", "code": NotFoundError.code}
-
-        assertions = kb.backend.assertions(subject=entity_id, status="active")
+            entity = kb.backend.get_entity(entity_id)
+            if entity is None:
+                return _error_response(NotFoundError(f"Entity {entity_id!r} not found"))
+            assertions = kb.backend.assertions(subject=entity_id, status="active")
+        except OntolithError as exc:
+            return _error_response(exc)
         return {
             "entity": {
                 "id": entity.id,
@@ -312,22 +358,17 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": AuthError.code}
+            return _error_response(AuthError(token_error))
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             auth_provider.resolve(token)
-        except AuthError as exc:
-            return {"error": str(exc), "code": exc.code}
-
-        if as_of is not None:
-            try:
-                builder = kb.as_of(as_of).query(concept)
-            except ValueError as exc:
-                return {"error": f"Invalid as_of value: {exc}", "code": ValidationError.code}
-        else:
-            builder = kb.query(concept)
-
-        try:
+            if as_of is not None:
+                try:
+                    builder = kb.as_of(as_of).query(concept)
+                except ValueError as exc:
+                    return _error_response(ValidationError(f"Invalid as_of value: {exc}"))
+            else:
+                builder = kb.query(concept)
             if filters:
                 builder = builder.where(**filters)
             if semantic is not None:
@@ -339,8 +380,8 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             if limit is not None:
                 builder = builder.limit(limit)
             entities = builder.all()
-        except ValidationError as exc:
-            return {"error": str(exc), "code": exc.code}
+        except OntolithError as exc:
+            return _error_response(exc)
         return {
             "concept": concept,
             "count": len(entities),
@@ -382,34 +423,33 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": AuthError.code}
+            return _error_response(AuthError(token_error))
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             auth_provider.resolve(token)
-        except AuthError as exc:
-            return {"error": str(exc), "code": exc.code}
+            match = kb.backend.get_assertion(assertion_id)
+            if match is None:
+                return _error_response(NotFoundError(f"Assertion {assertion_id!r} not found"))
 
-        match = kb.backend.get_assertion(assertion_id)
-        if match is None:
-            return {"error": f"Assertion {assertion_id!r} not found", "code": NotFoundError.code}
+            review_events = (
+                [
+                    {
+                        "actor": e.actor,
+                        "type": e.type,
+                        "detail": e.detail,
+                        "at": e.at.isoformat(),
+                    }
+                    for e in kb.backend.get_proposal_events(match.proposal_id)
+                ]
+                if match.proposal_id
+                else []
+            )
 
-        review_events = (
-            [
-                {
-                    "actor": e.actor,
-                    "type": e.type,
-                    "detail": e.detail,
-                    "at": e.at.isoformat(),
-                }
-                for e in kb.backend.get_proposal_events(match.proposal_id)
+            superseded_ids = [
+                e.assertion_id for e in kb.backend.get_assertion_events_by_successor(match.id)
             ]
-            if match.proposal_id
-            else []
-        )
-
-        superseded_ids = [
-            e.assertion_id for e in kb.backend.get_assertion_events_by_successor(match.id)
-        ]
+        except OntolithError as exc:
+            return _error_response(exc)
 
         return {
             "id": match.id,
@@ -494,26 +534,21 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         Returns:
             Dict with "proposal" (id, state, policy_reason, acting_as) and "decision" type.
         """
-        from ontolith.core.errors import AuthError, CapabilityError, ValidationError
+        from ontolith.core.errors import AuthError, ValidationError
 
         has_literal = value is not None and value_type is not None
         has_ref = target is not None
         if has_literal == has_ref:
-            return {
-                "error": "Provide exactly one of (value and value_type) or target",
-                "code": ValidationError.code,
-            }
+            return _error_response(
+                ValidationError("Provide exactly one of (value and value_type) or target")
+            )
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": AuthError.code}
+            return _error_response(AuthError(token_error))
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             author = auth_provider.resolve(token).id
-        except AuthError as exc:
-            return {"error": str(exc), "code": exc.code}
-
-        try:
             if has_ref:
                 assert target is not None
                 proposal, decision = kb.propose_ref(
@@ -541,12 +576,8 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
                     acting_as=acting_as,
                     model=model,
                 )
-        except AuthError as exc:
-            return {"error": str(exc), "code": exc.code}
-        except CapabilityError as exc:
-            return {"error": str(exc), "code": exc.code}
-        except ValidationError as exc:
-            return {"error": str(exc), "code": exc.code}
+        except OntolithError as exc:
+            return _error_response(exc)
 
         return {
             "proposal": {
@@ -597,31 +628,25 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             Unlike ``ontolith.resubmit``, ``retract()`` cannot raise
             ``NotFoundError``/``ValidationError`` — an unknown
             ``assertion_id`` surfaces as ``StorageError`` from the backend
-            write itself (pre-existing, not specific to this tool; REST's
-            generic ``OntolithError`` handler maps it to a redacted 500
-            the same way). Only ``AuthError`` (bad token, or an unknown
-            ``acting_as``) and ``CapabilityError`` (delegation not owned,
-            or the KI-033/KI-043 contradiction party/floor guards) are
-            actually reachable from ``kb.retract()``, so those are the
-            only two caught here.
+            write itself instead. In practice only ``AuthError`` (bad
+            token, or an unknown ``acting_as``), ``CapabilityError``
+            (delegation not owned, or the KI-033/KI-043 contradiction
+            party/floor guards), and that ``StorageError`` case are
+            actually reachable from ``kb.retract()`` — all handled the
+            same way, alongside every other tool, by the module-level
+            ``_error_response()`` blanket handler (KI-074).
         """
-        from ontolith.core.errors import AuthError, CapabilityError
+        from ontolith.core.errors import AuthError
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": AuthError.code}
+            return _error_response(AuthError(token_error))
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             author = auth_provider.resolve(token).id
-        except AuthError as exc:
-            return {"error": str(exc), "code": exc.code}
-
-        try:
             proposal, decision = kb.retract(assertion_id, author=author, acting_as=acting_as)
-        except AuthError as exc:
-            return {"error": str(exc), "code": exc.code}
-        except CapabilityError as exc:
-            return {"error": str(exc), "code": exc.code}
+        except OntolithError as exc:
+            return _error_response(exc)
 
         return {
             "proposal": {
@@ -667,29 +692,19 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         Returns:
             Dict describing the contradiction created/extended, or "error".
         """
-        from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
+        from ontolith.core.errors import AuthError
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": AuthError.code}
+            return _error_response(AuthError(token_error))
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             author = auth_provider.resolve(token).id
-        except AuthError as exc:
-            return {"error": str(exc), "code": exc.code}
-
-        try:
             contradiction, action = kb.flag_contradiction(
                 assertion_id_a, assertion_id_b, author, rationale=rationale
             )
-        except AuthError as exc:
-            return {"error": str(exc), "code": exc.code}
-        except CapabilityError as exc:
-            return {"error": str(exc), "code": exc.code}
-        except NotFoundError as exc:
-            return {"error": str(exc), "code": exc.code}
-        except ValidationError as exc:
-            return {"error": str(exc), "code": exc.code}
+        except OntolithError as exc:
+            return _error_response(exc)
 
         return {
             "contradiction_id": contradiction.id,
@@ -731,27 +746,17 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             Dict with "proposal" (id, state, policy_reason, decided_at) and
             "decision" type, or "error".
         """
-        from ontolith.core.errors import AuthError, CapabilityError, NotFoundError, ValidationError
+        from ontolith.core.errors import AuthError
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
-            return {"error": token_error, "code": AuthError.code}
+            return _error_response(AuthError(token_error))
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
         try:
             author = auth_provider.resolve(token).id
-        except AuthError as exc:
-            return {"error": str(exc), "code": exc.code}
-
-        try:
             proposal, decision = kb.resubmit(proposal_id, author)
-        except AuthError as exc:
-            return {"error": str(exc), "code": exc.code}
-        except CapabilityError as exc:
-            return {"error": str(exc), "code": exc.code}
-        except NotFoundError as exc:
-            return {"error": str(exc), "code": exc.code}
-        except ValidationError as exc:
-            return {"error": str(exc), "code": exc.code}
+        except OntolithError as exc:
+            return _error_response(exc)
 
         return {
             "proposal": {
