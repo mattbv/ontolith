@@ -1606,6 +1606,14 @@ class Ontology:
         of picking a winner.
 
         Raises:
+            NotFoundError: ``assertion_id`` does not exist — checked
+                unconditionally up front, before policy is even evaluated,
+                not only on the auto-accept path (KI-074 review, round 2):
+                a proposal ``self.policy`` would route to review must never
+                get to exist for an assertion that isn't real in the first
+                place, since ``ThresholdPolicy`` always routes AI principals
+                to review (ADR-0003) and the MCP/AI caller is exactly who
+                KI-074 was about
             CapabilityError: ``self.policy`` would auto-accept and the
                 assertion is a member of an open contradiction the
                 retracting principal is a party to (author or delegate of
@@ -1619,6 +1627,24 @@ class Ontology:
         """
         principal = self._get_principal_or_raise(author)
         delegating = self._resolve_delegation(principal, author, acting_as)
+
+        # Checked here, before any proposal is created or policy evaluated
+        # at all - not deferred to the auto-accept transaction below, which
+        # only the auto-accept path ever reaches. Safe to check once,
+        # outside any transaction: unlike a contradiction's membership or
+        # an assertion's status, existence is permanent once true
+        # (assertions are append-only and never deleted, SPEC §5), so no
+        # concurrent write can turn a real id back into a nonexistent one
+        # between this check and a later replay. This is the only
+        # constructor of a `retract` proposal payload, so a review-routed
+        # proposal created past this point is guaranteed, for the rest of
+        # its lifetime (accept_proposal, resubmit), to target a real
+        # assertion - closing the gap round 1's fix left open, where an
+        # unknown id auto-accepted fine but a review-routed one persisted
+        # a phantom proposal that later hit accept_proposal's own bare
+        # `assert retracted is not None` as an uncatchable AssertionError.
+        if self.backend.get_assertion(assertion_id) is None:
+            raise NotFoundError(f"Assertion not found: {assertion_id}")
 
         now = self.clock.now()
         proposal_id = self.id_provider.next()
@@ -1677,7 +1703,8 @@ class Ontology:
             # worth its own event (test_events_ordered_oldest_first) - only
             # an exact `retracted` -> `retracted` re-call is the no-op.
             current = self.backend.get_assertion(assertion_id)
-            if current is None or current.status != "retracted":
+            assert current is not None  # existence already checked above (KI-074 review)
+            if current.status != "retracted":
                 self.backend.set_assertion_status(
                     assertion_id, "retracted", valid_to=self._retraction_valid_to(assertion_id, now)
                 )
@@ -2061,7 +2088,18 @@ class Ontology:
                         op["assertion_id"], author_principal, delegating_principal
                     )
                 retracted = self.backend.get_assertion(op["assertion_id"])
-                assert retracted is not None  # append-only; targeted by an existing proposal op
+                if retracted is None:
+                    # Should be unreachable: retract() (the only constructor
+                    # of a `retract` op payload) now checks existence itself
+                    # before ever creating the proposal this replays
+                    # (KI-074 review, round 2) - append-only means that
+                    # can't stop being true later either. A real
+                    # NotFoundError rather than a bare assert regardless,
+                    # so any future path that manages to reach this with a
+                    # stale/corrupt payload fails as a caught OntolithError
+                    # (REST 404 / MCP structured error), not an uncaught,
+                    # blank-message AssertionError.
+                    raise NotFoundError(f"Assertion not found: {op['assertion_id']}")
                 # KI-051: same already-`retracted` no-op retract() itself
                 # applies (not `superseded` too - see retract()'s own
                 # comment for why the two aren't treated the same here).

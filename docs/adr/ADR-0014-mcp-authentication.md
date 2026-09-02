@@ -216,6 +216,79 @@ not a fix for a live vulnerability (the default behavior changes nothing on its 
 judged out of scope for this pass rather than blocking it. Tracked as KI-073 rather than left as
 ADR prose only.
 
+## Update (2026-09-02, closes KI-074): one blanket error handler, not a per-tool per-type catch
+
+KI-059 fixed MCP's error `code` *values* to read `exc.code` off the caught `OntolithError`, but
+left the *mechanism* untouched: each tool still hand-caught only the specific `OntolithError`
+subtypes it happened to expect (`AuthError`/`CapabilityError`/`NotFoundError`/`ValidationError`),
+unlike REST's single `@app.exception_handler(OntolithError)` (`_STATUS_BY_ERROR_TYPE`) or
+GraphQL's single `process_errors` override. A `SchemaError`, `PolicyDenied`, `ConflictError`,
+`StorageError`, or `PluginError` escaping any tool wasn't converted to `{"error", "code"}` at all —
+it propagated as an unstructured MCP protocol exception, and (for `StorageError`/`PluginError`
+specifically) without the message redaction REST/GraphQL already apply to avoid leaking internal
+exception text. The response shape also diverged even where the code matched: MCP returned
+`{"error", "code"}` while REST/GraphQL return `{"code", "message", "detail"}` — `exc.detail` was
+dropped entirely.
+
+**Fix:** a module-level `_error_response(exc: OntolithError) -> dict[str, Any]` — the MCP
+equivalent of REST's `_handle_ontolith_error`/GraphQL's `process_errors` override — redacts
+`StorageError`/`PluginError` messages the same way (`isinstance`, not REST's exact-type dict
+lookup, since MCP has no HTTP status to key off; matches GraphQL's own `_REDACT_MESSAGE_FOR`
+precedent instead) and returns `{"error", "code", "detail"}` uniformly. Every tool now wraps its
+*entire* body (after token resolution, which isn't itself an `OntolithError` — see
+`_bearer_token`) in one `try: ... except OntolithError as exc: return _error_response(exc)`,
+replacing every per-type `except` clause. The few remaining non-exception error paths (a
+synthesized validation message, a manual `is None` "not found" check, `_bearer_token`'s own
+auth-shaped strings) now construct a real exception instance (`ValidationError(...)`,
+`NotFoundError(...)`, `AuthError(token_error)`) and route it through the same `_error_response()`
+rather than hand-building a `{"error", "code"}` dict inline — `_error_response()` is now the single
+place any tool's error dict is built, closing the shape divergence completely, not just the code
+values KI-059 closed.
+
+**Why not raise these synthesized errors instead of constructing-and-immediately-formatting them:**
+raising would unwind through the same outer `try/except OntolithError` anyway (one level up in the
+call stack), which works but adds no value over calling `_error_response()` directly at the point
+of detection — the tool already knows it's returning early either way, and an explicit
+`return _error_response(...)` is one line, not two.
+
+**Review-driven follow-up (round 1):** the blanket handler turned a pre-existing mislabel in
+`Ontology.retract()` into an information-destroying one. An unknown `assertion_id` has always
+fallen through to the backend's generic `set_assertion_status`, whose "no row updated" case raises
+`StorageError` — meant for a genuine storage fault on a *known-good* id, not this caller-supplied
+bad-id case. Before this ADR, that `StorageError`'s message ("Assertion not found: ...") still
+reached the caller unredacted, so the mislabel was cosmetic (wrong code, right text). Once
+`_error_response()` started redacting every `StorageError`, the same caller-supplied bad id now got
+"An internal error occurred" — a client-actionable error made opaque.
+
+**Review-driven follow-up (round 2):** round 1's first fix checked `get_assertion(assertion_id) is
+None` only inside the auto-accept write transaction, so it never ran on the review-routed path —
+exactly the one an AI/MCP caller takes, since `ThresholdPolicy` always routes AI principals to
+review (ADR-0003). An unknown id from an AI caller still produced no error at all: a phantom
+`require_review` proposal was created and silently persisted, and if a reviewer later accepted it,
+`_replay_proposal_operations` hit a bare `assert retracted is not None`, escaping as an uncaught,
+blank-message `AssertionError` — worse than the redacted `StorageError` this ADR set out to fix.
+Fixed properly: `retract()` now checks existence unconditionally, before a proposal is even
+created or policy evaluated, raising `NotFoundError` up front regardless of how policy would route
+it — matching `flag_contradiction`'s existing precedent, and safe to check once outside any
+transaction since assertion existence is permanent (append-only, SPEC §5). The now-unreachable
+`assert` inside `_replay_proposal_operations` was also hardened into a real `NotFoundError`, as a
+backstop against any future path that might replay a proposal built some other way. This is a
+behavior change on every interface that calls `retract()`, not just MCP — REST now reports an
+unknown assertion as 404 rather than 500, and GraphQL's `errors` array carries `NOT_FOUND` rather
+than a redacted `STORAGE_ERROR`; the CLI's plain-text output changes wording only, since it already
+printed the underlying exception's message unredacted either way.
+
+**Recorded trade-off (not a defect):** FastMCP only marks a tool call `isError=True` when the tool
+*raises*; a returned `{"error", ...}` dict is a successful call carrying an error payload. Because
+every tool now catches `OntolithError` itself, `SchemaError`/`StorageError`/`PluginError` — genuine
+server-side faults, not just client mistakes — no longer surface as protocol-level MCP failures the
+way REST's 5xx or GraphQL's `errors` array still do. This is deliberate, not an oversight: MCP tool
+callers (LLM agents) are expected to read structured payloads rather than distinguish protocol-level
+error frames, and matches every other tool's response shape uniformly. It does mean an agent that
+only checks `isError` (rather than the response's own `code` field) will treat a redacted
+`StorageError` as success — callers of MCP tools should always check `code`, not rely on
+`isError` alone.
+
 ## References
 
 - ADR-0008 (MCP surface — this ADR implements its "server stamps `author`" provenance claim,
@@ -223,6 +296,9 @@ ADR prose only.
 - ADR-0003 (Agent identity, delegation)
 - ADR-0019 (public API stability policy — governs the breaking-change marker for the `issue_token`
   return-type change above)
-- SPEC §8.2 (Authentication), §14.4 (MCP server)
+- ADR-0021 (REST interface — `_STATUS_BY_ERROR_TYPE`/`_handle_ontolith_error`, the pattern this
+  update's `_error_response()` mirrors), ADR-0037 (GraphQL interface — `_REDACT_MESSAGE_FOR`, the
+  isinstance-based redaction precedent this update follows instead of REST's exact-type lookup)
+- SPEC §8.2 (Authentication), §14.4 (MCP server), §16 (stable, machine-readable error codes)
 - `identity/ports.py` (`AuthProvider`, stubbed since M0)
-- `docs/known-issues.md` KI-024, KI-067 (both resolved), KI-073 (the deferred `require_header_token` follow-up)
+- `docs/known-issues.md` KI-024, KI-059, KI-067, KI-074 (all resolved), KI-073 (the deferred `require_header_token` follow-up)

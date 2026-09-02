@@ -15,6 +15,7 @@ from ontolith.core.errors import (
     SchemaError,
     ValidationError,
 )
+from ontolith.govern.proposal import Proposal
 from ontolith.schema import ConceptDef, PropertyDef, RelationDef, SchemaIR
 
 
@@ -697,6 +698,61 @@ class TestAcceptProposalReResolvesTemporality:
         assert [a.value for a in active] == ["Ava"]
         assert [a.value for a in superseded] == ["Ada"]
         assert flagged == []
+
+
+class TestRetract:
+    """Ontology.retract() — propose-level capability gate (ADR-0008)."""
+
+    def test_unknown_assertion_raises_not_found(self, kb: Ontology) -> None:
+        """Regression (KI-074 review): an unknown assertion_id used to
+        surface as an opaque StorageError off the backend's generic
+        set_assertion_status write, indistinguishable from a genuine
+        storage fault and — once KI-074's blanket MCP handler started
+        redacting StorageError — hidden behind "An internal error
+        occurred" everywhere retract() is exposed."""
+        with pytest.raises(NotFoundError, match="Assertion not found: nonexistent"):
+            kb.retract("nonexistent", author="alice@example.com")
+
+    def test_unknown_assertion_raises_not_found_even_when_policy_routes_to_review(
+        self, kb: Ontology
+    ) -> None:
+        """Regression (KI-074 review, round 2): the existence check must
+        run before policy is evaluated at all, not only inside the
+        auto-accept transaction - an AI principal (always routed to
+        review by ThresholdPolicy, ADR-0003) retracting an unknown
+        assertion_id previously got no error at all: a phantom
+        require_review proposal was created and silently persisted."""
+        kb.create_principal("bot@example.com", kind="ai", owner="alice@example.com")
+
+        with pytest.raises(NotFoundError, match="Assertion not found: nonexistent"):
+            kb.retract("nonexistent", author="bot@example.com")
+
+        assert [p for p in kb.proposals(state=None) if p.author == "bot@example.com"] == []
+
+    def test_replay_backstop_raises_not_found_for_a_hand_crafted_phantom_proposal(
+        self, kb: Ontology
+    ) -> None:
+        """retract() itself can no longer create a proposal targeting an
+        unknown assertion_id (checked up front now, previous test) - this
+        pins _replay_proposal_operations's own backstop for a proposal
+        not built via retract() at all, hand-crafted here the same way
+        test_ontology_validators.py reaches its own otherwise-unreachable
+        shapes. Without the backstop this hits a bare `assert`, escaping
+        accept_proposal as an uncaught, blank-message AssertionError
+        instead of a structured NotFoundError."""
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        proposal = Proposal(
+            id=kb.id_provider.next(),
+            namespace=kb.namespace,
+            author="alice@example.com",
+            state="require_review",
+            created_at=kb.clock.now(),
+            payload={"operations": [{"kind": "retract", "assertion_id": "nonexistent"}]},
+        )
+        kb.backend.put_proposal(proposal)
+
+        with pytest.raises(NotFoundError, match="Assertion not found: nonexistent"):
+            kb.accept_proposal(proposal.id, reviewer="carol@example.com")
 
 
 class TestFlagContradiction:

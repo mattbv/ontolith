@@ -349,6 +349,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- **Breaking:** MCP now has one blanket error-handling path instead of hand-catching a handful of
+  exception types per tool (closes KI-074, ADR-0014 update): a new module-level
+  `_error_response(exc)` — the MCP equivalent of REST's `_handle_ontolith_error`/GraphQL's
+  `process_errors` override — every tool now wraps its whole body in
+  `try: ... except OntolithError as exc: return _error_response(exc)`. Closes the remaining 5 of
+  10 taxonomy codes (`SchemaError`, `PolicyDenied`, `ConflictError`, `StorageError`, `PluginError`)
+  that were previously unreachable from MCP entirely (escaping as an unstructured protocol
+  exception with no code), and redacts `StorageError`/`PluginError` messages the same way
+  REST/GraphQL already do (they interpolate raw internal exception text). Every tool's response
+  shape also gains a `detail` key, matching REST/GraphQL's `{"code", "message", "detail"}` — this
+  is the breaking part: any client relying on the exact 2-key `{"error", "code"}` shape gets a
+  third key now, though `error`/`code` themselves are unchanged for the codes MCP already returned.
+  Review found the new redaction turned a pre-existing mislabel in `Ontology.retract()` into an
+  information-destroying one: an unknown `assertion_id` used to surface an actionable (if
+  misclassified) `StorageError` message; blanket redaction hid it behind "An internal error
+  occurred" — and, on the review-routed path an AI/MCP caller actually takes, no error surfaced
+  at all, letting a phantom proposal persist. Fixed at the source — `retract()` now raises
+  `NotFoundError` for an unknown `assertion_id` unconditionally, before policy is even evaluated
+  — which also improves REST (`404` instead of `500`) and GraphQL, not just MCP.
 - **Breaking:** MCP's error `code` values now match REST/GraphQL's shared taxonomy (closes KI-059,
   SPEC §16): 32 hand-written lowercase literals (`"auth_error"`, `"not_found"`, etc.) in
   `interfaces/mcp.py` replaced with `exc.code` from the caught `OntolithError` (or the exception
