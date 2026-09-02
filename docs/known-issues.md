@@ -1482,7 +1482,7 @@ KI-060/ADR-0042 added `StorageBackend.get_admin_events()` and `PrincipalCredenti
 
 ### Fix
 
-New `Ontology.get_admin_events(author, *, actor=None, target=None)`, admin-gated the same way `list_tokens`/`list_principals` already are. REST gets `GET /admin-events` with optional `actor`/`target` query parameters and a new `AdminEventOut` model; `CredentialOut` gains `issued_by`/`revoked_by`. CLI gets a new `ontolith admin-events list [--actor] [--target] --author <id>` command, and `principal list-tokens`'s output line now shows who issued/revoked each credential. GraphQL/MCP left for their own future scope, per this KI's own "extend as those surfaces need it" — MCP specifically because `get_admin_events()`'s admin-gating would make it the first MCP tool requiring `admin` capability rather than `read`/`propose`, a genuine new precedent not worth spinning up speculatively.
+New `Ontology.get_admin_events(author, *, actor=None, target=None)`, admin-gated the same way `list_tokens`/`list_principals` already are. REST gets `GET /admin-events` with optional `actor`/`target` query parameters and a new `AdminEventOut` model; `CredentialOut` gains `issued_by`/`revoked_by`. CLI gets a new `ontolith admin-event list [--actor] [--target] --author <id>` command, and `principal list-tokens`'s output line now shows who issued/revoked each credential. GraphQL/MCP left for their own future scope, per this KI's own "extend as those surfaces need it" — MCP specifically because `get_admin_events()`'s admin-gating would make it the first MCP tool requiring `admin` capability rather than `read`/`propose`, a genuine new precedent not worth spinning up speculatively.
 
 ---
 

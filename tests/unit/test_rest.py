@@ -1863,6 +1863,20 @@ class TestAdminEventsRoute:
         assert event["actor"] == ADMIN
         assert event["action"] == "create_principal"
 
+    def test_includes_detail_when_recorded(self, tmp_path: Path) -> None:
+        """No production call site currently passes `detail` (KI-060/072
+        review) - seed one directly via record_admin_event to pin that
+        AdminEventOut actually surfaces it, not just id/actor/action/target/at."""
+        kb = _kb(tmp_path)
+        kb.record_admin_event(ADMIN, "apply_schema", "default:v1", detail="seeded for test")
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
+
+        response = client.get("/admin-events", headers=_auth(token))
+
+        [event] = [e for e in response.json() if e["target"] == "default:v1"]
+        assert event["detail"] == "seeded for test"
+
     def test_filters_by_actor(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         kb.create_principal(

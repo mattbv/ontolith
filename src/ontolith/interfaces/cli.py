@@ -28,7 +28,7 @@ app.add_typer(proposal_app, name="proposal")
 app.add_typer(contradiction_app, name="contradiction")
 app.add_typer(namespace_app, name="namespace")
 app.add_typer(schema_app, name="schema")
-app.add_typer(admin_event_app, name="admin-events")
+app.add_typer(admin_event_app, name="admin-event")
 
 # Module-level DB path, set by the root callback before any command runs.
 _db_path: Path = Path("ontolith.db")
@@ -207,11 +207,11 @@ def principal_list_tokens(
             typer.echo(f"No credentials issued for {principal_id}.")
             return
         for c in credentials:
-            status = (
-                f"revoked at {c.revoked_at.isoformat()} by {c.revoked_by}"
-                if c.revoked_at
-                else "active"
-            )
+            if c.revoked_at:
+                revoked_by = f" by {c.revoked_by}" if c.revoked_by else ""
+                status = f"revoked at {c.revoked_at.isoformat()}{revoked_by}"
+            else:
+                status = "active"
             issued_by = f" by {c.issued_by}" if c.issued_by else ""
             typer.echo(f"{c.id}  issued={c.created_at.isoformat()}{issued_by}  {status}")
     except Exception as exc:
@@ -789,7 +789,7 @@ def schema_migrate(
         kb.close()
 
 
-# ─── admin-events ──────────────────────────────────────────────────────────────
+# ─── admin-event ───────────────────────────────────────────────────────────────
 
 
 @admin_event_app.command("list")

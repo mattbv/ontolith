@@ -77,8 +77,8 @@ response model. `CredentialOut` (`GET /principals/{id}/tokens`) gains `issued_by
 `PrincipalCredential` has carried both fields since KI-060, but the REST response model never
 surfaced them.
 
-**CLI**: new `ontolith admin-events list [--actor] [--target] --author <id>` command (a new
-top-level `admin-events` Typer sub-app, matching `namespace`/`schema`'s existing pattern of one
+**CLI**: new `ontolith admin-event list [--actor] [--target] --author <id>` command (a new
+top-level `admin-event` Typer sub-app, matching `namespace`/`schema`'s existing pattern of one
 sub-app per noun) — thin wrapper around the same `Ontology.get_admin_events()`. `principal
 list-tokens`'s existing output line extended to show `issued_by`/`revoked_by` alongside each
 credential's id/timestamps/status.
@@ -91,6 +91,9 @@ is deliberately not extended: SPEC's no-direct-write-tool rule doesn't block a n
 `get_admin_events()`'s admin-gating would make it the first MCP tool requiring `admin` capability
 rather than `read`/`propose` (every existing MCP tool sits at one of those two tiers) — a genuine
 new precedent, not a mechanical port of the REST route, and better decided if/when an actual MCP
-consumer needs it rather than spun up speculatively here. GraphQL wasn't named as urgent by the KI
-and has no existing precedent this change would directly extend (unlike REST's query-param pattern
-and CLI's per-noun sub-app pattern, both already established elsewhere).
+consumer needs it rather than spun up speculatively here. GraphQL is left out purely on scope, not
+precedent — `Query.principals` (admin-tier, gated inside `Ontology.list_principals`, the exact
+shape an `adminEvents` query would take) and `Query.contradictions`'s optional-filter arguments
+already establish everything a GraphQL equivalent would need; it just wasn't built in this pass.
+Round-1 review of this ADR update caught an earlier draft claiming GraphQL had no precedent to
+extend, which was wrong — corrected here.

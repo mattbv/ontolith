@@ -337,6 +337,49 @@ class TestPrincipalTokens:
         assert result.exit_code == 0
         assert "by admin@example.com" in result.output
 
+    def test_list_tokens_pre_ki060_revoked_row_shows_no_literal_none(self, temp_db: Path) -> None:
+        """A credential revoked before KI-060's revoked_by column existed
+        has revoked_at set but revoked_by still None (PrincipalCredential's
+        own docstring: "None if ... revoked before this field existed") -
+        the output must not print the fields' attacker/operator-facing
+        "by None", which on an audit surface reads as a principal literally
+        named None."""
+        from datetime import UTC, datetime
+
+        from ontolith.identity.credential import PrincipalCredential
+
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        kb.backend.put_credential(
+            PrincipalCredential(
+                id="legacy-credential",
+                principal_id="alice@example.com",
+                token_hash="deadbeef",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                revoked_at=datetime(2025, 1, 2, tzinfo=UTC),
+                issued_by=None,
+                revoked_by=None,
+            )
+        )
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "principal",
+                "list-tokens",
+                "alice@example.com",
+                "--author",
+                "admin@example.com",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "by None" not in result.output
+        assert "revoked at 2025-01-02T00:00:00+00:00" in result.output
+
     def test_list_tokens_no_credentials_message(self, temp_db: Path) -> None:
         kb = Ontology.connect(temp_db)
         kb.create_principal("alice@example.com", kind="human", default_capability="write")
@@ -1583,7 +1626,7 @@ class TestSchemaMigrate:
 
 
 class TestAdminEventsList:
-    """KI-072: `ontolith admin-events list` - the read half of KI-060's
+    """KI-072: `ontolith admin-event list` - the read half of KI-060's
     audit trail for create_principal/apply_schema/register_plugin (token
     issuance/revocation are covered by `principal list-tokens` instead,
     see TestPrincipalTokens)."""
@@ -1598,11 +1641,29 @@ class TestAdminEventsList:
 
         result = runner.invoke(
             app,
-            ["--db", str(temp_db), "admin-events", "list", "--author", "admin@example.com"],
+            ["--db", str(temp_db), "admin-event", "list", "--author", "admin@example.com"],
         )
         assert result.exit_code == 0
         assert "erin@example.com" in result.output
         assert "create_principal" in result.output
+
+    def test_shows_detail_when_recorded(self, temp_db: Path) -> None:
+        """No production call site currently passes `detail` - seed one
+        directly to pin the CLI's own detail-display branch, not just
+        REST's."""
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        kb.record_admin_event(
+            "admin@example.com", "apply_schema", "default:v1", detail="seeded for test"
+        )
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "admin-event", "list", "--author", "admin@example.com"],
+        )
+        assert result.exit_code == 0
+        assert "seeded for test" in result.output
         assert "admin@example.com" in result.output
 
     def test_filters_by_target(self, temp_db: Path) -> None:
@@ -1624,7 +1685,7 @@ class TestAdminEventsList:
             [
                 "--db",
                 str(temp_db),
-                "admin-events",
+                "admin-event",
                 "list",
                 "--author",
                 "admin@example.com",
@@ -1643,7 +1704,7 @@ class TestAdminEventsList:
 
         result = runner.invoke(
             app,
-            ["--db", str(temp_db), "admin-events", "list", "--author", "admin@example.com"],
+            ["--db", str(temp_db), "admin-event", "list", "--author", "admin@example.com"],
         )
         assert result.exit_code == 0
         assert "No admin events recorded" in result.output
@@ -1655,7 +1716,7 @@ class TestAdminEventsList:
 
         result = runner.invoke(
             app,
-            ["--db", str(temp_db), "admin-events", "list", "--author", "alice@example.com"],
+            ["--db", str(temp_db), "admin-event", "list", "--author", "alice@example.com"],
         )
         assert result.exit_code == 1
         assert "lacks admin capability" in result.output

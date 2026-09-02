@@ -192,6 +192,26 @@ class TestOntologyGetAdminEvents:
         by_target = kb.get_admin_events(author=ADMIN, target="carol@example.com")
         assert [e.actor for e in by_target] == [ADMIN]
 
+    def test_get_admin_events_returns_oldest_first(self, kb: Ontology) -> None:
+        """Docstring-promised ordering (matching the backend's own ORDER BY
+        at ASC, id ASC) - REST/CLI both ship this order unchanged, so a
+        regression here would silently reach both."""
+        kb.create_principal(
+            "carol@example.com", kind="human", default_capability="write", author=ADMIN
+        )
+        kb.create_principal(
+            "dave@example.com", kind="human", default_capability="write", author=ADMIN
+        )
+        kb.create_principal(
+            "erin@example.com", kind="human", default_capability="write", author=ADMIN
+        )
+
+        events = kb.get_admin_events(author=ADMIN)
+
+        targets = [e.target for e in events]
+        assert targets.index("carol@example.com") < targets.index("dave@example.com")
+        assert targets.index("dave@example.com") < targets.index("erin@example.com")
+
     def test_get_admin_events_empty_when_none_recorded(self, kb: Ontology) -> None:
         assert kb.get_admin_events(author=ADMIN) == []
 

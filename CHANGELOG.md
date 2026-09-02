@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Ontology.get_admin_events(author, *, actor=None, target=None)`, admin-gated the same way
   `list_tokens`/`list_principals` already are. REST gets `GET /admin-events` (`actor`/`target`
   query filters, new `AdminEventOut` model) and `CredentialOut` gains `issued_by`/`revoked_by`. CLI
-  gets `ontolith admin-events list [--actor] [--target] --author <id>`, and `principal
+  gets `ontolith admin-event list [--actor] [--target] --author <id>`, and `principal
   list-tokens`'s output now shows who issued/revoked each credential. GraphQL/MCP left for their
   own future scope — MCP specifically, since admin-gating this would make it the first MCP tool
   requiring `admin` capability rather than `read`/`propose`.
