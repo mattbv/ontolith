@@ -1672,3 +1672,20 @@ class TestBlanketErrorHandling:
         assert result["code"] == "NOT_FOUND"
         assert result["error"] == "Entity 'does-not-exist' not found"
         assert result["detail"] == {}
+
+    def test_retract_unknown_assertion_is_not_found_not_redacted(self, tmp_path: Path) -> None:
+        """Regression (KI-074 review): before the Ontology.retract() fix,
+        an unknown assertion_id surfaced as a StorageError, which
+        _REDACT_MESSAGE_FOR then hid behind "An internal error occurred"
+        — a client-supplied bad ID must stay actionable, not become
+        indistinguishable from a genuine storage fault."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+
+        result = mcp._tool_manager.get_tool("ontolith.retract").fn(
+            assertion_id="does-not-exist", token=kb.issue_token(HUMAN, author=ADMIN)[0]
+        )
+
+        assert result["code"] == "NOT_FOUND"
+        assert result["error"] == "Assertion not found: does-not-exist"
+        assert result["detail"] == {}

@@ -251,6 +251,31 @@ call stack), which works but adds no value over calling `_error_response()` dire
 of detection — the tool already knows it's returning early either way, and an explicit
 `return _error_response(...)` is one line, not two.
 
+**Review-driven follow-up:** the blanket handler turned a pre-existing mislabel in
+`Ontology.retract()` into an information-destroying one. An unknown `assertion_id` has always
+fallen through to the backend's generic `set_assertion_status`, whose "no row updated" case raises
+`StorageError` — meant for a genuine storage fault on a *known-good* id, not this caller-supplied
+bad-id case. Before this ADR, that `StorageError`'s message ("Assertion not found: ...") still
+reached the caller unredacted, so the mislabel was cosmetic (wrong code, right text). Once
+`_error_response()` started redacting every `StorageError`, the same caller-supplied bad id now got
+"An internal error occurred" — a client-actionable error made opaque. Fixed at the source:
+`Ontology.retract()` now checks `get_assertion(assertion_id) is None` explicitly and raises
+`NotFoundError` before ever reaching `set_assertion_status`, matching `flag_contradiction`'s
+existing precedent for the same shape. This is a behavior change on every interface that calls
+`retract()`, not just MCP — REST/GraphQL/CLI all now report an unknown assertion as a client error
+(404 on REST) instead of a 500/opaque failure.
+
+**Recorded trade-off (not a defect):** FastMCP only marks a tool call `isError=True` when the tool
+*raises*; a returned `{"error", ...}` dict is a successful call carrying an error payload. Because
+every tool now catches `OntolithError` itself, `SchemaError`/`StorageError`/`PluginError` — genuine
+server-side faults, not just client mistakes — no longer surface as protocol-level MCP failures the
+way REST's 5xx or GraphQL's `errors` array still do. This is deliberate, not an oversight: MCP tool
+callers (LLM agents) are expected to read structured payloads rather than distinguish protocol-level
+error frames, and matches every other tool's response shape uniformly. It does mean an agent that
+only checks `isError` (rather than the response's own `code` field) will treat a redacted
+`StorageError` as success — callers of MCP tools should always check `code`, not rely on
+`isError` alone.
+
 ## References
 
 - ADR-0008 (MCP surface — this ADR implements its "server stamps `author`" provenance claim,

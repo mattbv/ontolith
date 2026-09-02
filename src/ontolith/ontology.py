@@ -1606,6 +1606,8 @@ class Ontology:
         of picking a winner.
 
         Raises:
+            NotFoundError: ``assertion_id`` does not exist (KI-074 review —
+                previously surfaced as an opaque StorageError instead)
             CapabilityError: ``self.policy`` would auto-accept and the
                 assertion is a member of an open contradiction the
                 retracting principal is a party to (author or delegate of
@@ -1676,8 +1678,21 @@ class Ontology:
             # action this codebase already treats as a real transition
             # worth its own event (test_events_ordered_oldest_first) - only
             # an exact `retracted` -> `retracted` re-call is the no-op.
+            #
+            # An unknown assertion_id is checked explicitly here, rather
+            # than left to surface as a StorageError out of the backend's
+            # generic set_assertion_status (KI-074 review) - that method's
+            # "no row updated" case is meant for genuine storage faults on
+            # a known-good id, not this caller-supplied-bad-id case, and
+            # collapsing the two made a client-facing, fully actionable
+            # NotFoundError indistinguishable from - and, once KI-074's
+            # blanket handler started redacting StorageError, hidden
+            # behind - an opaque "internal error" everywhere retract() is
+            # exposed (REST, GraphQL, MCP, CLI).
             current = self.backend.get_assertion(assertion_id)
-            if current is None or current.status != "retracted":
+            if current is None:
+                raise NotFoundError(f"Assertion not found: {assertion_id}")
+            if current.status != "retracted":
                 self.backend.set_assertion_status(
                     assertion_id, "retracted", valid_to=self._retraction_valid_to(assertion_id, now)
                 )

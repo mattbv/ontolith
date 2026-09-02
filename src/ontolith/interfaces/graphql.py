@@ -110,8 +110,11 @@ _logger = logging.getLogger(__name__)
 # _STATUS_BY_ERROR_TYPE). Redacted here rather than importing that dict
 # directly: GraphQL doesn't use HTTP status at all, so keying off REST's
 # status-code mapping would tie this module to a framing that doesn't apply
-# to it. isinstance, not exact type, so an OntolithError subclass added
-# later fails closed (redacted) rather than open.
+# to it. isinstance, not exact type: this automatically redacts any future
+# subclass of StorageError/PluginError specifically, without needing this
+# tuple updated - but a brand-new OntolithError direct subclass that ISN'T
+# one of those two still fails open (unredacted) here, same as it would
+# anywhere isinstance is used for this kind of check.
 _REDACT_MESSAGE_FOR: tuple[type[OntolithError], ...] = (StorageError, PluginError)
 _GENERIC_SERVER_ERROR_MESSAGE = "An internal error occurred"
 

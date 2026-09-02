@@ -78,9 +78,13 @@ _logger = logging.getLogger(__name__)
 # server-side instead (SPEC §16 still gets a stable `code`, just not the
 # raw text). isinstance, not exact type (unlike REST's _STATUS_BY_ERROR_TYPE
 # dict, which is keyed by exact type because it also has to pick an HTTP
-# status - MCP has no status channel to key off), so a future OntolithError
-# subclass fails closed (redacted) rather than open - matches GraphQL's own
-# _REDACT_MESSAGE_FOR precedent exactly.
+# status - MCP has no status channel to key off): this automatically
+# redacts any future subclass of StorageError/PluginError specifically,
+# without needing this tuple updated - but a brand-new OntolithError
+# direct subclass that ISN'T one of those two still fails open
+# (unredacted) here, same as it would anywhere isinstance is used for
+# this kind of check. Matches GraphQL's own _REDACT_MESSAGE_FOR precedent
+# exactly (including that same fails-open case for a genuinely new type).
 _REDACT_MESSAGE_FOR: tuple[type[OntolithError], ...] = (StorageError, PluginError)
 _GENERIC_SERVER_ERROR_MESSAGE = "An internal error occurred"
 
@@ -625,15 +629,14 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             "decision" type, or "error".
 
         Note:
-            Unlike ``ontolith.resubmit``, ``retract()`` cannot raise
-            ``NotFoundError``/``ValidationError`` — an unknown
-            ``assertion_id`` surfaces as ``StorageError`` from the backend
-            write itself instead. In practice only ``AuthError`` (bad
-            token, or an unknown ``acting_as``), ``CapabilityError``
-            (delegation not owned, or the KI-033/KI-043 contradiction
-            party/floor guards), and that ``StorageError`` case are
-            actually reachable from ``kb.retract()`` — all handled the
-            same way, alongside every other tool, by the module-level
+            ``AuthError`` (bad token, or an unknown ``acting_as``),
+            ``CapabilityError`` (delegation not owned, or the
+            KI-033/KI-043 contradiction party/floor guards), and
+            ``NotFoundError`` (unknown ``assertion_id`` — ``retract()``
+            checks explicitly rather than letting it surface as an opaque
+            ``StorageError`` off the backend write, KI-074 review) are
+            reachable from ``kb.retract()`` — all handled the same way,
+            alongside every other tool, by the module-level
             ``_error_response()`` blanket handler (KI-074).
         """
         from ontolith.core.errors import AuthError

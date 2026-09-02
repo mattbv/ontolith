@@ -699,6 +699,20 @@ class TestAcceptProposalReResolvesTemporality:
         assert flagged == []
 
 
+class TestRetract:
+    """Ontology.retract() — propose-level capability gate (ADR-0008)."""
+
+    def test_unknown_assertion_raises_not_found(self, kb: Ontology) -> None:
+        """Regression (KI-074 review): an unknown assertion_id used to
+        surface as an opaque StorageError off the backend's generic
+        set_assertion_status write, indistinguishable from a genuine
+        storage fault and — once KI-074's blanket MCP handler started
+        redacting StorageError — hidden behind "An internal error
+        occurred" everywhere retract() is exposed."""
+        with pytest.raises(NotFoundError, match="Assertion not found: nonexistent"):
+            kb.retract("nonexistent", author="alice@example.com")
+
+
 class TestFlagContradiction:
     """Ontology.flag_contradiction() — propose-level capability gate (ADR-0008)."""
 

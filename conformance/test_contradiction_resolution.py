@@ -20,7 +20,6 @@ from ontolith.core.errors import (
     AuthError,
     CapabilityError,
     NotFoundError,
-    StorageError,
     ValidationError,
 )
 from ontolith.govern import AutoAccept, Decision, PolicyStrategy, RequireReview
@@ -1133,19 +1132,18 @@ class TestRetractAlreadyTerminalIdempotency:
         assert kb.backend.get_assertion_events(a.id) == events_after_first_retract
         assert kb.backend.get_assertion(a.id).status == "retracted"  # type: ignore[union-attr]
 
-    def test_retracting_unknown_assertion_id_still_attempts_the_write(
-        self, make_kb: KbFactory
-    ) -> None:
-        """The idempotency no-op's `current is None` branch falls through
-        to attempt the write exactly as before this KI, rather than
-        silently treating an unknown id the same as an already-terminal
-        one - retract() has never validated assertion_id exists ahead of
-        this point, so a nonexistent id still surfaces as a StorageError
-        from set_assertion_status, unchanged behavior this fix preserves
-        rather than papers over."""
+    def test_retracting_unknown_assertion_id_raises_not_found(self, make_kb: KbFactory) -> None:
+        """The idempotency no-op's `current is None` branch does NOT fall
+        through to attempt the write - unlike before the KI-074 review
+        fix, an unknown id is now checked explicitly and raises
+        NotFoundError, rather than silently treating an unknown id the
+        same as an already-terminal one and letting it surface as an
+        opaque StorageError from set_assertion_status. A caller-supplied
+        bad id must stay distinguishable from a genuine storage fault
+        (SPEC §16) - see docs/known-issues.md KI-074."""
         kb = _kb(make_kb)
 
-        with pytest.raises(StorageError):
+        with pytest.raises(NotFoundError, match="nonexistent-assertion-id"):
             kb.retract("nonexistent-assertion-id", HUMAN_WRITE)
 
     def test_re_retracting_does_not_widen_valid_to(self, make_kb: KbFactory) -> None:

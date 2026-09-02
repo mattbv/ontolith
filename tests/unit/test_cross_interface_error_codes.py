@@ -158,3 +158,73 @@ class TestCapabilityErrorCodeParity:
         mcp_code: str = mcp_result["code"]
 
         assert rest_code == graphql_code == mcp_code == "CAPABILITY_ERROR"
+
+
+class _FailingSchemaBackend:
+    """Wraps a real StorageBackend, making ``get_schema`` raise a
+    StorageError whose message interpolates fake internal detail — the
+    shared vehicle below for triggering a genuine 5xx-class fault
+    identically across all three interfaces (mirrors
+    test_mcp_server.py's own copy of this fixture)."""
+
+    def __init__(self, real: object) -> None:
+        self._real = real
+
+    def get_schema(self, namespace: str) -> object:
+        from ontolith.core.errors import StorageError
+
+        raise StorageError("sqlite3.OperationalError: database is locked (fd=7, pid=12345)")
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._real, name)
+
+
+class TestStorageErrorRedactionParity:
+    """Same underlying exception type (StorageError, a redacted 5xx-class
+    fault), triggered through each interface's own GET-schema path, must
+    be redacted identically everywhere: `code` matches, the raw internal
+    message never reaches any of the three, and each still carries the
+    generic message in its own message-shaped field. KI-074's review
+    found MCP's blanket handler could regress this class of parity
+    silently (see ADR-0014's KI-074 update, "review-driven follow-up") —
+    this test exists so a future regression fails here instead."""
+
+    def test_all_three_interfaces_redact_the_same_way(self, kb: Ontology) -> None:
+        kb.backend = _FailingSchemaBackend(kb.backend)  # type: ignore[assignment]
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        headers = {"Authorization": f"Bearer {token}"}
+        auth_provider = TokenAuthProvider(kb.backend)
+
+        rest_client = TestClient(create_rest_app(kb, auth_provider))
+        rest_response = rest_client.get("/schema", headers=headers)
+        rest_body = rest_response.json()
+
+        graphql_client = TestClient(create_graphql_app(kb, auth_provider))
+        graphql_response = graphql_client.post(
+            "/graphql",
+            json={"query": "{ schema { concepts { name } } }"},
+            headers=headers,
+        )
+        assert graphql_response.status_code == 200
+        graphql_error = graphql_response.json()["errors"][0]
+
+        mcp = create_mcp_server(kb, auth_provider)
+        mcp_result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=token)
+
+        assert rest_response.status_code == 500
+        assert (
+            rest_body["code"]
+            == graphql_error["extensions"]["code"]
+            == mcp_result["code"]
+            == "STORAGE_ERROR"
+        )
+        generic = "An internal error occurred"
+        assert rest_body["message"] == graphql_error["message"] == mcp_result["error"] == generic
+        for detail in (
+            rest_body["detail"],
+            graphql_error["extensions"]["detail"],
+            mcp_result["detail"],
+        ):
+            assert detail == {}
+        assert "database is locked" not in rest_response.text
+        assert "database is locked" not in graphql_response.text

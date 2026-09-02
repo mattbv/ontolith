@@ -361,6 +361,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shape also gains a `detail` key, matching REST/GraphQL's `{"code", "message", "detail"}` — this
   is the breaking part: any client relying on the exact 2-key `{"error", "code"}` shape gets a
   third key now, though `error`/`code` themselves are unchanged for the codes MCP already returned.
+  Review found the new redaction turned a pre-existing mislabel in `Ontology.retract()` into an
+  information-destroying one: an unknown `assertion_id` used to surface an actionable (if
+  misclassified) `StorageError` message; blanket redaction hid it behind "An internal error
+  occurred". Fixed at the source — `retract()` now raises `NotFoundError` for an unknown
+  `assertion_id` instead of falling through to a generic backend write — which also improves
+  REST (`404` instead of `500`) and GraphQL, not just MCP.
 - **Breaking:** MCP's error `code` values now match REST/GraphQL's shared taxonomy (closes KI-059,
   SPEC §16): 32 hand-written lowercase literals (`"auth_error"`, `"not_found"`, etc.) in
   `interfaces/mcp.py` replaced with `exc.code` from the caught `OntolithError` (or the exception
