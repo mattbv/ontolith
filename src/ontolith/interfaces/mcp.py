@@ -3,11 +3,13 @@
 Exposes read/propose/flag tools to AI agents. No direct write tool is exposed;
 all mutations flow through the proposal/policy pipeline.
 
-Tools (ADR-0008, plus resubmit added for KI-027, retract added for KI-057/ADR-0039):
+Tools (ADR-0008, plus resubmit added for KI-027, retract added for KI-057/ADR-0039,
+list_contradictions added for KI-076):
   ontolith.schema           — read concept/relation definitions
   ontolith.get              — fetch entity + current assertions
   ontolith.query            — symbolic entity retrieval
   ontolith.provenance       — full provenance trail for an assertion
+  ontolith.list_contradictions — read-only contradiction listing
   ontolith.propose          — create a proposal (NOT write)
   ontolith.flag_contradiction — open/extend a contradiction for review
   ontolith.resubmit         — resubmit a changes_requested proposal (NOT write)
@@ -477,6 +479,81 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             "supersedes": match.supersedes,
             "superseded_ids": superseded_ids,
             "review_events": review_events,
+        }
+
+    # ------------------------------------------------------------------
+    # ontolith.list_contradictions — read-only contradiction listing
+    # ------------------------------------------------------------------
+
+    @mcp.tool(name="ontolith.list_contradictions")
+    def list_contradictions_tool(
+        state: str | None = "open", token: str | None = None
+    ) -> dict[str, Any]:
+        """List contradictions, defaulting to open (unresolved) ones.
+
+        Mirrors REST's ``GET /contradictions`` and GraphQL's
+        ``Query.contradictions`` (SPEC §14.1) — before this tool,
+        ``ontolith.flag_contradiction`` (propose-tier: extends membership,
+        flips assertion statuses to ``flagged``) was the only MCP surface
+        that returned a contradiction at all, so an agent that only wanted
+        to *read* one — including its accumulated ``rationale_history``,
+        KI-071/KI-075 — had no way to do so without also performing a write
+        (KI-076).
+
+        Args:
+            state: Filter by contradiction state ("open" or "resolved");
+                pass ``None`` explicitly for every state. Unlike REST's
+                ``GET /contradictions``, which needs a ``state=all`` string
+                sentinel (an HTTP query string can't express "no filter"
+                unambiguously — see that route's own docstring), MCP's
+                arguments are JSON: an explicit ``null`` is unambiguous
+                against the omitted-argument case, which falls back to this
+                parameter's own default ("open") the normal Python way — no
+                sentinel needed here.
+            token: Bearer token identifying the calling principal (ADR-0014).
+                Optional: an ``Authorization`` header takes priority when the
+                transport supplies one (KI-067, see module docstring); this
+                argument is the fallback, and the only channel on stdio.
+
+        Returns:
+            Dict with "contradictions" list and "count", or "error" if no
+            token was resolvable or it does not resolve to a valid
+            principal. Ungated beyond that — matches ``ontolith.query``/
+            ``.provenance``: `read` is the floor of SPEC §8.3's capability
+            order, so any resolved principal already clears it, the same as
+            ``proposals()``/``list_namespaces()`` at the SDK level.
+        """
+        from ontolith.core.errors import AuthError
+        from ontolith.govern.contradiction import safe_rationale_history
+
+        token, token_error = _bearer_token(token)
+        if token_error is not None:
+            return _error_response(AuthError(token_error))
+        assert token is not None  # _bearer_token: exactly one of (token, error) is set
+        try:
+            auth_provider.resolve(token)
+            results = kb.contradictions(state=state)
+        except OntolithError as exc:
+            return _error_response(exc)
+
+        return {
+            "count": len(results),
+            "contradictions": [
+                {
+                    "id": c.id,
+                    "namespace": c.namespace,
+                    "subject": c.subject,
+                    "predicate": c.predicate,
+                    "state": c.state,
+                    "member_ids": c.member_ids,
+                    "created_at": c.created_at.isoformat(),
+                    "raised_by": c.raised_by,
+                    "resolved_by": c.resolved_by,
+                    "resolved_at": c.resolved_at.isoformat() if c.resolved_at else None,
+                    "rationale_history": safe_rationale_history(c.metadata),
+                }
+                for c in results
+            ],
         }
 
     # ------------------------------------------------------------------

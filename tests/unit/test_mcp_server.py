@@ -1,6 +1,6 @@
 """Unit tests for the MCP server (ADR-0008, ADR-0014).
 
-Verifies that all 8 tools return the correct structure, that the no-write
+Verifies that all 9 tools return the correct structure, that the no-write
 invariant holds, and that the acting principal is always resolved from a
 verified bearer token (ADR-0014), never a caller-supplied ID. Tests run
 against a real in-memory SQLite KB.
@@ -953,8 +953,8 @@ class TestProposeTool:
         assert tool_names.isdisjoint(forbidden)
 
     def test_all_required_tools_registered(self, tmp_path: Path) -> None:
-        """ADR-0008 plus resubmit (KI-027) and retract (KI-057, ADR-0039):
-        all 8 required tools must be present."""
+        """ADR-0008 plus resubmit (KI-027), retract (KI-057, ADR-0039), and
+        list_contradictions (KI-076): all 9 required tools must be present."""
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}
@@ -963,12 +963,147 @@ class TestProposeTool:
             "ontolith.get",
             "ontolith.query",
             "ontolith.provenance",
+            "ontolith.list_contradictions",
             "ontolith.propose",
             "ontolith.flag_contradiction",
             "ontolith.resubmit",
             "ontolith.retract",
         }
         assert required.issubset(tool_names)
+
+
+# ---------------------------------------------------------------------------
+# ontolith.list_contradictions
+# ---------------------------------------------------------------------------
+
+
+class TestListContradictionsTool:
+    def _flag(self, kb: Ontology, entity_id: str, *, rationale: str | None = None) -> None:
+        kb.assert_literal(entity_id, "Person.name", "Ada", "Text", HUMAN)
+        second = kb.assert_literal(entity_id, "Person.name", "Ava", "Text", HUMAN)
+        first = kb.assertions(subject=entity_id, predicate="Person.name", status="flagged")[0]
+        kb.flag_contradiction(first.id, second.id, HUMAN, rationale=rationale)
+
+    def test_lists_open_contradictions_by_default(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        self._flag(kb, entity.id)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
+            token=kb.issue_token(HUMAN, author=ADMIN)[0]
+        )
+        assert result["count"] == 1
+        assert result["contradictions"][0]["state"] == "open"
+        assert result["contradictions"][0]["subject"] == entity.id
+
+    def test_no_contradictions_returns_empty(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
+            token=kb.issue_token(HUMAN, author=ADMIN)[0]
+        )
+        assert result == {"count": 0, "contradictions": []}
+
+    def test_resolved_excluded_by_default(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        self._flag(kb, entity.id)
+        [contradiction] = kb.contradictions()
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        kb.resolve_contradiction(contradiction.id, flagged[0].id, REVIEWER)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
+            token=kb.issue_token(HUMAN, author=ADMIN)[0]
+        )
+        assert result == {"count": 0, "contradictions": []}
+
+    def test_state_none_lists_every_state(self, tmp_path: Path) -> None:
+        """`state=None`, passed explicitly, is MCP's own "all states"
+        signal — unlike REST, which needs a `state=all` string sentinel
+        since an HTTP query string can't express `null` unambiguously,
+        JSON's `null` already is unambiguous against the omitted-argument
+        case (which falls back to this tool's own "open" default)."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        self._flag(kb, entity.id)
+        [contradiction] = kb.contradictions()
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        kb.resolve_contradiction(contradiction.id, flagged[0].id, REVIEWER)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
+            state=None, token=kb.issue_token(HUMAN, author=ADMIN)[0]
+        )
+        assert result["count"] == 1
+        assert result["contradictions"][0]["state"] == "resolved"
+
+    def test_rationale_history_is_included(self, tmp_path: Path) -> None:
+        """KI-076's whole point: reading rationale_history (KI-071/KI-075)
+        without also having to perform a flag_contradiction write."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        self._flag(kb, entity.id, rationale="Sources disagree")
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
+            token=kb.issue_token(HUMAN, author=ADMIN)[0]
+        )
+        assert result["contradictions"][0]["rationale_history"] == [
+            {"rationale": "Sources disagree", "actor": HUMAN, "at": T0.isoformat()}
+        ]
+
+    def test_no_rationale_gives_empty_rationale_history(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        self._flag(kb, entity.id)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
+            token=kb.issue_token(HUMAN, author=ADMIN)[0]
+        )
+        assert result["contradictions"][0]["rationale_history"] == []
+
+    def test_invalid_token_returns_auth_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
+            token="not-a-real-token"
+        )
+        assert "error" in result
+        assert result["code"] == "AUTH_ERROR"
+
+    def test_read_only_principal_can_list(self, tmp_path: Path) -> None:
+        """Ungated beyond a resolved principal - matches ontolith.query/
+        .provenance's own precedent (read is the capability floor)."""
+        kb = _kb(tmp_path)
+        kb.create_principal("readonly@example.com", kind="human", default_capability="read")
+        entity = kb.create_entity("Person", author=HUMAN)
+        self._flag(kb, entity.id)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
+            token=kb.issue_token("readonly@example.com", author=ADMIN)[0]
+        )
+        assert result["count"] == 1
+
+    def test_does_not_mutate_anything(self, tmp_path: Path) -> None:
+        """The whole point of KI-076: unlike flag_contradiction, listing
+        must not extend membership or touch any assertion's status."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        self._flag(kb, entity.id)
+        [before] = kb.contradictions()
+
+        mcp, _ = _server(kb)
+        mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
+            token=kb.issue_token(HUMAN, author=ADMIN)[0]
+        )
+
+        [after] = kb.contradictions()
+        assert after.member_ids == before.member_ids
+        assert after.state == before.state
 
 
 # ---------------------------------------------------------------------------
@@ -1574,7 +1709,7 @@ class TestBearerTokenTransport:
         assert result["proposal"]["state"] == "auto_accepted"
 
     def test_no_token_returns_auth_error_for_every_tool(self, tmp_path: Path) -> None:
-        """Each of the 8 tools gained its own `if token is None` branch
+        """Each of the 9 tools gained its own `if token is None` branch
         (KI-067) — not just ontolith.schema's, exercised above."""
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
@@ -1589,6 +1724,7 @@ class TestBearerTokenTransport:
             "ontolith.get": {"entity_id": entity.id},
             "ontolith.query": {"concept": "Person"},
             "ontolith.provenance": {"assertion_id": assertion.id},
+            "ontolith.list_contradictions": {},
             "ontolith.propose": {
                 "subject": entity.id,
                 "predicate": "Person.name",
