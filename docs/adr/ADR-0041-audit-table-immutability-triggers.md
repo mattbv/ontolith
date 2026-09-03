@@ -77,17 +77,29 @@ trail like admin actions or assertion status transitions, not to an optional, fr
 explanation attached to a review-routed dispute that isn't itself part of any capability or
 governance decision — and `Contradiction.metadata` already existed as the natural, no-new-schema
 home for exactly this kind of extension. If `rationale_history` is ever relied on for something
-audit-critical (e.g. treated as the authoritative record a policy or capability decision turns
-on), revisit this trade-off and consider the `ContradictionEvent` route instead.
+audit-critical (e.g. surfaced to a resolver as evidence, or exposed externally — see KI-075, no
+interface currently reads it back at all), revisit this trade-off and consider the
+`ContradictionEvent` route instead.
 
-**Update (2026-09-03, KI-075):** the "exposed externally" half of the trigger above has now
-happened — REST, GraphQL, MCP, and the CLI all surface `rationale_history` (KI-075). The
-trade-off stands unrevisited, deliberately: every one of those four surfaces presents it as
-read-only, advisory context for a human reviewer (or a caller deciding whether to flag/extend),
-never as an input any policy, capability check, or `resolve_contradiction()` call itself reads —
-resolution still turns solely on which assertion the reviewer names as winner. Read access
-crossing the API boundary is not the same as the *audit-critical reliance* this ADR's trigger
-names; that would mean something inside `govern/`'s own decision path consuming the trail, which
-nothing does. `update_contradiction_members`'s `metadata` parameter is unchanged: still wholesale
-replacement, still no DB-level guardrail against a future caller dropping or rewriting prior
-entries — visibility just makes that gap easier to notice, not more consequential to close.
+**Update (2026-09-03, KI-075):** both conditions the trigger above named have now happened —
+`rationale_history` is exposed externally (REST, GraphQL, MCP, and the CLI all surface it) *and*
+surfaced to a resolver as evidence (REST's `POST /contradictions/{id}/resolve` and GraphQL's
+`resolveContradiction` both return the accumulated trail in their resolution response; the CLI's
+`contradiction list --show-rationale` is explicitly reviewer-facing). The trade-off stands
+unrevisited, deliberately, but not because neither condition fired — both did. The distinction
+that actually matters: every one of those four surfaces presents `rationale_history` as read-only
+context a human can *look at* when deciding, never as an input any policy, capability check, or
+`resolve_contradiction()` call *itself* reads — `resolve_contradiction()`'s own logic still turns
+solely on which assertion the caller names as winner, with `rationale_history` never consulted
+anywhere in `govern/`'s decision path. The one place `govern/` itself touches `metadata` is
+`contradiction.py`'s own `safe_rationale_history()` (KI-075) — a presentation-safety coercion
+helper for read surfaces, not decision logic; it has no caller in `query/`, `core/`, or anywhere
+a policy or capability decision is made. "Surfaced to a resolver as evidence" meant available for a human to read
+while deciding, which is now true; it did not mean, and was never intended to mean, "consumed by
+the decision logic" — that stronger condition, the one this ADR's mutability guarantee is actually
+about, still hasn't happened. `update_contradiction_members`'s `metadata` parameter is unchanged:
+still wholesale replacement, still no DB-level guardrail against a future caller dropping or
+rewriting prior entries — visibility just makes that gap easier to notice, not more consequential
+to close. If a future change ever has `resolve_contradiction()`, a `PolicyStrategy`, or any other
+piece of `govern/` logic *read* `rationale_history` to decide something, that is the point to
+revisit this trade-off for real — not before.
