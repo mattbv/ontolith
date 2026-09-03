@@ -1251,3 +1251,43 @@ class TestContradictionMutations:
         )
         assert body["data"]["resolveContradiction"]["state"] == "resolved"
         assert body["data"]["resolveContradiction"]["resolvedBy"] == REVIEWER
+
+    def test_rationale_is_readable_back_in_rationale_history(self, tmp_path: Path) -> None:
+        """KI-075: `rationale` (KI-071) must round-trip through this
+        mutation/query, not just be recorded server-side and unreachable."""
+        kb = _kb(tmp_path)
+        e = kb.create_entity("Person", author=HUMAN)
+        a1 = kb.assert_literal(e.id, "Person.name", "Ada", "Text", author=HUMAN)
+        a2 = kb.assert_literal(e.id, "Person.name", "Ida", "Text", author=ADMIN)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
+        flag_query = """
+        mutation($a: String!, $b: String!, $r: String!) {
+          flagContradiction(assertionIdA: $a, assertionIdB: $b, rationale: $r) {
+            contradiction {
+              id
+              rationaleHistory { rationale actor at }
+            }
+          }
+        }
+        """
+        body = _gql(
+            client,
+            flag_query,
+            variables={"a": a1.id, "b": a2.id, "r": "Sources disagree"},
+            headers=_auth(token),
+        )
+        contradiction = body["data"]["flagContradiction"]["contradiction"]
+        assert contradiction["rationaleHistory"] == [
+            {"rationale": "Sources disagree", "actor": ADMIN, "at": T0.isoformat()}
+        ]
+
+        # Query.contradictions surfaces the same history for the same
+        # contradiction, not just the mutation's own response.
+        list_query = """
+        query { contradictions { id rationaleHistory { rationale actor at } } }
+        """
+        body = _gql(client, list_query, headers=_auth(token))
+        (listed,) = [c for c in body["data"]["contradictions"] if c["id"] == contradiction["id"]]
+        assert listed["rationaleHistory"] == contradiction["rationaleHistory"]

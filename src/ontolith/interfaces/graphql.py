@@ -319,6 +319,15 @@ class ProposeResultType:
 
 
 @strawberry.type
+class RationaleEntryType:
+    """One entry in a contradiction's ``rationale_history`` (KI-071)."""
+
+    rationale: str
+    actor: str
+    at: str
+
+
+@strawberry.type
 class ContradictionType:
     """A contradiction's fields, returned by every contradiction query/mutation."""
 
@@ -332,6 +341,11 @@ class ContradictionType:
     raised_by: str | None
     resolved_by: str | None
     resolved_at: str | None
+    # KI-075: projected out of `metadata["rationale_history"]` specifically,
+    # rather than exposing the raw open metadata blob — GraphQL has no
+    # native map scalar (see FilterInput's own comment elsewhere in this
+    # module), so a structured list is the standard workaround here too.
+    rationale_history: list[RationaleEntryType]
 
 
 @strawberry.type
@@ -412,6 +426,10 @@ def _contradiction_type(contradiction: Contradiction) -> ContradictionType:
         raised_by=contradiction.raised_by,
         resolved_by=contradiction.resolved_by,
         resolved_at=contradiction.resolved_at.isoformat() if contradiction.resolved_at else None,
+        rationale_history=[
+            RationaleEntryType(rationale=e["rationale"], actor=e["actor"], at=e["at"])
+            for e in contradiction.metadata.get("rationale_history", [])
+        ],
     )
 
 
