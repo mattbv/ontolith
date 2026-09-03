@@ -1291,3 +1291,48 @@ class TestContradictionMutations:
         body = _gql(client, list_query, headers=_auth(token))
         (listed,) = [c for c in body["data"]["contradictions"] if c["id"] == contradiction["id"]]
         assert listed["rationaleHistory"] == contradiction["rationaleHistory"]
+
+        # KI-075 review: extend with a second rationale, pinning that this
+        # response is read back from the persisted, re-fetched Contradiction
+        # (post-write) rather than synthesized from just this call's own
+        # `rationale` argument — a single-call test can't distinguish the two.
+        a3 = kb.assert_literal(e.id, "Person.name", "Ida L.", "Text", author=ADMIN)
+        kb.clock.advance(days=1)  # type: ignore[attr-defined]
+        body = _gql(
+            client,
+            flag_query,
+            variables={"a": a1.id, "b": a3.id, "r": "A third source also disagrees"},
+            headers=_auth(token),
+        )
+        extended = body["data"]["flagContradiction"]["contradiction"]
+        assert extended["rationaleHistory"] == [
+            {"rationale": "Sources disagree", "actor": ADMIN, "at": T0.isoformat()},
+            {
+                "rationale": "A third source also disagrees",
+                "actor": ADMIN,
+                "at": "2025-01-02T00:00:00+00:00",
+            },
+        ]
+
+        # And the accumulated trail survives resolveContradiction — the one
+        # backend write (state/resolved_by/resolved_at only) that could
+        # silently wipe `metadata` if it ever touched the wrong column.
+        # REVIEWER, not ADMIN: the resolver must not be a party (author) to
+        # any member assertion (KI-026), and ADMIN authored a2/a3 above.
+        reviewer_token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+        resolve_query = """
+        mutation($cid: String!, $winner: String!) {
+          resolveContradiction(contradictionId: $cid, winnerAssertionId: $winner) {
+            rationaleHistory { rationale actor at }
+          }
+        }
+        """
+        body = _gql(
+            client,
+            resolve_query,
+            variables={"cid": contradiction["id"], "winner": a1.id},
+            headers=_auth(reviewer_token),
+        )
+        assert (
+            body["data"]["resolveContradiction"]["rationaleHistory"] == extended["rationaleHistory"]
+        )

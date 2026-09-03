@@ -426,8 +426,14 @@ def _contradiction_type(contradiction: Contradiction) -> ContradictionType:
         raised_by=contradiction.raised_by,
         resolved_by=contradiction.resolved_by,
         resolved_at=contradiction.resolved_at.isoformat() if contradiction.resolved_at else None,
+        # .get(..., "") rather than direct indexing: `metadata` is an open
+        # blob (ADR-0041) with no schema enforcement, and a malformed entry
+        # here must not take down every OTHER contradiction in the same
+        # `Query.contradictions` list (KI-075 review).
         rationale_history=[
-            RationaleEntryType(rationale=e["rationale"], actor=e["actor"], at=e["at"])
+            RationaleEntryType(
+                rationale=e.get("rationale", ""), actor=e.get("actor", ""), at=e.get("at", "")
+            )
             for e in contradiction.metadata.get("rationale_history", [])
         ],
     )

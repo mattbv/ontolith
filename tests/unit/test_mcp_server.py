@@ -1048,6 +1048,41 @@ class TestFlagContradictionTool:
             {"rationale": "Sources disagree", "actor": HUMAN, "at": T0.isoformat()}
         ]
 
+        # KI-075 review: pin that this response is read back from the
+        # persisted, re-fetched Contradiction (post-write) rather than
+        # synthesized from just this call's own `rationale` argument — a
+        # single-call test can't distinguish the two, since both would
+        # produce the same one-entry list.
+        a3 = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity.id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada L.",
+            author=HUMAN,
+            asserted_at=T0,
+            status="active",
+        )
+        kb.backend.put_assertion(a3)
+        kb.clock.advance(days=1)  # type: ignore[attr-defined]
+        extended = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
+            assertion_id_a=assertions[0].id,
+            assertion_id_b=a3.id,
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            rationale="A third source also disagrees",
+        )
+        assert extended["action"] == "extended"
+        assert extended["rationale_history"] == [
+            {"rationale": "Sources disagree", "actor": HUMAN, "at": T0.isoformat()},
+            {
+                "rationale": "A third source also disagrees",
+                "actor": HUMAN,
+                "at": "2025-01-02T00:00:00+00:00",
+            },
+        ]
+
     def test_flag_different_predicates_returns_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
