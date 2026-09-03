@@ -832,7 +832,13 @@ class TestFlagContradiction:
         contradiction, _ = kb.flag_contradiction(
             a_id, b_id, "alice@example.com", rationale="Sources disagree"
         )
-        assert contradiction.metadata.get("rationale") == "Sources disagree"
+        assert contradiction.metadata["rationale_history"] == [
+            {
+                "rationale": "Sources disagree",
+                "actor": "alice@example.com",
+                "at": "2025-01-01T00:00:00+00:00",
+            }
+        ]
 
     def test_third_conflicting_assertion_extends_existing_contradiction(self, kb: Ontology) -> None:
         entity_id, a_id, b_id = self._conflicting_assertions(kb)
@@ -846,6 +852,99 @@ class TestFlagContradiction:
         assert action == "extended"
         assert second.id == first.id
         assert set(second.member_ids) == {a_id, b_id, c_assertion.id}
+
+    def test_rationale_on_extend_is_appended_not_dropped(self, kb: Ontology) -> None:
+        """Regression (KI-071): extending an already-open contradiction
+        used to silently discard `rationale` entirely - `existing.metadata`
+        was never touched on this branch. It must now accumulate alongside
+        whatever rationale (if any) was given when the contradiction was
+        first created, not replace it."""
+        kb.create_principal("bob@example.com", kind="human", default_capability="propose")
+        entity_id, a_id, b_id = self._conflicting_assertions(kb)
+        kb.flag_contradiction(a_id, b_id, "alice@example.com", rationale="Sources disagree")
+
+        c_assertion = kb.assert_literal(
+            entity_id, "Person.name", "Eve", "Text", "alice@example.com"
+        )
+        kb.clock.advance(days=1)  # type: ignore[attr-defined]  # distinct `at`, not just distinct content
+        extended, action = kb.flag_contradiction(
+            a_id, c_assertion.id, "bob@example.com", rationale="A third source also disagrees"
+        )
+
+        assert action == "extended"
+        assert extended.metadata["rationale_history"] == [
+            {
+                "rationale": "Sources disagree",
+                "actor": "alice@example.com",
+                "at": "2025-01-01T00:00:00+00:00",
+            },
+            {
+                "rationale": "A third source also disagrees",
+                "actor": "bob@example.com",
+                "at": "2025-01-02T00:00:00+00:00",
+            },
+        ]
+
+    def test_extend_without_rationale_leaves_existing_history_untouched(self, kb: Ontology) -> None:
+        """A caller extending membership without explaining why must not
+        blank out a rationale an earlier call already recorded."""
+        entity_id, a_id, b_id = self._conflicting_assertions(kb)
+        kb.flag_contradiction(a_id, b_id, "alice@example.com", rationale="Sources disagree")
+
+        c_assertion = kb.assert_literal(
+            entity_id, "Person.name", "Eve", "Text", "alice@example.com"
+        )
+        extended, _ = kb.flag_contradiction(a_id, c_assertion.id, "alice@example.com")
+
+        assert extended.metadata["rationale_history"] == [
+            {
+                "rationale": "Sources disagree",
+                "actor": "alice@example.com",
+                "at": "2025-01-01T00:00:00+00:00",
+            }
+        ]
+
+    def test_empty_string_rationale_is_treated_the_same_as_none(self, kb: Ontology) -> None:
+        """`rationale=""` must not record a real history entry - matches
+        this method's own long-standing truthy check (an empty string was
+        never distinguished from "no rationale given" on the "create"
+        branch, and the "extend" branch added by this fix must not
+        introduce that distinction either)."""
+        entity_id, a_id, b_id = self._conflicting_assertions(kb)
+        created, _ = kb.flag_contradiction(a_id, b_id, "alice@example.com", rationale="")
+        assert created.metadata == {}
+
+        c_assertion = kb.assert_literal(
+            entity_id, "Person.name", "Eve", "Text", "alice@example.com"
+        )
+        extended, _ = kb.flag_contradiction(a_id, c_assertion.id, "alice@example.com", rationale="")
+        assert extended.metadata == {}
+
+    def test_extend_adds_rationale_to_a_contradiction_created_without_one(
+        self, kb: Ontology
+    ) -> None:
+        """The created-without-rationale case is the other half of the same
+        gap: metadata starts as {} (no rationale_history key at all), so
+        the extend branch must build the list from scratch, not assume it
+        already exists."""
+        entity_id, a_id, b_id = self._conflicting_assertions(kb)
+        first, _ = kb.flag_contradiction(a_id, b_id, "alice@example.com")
+        assert first.metadata == {}
+
+        c_assertion = kb.assert_literal(
+            entity_id, "Person.name", "Eve", "Text", "alice@example.com"
+        )
+        extended, _ = kb.flag_contradiction(
+            a_id, c_assertion.id, "alice@example.com", rationale="Now we have an explanation"
+        )
+
+        assert extended.metadata["rationale_history"] == [
+            {
+                "rationale": "Now we have an explanation",
+                "actor": "alice@example.com",
+                "at": "2025-01-01T00:00:00+00:00",
+            }
+        ]
 
 
 class TestReindex:

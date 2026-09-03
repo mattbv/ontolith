@@ -1739,16 +1739,24 @@ class SQLiteBackend:
         self,
         contradiction_id: str,
         member_ids: list[str],
+        metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Add member IDs to an existing open contradiction."""
+        """Add member IDs to an existing open contradiction (KI-071:
+        optionally replace metadata too, in the same UPDATE)."""
         import json
 
         try:
             cursor = self.conn.cursor()
-            cursor.execute(
-                "UPDATE contradiction SET member_ids = ? WHERE id = ?",
-                (json.dumps(member_ids), contradiction_id),
-            )
+            if metadata is not None:
+                cursor.execute(
+                    "UPDATE contradiction SET member_ids = ?, metadata = ? WHERE id = ?",
+                    (json.dumps(member_ids), json.dumps(metadata), contradiction_id),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE contradiction SET member_ids = ? WHERE id = ?",
+                    (json.dumps(member_ids), contradiction_id),
+                )
             if cursor.rowcount == 0:
                 raise StorageError(f"Contradiction not found: {contradiction_id}")
             if not self._in_transaction:

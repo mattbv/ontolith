@@ -1454,7 +1454,7 @@ Either apply the same `<N.0` convention to the remaining direct dependencies (`p
 
 ---
 
-## KI-071 — `flag_contradiction()`'s `rationale` is silently dropped when extending an already-open contradiction
+## KI-071 — `flag_contradiction()`'s `rationale` is silently dropped when extending an already-open contradiction ✓ RESOLVED (Backlog)
 
 **Severity:** Data-loss gap — a caller-supplied explanation is silently discarded, not rejected or errored
 **Milestone target:** Backlog
@@ -1466,7 +1466,9 @@ Either apply the same `<N.0` convention to the remaining direct dependencies (`p
 
 ### Fix
 
-Either accumulate a per-extension rationale somewhere retrievable (e.g. a list in `metadata`, or a new `ContradictionEvent`-shaped record mirroring how `ProposalEvent` tracks proposal-lifecycle actions), or explicitly document that `rationale` is create-only and have every interface's help/docstring say so, so a caller extending a contradiction doesn't reasonably expect their explanation to be recorded.
+Both branches now write into the same unified `metadata["rationale_history"]` shape: a list of `{"rationale", "actor", "at"}` entries, one per call that supplied a truthy rationale (`None`/`""` are both still treated as "none given", matching this method's own long-standing check), whether that call created the contradiction or extended an already-open one. `create` seeds the list with one entry (or leaves `metadata` empty, as before, when no rationale is given); `extend` reads the existing list (defaulting to `[]` if the contradiction had none yet), appends, and writes the full dict back — a rationale-less extend appends nothing and leaves prior history untouched. This required extending the storage port: `StorageBackend.update_contradiction_members(contradiction_id, member_ids, metadata=None)` gained an optional `metadata` parameter that replaces the metadata blob wholesale when given (matching `member_ids`' own full-replacement convention) and leaves it alone when omitted — implemented identically in both SQLite and DuckDB, each folding the metadata column into the same single `UPDATE`. `Contradiction.metadata` was undocumented/unexposed by every interface before this, so no external consumer depended on the old single-`"rationale"`-key shape from the `create` path; that shape was unified into `rationale_history` too rather than kept as a special case for entry #1.
+
+The trail is currently readable only via `Ontology`/the SDK — no shipped interface (REST/GraphQL/MCP/CLI) serializes `Contradiction.metadata`, so a caller supplying `rationale` through any of them still cannot read it back. Filed as KI-075 rather than folded into this fix, matching the same data-captured/no-read-surface shape KI-072 closed for the admin-action audit trail. `rationale_history` is also stored as a plain, fully-overwritable `metadata` blob rather than an append-only, trigger-protected event table like `assertion_event`/`proposal_event`/`admin_event` — a deliberate scope choice (ADR-0041 update) given the three options considered, not an oversight.
 
 ---
 
@@ -1517,6 +1519,22 @@ KI-059 fixed MCP's error `code` *values* to match `exc.code`, but left the *mech
 New module-level `_error_response(exc: OntolithError) -> dict[str, Any]` — the MCP equivalent of REST's `_handle_ontolith_error`/GraphQL's `process_errors` override — redacts `StorageError`/`PluginError` messages via `isinstance` (matching GraphQL's own `_REDACT_MESSAGE_FOR` precedent, since MCP has no HTTP status to key a REST-style exact-type dict off) and returns `{"error", "code", "detail"}` uniformly. Every tool now wraps its entire body in one `try: ... except OntolithError as exc: return _error_response(exc)`, replacing every per-type `except` clause; the remaining non-exception error paths (a synthesized validation message, a manual `is None` not-found check, `_bearer_token`'s own auth-shaped strings) now construct a real exception instance and route it through the same helper, closing the shape divergence completely, not just the code values KI-059 closed. ADR-0014 update.
 
 Round 1 review found the new blanket redaction turned a pre-existing mislabel in `Ontology.retract()` into an information-destroying one: an unknown `assertion_id` fell through to the backend's generic `set_assertion_status`, whose "no row updated" case raises `StorageError` — previously cosmetic (wrong code, right text reached the caller), now redacted into an opaque "An internal error occurred" everywhere `retract()` is exposed. First fix checked existence only inside the auto-accept transaction — round 2 review found that never ran on the review-routed path, exactly the one an AI/MCP caller takes (`ThresholdPolicy` always routes AI to review, ADR-0003): an unknown id from an AI caller produced no error at all, a phantom `require_review` proposal persisted silently, and accepting it later hit a bare `assert`, escaping as an uncaught `AssertionError`. Fixed properly: `retract()` checks existence unconditionally, before a proposal is even created or policy evaluated, raising `NotFoundError` regardless of routing — matching `flag_contradiction`'s existing precedent; the now-unreachable `assert` in `_replay_proposal_operations` was hardened into a real `NotFoundError` backstop too. Also added a cross-interface `StorageError` redaction-parity test (`test_cross_interface_error_codes.py`) and corrected an inverted "fails closed" comment on the `isinstance`-based redaction tuple (both MCP and GraphQL). ADR-0014 update.
+
+---
+
+## KI-075 — No interface can read `Contradiction.metadata`/`rationale_history` back
+
+**Severity:** Architecture gap — the data is captured but unreachable through any shipped interface
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §10.3 (contradiction resolution)
+
+### Description
+
+KI-071 fixed `flag_contradiction()`'s `rationale` being silently dropped on the "extend" branch by accumulating it into `Contradiction.metadata["rationale_history"]`, readable via `Ontology`/the SDK. But `Contradiction.metadata` is not serialized by any of the four shipped interfaces: REST's `ContradictionOut` model, GraphQL's `_contradiction_type`, MCP's `ontolith.flag_contradiction` response dict (MCP has no contradiction query/list tool at all to serve it from either), and the CLI's `contradiction` sub-app's echo output all omit it entirely. A caller supplying `rationale` through any interface other than the raw SDK has no way to read back what was recorded — structurally the same gap KI-072 closed for the admin-action audit trail (data captured, no read surface), found during KI-071's own review.
+
+### Fix
+
+Add `metadata` (or specifically `rationale_history`) to each interface's contradiction read path: REST's `ContradictionOut`, GraphQL's contradiction type, MCP's contradiction-returning tool responses, and CLI's `contradiction list`/`contradiction flag` output — mirroring KI-072's own shape (a thin serialization change, no new domain logic).
 
 ---
 

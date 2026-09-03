@@ -1361,6 +1361,41 @@ class TestDuckDBBackend:
 
         assert backend.get_open_contradiction("test-ns", "entity-001", "Person.name") is None
 
+    def test_update_contradiction_members_metadata_param(self, backend: DuckDBBackend) -> None:
+        """KI-071: update_contradiction_members's new `metadata` param
+        replaces the metadata blob wholesale when given, and leaves it
+        untouched (not wiped) when omitted."""
+        from ontolith.govern.contradiction import Contradiction
+
+        backend.put_contradiction(
+            Contradiction(
+                id="contra-meta",
+                namespace="test-ns",
+                subject="entity-001",
+                predicate="Person.name",
+                member_ids=["a-1", "a-2"],
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                raised_by="alice@test.com",
+                metadata={"rationale_history": [{"rationale": "first"}]},
+            )
+        )
+
+        backend.update_contradiction_members("contra-meta", ["a-1", "a-2", "a-3"])
+        untouched = backend.get_contradiction("contra-meta")
+        assert untouched is not None
+        assert untouched.member_ids == ["a-1", "a-2", "a-3"]
+        assert untouched.metadata == {"rationale_history": [{"rationale": "first"}]}
+
+        backend.update_contradiction_members(
+            "contra-meta",
+            ["a-1", "a-2", "a-3", "a-4"],
+            metadata={"rationale_history": ["replaced"]},
+        )
+        replaced = backend.get_contradiction("contra-meta")
+        assert replaced is not None
+        assert replaced.member_ids == ["a-1", "a-2", "a-3", "a-4"]
+        assert replaced.metadata == {"rationale_history": ["replaced"]}
+
     def test_contradictions_filter_by_state(self, backend: DuckDBBackend) -> None:
         from ontolith.govern.contradiction import Contradiction
 
