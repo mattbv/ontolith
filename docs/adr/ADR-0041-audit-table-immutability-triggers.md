@@ -94,8 +94,9 @@ solely on which assertion the caller names as winner, with `rationale_history` n
 anywhere in `govern/`'s decision path. The one place `govern/` itself touches `metadata` is
 `contradiction.py`'s own `safe_rationale_history()` (KI-075) — a presentation-safety coercion
 helper for read surfaces, not decision logic; it has no caller in `query/`, `core/`, or anywhere
-a policy or capability decision is made. "Surfaced to a resolver as evidence" meant available for a human to read
-while deciding, which is now true; it did not mean, and was never intended to mean, "consumed by
+a policy or capability decision is made. "Surfaced to a resolver as evidence" meant available for
+a human to read while deciding, which is now true; it did not mean, and was never intended to
+mean, "consumed by
 the decision logic" — that stronger condition, the one this ADR's mutability guarantee is actually
 about, still hasn't happened. `update_contradiction_members`'s `metadata` parameter is unchanged:
 still wholesale replacement, still no DB-level guardrail against a future caller dropping or

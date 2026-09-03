@@ -592,15 +592,16 @@ def list_contradictions(
         bool,
         typer.Option("--all", help="Show contradictions in every state, ignoring --state."),
     ] = False,
+    # Named distinctly from `flag`'s own `--rationale <text>` option (a
+    # different kind of value - text there, a bool switch here) to avoid a
+    # same-name-different-meaning trap between the two sibling commands.
     show_rationale: Annotated[
         bool,
         typer.Option(
             "--show-rationale",
             help=(
-                "Print each contradiction's accumulated rationale_history entries "
-                "(KI-075) in full, not just their count. Named distinctly from "
-                "`flag`'s own `--rationale <text>` (a different kind of value) to "
-                "avoid a same-name-different-meaning trap across sibling commands."
+                "Print each contradiction's accumulated rationale_history "
+                "entries (KI-075) in full, not just their count."
             ),
         ),
     ] = False,
