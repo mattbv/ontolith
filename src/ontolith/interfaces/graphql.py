@@ -92,8 +92,8 @@ from ontolith.core.errors import (
     StorageError,
     ValidationError,
 )
-from ontolith.govern.contradiction import Contradiction, safe_rationale_history
-from ontolith.govern.proposal import Proposal
+from ontolith.govern.contradiction import Contradiction, ContradictionState, safe_rationale_history
+from ontolith.govern.proposal import Proposal, ProposalState
 from ontolith.identity import Principal
 from ontolith.ontology import Ontology
 
@@ -121,11 +121,12 @@ _logger = logging.getLogger(__name__)
 _REDACT_MESSAGE_FOR: tuple[type[OntolithError], ...] = (StorageError, PluginError)
 _GENERIC_SERVER_ERROR_MESSAGE = "An internal error occurred"
 
-# Derived from Proposal.state's/Contradiction.state's own Literal, not
-# hand-duplicated, so neither can silently drift if either type ever
-# gains/loses a state (KI-077; mirrors rest.py's identical constants).
-_PROPOSAL_STATES: tuple[str, ...] = get_args(Proposal.model_fields["state"].annotation)
-_CONTRADICTION_STATES: tuple[str, ...] = get_args(Contradiction.model_fields["state"].annotation)
+# Derived from ProposalState's/ContradictionState's own named Literal alias
+# (govern/proposal.py, govern/contradiction.py), not hand-duplicated, so
+# neither can silently drift if either type ever gains/loses a state
+# (KI-077; mirrors rest.py's/mcp.py's identical constants).
+_PROPOSAL_STATES: tuple[str, ...] = get_args(ProposalState)
+_CONTRADICTION_STATES: tuple[str, ...] = get_args(ContradictionState)
 
 # Deliberately NOT an ontolith.core.errors.OntolithError code: SPEC §16's
 # error taxonomy is for *domain* errors (schema, validation, auth,
@@ -832,6 +833,11 @@ class Query:
         state="all" to list every state (mirrors REST's GET /proposals,
         including its "all" sentinel — see that route for why one is
         needed)."""
+        # _require_principal runs, and can raise AuthError, before
+        # _list_proposals (which validates state, KI-077) is even
+        # scheduled - an unauthenticated caller never gets a free pre-auth
+        # probe of the accepted-value set (matches MCP's own
+        # ontolith.list_contradictions, KI-076 review).
         _require_principal(info)
         kb = _kb(info)
         return await run_in_threadpool(_list_proposals, kb, state)
@@ -842,6 +848,8 @@ class Query:
     ) -> list[ContradictionType]:
         """List contradictions, defaulting to open ones. Pass state="all"
         for every state (mirrors REST's GET /contradictions)."""
+        # Structurally after auth, not just textually — see
+        # Query.proposals's identical comment above.
         _require_principal(info)
         kb = _kb(info)
         return await run_in_threadpool(_list_contradictions, kb, state)

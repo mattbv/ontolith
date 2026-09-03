@@ -61,17 +61,25 @@ Usage:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
 
 from mcp.server.fastmcp import FastMCP
 
 from ontolith.core.errors import OntolithError, PluginError, StorageError
+from ontolith.govern.contradiction import ContradictionState
 
 if TYPE_CHECKING:
     from ontolith.identity.ports import AuthProvider
     from ontolith.ontology import Ontology
 
 _logger = logging.getLogger(__name__)
+
+# Derived from ContradictionState's own named Literal alias
+# (govern/contradiction.py), not hand-duplicated, so this can't silently
+# drift if that type ever gains/loses a state (KI-077 review — this tuple
+# used to be hand-written here, independently of the identical constant
+# rest.py/graphql.py derive the same way).
+_CONTRADICTION_STATES: tuple[str, ...] = get_args(ContradictionState)
 
 # StorageError/PluginError messages interpolate raw internal exception text
 # (e.g. sqlite3 constraint/transaction-state details) - redacted in the
@@ -546,7 +554,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             # caller should learn "no token" before "bad argument," not
             # get a free, pre-auth probe of which state values this tool
             # accepts.
-            if state not in (None, "open", "resolved", "all"):
+            if state not in (None, *_CONTRADICTION_STATES, "all"):
                 return _error_response(ValidationError(f"Invalid state: {state!r}"))
             effective_state = None if state == "all" else state
             results = kb.contradictions(state=effective_state)

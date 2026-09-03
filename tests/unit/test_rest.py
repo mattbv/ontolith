@@ -799,7 +799,7 @@ class TestListProposalsRoute:
 
         client, _ = _client(kb)
         token, _ = kb.issue_token(HUMAN, author=ADMIN)
-        for bad_state in ("Auto_accepted", "pendng", "All", ""):
+        for bad_state in ("Auto_accepted", "pendng", "All", "", "None", "open"):
             response = client.get("/proposals", params={"state": bad_state}, headers=_auth(token))
             assert response.status_code == 400, bad_state
             assert response.json()["code"] == "VALIDATION_ERROR", bad_state
@@ -1457,7 +1457,7 @@ class TestListContradictionsRoute:
         _make_contradiction(kb)
         client, _ = _client(kb)
         token, _ = kb.issue_token(HUMAN, author=ADMIN)
-        for bad_state in ("Open", "unresolved", "All", ""):
+        for bad_state in ("Open", "unresolved", "All", "", "None", "accepted"):
             response = client.get(
                 "/contradictions", params={"state": bad_state}, headers=_auth(token)
             )

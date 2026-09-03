@@ -55,8 +55,8 @@ from ontolith.core.errors import (
     StorageError,
     ValidationError,
 )
-from ontolith.govern.contradiction import Contradiction
-from ontolith.govern.proposal import Proposal
+from ontolith.govern.contradiction import ContradictionState
+from ontolith.govern.proposal import ProposalState
 from ontolith.identity import Principal
 
 if TYPE_CHECKING:
@@ -65,11 +65,13 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
-# Derived from Proposal.state's/Contradiction.state's own Literal, not
-# hand-duplicated, so neither can silently drift if either type ever
-# gains/loses a state (KI-077).
-_PROPOSAL_STATES: tuple[str, ...] = get_args(Proposal.model_fields["state"].annotation)
-_CONTRADICTION_STATES: tuple[str, ...] = get_args(Contradiction.model_fields["state"].annotation)
+# Derived from ProposalState's/ContradictionState's own named Literal alias
+# (govern/proposal.py, govern/contradiction.py), not hand-duplicated, so
+# neither can silently drift if either type ever gains/loses a state
+# (KI-077) — every interface that validates a state filter (MCP's own
+# ontolith.list_contradictions included) derives from the same alias.
+_PROPOSAL_STATES: tuple[str, ...] = get_args(ProposalState)
+_CONTRADICTION_STATES: tuple[str, ...] = get_args(ContradictionState)
 
 _STATUS_BY_ERROR_TYPE: dict[type[OntolithError], int] = {
     ValidationError: 400,
@@ -796,6 +798,11 @@ def create_rest_app(
                 silently matched zero rows, indistinguishable from "no
                 proposals in that state" (KI-077).
         """
+        # Structurally after auth, not just textually: `_principal` is a
+        # FastAPI `Depends`, resolved before this body ever runs - an
+        # unauthenticated caller gets 401 regardless of `state`, never a
+        # free pre-auth probe of the accepted-value set (matches MCP's own
+        # ontolith.list_contradictions, KI-076 review).
         if state not in (None, *_PROPOSAL_STATES, "pending", "all"):
             raise ValidationError(f"Invalid state: {state!r}")
         effective_state = None if state == "all" else state
@@ -1036,6 +1043,8 @@ def create_rest_app(
                 contradictions in that state" (KI-077; same class of bug
                 KI-076 fixed for MCP's ``ontolith.list_contradictions``).
         """
+        # Structurally after auth, not just textually — see
+        # list_proposals_route's identical comment above.
         if state not in (None, *_CONTRADICTION_STATES, "all"):
             raise ValidationError(f"Invalid state: {state!r}")
         effective_state = None if state == "all" else state

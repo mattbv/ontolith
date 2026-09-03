@@ -928,6 +928,41 @@ class TestProposalsQuery:
         assert len(body["data"]["proposals"]) == 1
         assert body["data"]["proposals"][0]["state"] == "auto_accepted"
 
+    def test_null_returns_every_state(self, tmp_path: Path) -> None:
+        """An explicit JSON `null` works the same as `state: "all"` - unlike
+        REST, GraphQL doesn't strictly need the string sentinel (a `null`
+        variable is unambiguous against an omitted one), but both are
+        accepted (KI-077 review)."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)  # auto-accepted
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(
+            client,
+            "query($s: String) { proposals(state: $s) { id state } }",
+            variables={"s": None},
+            headers=_auth(token),
+        )
+        assert len(body["data"]["proposals"]) == 1
+        assert body["data"]["proposals"][0]["state"] == "auto_accepted"
+
+    def test_pending_merges_changes_requested(self, tmp_path: Path) -> None:
+        """KI-027: request_changes() moves a proposal out of require_review
+        - state="pending" is an explicit, documented alias merging both
+        require_review and changes_requested (mirrors REST's own test)."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="gpt-test")
+        kb.request_changes(proposal.id, REVIEWER)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(client, '{ proposals(state: "pending") { id state } }', headers=_auth(token))
+        assert len(body["data"]["proposals"]) == 1
+        assert body["data"]["proposals"][0]["state"] == "changes_requested"
+
     def test_unrecognized_state_returns_validation_error(self, tmp_path: Path) -> None:
         """KI-077: an unrecognized `state` value previously reached
         kb.proposals()'s own WHERE state = ? unfiltered and silently
@@ -939,7 +974,7 @@ class TestProposalsQuery:
 
         client, _ = _client(kb)
         token, _ = kb.issue_token(HUMAN, author=ADMIN)
-        for bad_state in ("Auto_accepted", "pendng", "All"):
+        for bad_state in ("Auto_accepted", "pendng", "All", "", "None", "open"):
             body = _gql(
                 client,
                 "query($s: String) { proposals(state: $s) { id } }",
@@ -962,6 +997,69 @@ class TestContradictionsQuery:
         assert len(body["data"]["contradictions"]) == 1
         assert body["data"]["contradictions"][0]["state"] == "open"
 
+    def test_state_resolved_filters_correctly(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        e = kb.create_entity("Person", author=HUMAN)
+        a1 = kb.assert_literal(e.id, "Person.name", "Ada", "Text", author=HUMAN)
+        kb.assert_literal(e.id, "Person.name", "Ida", "Text", author=ADMIN)
+        [contradiction] = kb.contradictions()
+
+        client, _ = _client(kb)
+        reviewer_token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+        _gql(
+            client,
+            "mutation($cid: String!, $w: String!) { "
+            "resolveContradiction(contradictionId: $cid, winnerAssertionId: $w) { state } }",
+            variables={"cid": contradiction.id, "w": a1.id},
+            headers=_auth(reviewer_token),
+        )
+
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(
+            client, '{ contradictions(state: "resolved") { id state } }', headers=_auth(token)
+        )
+        assert len(body["data"]["contradictions"]) == 1
+        assert body["data"]["contradictions"][0]["state"] == "resolved"
+
+    def test_all_sentinel_returns_every_state(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        e = kb.create_entity("Person", author=HUMAN)
+        a1 = kb.assert_literal(e.id, "Person.name", "Ada", "Text", author=HUMAN)
+        kb.assert_literal(e.id, "Person.name", "Ida", "Text", author=ADMIN)
+        [contradiction] = kb.contradictions()
+
+        client, _ = _client(kb)
+        reviewer_token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+        _gql(
+            client,
+            "mutation($cid: String!, $w: String!) { "
+            "resolveContradiction(contradictionId: $cid, winnerAssertionId: $w) { state } }",
+            variables={"cid": contradiction.id, "w": a1.id},
+            headers=_auth(reviewer_token),
+        )
+
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(client, '{ contradictions(state: "all") { id state } }', headers=_auth(token))
+        assert len(body["data"]["contradictions"]) == 1
+        assert body["data"]["contradictions"][0]["state"] == "resolved"
+
+    def test_null_returns_every_state(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        e = kb.create_entity("Person", author=HUMAN)
+        kb.assert_literal(e.id, "Person.name", "Ada", "Text", author=HUMAN)
+        kb.assert_literal(e.id, "Person.name", "Ida", "Text", author=ADMIN)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(
+            client,
+            "query($s: String) { contradictions(state: $s) { id state } }",
+            variables={"s": None},
+            headers=_auth(token),
+        )
+        assert len(body["data"]["contradictions"]) == 1
+        assert body["data"]["contradictions"][0]["state"] == "open"
+
     def test_unrecognized_state_returns_validation_error(self, tmp_path: Path) -> None:
         """KI-077: an unrecognized `state` value previously reached
         kb.contradictions()'s own WHERE state = ? unfiltered and silently
@@ -975,7 +1073,7 @@ class TestContradictionsQuery:
 
         client, _ = _client(kb)
         token, _ = kb.issue_token(HUMAN, author=ADMIN)
-        for bad_state in ("Open", "unresolved", "All"):
+        for bad_state in ("Open", "unresolved", "All", "", "None", "accepted"):
             body = _gql(
                 client,
                 "query($s: String) { contradictions(state: $s) { id } }",
