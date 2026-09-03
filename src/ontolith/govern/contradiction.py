@@ -65,9 +65,9 @@ def safe_rationale_history(metadata: dict[str, Any]) -> list[dict[str, str]]:
 
     REST alone deliberately does NOT go through this: its
     ``ContradictionOut.metadata`` field returns the raw, unprojected blob
-    (any shape is valid JSON) rather than a specifically-``rationale_
-    history`` view, so it never indexes into an individual entry and can't
-    raise on a malformed one.
+    (any shape is valid JSON) rather than a ``rationale_history``-specific
+    view, so it never indexes into an individual entry and can't raise on
+    a malformed one.
     """
     raw = metadata.get("rationale_history", [])
     if not isinstance(raw, list):

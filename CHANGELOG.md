@@ -21,8 +21,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   matched zero rows silently, indistinguishable from "no contradictions exist"). Returns
   `rationale_history` via the same `govern.contradiction.safe_rationale_history()` helper
   `ontolith.flag_contradiction`'s response was also switched to in this fix (review finding: the
-  two tools previously guaranteed different shapes — a malformed `metadata` blob crashed one and
-  silently passed through raw garbage on the other). MCP now has 9 tools (was 8 as of KI-067).
+  two tools previously guaranteed different shapes for the same field on the same contradiction —
+  a malformed `metadata` blob degraded to `[]` on one and passed through raw, unprojected garbage
+  on the other). MCP now has 9 tools (was 8 as of KI-067).
+
+#### Fixed
+- `Ontology.flag_contradiction()`'s "extend" branch reading a malformed prior `rationale_history`
+  blob (pre-existing since KI-071, found during KI-076's review): `existing.metadata.get(
+  "rationale_history", [])` either raised (a non-iterable value) or, worse, silently corrupted the
+  trail further on write (e.g. a bare string exploded into one entry per character). Now routes
+  through the same `safe_rationale_history()` helper the read surfaces already use. Filed KI-077
+  for the same unvalidated-`state`-parameter shape on REST's `GET /contradictions`/GraphQL's
+  `Query.contradictions`, pre-existing and out of this fix's own scope.
 - Read surface for a contradiction's accumulated `rationale_history` (closes KI-075): REST's
   `ContradictionOut` gains a `metadata: dict[str, Any]` field (all three routes that return one —
   `GET /contradictions`, `POST /contradictions/flag`, `POST /contradictions/{id}/resolve`).
