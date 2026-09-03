@@ -788,6 +788,22 @@ class TestListProposalsRoute:
         assert response.status_code == 200
         assert response.json() == []
 
+    def test_unrecognized_state_returns_validation_error(self, tmp_path: Path) -> None:
+        """KI-077: an unrecognized `state` value previously reached
+        kb.proposals()'s own WHERE state = ? unfiltered and silently
+        matched zero rows - indistinguishable from "no proposals in that
+        state." Must raise instead."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        for bad_state in ("Auto_accepted", "pendng", "All", ""):
+            response = client.get("/proposals", params={"state": bad_state}, headers=_auth(token))
+            assert response.status_code == 400, bad_state
+            assert response.json()["code"] == "VALIDATION_ERROR", bad_state
+
 
 # ---------------------------------------------------------------------------
 # OntolithError -> HTTP status mapping (SPEC §16)
@@ -1430,6 +1446,23 @@ class TestListContradictionsRoute:
         response = client.get("/contradictions", params={"state": "all"}, headers=_auth(token))
         assert response.status_code == 200
         assert len(response.json()) == 1
+
+    def test_unrecognized_state_returns_validation_error(self, tmp_path: Path) -> None:
+        """KI-077: an unrecognized `state` value previously reached
+        kb.contradictions()'s own WHERE state = ? unfiltered and silently
+        matched zero rows - indistinguishable from "no contradictions in
+        that state." Must raise instead (same class of bug KI-076 fixed
+        for MCP's ontolith.list_contradictions)."""
+        kb = _kb(tmp_path)
+        _make_contradiction(kb)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        for bad_state in ("Open", "unresolved", "All", ""):
+            response = client.get(
+                "/contradictions", params={"state": bad_state}, headers=_auth(token)
+            )
+            assert response.status_code == 400, bad_state
+            assert response.json()["code"] == "VALIDATION_ERROR", bad_state
 
 
 # ---------------------------------------------------------------------------
