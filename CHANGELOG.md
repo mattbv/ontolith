@@ -363,10 +363,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as KI-075.
 - **Breaking:** `StorageBackend.update_contradiction_members` gained an optional `metadata`
   parameter (implemented identically in SQLite and DuckDB), backing the `flag_contradiction` fix
-  above. A third-party backend implementing the old 2-argument signature raises an unmapped
-  `TypeError` (not a SPEC §16 `OntolithError`) the first time `flag_contradiction` extends a
-  contradiction with a rationale — pass `metadata` as keyword-only with a default if your backend
-  needs to keep the exact old call shape working.
+  above. `Ontology` now always passes `metadata=` (`None` when no rationale was given) on the
+  "extend" branch, so a third-party backend still on the old 2-argument signature raises an
+  unmapped `TypeError` (not a SPEC §16 `OntolithError`) on *every* `flag_contradiction` call that
+  extends an existing contradiction, rationale or not — accept a `metadata` keyword argument if
+  your backend needs to keep working.
 - **Breaking:** MCP now has one blanket error-handling path instead of hand-catching a handful of
   exception types per tool (closes KI-074, ADR-0014 update): a new module-level
   `_error_response(exc)` — the MCP equivalent of REST's `_handle_ontolith_error`/GraphQL's

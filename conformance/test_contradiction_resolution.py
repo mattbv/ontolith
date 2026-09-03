@@ -15,7 +15,7 @@ import pytest
 
 from conformance.conftest import KbFactory
 from ontolith import Ontology
-from ontolith.core import FixedClock, FixedIdProvider
+from ontolith.core import Assertion, FixedClock, FixedIdProvider
 from ontolith.core.errors import (
     AuthError,
     CapabilityError,
@@ -1684,11 +1684,13 @@ class TestFlagContradictionTOCTOU:
 class TestFlagContradictionRationaleAccumulation:
     """KI-071: `rationale` must accumulate identically on both backends -
     the SDK-level unit tests (test_ontology.py) only exercise this
-    against SQLite (the unit-test suite's default backend), so this
-    conformance vector is what actually proves DuckDBBackend's own,
-    independently-written `update_contradiction_members` metadata branch
-    produces the same result as SQLiteBackend's, not just that one of the
-    two does."""
+    against SQLite (the unit-test suite's default backend). Both
+    backends' own `update_contradiction_members` metadata branch already
+    has direct unit coverage (test_sqlite_backend.py/test_duckdb_
+    backend.py) - this conformance vector's own job is proving the
+    *composed* `Ontology.flag_contradiction()` -> backend path, not just
+    the backend method in isolation, is identical end to end, and
+    guarding against future divergence between the two."""
 
     def _conflicting_assertions(self, kb: Ontology, entity_id: str) -> tuple[str, str]:
         """Two active assertions on the same (subject, predicate) with
@@ -1696,8 +1698,6 @@ class TestFlagContradictionRationaleAccumulation:
         so they don't already form a contradiction before
         flag_contradiction() is called - mirrors
         test_ontology.py::TestFlagContradiction's own identical helper."""
-        from ontolith.core import Assertion
-
         a = Assertion(
             id=kb.id_provider.next(),
             namespace="default",
@@ -1736,7 +1736,20 @@ class TestFlagContradictionRationaleAccumulation:
         )
         assert action == "created"
 
+        # `_apply_with_conflict_routing`'s own static-fast-path auto-sweeps
+        # `c` into the now-open contradiction right here (any subsequent
+        # same-predicate write does, once one is open) - so by the time
+        # flag_contradiction() below runs, `c` is already a member and
+        # membership itself doesn't change. What this test actually
+        # verifies is that the *explicit* call still takes the "extend"
+        # branch and appends its own rationale entry, on top of whatever
+        # routing's own 2-arg update_contradiction_members call already
+        # did (which must not have blanked entry #1 - asserted below too).
         c = kb.assert_literal(entity.id, "Person.name", "Eve", "Text", HUMAN_WRITE)
+        assert kb.backend.get_contradiction(created.id).metadata["rationale_history"] == [  # type: ignore[union-attr]
+            {"rationale": "Sources disagree", "actor": HUMAN_WRITE, "at": T0.isoformat()}
+        ]
+
         extended, action = kb.flag_contradiction(
             a_id, c.id, REVIEWER, rationale="A third source also disagrees"
         )

@@ -61,8 +61,8 @@ table: accumulate rationale-per-call into `Contradiction.metadata` (a plain, ful
 JSON blob, already present and documented as "open ... for future extension"); a new
 `ContradictionEvent` table mirroring this ADR's own `assertion_event`/`proposal_event`/
 `admin_event` — append-only, trigger-protected on SQLite, the pattern this ADR exists to
-strengthen; or leave `rationale` create-only and just document the limitation. The user chose the
-first: `metadata["rationale_history"]` accumulates a list of `{"rationale", "actor", "at"}`
+strengthen; or leave `rationale` create-only and just document the limitation. Decision: the
+first — `metadata["rationale_history"]` accumulates a list of `{"rationale", "actor", "at"}`
 entries across every rationale-bearing call (create or extend), via `Contradiction.metadata`'s own
 already-open extension point, with no new table.
 
