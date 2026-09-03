@@ -14,9 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GET /contradictions`/GraphQL's `Query.contradictions` — `ontolith.flag_contradiction`
   (propose-tier, mutates) was previously the only MCP surface that returned a contradiction at
   all, so reading one back (including its `rationale_history`, KI-075) required a write. `state:
-  str | None = "open"` accepts an explicit `null` for every state — MCP's JSON arguments don't
-  need REST's `state=all` string-sentinel workaround, since `null` is already unambiguous against
-  an omitted argument. MCP now has 9 tools (was 8 as of KI-067).
+  str | None = "open"` accepts `"open"`/`"resolved"`, `"all"` or `None` for every state (both work
+  identically — `"all"` kept for consistency with REST/GraphQL's own sentinel, even though MCP's
+  JSON `null` doesn't share the HTTP-query-string ambiguity that sentinel exists to work around),
+  or a `validation_error` for anything else (review finding: an unrecognized value previously
+  matched zero rows silently, indistinguishable from "no contradictions exist"). Returns
+  `rationale_history` via the same `govern.contradiction.safe_rationale_history()` helper
+  `ontolith.flag_contradiction`'s response was also switched to in this fix (review finding: the
+  two tools previously guaranteed different shapes — a malformed `metadata` blob crashed one and
+  silently passed through raw garbage on the other). MCP now has 9 tools (was 8 as of KI-067).
 - Read surface for a contradiction's accumulated `rationale_history` (closes KI-075): REST's
   `ContradictionOut` gains a `metadata: dict[str, Any]` field (all three routes that return one —
   `GET /contradictions`, `POST /contradictions/flag`, `POST /contradictions/{id}/resolve`).

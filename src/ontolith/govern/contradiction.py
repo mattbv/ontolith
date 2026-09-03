@@ -53,19 +53,21 @@ def safe_rationale_history(metadata: dict[str, Any]) -> list[dict[str, str]]:
     that ``rationale_history`` is a list, that its entries are dicts, or
     that those dicts carry all three keys with string values. Every read
     surface that projects individual entries out of it (KI-075: GraphQL's
-    ``ContradictionType``, the CLI's ``contradiction`` sub-app) needs the
-    same defense against a malformed or legacy-shape blob, so it lives
-    here once rather than duplicated per interface. A malformed entry
-    degrades to blank fields rather than raising — critically, this must
-    not raise: an uncaught exception from one bad contradiction previously
-    took down GraphQL's entire ``Query.contradictions`` list, not just the
-    one contradiction it belonged to (KI-075 review, round 2).
+    ``ContradictionType``, the CLI's ``contradiction`` sub-app; KI-076:
+    both of MCP's ``ontolith.list_contradictions`` and
+    ``ontolith.flag_contradiction``) needs the same defense against a
+    malformed or legacy-shape blob, so it lives here once rather than
+    duplicated per interface. A malformed entry degrades to blank fields
+    rather than raising — critically, this must not raise: an uncaught
+    exception from one bad contradiction previously took down GraphQL's
+    entire ``Query.contradictions`` list, not just the one contradiction
+    it belonged to (KI-075 review, round 2).
 
-    REST and MCP deliberately do NOT go through this: REST returns
-    ``metadata`` as a raw, unprojected blob (any shape is valid JSON), and
-    MCP's response dict is a straight ``.get("rationale_history", [])``
-    with no per-entry field access — neither indexes into individual
-    entries, so neither can raise on a malformed one.
+    REST alone deliberately does NOT go through this: its
+    ``ContradictionOut.metadata`` field returns the raw, unprojected blob
+    (any shape is valid JSON) rather than a specifically-``rationale_
+    history`` view, so it never indexes into an individual entry and can't
+    raise on a malformed one.
     """
     raw = metadata.get("rationale_history", [])
     if not isinstance(raw, list):
