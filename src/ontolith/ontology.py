@@ -32,7 +32,7 @@ from ontolith.core.errors import (
 )
 from ontolith.govern import AutoAccept, ThresholdPolicy
 from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, route
-from ontolith.govern.contradiction import Contradiction
+from ontolith.govern.contradiction import Contradiction, safe_rationale_history
 from ontolith.govern.policy import Decision, PolicyStrategy, Reject, RequireReview
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import AdminEvent, Principal, PrincipalCredential, min_capability
@@ -2812,7 +2812,24 @@ class Ontology:
                 # "None means untouched" contract).
                 metadata = None
                 if rationale:
-                    history = list(existing.metadata.get("rationale_history", []))
+                    # safe_rationale_history, not a raw .get() (KI-076
+                    # review): `existing.metadata` is an open, schema-less
+                    # blob (ADR-0041) that anything holding a raw backend
+                    # connection could have written in some other shape -
+                    # a non-list/non-dict-entries value here previously
+                    # raised (a bare `.get()` return isn't guaranteed
+                    # iterable) or, worse, silently exploded a string into
+                    # one "entry" per character on append. Every read
+                    # surface projecting this same field already defends
+                    # against exactly this; the one write surface that
+                    # reads prior history before appending needs the same
+                    # defense, not just the surfaces reading it back.
+                    # Unlike a read surface's per-request projection, the
+                    # coerced result here IS what gets persisted below -
+                    # unparseable prior content is dropped for good, not
+                    # just hidden from one response (see the helper's own
+                    # docstring for why that's the accepted trade-off).
+                    history: list[dict[str, str]] = safe_rationale_history(existing.metadata)
                     history.append({"rationale": rationale, "actor": author, "at": now.isoformat()})
                     metadata = {**existing.metadata, "rationale_history": history}
                 self.backend.update_contradiction_members(existing.id, merged, metadata=metadata)

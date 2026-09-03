@@ -946,6 +946,41 @@ class TestFlagContradiction:
             }
         ]
 
+    def test_extend_with_malformed_prior_history_degrades_gracefully(self, kb: Ontology) -> None:
+        """`metadata` is an open, schema-less blob (ADR-0041) - some other
+        writer holding a raw backend connection could have left
+        `rationale_history` in any shape at all. Before this fix, reading
+        it back here (`existing.metadata.get("rationale_history", [])`,
+        not routed through `safe_rationale_history()`) either raised
+        (a non-iterable value) or silently corrupted the trail further
+        (e.g. a bare string exploded into one "entry" per character on
+        append) - the same class of bug KI-076's review found on the MCP
+        read side, but on this write path instead."""
+        entity_id, a_id, b_id = self._conflicting_assertions(kb)
+        kb.flag_contradiction(a_id, b_id, "alice@example.com")
+        created = kb.contradictions()[0]
+        kb.backend.update_contradiction_members(
+            created.id,
+            created.member_ids,
+            metadata={"rationale_history": "not a list at all"},
+        )
+
+        c_assertion = kb.assert_literal(
+            entity_id, "Person.name", "Eve", "Text", "alice@example.com"
+        )
+        extended, action = kb.flag_contradiction(
+            a_id, c_assertion.id, "alice@example.com", rationale="A well-formed rationale"
+        )
+
+        assert action == "extended"
+        assert extended.metadata["rationale_history"] == [
+            {
+                "rationale": "A well-formed rationale",
+                "actor": "alice@example.com",
+                "at": "2025-01-01T00:00:00+00:00",
+            }
+        ]
+
 
 class TestReindex:
     """Tests for Ontology.reindex() (SPEC §11.3, ADR-0020)."""

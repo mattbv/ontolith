@@ -3,11 +3,13 @@
 Exposes read/propose/flag tools to AI agents. No direct write tool is exposed;
 all mutations flow through the proposal/policy pipeline.
 
-Tools (ADR-0008, plus resubmit added for KI-027, retract added for KI-057/ADR-0039):
+Tools (ADR-0008, plus resubmit added for KI-027, retract added for KI-057/ADR-0039,
+list_contradictions added for KI-076):
   ontolith.schema           — read concept/relation definitions
   ontolith.get              — fetch entity + current assertions
   ontolith.query            — symbolic entity retrieval
   ontolith.provenance       — full provenance trail for an assertion
+  ontolith.list_contradictions — read-only contradiction listing
   ontolith.propose          — create a proposal (NOT write)
   ontolith.flag_contradiction — open/extend a contradiction for review
   ontolith.resubmit         — resubmit a changes_requested proposal (NOT write)
@@ -480,6 +482,98 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         }
 
     # ------------------------------------------------------------------
+    # ontolith.list_contradictions — read-only contradiction listing
+    # ------------------------------------------------------------------
+
+    @mcp.tool(name="ontolith.list_contradictions")
+    def list_contradictions_tool(
+        state: str | None = "open", token: str | None = None
+    ) -> dict[str, Any]:
+        """List contradictions, defaulting to open (unresolved) ones.
+
+        Mirrors REST's ``GET /contradictions`` and GraphQL's
+        ``Query.contradictions`` (SPEC §14.1) — before this tool,
+        ``ontolith.flag_contradiction`` (propose-tier: extends membership,
+        flips assertion statuses to ``flagged``) was the only MCP surface
+        that returned a contradiction at all, so an agent that only wanted
+        to *read* one — including its accumulated ``rationale_history``,
+        KI-071/KI-075 — had no way to do so without also performing a write
+        (KI-076).
+
+        Args:
+            state: Filter by contradiction state ("open" or "resolved").
+                Pass ``"all"`` for every state — same string REST's
+                ``GET /contradictions``/GraphQL's ``Query.contradictions``
+                both already document and accept, kept here too for
+                cross-interface consistency even though MCP's JSON
+                arguments could instead use an explicit ``null``
+                unambiguously (unlike REST's HTTP query string, which
+                can't express "no filter" any other way — see that route's
+                own docstring). ``None``, passed explicitly, works
+                identically to ``"all"``: both are accepted so a caller
+                who already knows one sibling interface's convention isn't
+                punished for using it. Anything else — including a
+                near-miss like ``"Open"``, ``"unresolved"``, or the
+                literal string ``"None"`` a model might emit for a null —
+                raises a validation_error rather than silently matching
+                zero contradictions, which an agent could otherwise
+                mistake for "no contradictions exist" (KI-076 review).
+            token: Bearer token identifying the calling principal (ADR-0014).
+                Optional: an ``Authorization`` header takes priority when the
+                transport supplies one (KI-067, see module docstring); this
+                argument is the fallback, and the only channel on stdio.
+
+        Returns:
+            Dict with "contradictions" list and "count", or "error" if no
+            token was resolvable, it does not resolve to a valid principal,
+            or ``state`` is none of "open"/"resolved"/"all"/``None``.
+            Ungated beyond that — matches ``ontolith.query``/``.provenance``:
+            `read` is the floor of SPEC §8.3's capability order, so any
+            resolved principal already clears it, the same as
+            ``proposals()``/``list_namespaces()`` at the SDK level.
+        """
+        from ontolith.core.errors import AuthError, ValidationError
+        from ontolith.govern.contradiction import safe_rationale_history
+
+        token, token_error = _bearer_token(token)
+        if token_error is not None:
+            return _error_response(AuthError(token_error))
+        assert token is not None  # _bearer_token: exactly one of (token, error) is set
+        try:
+            auth_provider.resolve(token)
+            # Validated after auth, not before (matches ontolith.query's
+            # own as_of validation, KI-076 review): an unauthenticated
+            # caller should learn "no token" before "bad argument," not
+            # get a free, pre-auth probe of which state values this tool
+            # accepts.
+            if state not in (None, "open", "resolved", "all"):
+                return _error_response(ValidationError(f"Invalid state: {state!r}"))
+            effective_state = None if state == "all" else state
+            results = kb.contradictions(state=effective_state)
+        except OntolithError as exc:
+            return _error_response(exc)
+
+        return {
+            "count": len(results),
+            "contradictions": [
+                {
+                    "id": c.id,
+                    "namespace": c.namespace,
+                    "subject": c.subject,
+                    "predicate": c.predicate,
+                    "state": c.state,
+                    "member_ids": c.member_ids,
+                    "created_at": c.created_at.isoformat(),
+                    "raised_by": c.raised_by,
+                    "resolved_by": c.resolved_by,
+                    "resolved_at": c.resolved_at.isoformat() if c.resolved_at else None,
+                    "rationale_history": safe_rationale_history(c.metadata),
+                }
+                for c in results
+            ],
+        }
+
+    # ------------------------------------------------------------------
     # ontolith.propose — create a proposal (NOT a direct write)
     # ------------------------------------------------------------------
 
@@ -703,6 +797,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             call that supplied a non-empty rationale (KI-071).
         """
         from ontolith.core.errors import AuthError
+        from ontolith.govern.contradiction import safe_rationale_history
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
@@ -725,7 +820,12 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             "raised_by": contradiction.raised_by,
             # KI-075: the accumulated rationale trail (KI-071) — [] if no
             # call in this contradiction's history has ever supplied one.
-            "rationale_history": contradiction.metadata.get("rationale_history", []),
+            # safe_rationale_history, not a raw .get() (KI-076 review): a
+            # malformed metadata blob must produce the same coerced shape
+            # here as it does from ontolith.list_contradictions, not a
+            # differently-shaped response for the same field on a
+            # different MCP tool.
+            "rationale_history": safe_rationale_history(contradiction.metadata),
         }
 
     # ------------------------------------------------------------------

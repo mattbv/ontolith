@@ -53,19 +53,35 @@ def safe_rationale_history(metadata: dict[str, Any]) -> list[dict[str, str]]:
     that ``rationale_history`` is a list, that its entries are dicts, or
     that those dicts carry all three keys with string values. Every read
     surface that projects individual entries out of it (KI-075: GraphQL's
-    ``ContradictionType``, the CLI's ``contradiction`` sub-app) needs the
-    same defense against a malformed or legacy-shape blob, so it lives
-    here once rather than duplicated per interface. A malformed entry
-    degrades to blank fields rather than raising — critically, this must
-    not raise: an uncaught exception from one bad contradiction previously
-    took down GraphQL's entire ``Query.contradictions`` list, not just the
-    one contradiction it belonged to (KI-075 review, round 2).
+    ``ContradictionType``, the CLI's ``contradiction`` sub-app; KI-076:
+    both of MCP's ``ontolith.list_contradictions`` and
+    ``ontolith.flag_contradiction``) needs the same defense against a
+    malformed or legacy-shape blob, so it lives here once rather than
+    duplicated per interface. A malformed entry degrades to blank fields
+    rather than raising — critically, this must not raise: an uncaught
+    exception from one bad contradiction previously took down GraphQL's
+    entire ``Query.contradictions`` list, not just the one contradiction
+    it belonged to (KI-075 review, round 2).
 
-    REST and MCP deliberately do NOT go through this: REST returns
-    ``metadata`` as a raw, unprojected blob (any shape is valid JSON), and
-    MCP's response dict is a straight ``.get("rationale_history", [])``
-    with no per-entry field access — neither indexes into individual
-    entries, so neither can raise on a malformed one.
+    One caller isn't a read surface at all: ``Ontology.flag_contradiction()``'s
+    "extend" branch also reads prior ``rationale_history`` through this
+    function, before appending a new entry and persisting the result (KI-076
+    review, round 2) — a malformed prior blob there previously either raised
+    or, worse, got silently corrupted further on write (e.g. a bare string
+    exploding into one list entry per character). Unlike the read surfaces,
+    where coercion is a per-request projection that leaves the stored
+    ``metadata`` untouched, this call's coerced result IS what gets
+    persisted — any content this function couldn't parse is dropped for
+    good, not just hidden from that one response. Accepted as the least-bad
+    option: raising would still block a legitimate rationale from being
+    recorded, and silently corrupting further (the pre-fix behavior) is
+    strictly worse than losing unparseable history.
+
+    REST alone deliberately does NOT go through this: its
+    ``ContradictionOut.metadata`` field returns the raw, unprojected blob
+    (any shape is valid JSON) rather than a ``rationale_history``-specific
+    view, so it never indexes into an individual entry and can't raise on
+    a malformed one.
     """
     raw = metadata.get("rationale_history", [])
     if not isinstance(raw, list):
