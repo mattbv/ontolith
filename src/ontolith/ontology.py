@@ -2824,6 +2824,11 @@ class Ontology:
                     # against exactly this; the one write surface that
                     # reads prior history before appending needs the same
                     # defense, not just the surfaces reading it back.
+                    # Unlike a read surface's per-request projection, the
+                    # coerced result here IS what gets persisted below -
+                    # unparseable prior content is dropped for good, not
+                    # just hidden from one response (see the helper's own
+                    # docstring for why that's the accepted trade-off).
                     history: list[dict[str, str]] = safe_rationale_history(existing.metadata)
                     history.append({"rationale": rationale, "actor": author, "at": now.isoformat()})
                     metadata = {**existing.metadata, "rationale_history": history}

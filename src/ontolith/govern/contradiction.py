@@ -63,6 +63,20 @@ def safe_rationale_history(metadata: dict[str, Any]) -> list[dict[str, str]]:
     entire ``Query.contradictions`` list, not just the one contradiction
     it belonged to (KI-075 review, round 2).
 
+    One caller isn't a read surface at all: ``Ontology.flag_contradiction()``'s
+    "extend" branch also reads prior ``rationale_history`` through this
+    function, before appending a new entry and persisting the result (KI-076
+    review, round 2) — a malformed prior blob there previously either raised
+    or, worse, got silently corrupted further on write (e.g. a bare string
+    exploding into one list entry per character). Unlike the read surfaces,
+    where coercion is a per-request projection that leaves the stored
+    ``metadata`` untouched, this call's coerced result IS what gets
+    persisted — any content this function couldn't parse is dropped for
+    good, not just hidden from that one response. Accepted as the least-bad
+    option: raising would still block a legitimate rationale from being
+    recorded, and silently corrupting further (the pre-fix behavior) is
+    strictly worse than losing unparseable history.
+
     REST alone deliberately does NOT go through this: its
     ``ContradictionOut.metadata`` field returns the raw, unprojected blob
     (any shape is valid JSON) rather than a ``rationale_history``-specific

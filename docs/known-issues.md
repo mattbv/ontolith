@@ -1572,7 +1572,7 @@ Round 2 found the same "malformed/unexpected shape silently corrupts or breaks" 
 
 ### Fix
 
-Validate `state` against `{"open", "resolved", "all", None}` (REST)/`{"open", "resolved", None}` (GraphQL, which can accept a JSON `null` directly rather than needing an `"all"` string sentinel) before querying, returning a `validation_error`/`VALIDATION_ERROR` for anything else — mirroring the fix KI-076 already applied to `ontolith.list_contradictions`. The same gap likely exists on `GET /proposals`'s own `state` parameter (a similarly free-form filter) — worth checking in the same pass.
+Validate `state` against `{"open", "resolved", "all", None}` before querying, returning a `validation_error`/`VALIDATION_ERROR` for anything else — the same set on both interfaces: GraphQL's `Query.contradictions` already documents and accepts `"all"` too (`graphql.py`'s own docstring: "Pass state="all" for every state"), not just a JSON `null`, so the fix is identical to what KI-076 already applied to `ontolith.list_contradictions`, not a narrower GraphQL-specific set. The same gap likely exists on `GET /proposals`/`Query.proposals`'s own `state` parameter (a similarly free-form filter, same `"all"` sentinel documented) — worth checking in the same pass.
 
 ---
 
