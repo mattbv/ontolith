@@ -77,6 +77,17 @@ trail like admin actions or assertion status transitions, not to an optional, fr
 explanation attached to a review-routed dispute that isn't itself part of any capability or
 governance decision — and `Contradiction.metadata` already existed as the natural, no-new-schema
 home for exactly this kind of extension. If `rationale_history` is ever relied on for something
-audit-critical (e.g. surfaced to a resolver as evidence, or exposed externally — see KI-075, no
-interface currently reads it back at all), revisit this trade-off and consider the
-`ContradictionEvent` route instead.
+audit-critical (e.g. treated as the authoritative record a policy or capability decision turns
+on), revisit this trade-off and consider the `ContradictionEvent` route instead.
+
+**Update (2026-09-03, KI-075):** the "exposed externally" half of the trigger above has now
+happened — REST, GraphQL, MCP, and the CLI all surface `rationale_history` (KI-075). The
+trade-off stands unrevisited, deliberately: every one of those four surfaces presents it as
+read-only, advisory context for a human reviewer (or a caller deciding whether to flag/extend),
+never as an input any policy, capability check, or `resolve_contradiction()` call itself reads —
+resolution still turns solely on which assertion the reviewer names as winner. Read access
+crossing the API boundary is not the same as the *audit-critical reliance* this ADR's trigger
+names; that would mean something inside `govern/`'s own decision path consuming the trail, which
+nothing does. `update_contradiction_members`'s `metadata` parameter is unchanged: still wholesale
+replacement, still no DB-level guardrail against a future caller dropping or rewriting prior
+entries — visibility just makes that gap easier to notice, not more consequential to close.
