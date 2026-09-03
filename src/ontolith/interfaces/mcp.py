@@ -539,11 +539,16 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         if token_error is not None:
             return _error_response(AuthError(token_error))
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
-        if state not in (None, "open", "resolved", "all"):
-            return _error_response(ValidationError(f"Invalid state: {state!r}"))
-        effective_state = None if state == "all" else state
         try:
             auth_provider.resolve(token)
+            # Validated after auth, not before (matches ontolith.query's
+            # own as_of validation, KI-076 review): an unauthenticated
+            # caller should learn "no token" before "bad argument," not
+            # get a free, pre-auth probe of which state values this tool
+            # accepts.
+            if state not in (None, "open", "resolved", "all"):
+                return _error_response(ValidationError(f"Invalid state: {state!r}"))
+            effective_state = None if state == "all" else state
             results = kb.contradictions(state=effective_state)
         except OntolithError as exc:
             return _error_response(exc)

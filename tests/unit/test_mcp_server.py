@@ -984,6 +984,24 @@ class TestListContradictionsTool:
         first = kb.assertions(subject=entity_id, predicate="Person.name", status="flagged")[0]
         kb.flag_contradiction(first.id, second.id, HUMAN, rationale=rationale)
 
+    def _one_resolved_and_one_open(self, kb: Ontology) -> None:
+        """Seeds two contradictions in different states, so an "every
+        state" filter test can assert `count == 2` and not just "whichever
+        one state happened to come back" (KI-076 review) — a mapping bug
+        that coincidentally returned the resolved one alone (e.g. treating
+        `"all"` as a literal state value equal to `"resolved"`) would pass
+        a single-contradiction test just as easily as the real behavior."""
+        resolved_entity = kb.create_entity("Person", author=HUMAN)
+        self._flag(kb, resolved_entity.id)
+        [contradiction] = kb.contradictions()
+        flagged = kb.assertions(
+            subject=resolved_entity.id, predicate="Person.name", status="flagged"
+        )
+        kb.resolve_contradiction(contradiction.id, flagged[0].id, REVIEWER)
+
+        open_entity = kb.create_entity("Person", author=HUMAN)
+        self._flag(kb, open_entity.id)
+
     def test_lists_open_contradictions_by_default(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
@@ -1042,18 +1060,14 @@ class TestListContradictionsTool:
         string, which can't and so needs the `"all"` string sentinel), but
         `None` is accepted here purely as a convenience alongside it."""
         kb = _kb(tmp_path)
-        entity = kb.create_entity("Person", author=HUMAN)
-        self._flag(kb, entity.id)
-        [contradiction] = kb.contradictions()
-        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
-        kb.resolve_contradiction(contradiction.id, flagged[0].id, REVIEWER)
+        self._one_resolved_and_one_open(kb)
 
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
             state=None, token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
-        assert result["count"] == 1
-        assert result["contradictions"][0]["state"] == "resolved"
+        assert result["count"] == 2
+        assert {c["state"] for c in result["contradictions"]} == {"open", "resolved"}
 
     def test_state_all_lists_every_state(self, tmp_path: Path) -> None:
         """`state="all"` — the same sentinel REST's `GET /contradictions`
@@ -1062,18 +1076,14 @@ class TestListContradictionsTool:
         sibling interface's convention isn't punished for using it on MCP
         (KI-076 review: this used to silently match zero rows instead)."""
         kb = _kb(tmp_path)
-        entity = kb.create_entity("Person", author=HUMAN)
-        self._flag(kb, entity.id)
-        [contradiction] = kb.contradictions()
-        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
-        kb.resolve_contradiction(contradiction.id, flagged[0].id, REVIEWER)
+        self._one_resolved_and_one_open(kb)
 
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
             state="all", token=kb.issue_token(HUMAN, author=ADMIN)[0]
         )
-        assert result["count"] == 1
-        assert result["contradictions"][0]["state"] == "resolved"
+        assert result["count"] == 2
+        assert {c["state"] for c in result["contradictions"]} == {"open", "resolved"}
 
     def test_invalid_state_returns_validation_error(self, tmp_path: Path) -> None:
         """A near-miss value (wrong case, a plausible-sounding synonym, or
@@ -1093,6 +1103,19 @@ class TestListContradictionsTool:
             assert "error" in result, bad_state
             assert result["code"] == "VALIDATION_ERROR", bad_state
 
+    def test_bad_token_reports_auth_error_over_bad_state(self, tmp_path: Path) -> None:
+        """`state` is validated after token resolution (matches
+        ontolith.query's own as_of-validation placement) - an
+        unauthenticated caller should learn "no valid token" before "bad
+        argument," not get a free, pre-auth probe of which state values
+        this tool accepts (KI-076 review)."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
+            state="not-a-real-state", token="not-a-real-token"
+        )
+        assert result["code"] == "AUTH_ERROR"
+
     def test_state_none_over_real_transport_lists_every_state(self, tmp_path: Path) -> None:
         """Every other test in this class drives the tool via a direct
         `.fn()` call, bypassing FastMCP's own pydantic argument model
@@ -1106,11 +1129,7 @@ class TestListContradictionsTool:
         own rationale for testing the real transport, not just the fake
         one every other test in this file uses)."""
         kb = _kb(tmp_path)
-        entity = kb.create_entity("Person", author=HUMAN)
-        self._flag(kb, entity.id)
-        [contradiction] = kb.contradictions()
-        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
-        kb.resolve_contradiction(contradiction.id, flagged[0].id, REVIEWER)
+        self._one_resolved_and_one_open(kb)
 
         mcp, _ = _server(kb)
         token = kb.issue_token(HUMAN, author=ADMIN)[0]
@@ -1120,8 +1139,8 @@ class TestListContradictionsTool:
                 mcp, "ontolith.list_contradictions", {"state": None, "token": token}, None
             )
         )
-        assert result["count"] == 1
-        assert result["contradictions"][0]["state"] == "resolved"
+        assert result["count"] == 2
+        assert {c["state"] for c in result["contradictions"]} == {"open", "resolved"}
 
     def test_rationale_history_is_included(self, tmp_path: Path) -> None:
         """KI-076's whole point: reading rationale_history (KI-071/KI-075)
