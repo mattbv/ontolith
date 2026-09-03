@@ -3,7 +3,7 @@
 **Status**: Accepted
 **Date**: 2026-08-31
 **Deciders**: Ontolith Core Team
-**Related**: SPEC §17 ("the audit trail MUST NOT be mutable"), ADR-0011 (accountable-owner DB-layer defense-in-depth — the direct precedent for a store-level guarantee backing an application-layer convention), ADR-0032 (DuckDB concurrency lock — the direct precedent for a documented, currently-unfixable backend asymmetry), KI-066
+**Related**: SPEC §17 ("the audit trail MUST NOT be mutable"), ADR-0011 (accountable-owner DB-layer defense-in-depth — the direct precedent for a store-level guarantee backing an application-layer convention), ADR-0032 (DuckDB concurrency lock — the direct precedent for a documented, currently-unfixable backend asymmetry), KI-066, KI-071 (chose the opposite mutability guarantee for `Contradiction.metadata["rationale_history"]` — see Update), KI-075
 
 ---
 
@@ -52,3 +52,31 @@ The triggers are created with `CREATE TRIGGER IF NOT EXISTS` alongside every oth
 - **A view-based indirection with the real table access-restricted**: rejected — DuckDB has no connection-level access restriction mechanism to enforce it (see Rationale).
 - **Application-layer-only enforcement, revisited/re-documented rather than adding DB triggers**: rejected — this is exactly the status quo KI-066 was filed against; it doesn't close the "code with raw connection access" gap the KI names, only restates it.
 - **A generic, backend-agnostic soft-delete/tombstone convention instead of DB-level immutability**: rejected — out of scope; the tables are already append-only by design (no soft-delete semantics exist for them), and this ADR is about enforcing that existing design, not changing it.
+
+## Update (2026-09-03, closes KI-071): a deliberately *mutable* accumulation, not an event table — same decision class, opposite answer
+
+`flag_contradiction()`'s `rationale` was silently dropped whenever a call extended an
+already-open contradiction rather than creating a new one (KI-071). Three fixes were on the
+table: accumulate rationale-per-call into `Contradiction.metadata` (a plain, fully-overwritable
+JSON blob, already present and documented as "open ... for future extension"); a new
+`ContradictionEvent` table mirroring this ADR's own `assertion_event`/`proposal_event`/
+`admin_event` — append-only, trigger-protected on SQLite, the pattern this ADR exists to
+strengthen; or leave `rationale` create-only and just document the limitation. The user chose the
+first: `metadata["rationale_history"]` accumulates a list of `{"rationale", "actor", "at"}`
+entries across every rationale-bearing call (create or extend), via `Contradiction.metadata`'s own
+already-open extension point, with no new table.
+
+**This is the opposite mutability guarantee from every sibling accountability trail this ADR
+covers.** `assertion_event`/`proposal_event`/`admin_event` are append-only rows a SQLite trigger
+actively rejects any UPDATE/DELETE/REPLACE against; `rationale_history` is a blob living inside
+`update_contradiction_members`'s `metadata` parameter, whose own contract (`store/base.py`) is
+*wholesale replacement* — any future caller of that method has no DB-level guardrail stopping it
+from passing a `metadata` dict that drops or rewrites prior entries. Accepted deliberately, not
+missed: a dedicated `ContradictionEvent` table is proportionate to an accountability-critical
+trail like admin actions or assertion status transitions, not to an optional, free-text
+explanation attached to a review-routed dispute that isn't itself part of any capability or
+governance decision — and `Contradiction.metadata` already existed as the natural, no-new-schema
+home for exactly this kind of extension. If `rationale_history` is ever relied on for something
+audit-critical (e.g. surfaced to a resolver as evidence, or exposed externally — see KI-075, no
+interface currently reads it back at all), revisit this trade-off and consider the
+`ContradictionEvent` route instead.

@@ -353,13 +353,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   already-open contradiction (closes KI-071). Previously only the "create a new contradiction"
   branch wrote `rationale` into `Contradiction.metadata`; the "extend" branch never touched
   `metadata` at all. Both branches now write into a unified `metadata["rationale_history"]` shape
-  — a list of `{"rationale", "actor", "at"}` entries, one per call that supplied a non-`None`
-  rationale — so a rationale given while extending is preserved alongside whatever was recorded at
-  creation, and a rationale-less extend leaves prior history untouched rather than blanking it.
-  Required extending the storage port: `StorageBackend.update_contradiction_members` gained an
-  optional `metadata` parameter (implemented identically in SQLite and DuckDB). `Contradiction
-  .metadata` was never exposed by any interface, so no consumer depended on the old single-key
-  `{"rationale": ...}` shape from the `create` path — it's unified into `rationale_history` too.
+  — a list of `{"rationale", "actor", "at"}` entries, one per call that supplied a truthy
+  rationale (`None`/`""` are both still treated as "none given", matching the method's
+  long-standing behavior) — so a rationale given while extending is preserved alongside whatever
+  was recorded at creation, and a rationale-less extend leaves prior history untouched rather than
+  blanking it. `Contradiction.metadata` was never exposed by any interface, so no consumer
+  depended on the old single-key `{"rationale": ...}` shape from the `create` path — it's unified
+  into `rationale_history` too. No shipped interface reads `rationale_history` back yet — tracked
+  as KI-075.
+- **Breaking:** `StorageBackend.update_contradiction_members` gained an optional `metadata`
+  parameter (implemented identically in SQLite and DuckDB), backing the `flag_contradiction` fix
+  above. A third-party backend implementing the old 2-argument signature raises an unmapped
+  `TypeError` (not a SPEC §16 `OntolithError`) the first time `flag_contradiction` extends a
+  contradiction with a rationale — pass `metadata` as keyword-only with a default if your backend
+  needs to keep the exact old call shape working.
 - **Breaking:** MCP now has one blanket error-handling path instead of hand-catching a handful of
   exception types per tool (closes KI-074, ADR-0014 update): a new module-level
   `_error_response(exc)` — the MCP equivalent of REST's `_handle_ontolith_error`/GraphQL's

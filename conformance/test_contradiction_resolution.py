@@ -1679,3 +1679,84 @@ class TestFlagContradictionTOCTOU:
             kb.flag_contradiction(a.id, b.id, REVIEWER)
 
         assert kb.backend.get_open_contradiction("default", entity.id, "Person.employer") is None
+
+
+class TestFlagContradictionRationaleAccumulation:
+    """KI-071: `rationale` must accumulate identically on both backends -
+    the SDK-level unit tests (test_ontology.py) only exercise this
+    against SQLite (the unit-test suite's default backend), so this
+    conformance vector is what actually proves DuckDBBackend's own,
+    independently-written `update_contradiction_members` metadata branch
+    produces the same result as SQLiteBackend's, not just that one of the
+    two does."""
+
+    def _conflicting_assertions(self, kb: Ontology, entity_id: str) -> tuple[str, str]:
+        """Two active assertions on the same (subject, predicate) with
+        different values, inserted directly (bypassing conflict routing)
+        so they don't already form a contradiction before
+        flag_contradiction() is called - mirrors
+        test_ontology.py::TestFlagContradiction's own identical helper."""
+        from ontolith.core import Assertion
+
+        a = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity_id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada",
+            author=HUMAN_WRITE,
+            asserted_at=kb.clock.now(),
+            status="active",
+        )
+        b = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity_id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ava",
+            author=HUMAN_WRITE,
+            asserted_at=kb.clock.now(),
+            status="active",
+        )
+        kb.backend.put_assertion(a)
+        kb.backend.put_assertion(b)
+        return a.id, b.id
+
+    def test_rationale_accumulates_across_create_and_extend(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        a_id, b_id = self._conflicting_assertions(kb, entity.id)
+
+        created, action = kb.flag_contradiction(
+            a_id, b_id, HUMAN_WRITE, rationale="Sources disagree"
+        )
+        assert action == "created"
+
+        c = kb.assert_literal(entity.id, "Person.name", "Eve", "Text", HUMAN_WRITE)
+        extended, action = kb.flag_contradiction(
+            a_id, c.id, REVIEWER, rationale="A third source also disagrees"
+        )
+
+        assert action == "extended"
+        assert extended.id == created.id
+        assert extended.metadata["rationale_history"] == [
+            {"rationale": "Sources disagree", "actor": HUMAN_WRITE, "at": T0.isoformat()},
+            {"rationale": "A third source also disagrees", "actor": REVIEWER, "at": T0.isoformat()},
+        ]
+
+    def test_extend_without_rationale_leaves_history_untouched(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_WRITE)
+        a_id, b_id = self._conflicting_assertions(kb, entity.id)
+        kb.flag_contradiction(a_id, b_id, HUMAN_WRITE, rationale="Sources disagree")
+
+        c = kb.assert_literal(entity.id, "Person.name", "Eve", "Text", HUMAN_WRITE)
+        extended, _ = kb.flag_contradiction(a_id, c.id, REVIEWER)
+
+        assert extended.metadata["rationale_history"] == [
+            {"rationale": "Sources disagree", "actor": HUMAN_WRITE, "at": T0.isoformat()}
+        ]

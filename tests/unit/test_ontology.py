@@ -851,6 +851,7 @@ class TestFlagContradiction:
 
         assert action == "extended"
         assert second.id == first.id
+        assert set(second.member_ids) == {a_id, b_id, c_assertion.id}
 
     def test_rationale_on_extend_is_appended_not_dropped(self, kb: Ontology) -> None:
         """Regression (KI-071): extending an already-open contradiction
@@ -865,6 +866,7 @@ class TestFlagContradiction:
         c_assertion = kb.assert_literal(
             entity_id, "Person.name", "Eve", "Text", "alice@example.com"
         )
+        kb.clock.advance(days=1)  # type: ignore[attr-defined]  # distinct `at`, not just distinct content
         extended, action = kb.flag_contradiction(
             a_id, c_assertion.id, "bob@example.com", rationale="A third source also disagrees"
         )
@@ -879,7 +881,7 @@ class TestFlagContradiction:
             {
                 "rationale": "A third source also disagrees",
                 "actor": "bob@example.com",
-                "at": "2025-01-01T00:00:00+00:00",
+                "at": "2025-01-02T00:00:00+00:00",
             },
         ]
 
@@ -901,6 +903,22 @@ class TestFlagContradiction:
                 "at": "2025-01-01T00:00:00+00:00",
             }
         ]
+
+    def test_empty_string_rationale_is_treated_the_same_as_none(self, kb: Ontology) -> None:
+        """`rationale=""` must not record a real history entry - matches
+        this method's own long-standing truthy check (an empty string was
+        never distinguished from "no rationale given" on the "create"
+        branch, and the "extend" branch added by this fix must not
+        introduce that distinction either)."""
+        entity_id, a_id, b_id = self._conflicting_assertions(kb)
+        created, _ = kb.flag_contradiction(a_id, b_id, "alice@example.com", rationale="")
+        assert created.metadata == {}
+
+        c_assertion = kb.assert_literal(
+            entity_id, "Person.name", "Eve", "Text", "alice@example.com"
+        )
+        extended, _ = kb.flag_contradiction(a_id, c_assertion.id, "alice@example.com", rationale="")
+        assert extended.metadata == {}
 
     def test_extend_adds_rationale_to_a_contradiction_created_without_one(
         self, kb: Ontology

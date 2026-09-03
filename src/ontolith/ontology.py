@@ -2729,10 +2729,12 @@ class Ontology:
             rationale: Optional explanation of the contradiction. Recorded
                 in ``Contradiction.metadata["rationale_history"]`` — a list
                 of ``{"rationale", "actor", "at"}`` entries, one per call
-                that supplied a non-``None`` rationale, whether that call
-                created the contradiction or extended an already-open one
-                (KI-071: previously silently dropped on the "extend"
-                branch). A call with ``rationale=None`` never appends —
+                that supplied a truthy rationale (matching every other
+                optional-string field on this method's payload — ``None``
+                and ``""`` are both treated as "none given"), whether that
+                call created the contradiction or extended an already-open
+                one (KI-071: previously silently dropped on the "extend"
+                branch). A call with no rationale never appends —
                 extending membership without an explanation adds no entry,
                 it doesn't overwrite the history with a blank one.
 
@@ -2802,12 +2804,14 @@ class Ontology:
                 # KI-071: rationale was previously silently dropped on this
                 # branch - `existing.metadata` was never touched at all.
                 # Appended, not overwritten: a rationale-less extend
-                # (rationale is None) leaves prior history exactly as it
-                # was, so `metadata` stays None and this UPDATE doesn't
-                # even touch that column (matches update_contradiction_
-                # members' own "None means untouched" contract).
+                # (falsy rationale - None or "", matching the "create"
+                # branch's own long-standing truthy check just below)
+                # leaves prior history exactly as it was, so `metadata`
+                # stays None and this UPDATE doesn't even touch that
+                # column (matches update_contradiction_members' own
+                # "None means untouched" contract).
                 metadata = None
-                if rationale is not None:
+                if rationale:
                     history = list(existing.metadata.get("rationale_history", []))
                     history.append({"rationale": rationale, "actor": author, "at": now.isoformat()})
                     metadata = {**existing.metadata, "rationale_history": history}
@@ -2859,7 +2863,7 @@ class Ontology:
                                     {"rationale": rationale, "actor": author, "at": now.isoformat()}
                                 ]
                             }
-                            if rationale is not None
+                            if rationale
                             else {}
                         ),
                     )
