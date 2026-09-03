@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- New MCP tool `ontolith.list_contradictions` (closes KI-076): `read`-tier, mirroring REST's
+  `GET /contradictions`/GraphQL's `Query.contradictions` — `ontolith.flag_contradiction`
+  (propose-tier, mutates) was previously the only MCP surface that returned a contradiction at
+  all, so reading one back (including its `rationale_history`, KI-075) required a write. `state:
+  str | None = "open"` accepts an explicit `null` for every state — MCP's JSON arguments don't
+  need REST's `state=all` string-sentinel workaround, since `null` is already unambiguous against
+  an omitted argument. MCP now has 9 tools (was 8 as of KI-067).
 - Read surface for a contradiction's accumulated `rationale_history` (closes KI-075): REST's
   `ContradictionOut` gains a `metadata: dict[str, Any]` field (all three routes that return one —
   `GET /contradictions`, `POST /contradictions/flag`, `POST /contradictions/{id}/resolve`).

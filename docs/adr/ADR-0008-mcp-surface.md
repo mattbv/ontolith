@@ -29,6 +29,8 @@ The MCP (Model Context Protocol) server exposes Ontolith to AI agents as a tool.
    2026-07-29, see Update below, KI-027)
 8. **`ontolith.retract`** — Propose retraction of an assertion (propose, NOT write; added
    2026-08-31, see Update below, KI-057/ADR-0039)
+9. **`ontolith.list_contradictions`** — Read-only contradiction listing (read; added 2026-09-03,
+   see Update below, KI-076)
 
 **Forbidden Tools:**
 - ❌ `ontolith.write` — No direct write
@@ -122,6 +124,19 @@ or edit an assertion directly, and accepts only an `assertion_id`, a token-resol
 an optional `acting_as` — the same footprint as the tools it mirrors. This is a different posture
 than `resolve_contradiction()`, which has no policy evaluation at all and remains deliberately
 excluded from MCP as a reviewer-only action (unchanged by this update).
+
+## Update (2026-09-03): `ontolith.list_contradictions` added, KI-076
+
+A 9th tool, **`ontolith.list_contradictions`** (read, not propose) — mirroring REST's
+`GET /contradictions`/GraphQL's `Query.contradictions`. Before this, `ontolith.flag_contradiction`
+(a propose-tier write: it extends membership and flips assertion statuses to `flagged`) was the
+*only* MCP surface that returned a contradiction at all, so an agent that only wanted to inspect
+one — including its accumulated `rationale_history` (KI-071/KI-075) — had no way to do so without
+also performing a write, an out-of-scope gap found and filed during KI-075's own review. This tool
+is `read`-tier, unlike the other tools added in the two Updates above: it requires no capability
+beyond a resolved principal, the same as `ontolith.schema`/`.query`/`.get`/`.provenance` — `read`
+is the floor of SPEC §8.3's capability order, so it does not widen this ADR's "no direct write"
+boundary any more than those four already-listed read tools do.
 
 ## References
 

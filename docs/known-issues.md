@@ -1540,7 +1540,7 @@ Two secondary items from round-2 review: `metadata`/`rationale_history` is an op
 
 ---
 
-## KI-076 — MCP has no contradiction list/query tool at all, only `flag_contradiction`
+## KI-076 — MCP has no contradiction list/query tool at all, only `flag_contradiction` ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — the only way to read a contradiction back via MCP is a propose-tier write
 **Milestone target:** Backlog
@@ -1552,7 +1552,7 @@ REST and GraphQL both expose a pure read path for contradictions (`GET /contradi
 
 ### Fix
 
-Add a read-only `ontolith.list_contradictions` (or `ontolith.get_contradiction`) tool mirroring `GET /contradictions`'/`Query.contradictions`' shape (`state` filter, same fields including `rationale_history`) — `read` capability, matching every other read-tier MCP tool (`ontolith.get`/`ontolith.query`/`ontolith.provenance`), not `propose`.
+New `ontolith.list_contradictions` tool (`state: str | None = "open"`, mirroring `Ontology.contradictions()`'s own default), `read`-tier like `ontolith.get`/`.query`/`.provenance` — no additional capability check beyond a resolved principal, since `read` is the floor of SPEC §8.3's total order. Returns the same fields REST's `ContradictionOut`/GraphQL's `ContradictionType` do, including `rationale_history` (via the shared `govern.contradiction.safe_rationale_history()` helper KI-075 introduced) — closing the last "propose-tier write is the only read path" gap left after KI-075. Unlike REST's `GET /contradictions`, which needs a `state=all` string sentinel because an HTTP query string can't express "no filter" unambiguously, MCP's arguments are JSON: a caller passes `state=null` explicitly for every state, distinct from omitting the argument (which falls back to the tool's own `"open"` default) — no sentinel needed. Now 9 MCP tools total (was 8 as of KI-067).
 
 ---
 
