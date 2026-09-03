@@ -1304,7 +1304,7 @@ class TestContradictionFlag:
         # command's output reflects the persisted, re-fetched Contradiction
         # (post-write) rather than just this call's own `--rationale` value
         # — a single-call test can't distinguish the two. Also exercises
-        # `contradiction list --rationale`, the read-only path to the
+        # `contradiction list --show-rationale`, the read-only path to the
         # actual text (plain `list` only shows a count).
         kb = Ontology.connect(db)
         third = Assertion(
@@ -1343,7 +1343,7 @@ class TestContradictionFlag:
         assert f"{author}: A third source also disagrees" in extend_result.output
 
         rationale_list_result = runner.invoke(
-            app, ["--db", str(db), "contradiction", "list", "--rationale"]
+            app, ["--db", str(db), "contradiction", "list", "--show-rationale"]
         )
         assert "rationale_entries=2" in rationale_list_result.output
         assert f"{author}: Sources disagree" in rationale_list_result.output

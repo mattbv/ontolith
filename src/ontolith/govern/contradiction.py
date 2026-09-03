@@ -45,4 +45,43 @@ class Contradiction(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
-__all__ = ["Contradiction"]
+def safe_rationale_history(metadata: dict[str, Any]) -> list[dict[str, str]]:
+    """Defensively coerce ``metadata["rationale_history"]`` (KI-071) into a
+    list of well-formed ``{"rationale", "actor", "at"}`` string dicts.
+
+    ``metadata`` is an open, schema-less blob (ADR-0041) — nothing enforces
+    that ``rationale_history`` is a list, that its entries are dicts, or
+    that those dicts carry all three keys with string values. Every read
+    surface that projects individual entries out of it (KI-075: GraphQL's
+    ``ContradictionType``, the CLI's ``contradiction`` sub-app) needs the
+    same defense against a malformed or legacy-shape blob, so it lives
+    here once rather than duplicated per interface. A malformed entry
+    degrades to blank fields rather than raising — critically, this must
+    not raise: an uncaught exception from one bad contradiction previously
+    took down GraphQL's entire ``Query.contradictions`` list, not just the
+    one contradiction it belonged to (KI-075 review, round 2).
+
+    REST and MCP deliberately do NOT go through this: REST returns
+    ``metadata`` as a raw, unprojected blob (any shape is valid JSON), and
+    MCP's response dict is a straight ``.get("rationale_history", [])``
+    with no per-entry field access — neither indexes into individual
+    entries, so neither can raise on a malformed one.
+    """
+    raw = metadata.get("rationale_history", [])
+    if not isinstance(raw, list):
+        return []
+    result: list[dict[str, str]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        result.append(
+            {
+                "rationale": str(entry.get("rationale") or ""),
+                "actor": str(entry.get("actor") or ""),
+                "at": str(entry.get("at") or ""),
+            }
+        )
+    return result
+
+
+__all__ = ["Contradiction", "safe_rationale_history"]
