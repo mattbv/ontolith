@@ -1300,6 +1300,55 @@ class TestContradictionFlag:
         list_result = runner.invoke(app, ["--db", str(db), "contradiction", "list"])
         assert "rationale_entries=1" in list_result.output
 
+        # KI-075 review: extend with a second rationale, pinning that this
+        # command's output reflects the persisted, re-fetched Contradiction
+        # (post-write) rather than just this call's own `--rationale` value
+        # — a single-call test can't distinguish the two. Also exercises
+        # `contradiction list --rationale`, the read-only path to the
+        # actual text (plain `list` only shows a count).
+        kb = Ontology.connect(db)
+        third = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity_id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada L.",
+            author=author,
+            asserted_at=kb.clock.now(),
+            status="active",
+        )
+        kb.backend.put_assertion(third)
+        kb.close()
+
+        extend_result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "contradiction",
+                "flag",
+                first.id,
+                third.id,
+                "--author",
+                author,
+                "--rationale",
+                "A third source also disagrees",
+            ],
+        )
+        assert extend_result.exit_code == 0
+        assert "Extended:" in extend_result.output
+        assert f"{author}: Sources disagree" in extend_result.output
+        assert f"{author}: A third source also disagrees" in extend_result.output
+
+        rationale_list_result = runner.invoke(
+            app, ["--db", str(db), "contradiction", "list", "--rationale"]
+        )
+        assert "rationale_entries=2" in rationale_list_result.output
+        assert f"{author}: Sources disagree" in rationale_list_result.output
+        assert f"{author}: A third source also disagrees" in rationale_list_result.output
+
 
 class TestContradictionResolve:
     def test_resolves_contradiction(self, seeded_db: tuple[Path, str, str]) -> None:

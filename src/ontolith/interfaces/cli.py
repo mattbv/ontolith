@@ -591,6 +591,16 @@ def list_contradictions(
         bool,
         typer.Option("--all", help="Show contradictions in every state, ignoring --state."),
     ] = False,
+    show_rationale: Annotated[
+        bool,
+        typer.Option(
+            "--rationale",
+            help=(
+                "Print each contradiction's accumulated rationale_history entries "
+                "(KI-075) in full, not just their count."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """List contradictions, defaulting to open (unresolved) ones."""
     kb = _kb()
@@ -601,11 +611,17 @@ def list_contradictions(
             return
         for c in results:
             history = c.metadata.get("rationale_history", [])
-            rationale = f"  rationale_entries={len(history)}" if history else ""
+            suffix = f"  rationale_entries={len(history)}" if history else ""
             typer.echo(
                 f"{c.id}  state={c.state}  subject={c.subject}  "
-                f"predicate={c.predicate}  members={len(c.member_ids)}{rationale}"
+                f"predicate={c.predicate}  members={len(c.member_ids)}{suffix}"
             )
+            if show_rationale:
+                for entry in history:
+                    typer.echo(
+                        f"  [{entry.get('at', '?')}] {entry.get('actor', '?')}: "
+                        f"{entry.get('rationale', '')}"
+                    )
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
@@ -645,7 +661,10 @@ def flag_contradiction(
         # was appended rather than dropped (KI-071) without a separate
         # `contradiction list` round-trip.
         for entry in contradiction.metadata.get("rationale_history", []):
-            typer.echo(f"  [{entry['at']}] {entry['actor']}: {entry['rationale']}")
+            typer.echo(
+                f"  [{entry.get('at', '?')}] {entry.get('actor', '?')}: "
+                f"{entry.get('rationale', '')}"
+            )
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
