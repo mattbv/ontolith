@@ -1012,6 +1012,42 @@ class TestFlagContradictionTool:
         assert set(result["member_ids"]) == {assertions[0].id, a2.id}
         assert result["raised_by"] == HUMAN
 
+    def test_rationale_is_readable_back_in_rationale_history(self, tmp_path: Path) -> None:
+        """KI-075: `rationale` (KI-071) must round-trip through this tool's
+        own response, not just be recorded server-side and unreachable."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        from ontolith.core import Assertion
+
+        a2 = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity.id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada Lovelace",
+            author=HUMAN,
+            asserted_at=T0,
+            status="active",
+        )
+        kb.backend.put_assertion(a2)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
+            assertion_id_a=assertions[0].id,
+            assertion_id_b=a2.id,
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            rationale="Sources disagree",
+        )
+
+        assert result["rationale_history"] == [
+            {"rationale": "Sources disagree", "actor": HUMAN, "at": T0.isoformat()}
+        ]
+
     def test_flag_different_predicates_returns_error(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)

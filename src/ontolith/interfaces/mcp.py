@@ -697,6 +697,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         Returns:
             Dict describing the contradiction created/extended, or "error".
+            ``rationale_history`` (KI-075) carries every rationale ever
+            recorded for this contradiction, not just the one from this
+            call — one ``{"rationale", "actor", "at"}`` entry per prior
+            call that supplied a non-empty rationale (KI-071).
         """
         from ontolith.core.errors import AuthError
 
@@ -719,6 +723,9 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             "member_ids": [assertion_id_a, assertion_id_b],
             "action": action,
             "raised_by": contradiction.raised_by,
+            # KI-075: the accumulated rationale trail (KI-071) — [] if no
+            # call in this contradiction's history has ever supplied one.
+            "rationale_history": contradiction.metadata.get("rationale_history", []),
         }
 
     # ------------------------------------------------------------------
