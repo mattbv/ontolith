@@ -390,6 +390,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- REST's `GET /contradictions`/GraphQL's `Query.contradictions`, and `GET /proposals`/
+  `Query.proposals`, passed an unvalidated `state` filter straight to the backend's
+  `WHERE state = ?` (closes KI-077, found during KI-076's review): an unrecognized value (a typo,
+  wrong case, or a plausible-sounding synonym) silently matched zero rows instead of erroring —
+  indistinguishable from "no results in that state." Both routes/resolvers now raise
+  `ValidationError` for anything outside their accepted set (`{"open", "resolved", "all", None}`
+  for contradictions; the 8 `Proposal.state` values plus `"pending"`/`"all"`/`None` for proposals),
+  derived from each type's own `Literal` via `get_args()` rather than hand-duplicated so neither
+  set can drift. Same class of bug KI-076 already fixed for MCP's `ontolith.list_contradictions`.
 - `Ontology.flag_contradiction()`'s "extend" branch reading a malformed prior `rationale_history`
   blob (pre-existing since KI-071, found during KI-076's review): `existing.metadata.get(
   "rationale_history", [])` either raised (a non-iterable value) or, worse, silently corrupted the

@@ -1560,7 +1560,7 @@ Round 2 found the same "malformed/unexpected shape silently corrupts or breaks" 
 
 ---
 
-## KI-077 — REST's `GET /contradictions`/GraphQL's `Query.contradictions` pass an unvalidated `state` filter straight to the backend
+## KI-077 — REST's `GET /contradictions`/GraphQL's `Query.contradictions` pass an unvalidated `state` filter straight to the backend ✓ RESOLVED (Backlog)
 
 **Severity:** Correctness gap — an unrecognized value silently returns an empty result rather than an error
 **Milestone target:** Backlog
@@ -1572,7 +1572,9 @@ Round 2 found the same "malformed/unexpected shape silently corrupts or breaks" 
 
 ### Fix
 
-Validate `state` against `{"open", "resolved", "all", None}` before querying, returning a `validation_error`/`VALIDATION_ERROR` for anything else — the same set on both interfaces: GraphQL's `Query.contradictions` already documents and accepts `"all"` too (`graphql.py`'s own docstring: "Pass state="all" for every state"), not just a JSON `null`, so the fix is identical to what KI-076 already applied to `ontolith.list_contradictions`, not a narrower GraphQL-specific set. The same gap likely exists on `GET /proposals`/`Query.proposals`'s own `state` parameter (a similarly free-form filter, same `"all"` sentinel documented) — worth checking in the same pass.
+Both routes/resolvers now validate `state` before querying, raising `ValidationError` (400 on REST, `VALIDATION_ERROR` on GraphQL) for anything not in `{"open", "resolved", "all", None}` — the identical accepted set on both interfaces, since GraphQL's `Query.contradictions` already documents and accepts `"all"` too, the same as REST, not a narrower GraphQL-specific set limited to a JSON `null`. `GET /proposals`/`Query.proposals`'s own `state` parameter shared the identical shape (a larger accepted set: the 8 `Proposal.state` values plus `"pending"`/`"all"`/`None`) — fixed identically in the same pass, per this KI's own Fix text.
+
+Both accepted-value sets (`_PROPOSAL_STATES`/`_CONTRADICTION_STATES`) are derived from `Proposal.state`'s/`Contradiction.state`'s own `Literal` type via `typing.get_args()` rather than hand-duplicated, so neither can silently drift if either type ever gains or loses a state — the same helper pattern `plugins/registry.py` already uses for `PluginKind`.
 
 ---
 
