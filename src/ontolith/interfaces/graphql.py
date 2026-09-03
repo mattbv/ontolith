@@ -70,7 +70,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal, get_args
 
 import strawberry
 from fastapi import FastAPI, Header
@@ -120,6 +120,12 @@ _logger = logging.getLogger(__name__)
 # case this isinstance check fails open on.
 _REDACT_MESSAGE_FOR: tuple[type[OntolithError], ...] = (StorageError, PluginError)
 _GENERIC_SERVER_ERROR_MESSAGE = "An internal error occurred"
+
+# Derived from Proposal.state's/Contradiction.state's own Literal, not
+# hand-duplicated, so neither can silently drift if either type ever
+# gains/loses a state (KI-077; mirrors rest.py's identical constants).
+_PROPOSAL_STATES: tuple[str, ...] = get_args(Proposal.model_fields["state"].annotation)
+_CONTRADICTION_STATES: tuple[str, ...] = get_args(Contradiction.model_fields["state"].annotation)
 
 # Deliberately NOT an ontolith.core.errors.OntolithError code: SPEC §16's
 # error taxonomy is for *domain* errors (schema, validation, auth,
@@ -629,13 +635,33 @@ def _build_provenance(kb: Ontology, assertion_id: str) -> ProvenanceType:
 
 
 def _list_proposals(kb: Ontology, state: str | None) -> list[ProposalType]:
-    """Blocking body of Query.proposals."""
+    """Blocking body of Query.proposals.
+
+    Raises:
+        ValidationError: ``state`` is none of the accepted values — an
+            unrecognized value previously reached ``kb.proposals()``'s own
+            ``WHERE state = ?`` unfiltered and silently matched zero rows,
+            indistinguishable from "no proposals in that state" (KI-077).
+    """
+    if state not in (None, *_PROPOSAL_STATES, "pending", "all"):
+        raise ValidationError(f"Invalid state: {state!r}")
     effective_state = None if state == "all" else state
     return [_proposal_type(p) for p in kb.proposals(state=effective_state)]
 
 
 def _list_contradictions(kb: Ontology, state: str | None) -> list[ContradictionType]:
-    """Blocking body of Query.contradictions."""
+    """Blocking body of Query.contradictions.
+
+    Raises:
+        ValidationError: ``state`` is none of "open"/"resolved"/"all" — an
+            unrecognized value previously reached ``kb.contradictions()``'s
+            own ``WHERE state = ?`` unfiltered and silently matched zero
+            rows, indistinguishable from "no contradictions in that state"
+            (KI-077; same class of bug KI-076 fixed for MCP's
+            ``ontolith.list_contradictions``).
+    """
+    if state not in (None, *_CONTRADICTION_STATES, "all"):
+        raise ValidationError(f"Invalid state: {state!r}")
     effective_state = None if state == "all" else state
     return [_contradiction_type(c) for c in kb.contradictions(state=effective_state)]
 

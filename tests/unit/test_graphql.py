@@ -928,6 +928,26 @@ class TestProposalsQuery:
         assert len(body["data"]["proposals"]) == 1
         assert body["data"]["proposals"][0]["state"] == "auto_accepted"
 
+    def test_unrecognized_state_returns_validation_error(self, tmp_path: Path) -> None:
+        """KI-077: an unrecognized `state` value previously reached
+        kb.proposals()'s own WHERE state = ? unfiltered and silently
+        matched zero rows - indistinguishable from "no proposals in that
+        state." Must raise instead."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        for bad_state in ("Auto_accepted", "pendng", "All"):
+            body = _gql(
+                client,
+                "query($s: String) { proposals(state: $s) { id } }",
+                variables={"s": bad_state},
+                headers=_auth(token),
+            )
+            assert _error_codes(body) == ["VALIDATION_ERROR"], bad_state
+
 
 class TestContradictionsQuery:
     def test_defaults_to_open(self, tmp_path: Path) -> None:
@@ -941,6 +961,28 @@ class TestContradictionsQuery:
         body = _gql(client, "{ contradictions { id state } }", headers=_auth(token))
         assert len(body["data"]["contradictions"]) == 1
         assert body["data"]["contradictions"][0]["state"] == "open"
+
+    def test_unrecognized_state_returns_validation_error(self, tmp_path: Path) -> None:
+        """KI-077: an unrecognized `state` value previously reached
+        kb.contradictions()'s own WHERE state = ? unfiltered and silently
+        matched zero rows - indistinguishable from "no contradictions in
+        that state." Must raise instead (same class of bug KI-076 fixed
+        for MCP's ontolith.list_contradictions)."""
+        kb = _kb(tmp_path)
+        e = kb.create_entity("Person", author=HUMAN)
+        kb.assert_literal(e.id, "Person.name", "Ada", "Text", author=HUMAN)
+        kb.assert_literal(e.id, "Person.name", "Ida", "Text", author=ADMIN)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        for bad_state in ("Open", "unresolved", "All"):
+            body = _gql(
+                client,
+                "query($s: String) { contradictions(state: $s) { id } }",
+                variables={"s": bad_state},
+                headers=_auth(token),
+            )
+            assert _error_codes(body) == ["VALIDATION_ERROR"], bad_state
 
 
 class TestPrincipalsQuery:
