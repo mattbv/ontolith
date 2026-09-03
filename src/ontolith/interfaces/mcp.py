@@ -501,15 +501,23 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         (KI-076).
 
         Args:
-            state: Filter by contradiction state ("open" or "resolved");
-                pass ``None`` explicitly for every state. Unlike REST's
-                ``GET /contradictions``, which needs a ``state=all`` string
-                sentinel (an HTTP query string can't express "no filter"
-                unambiguously — see that route's own docstring), MCP's
-                arguments are JSON: an explicit ``null`` is unambiguous
-                against the omitted-argument case, which falls back to this
-                parameter's own default ("open") the normal Python way — no
-                sentinel needed here.
+            state: Filter by contradiction state ("open" or "resolved").
+                Pass ``"all"`` for every state — same string REST's
+                ``GET /contradictions``/GraphQL's ``Query.contradictions``
+                both already document and accept, kept here too for
+                cross-interface consistency even though MCP's JSON
+                arguments could instead use an explicit ``null``
+                unambiguously (unlike REST's HTTP query string, which
+                can't express "no filter" any other way — see that route's
+                own docstring). ``None``, passed explicitly, works
+                identically to ``"all"``: both are accepted so a caller
+                who already knows one sibling interface's convention isn't
+                punished for using it. Anything else — including a
+                near-miss like ``"Open"``, ``"unresolved"``, or the
+                literal string ``"None"`` a model might emit for a null —
+                raises a validation_error rather than silently matching
+                zero contradictions, which an agent could otherwise
+                mistake for "no contradictions exist" (KI-076 review).
             token: Bearer token identifying the calling principal (ADR-0014).
                 Optional: an ``Authorization`` header takes priority when the
                 transport supplies one (KI-067, see module docstring); this
@@ -517,22 +525,26 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
 
         Returns:
             Dict with "contradictions" list and "count", or "error" if no
-            token was resolvable or it does not resolve to a valid
-            principal. Ungated beyond that — matches ``ontolith.query``/
-            ``.provenance``: `read` is the floor of SPEC §8.3's capability
-            order, so any resolved principal already clears it, the same as
+            token was resolvable, it does not resolve to a valid principal,
+            or ``state`` is none of "open"/"resolved"/"all"/``None``.
+            Ungated beyond that — matches ``ontolith.query``/``.provenance``:
+            `read` is the floor of SPEC §8.3's capability order, so any
+            resolved principal already clears it, the same as
             ``proposals()``/``list_namespaces()`` at the SDK level.
         """
-        from ontolith.core.errors import AuthError
+        from ontolith.core.errors import AuthError, ValidationError
         from ontolith.govern.contradiction import safe_rationale_history
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
             return _error_response(AuthError(token_error))
         assert token is not None  # _bearer_token: exactly one of (token, error) is set
+        if state not in (None, "open", "resolved", "all"):
+            return _error_response(ValidationError(f"Invalid state: {state!r}"))
+        effective_state = None if state == "all" else state
         try:
             auth_provider.resolve(token)
-            results = kb.contradictions(state=state)
+            results = kb.contradictions(state=effective_state)
         except OntolithError as exc:
             return _error_response(exc)
 
@@ -780,6 +792,7 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             call that supplied a non-empty rationale (KI-071).
         """
         from ontolith.core.errors import AuthError
+        from ontolith.govern.contradiction import safe_rationale_history
 
         token, token_error = _bearer_token(token)
         if token_error is not None:
@@ -802,7 +815,12 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
             "raised_by": contradiction.raised_by,
             # KI-075: the accumulated rationale trail (KI-071) — [] if no
             # call in this contradiction's history has ever supplied one.
-            "rationale_history": contradiction.metadata.get("rationale_history", []),
+            # safe_rationale_history, not a raw .get() (KI-076 review): a
+            # malformed metadata blob must produce the same coerced shape
+            # here as it does from ontolith.list_contradictions, not a
+            # differently-shaped response for the same field on a
+            # different MCP tool.
+            "rationale_history": safe_rationale_history(contradiction.metadata),
         }
 
     # ------------------------------------------------------------------

@@ -1019,12 +1019,28 @@ class TestListContradictionsTool:
         )
         assert result == {"count": 0, "contradictions": []}
 
+    def test_state_resolved_filters_correctly(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        self._flag(kb, entity.id)
+        [contradiction] = kb.contradictions()
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        kb.resolve_contradiction(contradiction.id, flagged[0].id, REVIEWER)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
+            state="resolved", token=kb.issue_token(HUMAN, author=ADMIN)[0]
+        )
+        assert result["count"] == 1
+        assert result["contradictions"][0]["state"] == "resolved"
+
     def test_state_none_lists_every_state(self, tmp_path: Path) -> None:
-        """`state=None`, passed explicitly, is MCP's own "all states"
-        signal — unlike REST, which needs a `state=all` string sentinel
-        since an HTTP query string can't express `null` unambiguously,
-        JSON's `null` already is unambiguous against the omitted-argument
-        case (which falls back to this tool's own "open" default)."""
+        """`state=None`, passed explicitly, is one of two ways to request
+        every state (the other, `state="all"`, is tested separately) —
+        MCP's JSON arguments could distinguish an explicit `null` from an
+        omitted one unambiguously on their own (unlike REST's HTTP query
+        string, which can't and so needs the `"all"` string sentinel), but
+        `None` is accepted here purely as a convenience alongside it."""
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
         self._flag(kb, entity.id)
@@ -1035,6 +1051,74 @@ class TestListContradictionsTool:
         mcp, _ = _server(kb)
         result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
             state=None, token=kb.issue_token(HUMAN, author=ADMIN)[0]
+        )
+        assert result["count"] == 1
+        assert result["contradictions"][0]["state"] == "resolved"
+
+    def test_state_all_lists_every_state(self, tmp_path: Path) -> None:
+        """`state="all"` — the same sentinel REST's `GET /contradictions`
+        and GraphQL's `Query.contradictions` already document and accept —
+        works identically to `state=None` here, so a caller who knows one
+        sibling interface's convention isn't punished for using it on MCP
+        (KI-076 review: this used to silently match zero rows instead)."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        self._flag(kb, entity.id)
+        [contradiction] = kb.contradictions()
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        kb.resolve_contradiction(contradiction.id, flagged[0].id, REVIEWER)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
+            state="all", token=kb.issue_token(HUMAN, author=ADMIN)[0]
+        )
+        assert result["count"] == 1
+        assert result["contradictions"][0]["state"] == "resolved"
+
+    def test_invalid_state_returns_validation_error(self, tmp_path: Path) -> None:
+        """A near-miss value (wrong case, a plausible-sounding synonym, or
+        the literal string "None" a model might emit for a null) must
+        raise loudly rather than silently matching zero contradictions,
+        which an agent could mistake for "no contradictions exist"
+        (KI-076 review)."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        self._flag(kb, entity.id)
+
+        mcp, _ = _server(kb)
+        for bad_state in ("Open", "unresolved", "None", ""):
+            result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
+                state=bad_state, token=kb.issue_token(HUMAN, author=ADMIN)[0]
+            )
+            assert "error" in result, bad_state
+            assert result["code"] == "VALIDATION_ERROR", bad_state
+
+    def test_state_none_over_real_transport_lists_every_state(self, tmp_path: Path) -> None:
+        """Every other test in this class drives the tool via a direct
+        `.fn()` call, bypassing FastMCP's own pydantic argument model
+        entirely. This one instead runs the real streamable-HTTP ASGI app
+        end to end, confirming a JSON `null` sent over the wire really
+        does reach this function as `None` — distinct from the omitted-
+        argument case, which falls back to the "open" default — rather
+        than being coerced to the default by pydantic somewhere in
+        between (KI-076 review; mirrors
+        test_header_authenticates_over_real_streamable_http_transport's
+        own rationale for testing the real transport, not just the fake
+        one every other test in this file uses)."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        self._flag(kb, entity.id)
+        [contradiction] = kb.contradictions()
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        kb.resolve_contradiction(contradiction.id, flagged[0].id, REVIEWER)
+
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        result = asyncio.run(
+            _call_tool_over_real_transport(
+                mcp, "ontolith.list_contradictions", {"state": None, "token": token}, None
+            )
         )
         assert result["count"] == 1
         assert result["contradictions"][0]["state"] == "resolved"
@@ -1095,6 +1179,10 @@ class TestListContradictionsTool:
         entity = kb.create_entity("Person", author=HUMAN)
         self._flag(kb, entity.id)
         [before] = kb.contradictions()
+        statuses_before = {
+            a.id: a.status
+            for a in kb.assertions(subject=entity.id, predicate="Person.name", status=None)
+        }
 
         mcp, _ = _server(kb)
         mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
@@ -1104,6 +1192,34 @@ class TestListContradictionsTool:
         [after] = kb.contradictions()
         assert after.member_ids == before.member_ids
         assert after.state == before.state
+        statuses_after = {
+            a.id: a.status
+            for a in kb.assertions(subject=entity.id, predicate="Person.name", status=None)
+        }
+        assert statuses_after == statuses_before
+
+    def test_malformed_metadata_degrades_gracefully_not_a_crash(self, tmp_path: Path) -> None:
+        """`metadata` is an open, schema-less blob (ADR-0041) - one
+        contradiction with a malformed rationale_history entry must not
+        take down the whole listing, the same failure mode this tool's
+        safe_rationale_history() usage was written to prevent (KI-076
+        review)."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        self._flag(kb, entity.id)
+        [contradiction] = kb.contradictions()
+        kb.backend.update_contradiction_members(
+            contradiction.id,
+            contradiction.member_ids,
+            metadata={"rationale_history": ["a bare string, not a dict"]},
+        )
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.list_contradictions").fn(
+            token=kb.issue_token(HUMAN, author=ADMIN)[0]
+        )
+        assert result["count"] == 1
+        assert result["contradictions"][0]["rationale_history"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -1216,6 +1332,40 @@ class TestFlagContradictionTool:
                 "actor": HUMAN,
                 "at": "2025-01-02T00:00:00+00:00",
             },
+        ]
+
+    def test_malformed_prior_metadata_degrades_gracefully_on_extend(self, tmp_path: Path) -> None:
+        """`metadata` is an open, schema-less blob (ADR-0041) - a malformed
+        entry left by some other writer must not crash a later extend call
+        that itself supplies a perfectly good rationale (KI-076 review:
+        this tool now routes through the same safe_rationale_history()
+        helper as ontolith.list_contradictions, not a raw .get(), so both
+        MCP tools must handle this identically)."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        second = kb.assert_literal(entity.id, "Person.name", "Ava", "Text", HUMAN)
+        first = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")[0]
+        kb.flag_contradiction(first.id, second.id, HUMAN)
+        [contradiction] = kb.contradictions()
+        kb.backend.update_contradiction_members(
+            contradiction.id,
+            contradiction.member_ids,
+            metadata={"rationale_history": ["a bare string, not a dict"]},
+        )
+
+        third = kb.assert_literal(entity.id, "Person.name", "Ada L.", "Text", HUMAN)
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.flag_contradiction").fn(
+            assertion_id_a=first.id,
+            assertion_id_b=third.id,
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            rationale="A new, well-formed rationale",
+        )
+
+        assert result["action"] == "extended"
+        assert result["rationale_history"] == [
+            {"rationale": "A new, well-formed rationale", "actor": HUMAN, "at": T0.isoformat()}
         ]
 
     def test_flag_different_predicates_returns_error(self, tmp_path: Path) -> None:
