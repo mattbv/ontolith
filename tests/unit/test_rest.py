@@ -1508,6 +1508,107 @@ class TestFlagContradictionRoute:
         assert response.status_code == 404
         assert response.json()["code"] == "NOT_FOUND"
 
+    def test_rationale_is_readable_back_in_metadata(self, tmp_path: Path) -> None:
+        """KI-075: `rationale` (KI-071) must round-trip through this route,
+        not just be recorded server-side and unreachable."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        from ontolith.core import Assertion
+
+        a2 = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity.id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada Lovelace",
+            author=HUMAN,
+            asserted_at=T0,
+            status="active",
+        )
+        kb.backend.put_assertion(a2)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/contradictions/flag",
+            json={
+                "assertion_id_a": assertions[0].id,
+                "assertion_id_b": a2.id,
+                "rationale": "Sources disagree",
+            },
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 201
+        contradiction_id = response.json()["contradiction"]["id"]
+        history = response.json()["contradiction"]["metadata"]["rationale_history"]
+        assert history == [{"rationale": "Sources disagree", "actor": HUMAN, "at": T0.isoformat()}]
+
+        # And GET /contradictions surfaces the same history for the same
+        # contradiction, not just the flag route's own response.
+        list_response = client.get("/contradictions", headers=_auth(token))
+        (listed,) = [c for c in list_response.json() if c["id"] == contradiction_id]
+        assert listed["metadata"]["rationale_history"] == history
+
+        # KI-075 review: extend the same contradiction with a second
+        # rationale, pinning that this route's response is read back from
+        # the persisted, re-fetched Contradiction (post-write) rather than
+        # synthesized from just this call's own `rationale` field — a
+        # single-call test can't distinguish the two.
+        a3 = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity.id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada L.",
+            author=HUMAN,
+            asserted_at=T0,
+            status="active",
+        )
+        kb.backend.put_assertion(a3)
+        kb.clock.advance(days=1)  # type: ignore[attr-defined]
+        extend_response = client.post(
+            "/contradictions/flag",
+            json={
+                "assertion_id_a": assertions[0].id,
+                "assertion_id_b": a3.id,
+                "rationale": "A third source also disagrees",
+            },
+            headers=_auth(token),
+        )
+        assert extend_response.status_code == 201
+        assert extend_response.json()["action"] == "extended"
+        extended_history = extend_response.json()["contradiction"]["metadata"]["rationale_history"]
+        assert extended_history == [
+            {"rationale": "Sources disagree", "actor": HUMAN, "at": T0.isoformat()},
+            {
+                "rationale": "A third source also disagrees",
+                "actor": HUMAN,
+                "at": "2025-01-02T00:00:00+00:00",
+            },
+        ]
+
+        # And the accumulated trail survives POST .../resolve — the one
+        # backend write (state/resolved_by/resolved_at only) that could
+        # silently wipe `metadata` if it ever touched the wrong column.
+        # REVIEWER, not HUMAN: the resolver must not be a party (author) to
+        # any member assertion (KI-026), and HUMAN authored all three here.
+        reviewer_token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+        resolve_response = client.post(
+            f"/contradictions/{contradiction_id}/resolve",
+            json={"winner_assertion_id": assertions[0].id},
+            headers=_auth(reviewer_token),
+        )
+        assert resolve_response.status_code == 200
+        assert resolve_response.json()["metadata"]["rationale_history"] == extended_history
+
 
 # ---------------------------------------------------------------------------
 # POST /contradictions/{contradiction_id}/resolve

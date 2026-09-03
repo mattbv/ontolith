@@ -10,6 +10,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- Read surface for a contradiction's accumulated `rationale_history` (closes KI-075): REST's
+  `ContradictionOut` gains a `metadata: dict[str, Any]` field (all three routes that return one —
+  `GET /contradictions`, `POST /contradictions/flag`, `POST /contradictions/{id}/resolve`).
+  GraphQL's `ContradictionType` gains `rationaleHistory: [RationaleEntryType!]!` instead — GraphQL
+  has no native map scalar, so the trail is projected into a structured `{rationale, actor, at}`
+  type rather than exposed as an opaque blob (same reason `FilterInput` already exists as an
+  explicit key/value list). MCP's `ontolith.flag_contradiction` response gains a
+  `rationale_history` key carrying the *full* trail, not just the value passed to that call —
+  still the only MCP surface that returns a contradiction at all (KI-076, filed during review: no
+  read-only `list_contradictions`-shaped tool exists). CLI's `contradiction list` output gains a
+  `rationale_entries=<n>` suffix (omitted when a contradiction has no history) plus a
+  `--show-rationale` flag that prints every entry's full text (mirroring `flag`'s own format —
+  added during review, since a bare count with no way to read the text on a pure read path
+  defeated the point; named distinctly from `flag`'s own `--rationale <text>` option to avoid a
+  same-flag-different-meaning trap between the two commands), and `contradiction flag` echoes
+  every accumulated entry on its own line after the summary. Mirrors KI-072's own shape: the data
+  was captured (KI-071) but unreachable through any interface but the raw SDK. `contradiction
+  resolve` (CLI) has no equivalent flag — `resolve_contradiction()` takes no `rationale` input,
+  and a resolved contradiction's trail is reachable via `contradiction list --state resolved
+  --show-rationale`. New `govern.contradiction.safe_rationale_history()` — used by GraphQL's and
+  the CLI's entry-rendering instead of per-field `.get(key, default)` (review finding: `.get()`
+  alone still raised on a non-dict entry or a non-list `rationale_history`, and silently passed a
+  present-but-`None` field value through instead of defaulting it, since the key check `.get()`
+  performs doesn't cover either case) — `metadata`/`rationale_history` is an open, schema-less
+  blob (ADR-0041), and a malformed or legacy-shape entry previously raised an uncaught exception —
+  on GraphQL, one that failed the entire `contradictions` query, not just the one bad
+  contradiction.
 - Read surface for the admin-action audit trail (closes KI-072, ADR-0042 update): new
   `Ontology.get_admin_events(author, *, actor=None, target=None)`, admin-gated the same way
   `list_tokens`/`list_principals` already are. REST gets `GET /admin-events` (`actor`/`target`

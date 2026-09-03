@@ -1251,3 +1251,88 @@ class TestContradictionMutations:
         )
         assert body["data"]["resolveContradiction"]["state"] == "resolved"
         assert body["data"]["resolveContradiction"]["resolvedBy"] == REVIEWER
+
+    def test_rationale_is_readable_back_in_rationale_history(self, tmp_path: Path) -> None:
+        """KI-075: `rationale` (KI-071) must round-trip through this
+        mutation/query, not just be recorded server-side and unreachable."""
+        kb = _kb(tmp_path)
+        e = kb.create_entity("Person", author=HUMAN)
+        a1 = kb.assert_literal(e.id, "Person.name", "Ada", "Text", author=HUMAN)
+        a2 = kb.assert_literal(e.id, "Person.name", "Ida", "Text", author=ADMIN)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(ADMIN, author=ADMIN)
+        flag_query = """
+        mutation($a: String!, $b: String!, $r: String!) {
+          flagContradiction(assertionIdA: $a, assertionIdB: $b, rationale: $r) {
+            contradiction {
+              id
+              rationaleHistory { rationale actor at }
+            }
+          }
+        }
+        """
+        body = _gql(
+            client,
+            flag_query,
+            variables={"a": a1.id, "b": a2.id, "r": "Sources disagree"},
+            headers=_auth(token),
+        )
+        contradiction = body["data"]["flagContradiction"]["contradiction"]
+        assert contradiction["rationaleHistory"] == [
+            {"rationale": "Sources disagree", "actor": ADMIN, "at": T0.isoformat()}
+        ]
+
+        # Query.contradictions surfaces the same history for the same
+        # contradiction, not just the mutation's own response.
+        list_query = """
+        query { contradictions { id rationaleHistory { rationale actor at } } }
+        """
+        body = _gql(client, list_query, headers=_auth(token))
+        (listed,) = [c for c in body["data"]["contradictions"] if c["id"] == contradiction["id"]]
+        assert listed["rationaleHistory"] == contradiction["rationaleHistory"]
+
+        # KI-075 review: extend with a second rationale, pinning that this
+        # response is read back from the persisted, re-fetched Contradiction
+        # (post-write) rather than synthesized from just this call's own
+        # `rationale` argument — a single-call test can't distinguish the two.
+        a3 = kb.assert_literal(e.id, "Person.name", "Ida L.", "Text", author=ADMIN)
+        kb.clock.advance(days=1)  # type: ignore[attr-defined]
+        body = _gql(
+            client,
+            flag_query,
+            variables={"a": a1.id, "b": a3.id, "r": "A third source also disagrees"},
+            headers=_auth(token),
+        )
+        extended = body["data"]["flagContradiction"]["contradiction"]
+        assert extended["rationaleHistory"] == [
+            {"rationale": "Sources disagree", "actor": ADMIN, "at": T0.isoformat()},
+            {
+                "rationale": "A third source also disagrees",
+                "actor": ADMIN,
+                "at": "2025-01-02T00:00:00+00:00",
+            },
+        ]
+
+        # And the accumulated trail survives resolveContradiction — the one
+        # backend write (state/resolved_by/resolved_at only) that could
+        # silently wipe `metadata` if it ever touched the wrong column.
+        # REVIEWER, not ADMIN: the resolver must not be a party (author) to
+        # any member assertion (KI-026), and ADMIN authored a2/a3 above.
+        reviewer_token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+        resolve_query = """
+        mutation($cid: String!, $winner: String!) {
+          resolveContradiction(contradictionId: $cid, winnerAssertionId: $winner) {
+            rationaleHistory { rationale actor at }
+          }
+        }
+        """
+        body = _gql(
+            client,
+            resolve_query,
+            variables={"cid": contradiction["id"], "winner": a1.id},
+            headers=_auth(reviewer_token),
+        )
+        assert (
+            body["data"]["resolveContradiction"]["rationaleHistory"] == extended["rationaleHistory"]
+        )

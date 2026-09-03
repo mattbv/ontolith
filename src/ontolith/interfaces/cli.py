@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 
 from ontolith import Ontology
+from ontolith.govern.contradiction import safe_rationale_history
 from ontolith.schema.linkml import from_yaml
 
 app = typer.Typer(
@@ -591,6 +592,19 @@ def list_contradictions(
         bool,
         typer.Option("--all", help="Show contradictions in every state, ignoring --state."),
     ] = False,
+    # Named distinctly from `flag`'s own `--rationale <text>` option (a
+    # different kind of value - text there, a bool switch here) to avoid a
+    # same-name-different-meaning trap between the two sibling commands.
+    show_rationale: Annotated[
+        bool,
+        typer.Option(
+            "--show-rationale",
+            help=(
+                "Print each contradiction's accumulated rationale_history "
+                "entries (KI-075) in full, not just their count."
+            ),
+        ),
+    ] = False,
 ) -> None:
     """List contradictions, defaulting to open (unresolved) ones."""
     kb = _kb()
@@ -600,10 +614,15 @@ def list_contradictions(
             typer.echo("No contradictions found.")
             return
         for c in results:
+            history = safe_rationale_history(c.metadata)
+            suffix = f"  rationale_entries={len(history)}" if history else ""
             typer.echo(
                 f"{c.id}  state={c.state}  subject={c.subject}  "
-                f"predicate={c.predicate}  members={len(c.member_ids)}"
+                f"predicate={c.predicate}  members={len(c.member_ids)}{suffix}"
             )
+            if show_rationale:
+                for entry in history:
+                    typer.echo(f"  [{entry['at']}] {entry['actor']}: {entry['rationale']}")
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
@@ -638,6 +657,12 @@ def flag_contradiction(
             f"{action.capitalize()}: {contradiction.id}  state={contradiction.state}  "
             f"members={len(contradiction.member_ids)}"
         )
+        # KI-075: echo the full accumulated trail, not just this call's own
+        # rationale — the only way to confirm an "extend" call's rationale
+        # was appended rather than dropped (KI-071) without a separate
+        # `contradiction list` round-trip.
+        for entry in safe_rationale_history(contradiction.metadata):
+            typer.echo(f"  [{entry['at']}] {entry['actor']}: {entry['rationale']}")
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None

@@ -1255,6 +1255,100 @@ class TestContradictionFlag:
         assert result.exit_code == 1
         assert "Assertion not found" in result.output
 
+    def test_rationale_is_readable_back_in_output(self, seeded_db: tuple[Path, str, str]) -> None:
+        """KI-075: `--rationale` (KI-071) must be echoed back by this
+        command, not just recorded server-side and unreachable."""
+        db, author, entity_id = seeded_db
+        kb = Ontology.connect(db)
+        kb.assert_literal(entity_id, "Person.name", "Ada", "Text", author)
+        first = kb.assertions(subject=entity_id, predicate="Person.name", status="active")[0]
+        second = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity_id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada Lovelace",
+            author=author,
+            asserted_at=kb.clock.now(),
+            status="active",
+        )
+        kb.backend.put_assertion(second)
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "contradiction",
+                "flag",
+                first.id,
+                second.id,
+                "--author",
+                author,
+                "--rationale",
+                "Sources disagree",
+            ],
+        )
+        assert result.exit_code == 0
+        assert f"{author}: Sources disagree" in result.output
+
+        # `contradiction list` surfaces the same history for the same
+        # contradiction, not just the flag command's own output.
+        list_result = runner.invoke(app, ["--db", str(db), "contradiction", "list"])
+        assert "rationale_entries=1" in list_result.output
+
+        # KI-075 review: extend with a second rationale, pinning that this
+        # command's output reflects the persisted, re-fetched Contradiction
+        # (post-write) rather than just this call's own `--rationale` value
+        # — a single-call test can't distinguish the two. Also exercises
+        # `contradiction list --show-rationale`, the read-only path to the
+        # actual text (plain `list` only shows a count).
+        kb = Ontology.connect(db)
+        third = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity_id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada L.",
+            author=author,
+            asserted_at=kb.clock.now(),
+            status="active",
+        )
+        kb.backend.put_assertion(third)
+        kb.close()
+
+        extend_result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "contradiction",
+                "flag",
+                first.id,
+                third.id,
+                "--author",
+                author,
+                "--rationale",
+                "A third source also disagrees",
+            ],
+        )
+        assert extend_result.exit_code == 0
+        assert "Extended:" in extend_result.output
+        assert f"{author}: Sources disagree" in extend_result.output
+        assert f"{author}: A third source also disagrees" in extend_result.output
+
+        rationale_list_result = runner.invoke(
+            app, ["--db", str(db), "contradiction", "list", "--show-rationale"]
+        )
+        assert "rationale_entries=2" in rationale_list_result.output
+        assert f"{author}: Sources disagree" in rationale_list_result.output
+        assert f"{author}: A third source also disagrees" in rationale_list_result.output
+
 
 class TestContradictionResolve:
     def test_resolves_contradiction(self, seeded_db: tuple[Path, str, str]) -> None:

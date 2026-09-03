@@ -345,6 +345,9 @@ class ContradictionOut(BaseModel):
     raised_by: str | None
     resolved_by: str | None
     resolved_at: str | None
+    # Open JSON blob (KI-071/KI-075) — in practice, {} or
+    # {"rationale_history": [{"rationale", "actor", "at"}, ...]}.
+    metadata: dict[str, Any]
 
 
 class ResolveContradictionIn(BaseModel):
@@ -1021,6 +1024,7 @@ def create_rest_app(
                 raised_by=c.raised_by,
                 resolved_by=c.resolved_by,
                 resolved_at=c.resolved_at.isoformat() if c.resolved_at else None,
+                metadata=c.metadata,
             )
             for c in results
         ]
@@ -1056,6 +1060,7 @@ def create_rest_app(
                 resolved_at=(
                     contradiction.resolved_at.isoformat() if contradiction.resolved_at else None
                 ),
+                metadata=contradiction.metadata,
             ),
             action=action,
         )
@@ -1088,6 +1093,7 @@ def create_rest_app(
             resolved_at=(
                 contradiction.resolved_at.isoformat() if contradiction.resolved_at else None
             ),
+            metadata=contradiction.metadata,
         )
 
     # ------------------------------------------------------------------

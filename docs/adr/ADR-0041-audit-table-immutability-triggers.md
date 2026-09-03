@@ -80,3 +80,27 @@ home for exactly this kind of extension. If `rationale_history` is ever relied o
 audit-critical (e.g. surfaced to a resolver as evidence, or exposed externally — see KI-075, no
 interface currently reads it back at all), revisit this trade-off and consider the
 `ContradictionEvent` route instead.
+
+**Update (2026-09-03, KI-075):** both conditions the trigger above named have now happened —
+`rationale_history` is exposed externally (REST, GraphQL, MCP, and the CLI all surface it) *and*
+surfaced to a resolver as evidence (REST's `POST /contradictions/{id}/resolve` and GraphQL's
+`resolveContradiction` both return the accumulated trail in their resolution response; the CLI's
+`contradiction list --show-rationale` is explicitly reviewer-facing). The trade-off stands
+unrevisited, deliberately, but not because neither condition fired — both did. The distinction
+that actually matters: every one of those four surfaces presents `rationale_history` as read-only
+context a human can *look at* when deciding, never as an input any policy, capability check, or
+`resolve_contradiction()` call *itself* reads — `resolve_contradiction()`'s own logic still turns
+solely on which assertion the caller names as winner, with `rationale_history` never consulted
+anywhere in `govern/`'s decision path. The one place `govern/` itself touches `metadata` is
+`contradiction.py`'s own `safe_rationale_history()` (KI-075) — a presentation-safety coercion
+helper for read surfaces, not decision logic; it has no caller in `query/`, `core/`, or anywhere
+a policy or capability decision is made. "Surfaced to a resolver as evidence" meant available for
+a human to read while deciding, which is now true; it did not mean, and was never intended to
+mean, "consumed by
+the decision logic" — that stronger condition, the one this ADR's mutability guarantee is actually
+about, still hasn't happened. `update_contradiction_members`'s `metadata` parameter is unchanged:
+still wholesale replacement, still no DB-level guardrail against a future caller dropping or
+rewriting prior entries — visibility just makes that gap easier to notice, not more consequential
+to close. If a future change ever has `resolve_contradiction()`, a `PolicyStrategy`, or any other
+piece of `govern/` logic *read* `rationale_history` to decide something, that is the point to
+revisit this trade-off for real — not before.
