@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- Read surface for a contradiction's accumulated `rationale_history` (closes KI-075): REST's
+  `ContradictionOut` gains a `metadata: dict[str, Any]` field (all three routes that return one —
+  `GET /contradictions`, `POST /contradictions/flag`, `POST /contradictions/{id}/resolve`).
+  GraphQL's `ContradictionType` gains `rationaleHistory: [RationaleEntryType!]!` instead — GraphQL
+  has no native map scalar, so the trail is projected into a structured `{rationale, actor, at}`
+  type rather than exposed as an opaque blob (same reason `FilterInput` already exists as an
+  explicit key/value list). MCP's `ontolith.flag_contradiction` response gains a
+  `rationale_history` key carrying the *full* trail, not just the value passed to that call. CLI's
+  `contradiction list` output gains a `rationale_entries=<n>` suffix per contradiction, and
+  `contradiction flag` echoes every accumulated entry on its own line after the summary. Mirrors
+  KI-072's own shape: the data was captured (KI-071) but unreachable through any interface but the
+  raw SDK. `contradiction resolve` (CLI) is unchanged — `resolve_contradiction()` takes no
+  `rationale`, and this KI only named `list`/`flag`.
 - Read surface for the admin-action audit trail (closes KI-072, ADR-0042 update): new
   `Ontology.get_admin_events(author, *, actor=None, target=None)`, admin-gated the same way
   `list_tokens`/`list_principals` already are. REST gets `GET /admin-events` (`actor`/`target`

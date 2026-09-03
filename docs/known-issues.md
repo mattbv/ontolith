@@ -1522,7 +1522,7 @@ Round 1 review found the new blanket redaction turned a pre-existing mislabel in
 
 ---
 
-## KI-075 — No interface can read `Contradiction.metadata`/`rationale_history` back
+## KI-075 — No interface can read `Contradiction.metadata`/`rationale_history` back ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — the data is captured but unreachable through any shipped interface
 **Milestone target:** Backlog
@@ -1534,7 +1534,7 @@ KI-071 fixed `flag_contradiction()`'s `rationale` being silently dropped on the 
 
 ### Fix
 
-Add `metadata` (or specifically `rationale_history`) to each interface's contradiction read path: REST's `ContradictionOut`, GraphQL's contradiction type, MCP's contradiction-returning tool responses, and CLI's `contradiction list`/`contradiction flag` output — mirroring KI-072's own shape (a thin serialization change, no new domain logic).
+REST's `ContradictionOut` gained a `metadata: dict[str, Any]` field, populated identically by all three routes that return one (`GET /contradictions`, `POST /contradictions/flag`, `POST /contradictions/{id}/resolve`). GraphQL's `ContradictionType` gained `rationale_history: list[RationaleEntryType]` instead of a raw `metadata` field — GraphQL has no native map scalar (the same reason `FilterInput` already exists as an explicit key/value list), so the accumulated trail is projected out of `metadata["rationale_history"]` into a structured `{rationale, actor, at}` type rather than exposed as an opaque blob; `_contradiction_type()`, the one helper shared by the query and both mutations, is the single call site. MCP's `ontolith.flag_contradiction` response dict gained a `rationale_history` key carrying the *full* accumulated trail (not just the value passed to that call) — MCP still has no contradiction query/list tool at all (unchanged by this fix; the same gap the Description notes). CLI's `contradiction list` output gained a `rationale_entries=<n>` suffix per contradiction (omitted when there's no history, to keep the one-line-per-contradiction format); `contradiction flag` echoes every accumulated entry as its own indented line after the summary, so a caller can confirm an "extend" call's rationale was appended rather than dropped without a separate `list` round-trip. `contradiction resolve` was left unchanged — `resolve_contradiction()` doesn't take a `rationale`, and KI-075 itself only named `list`/`flag`.
 
 ---
 
