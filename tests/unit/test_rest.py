@@ -1508,6 +1508,54 @@ class TestFlagContradictionRoute:
         assert response.status_code == 404
         assert response.json()["code"] == "NOT_FOUND"
 
+    def test_rationale_is_readable_back_in_metadata(self, tmp_path: Path) -> None:
+        """KI-075: `rationale` (KI-071) must round-trip through this route,
+        not just be recorded server-side and unreachable."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        assertions = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        from ontolith.core import Assertion
+
+        a2 = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity.id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada Lovelace",
+            author=HUMAN,
+            asserted_at=T0,
+            status="active",
+        )
+        kb.backend.put_assertion(a2)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/contradictions/flag",
+            json={
+                "assertion_id_a": assertions[0].id,
+                "assertion_id_b": a2.id,
+                "rationale": "Sources disagree",
+            },
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 201
+        history = response.json()["contradiction"]["metadata"]["rationale_history"]
+        assert history == [{"rationale": "Sources disagree", "actor": HUMAN, "at": T0.isoformat()}]
+
+        # And GET /contradictions surfaces the same history for the same
+        # contradiction, not just the flag route's own response.
+        list_response = client.get("/contradictions", headers=_auth(token))
+        (listed,) = [
+            c for c in list_response.json() if c["id"] == response.json()["contradiction"]["id"]
+        ]
+        assert listed["metadata"]["rationale_history"] == history
+
 
 # ---------------------------------------------------------------------------
 # POST /contradictions/{contradiction_id}/resolve
