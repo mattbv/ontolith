@@ -600,9 +600,11 @@ def list_contradictions(
             typer.echo("No contradictions found.")
             return
         for c in results:
+            history = c.metadata.get("rationale_history", [])
+            rationale = f"  rationale_entries={len(history)}" if history else ""
             typer.echo(
                 f"{c.id}  state={c.state}  subject={c.subject}  "
-                f"predicate={c.predicate}  members={len(c.member_ids)}"
+                f"predicate={c.predicate}  members={len(c.member_ids)}{rationale}"
             )
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -638,6 +640,12 @@ def flag_contradiction(
             f"{action.capitalize()}: {contradiction.id}  state={contradiction.state}  "
             f"members={len(contradiction.member_ids)}"
         )
+        # KI-075: echo the full accumulated trail, not just this call's own
+        # rationale — the only way to confirm an "extend" call's rationale
+        # was appended rather than dropped (KI-071) without a separate
+        # `contradiction list` round-trip.
+        for entry in contradiction.metadata.get("rationale_history", []):
+            typer.echo(f"  [{entry['at']}] {entry['actor']}: {entry['rationale']}")
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None

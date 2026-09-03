@@ -1255,6 +1255,51 @@ class TestContradictionFlag:
         assert result.exit_code == 1
         assert "Assertion not found" in result.output
 
+    def test_rationale_is_readable_back_in_output(self, seeded_db: tuple[Path, str, str]) -> None:
+        """KI-075: `--rationale` (KI-071) must be echoed back by this
+        command, not just recorded server-side and unreachable."""
+        db, author, entity_id = seeded_db
+        kb = Ontology.connect(db)
+        kb.assert_literal(entity_id, "Person.name", "Ada", "Text", author)
+        first = kb.assertions(subject=entity_id, predicate="Person.name", status="active")[0]
+        second = Assertion(
+            id=kb.id_provider.next(),
+            namespace="default",
+            subject=entity_id,
+            predicate="Person.name",
+            value_kind="literal",
+            value_type="Text",
+            value="Ada Lovelace",
+            author=author,
+            asserted_at=kb.clock.now(),
+            status="active",
+        )
+        kb.backend.put_assertion(second)
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "contradiction",
+                "flag",
+                first.id,
+                second.id,
+                "--author",
+                author,
+                "--rationale",
+                "Sources disagree",
+            ],
+        )
+        assert result.exit_code == 0
+        assert f"{author}: Sources disagree" in result.output
+
+        # `contradiction list` surfaces the same history for the same
+        # contradiction, not just the flag command's own output.
+        list_result = runner.invoke(app, ["--db", str(db), "contradiction", "list"])
+        assert "rationale_entries=1" in list_result.output
+
 
 class TestContradictionResolve:
     def test_resolves_contradiction(self, seeded_db: tuple[Path, str, str]) -> None:
