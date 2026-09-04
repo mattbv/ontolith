@@ -960,6 +960,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their own losing entry either. `docs/adr/ADR-0022-rest-write-review-admin.md` incorrectly
   claimed this guard already existed; corrected.
 
+#### Documented
+- SPEC §18 observability (metrics/events/structured logs) is scoped to M4, not built
+  opportunistically ahead of it and not declared out of scope through 1.0 (closes KI-064,
+  ADR-0044): `observe/` stays an empty package for now, but the Implementation Plan's M4 scope
+  column — which never named observability at all — now does, and the architecture (a single
+  `Clock`/`IdProvider`-style port, `govern/policy` still emits nothing itself) and a priority
+  order (structured correlated logs, then the four named lifecycle events, then the 8-metric
+  surface) are decided ahead of M4 so the milestone doesn't have to re-litigate them. No code
+  changes — a scoping decision, not a feature.
+
 #### Security
 
 - MCP's `create_mcp_server()` gains an opt-in `require_header_token: bool = False` keyword-only
