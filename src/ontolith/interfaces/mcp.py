@@ -40,6 +40,15 @@ closed rather than silently falling back to the argument — see
 ``token`` remains the only channel there — ADR-0014 recommends short-lived
 tokens for stdio-facing principals for that reason.
 
+That fallback is opt-in to disable (KI-073): ``create_mcp_server(...,
+require_header_token=True)`` makes an absent header fail the call the same
+as no credential at all, even when a caller still supplies ``token`` —
+letting an HTTP deployment require the more private channel outright
+instead of merely preferring it. Off by default, since it makes stdio
+transports (which have no header channel to require) unusable outright;
+a deployment reaches for it once the header path is available, not
+because the argument fallback is itself a live vulnerability.
+
 Error handling (KI-059, KI-074, SPEC §16): every tool wraps its body in one
 ``except OntolithError as exc: return _error_response(exc)``, the MCP
 equivalent of REST's single ``@app.exception_handler(OntolithError)`` and
@@ -123,7 +132,13 @@ def _error_response(exc: OntolithError) -> dict[str, Any]:
     return {"error": message, "code": exc.code, "detail": exc.detail}
 
 
-def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "ontolith") -> FastMCP:
+def create_mcp_server(
+    kb: Ontology,
+    auth_provider: AuthProvider,
+    name: str = "ontolith",
+    *,
+    require_header_token: bool = False,
+) -> FastMCP:
     """Build and return a FastMCP server bound to the given knowledge base.
 
     The returned server is not yet running — call ``mcp.run()`` to start it.
@@ -133,6 +148,15 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         auth_provider: Resolves caller-supplied bearer tokens to Principals
             (ADR-0014) — e.g. ``TokenAuthProvider(kb.backend)``
         name: Server name advertised to MCP clients
+        require_header_token: When ``True`` (KI-073), disables the ``token``
+            tool-argument fallback entirely — a call reaching a tool with no
+            (or a malformed) ``Authorization`` header fails the same way a
+            call with no credential at all would, even if ``token`` was
+            supplied. ``False`` by default: the argument remains a valid
+            fallback (KI-067), which is what keeps stdio transports (no
+            header channel exists there) usable at all. Set this only for
+            an HTTP (SSE/streamable-HTTP) deployment that wants to require
+            the more private channel outright, not merely prefer it.
 
     Returns:
         Configured FastMCP server with all ADR-0008 tools registered
@@ -152,7 +176,9 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         would reopen the exact exposure this fix removes, with no signal
         that it happened. An *absent* header (or no HTTP request context at
         all — see below) is not malformed, just missing, and does fall back
-        to the argument as before.
+        to the argument as before — unless ``require_header_token`` is set
+        (KI-073), in which case an absent header is treated the same as no
+        credential supplied at all, regardless of ``token``.
 
         ``mcp.get_context().request_context.request`` is the raw Starlette
         request under the SSE/streamable-HTTP transports (the mcp SDK's own
@@ -160,7 +186,10 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
         request exists) and accessing ``.request_context`` itself raises
         ``ValueError`` when called outside any live request at all (e.g. a
         test invoking a tool's ``.fn`` directly) — both cases fall back to
-        the ``token`` argument, same as a live request with no header.
+        the ``token`` argument, same as a live request with no header (or,
+        under ``require_header_token``, fail the same way a live request
+        with no header would — stdio simply has no way to satisfy the
+        requirement).
         """
         try:
             request = mcp.get_context().request_context.request
@@ -174,6 +203,8 @@ def create_mcp_server(kb: Ontology, auth_provider: AuthProvider, name: str = "on
                 if scheme.lower() != "bearer" or not value:
                     return None, "Malformed Authorization header"
                 return value, None
+        if require_header_token:
+            return None, "No bearer token provided"
         if token is None:
             return None, "No bearer token provided"
         return token, None

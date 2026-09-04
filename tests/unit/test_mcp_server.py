@@ -46,9 +46,12 @@ def _kb(tmp_path: Path) -> Ontology:
     return kb
 
 
-def _server(kb: Ontology) -> tuple:
+def _server(kb: Ontology, *, require_header_token: bool = False) -> tuple:
     auth_provider = TokenAuthProvider(kb.backend)
-    return create_mcp_server(kb, auth_provider), auth_provider
+    return (
+        create_mcp_server(kb, auth_provider, require_header_token=require_header_token),
+        auth_provider,
+    )
 
 
 @contextlib.contextmanager
@@ -1957,6 +1960,122 @@ class TestBearerTokenTransport:
             "code": "AUTH_ERROR",
             "detail": {},
         }
+
+
+# ---------------------------------------------------------------------------
+# require_header_token (KI-073)
+# ---------------------------------------------------------------------------
+
+
+class TestRequireHeaderToken:
+    """`create_mcp_server(..., require_header_token=True)`: an opt-in that
+    disables the `token` argument fallback entirely, so an HTTP deployment
+    can require the header channel outright instead of merely preferring
+    it (KI-067). Off by default — every test above in TestBearerTokenTransport
+    exercises the default (`require_header_token=False`) behavior unchanged."""
+
+    def test_default_is_false_existing_behavior_unaffected(self, tmp_path: Path) -> None:
+        """create_mcp_server's own default, not passing the kwarg at all -
+        pins that the flag is genuinely opt-in, not just False by
+        convention in this file's own _server() helper."""
+        kb = _kb(tmp_path)
+        auth_provider = TokenAuthProvider(kb.backend)
+        mcp = create_mcp_server(kb, auth_provider)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request(None):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=token)
+
+        assert result == {"concepts": []}
+
+    def test_valid_header_still_authenticates(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb, require_header_token=True)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request(f"Bearer {token}"):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn()
+
+        assert result == {"concepts": []}
+
+    def test_no_header_rejects_even_a_valid_token_argument(self, tmp_path: Path) -> None:
+        """The whole point of the flag: a live HTTP request with no header
+        must fail, even though the token argument alone would have
+        authenticated fine under the default (False) behavior - proven by
+        TestBearerTokenTransport.test_no_header_falls_back_to_token_argument
+        using the identical setup with the flag left off."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb, require_header_token=True)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request(None):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=token)
+
+        assert result == {"error": "No bearer token provided", "code": "AUTH_ERROR", "detail": {}}
+
+    def test_no_request_context_at_all_also_rejects_token_argument(self, tmp_path: Path) -> None:
+        """stdio (or any call outside a live HTTP request/context) has no
+        header channel to satisfy the requirement at all - it becomes
+        unusable under this flag, the documented tradeoff, not a bug. A
+        direct .fn() call with no _http_request context simulates this."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb, require_header_token=True)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=token)
+
+        assert result == {"error": "No bearer token provided", "code": "AUTH_ERROR", "detail": {}}
+
+    def test_malformed_header_still_fails_closed(self, tmp_path: Path) -> None:
+        """Unchanged from the default behavior - a present-but-malformed
+        header never falls back to the argument regardless of this flag."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb, require_header_token=True)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request("Basic dXNlcjpwYXNz"):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn(token=token)
+
+        assert result == {
+            "error": "Malformed Authorization header",
+            "code": "AUTH_ERROR",
+            "detail": {},
+        }
+
+    def test_no_header_and_no_token_argument_still_rejects(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb, require_header_token=True)
+
+        with _http_request(None):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn()
+
+        assert result == {"error": "No bearer token provided", "code": "AUTH_ERROR", "detail": {}}
+
+    def test_blocks_argument_fallback_over_real_transport(self, tmp_path: Path) -> None:
+        """Every test above drives `_bearer_token` through `_http_request`'s
+        faked `RequestContext` - this one instead runs the real
+        streamable-HTTP ASGI app end to end, mirroring
+        test_header_authenticates_over_real_streamable_http_transport's own
+        rationale for not trusting the fake context alone (KI-067 review
+        found the fake had drifted from the SDK's real wiring once)."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb, require_header_token=True)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        result = asyncio.run(
+            _call_tool_over_real_transport(mcp, "ontolith.schema", {"token": token}, None)
+        )
+        assert result == {"error": "No bearer token provided", "code": "AUTH_ERROR", "detail": {}}
+
+    def test_valid_header_authenticates_over_real_transport(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb, require_header_token=True)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        result = asyncio.run(
+            _call_tool_over_real_transport(mcp, "ontolith.schema", {}, f"Bearer {token}")
+        )
+        assert result == {"concepts": []}
 
 
 # ---------------------------------------------------------------------------
