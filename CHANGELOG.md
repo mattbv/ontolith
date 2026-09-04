@@ -966,8 +966,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `strawberry-graphql`'s own `<1.0` bound was justified by. `fastapi`/`typer`/`uvicorn` are all
   long-lived pre-1.0 packages, same shape `strawberry-graphql` was in before KI-065's own floor
   bump — the `<1.0` bound guards against an eventual major release, not 0.x churn;
-  `security.yml`'s weekly `pip-audit` remains the real backstop for that. `uv lock` produced only
-  an 8-line lockfile metadata diff — no package's resolved version actually changed.
+  `security.yml`'s weekly `pip-audit` remains the real backstop for that. `python-ulid`'s floor
+  stayed at `2.0` (the lock resolves `3.1.0`) rather than being bumped to match, so its `<4.0`
+  deliberately spans two majors instead of one — out of scope for this KI, which added upper
+  bounds, not audited floors. The `dev` extra's ~20 tooling dependencies remain unbounded, also out
+  of scope and lock-pinned in practice via the committed `uv.lock`. `uv lock` produced only an
+  8-line lockfile metadata diff — no package's resolved version actually changed. ADR-0026 updated.
 - MCP tools prefer an `Authorization: Bearer <token>` HTTP header over the `token` tool argument
   under the SSE/streamable-HTTP transports (closes KI-067, ADR-0014 update) — keeps a live
   credential out of the calling model's own context window and any MCP client's tool-call logging.

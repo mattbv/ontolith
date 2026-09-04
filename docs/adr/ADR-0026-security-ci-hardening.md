@@ -149,6 +149,17 @@ every direct dependency (`pydantic`, `typer`, `python-ulid`, `fastapi`, `duckdb`
 `pyyaml` remain unbounded) — those are a separate, broader decision tracked as a follow-up, not
 silently out of scope.
 
+**Update (2026-09-04, KI-070):** that follow-up landed — the convention now covers every direct
+*runtime* dependency: `pydantic>=2.0,<3.0`, `typer>=0.9,<1.0`, `python-ulid>=2.0,<4.0`
+(floor left at `2.0` rather than bumped to match the locked `3.x`, so this one spans two majors
+rather than one — deliberate, not an oversight, since KI-070's own scope was adding upper bounds,
+not auditing floors), `fastapi>=0.110,<1.0`, `duckdb>=1.0,<2.0`, `uvicorn>=0.27,<1.0`, and
+`pyyaml>=6.0,<7.0`. `fastapi`/`typer`/`uvicorn` share `strawberry-graphql`'s own pre-1.0 caveat
+from the update above: `<1.0` guards against an eventual major release, not 0.x churn. The `dev`
+extra's ~20 tooling dependencies (`ruff`, `mypy`, `pytest`, etc.) remain deliberately unbounded —
+out of KI-070's own stated scope, and lock-pinned in practice since CI installs from the committed
+`uv.lock`, not a fresh resolve.
+
 ## References
 
 - Implementation Plan §5 (quality gates table), §7.1 (CI pipeline)
