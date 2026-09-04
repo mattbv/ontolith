@@ -6,7 +6,7 @@
 
 **Deciders:** Ontolith Core Team
 
-**Related:** ADR-0002 (Schema Definition), ADR-0007 (Interop Priority), SPEC §6.1 (One IR, two front-ends), SPEC Appendix B (open implementation questions)
+**Related:** ADR-0002 (Schema Definition), ADR-0007 (Interop Priority), SPEC §6.1 (One IR, two front-ends), SPEC Appendix B (open implementation questions), ADR-0036 (RDF/OWL bridge — `Float` mapping reconciled, see Update below, KI-068)
 
 ---
 
@@ -49,7 +49,7 @@ The single biggest scope-reducer is **inline attributes only** — Ontolith-auth
 |---|---|
 | Text | string |
 | Integer | integer |
-| Float | float (also accepts `double` on import) |
+| Float | double (also accepts `float` on import — see Update below, KI-068) |
 | Boolean | boolean |
 | Date | date |
 | DateTime | datetime |
@@ -91,9 +91,19 @@ Implemented directly against `PyYAML` (new `interop` optional-dependency extra, 
 
 **Shared top-level `slots:` support in v1:** Rejected — meaningfully more parsing/resolution logic (slot reuse, `slot_usage` override merging) for a construct Ontolith-authored schemas never produce.
 
+## Update (2026-09-04, closes KI-068): `Float` emits `double`, not `float`
+
+The type mapping table above originally emitted `range: float` for `value_type="Float"`. Real LinkML tooling treats `float` as 32-bit `xsd:float`, but Ontolith's `Float` is backed by Python's `float` (IEEE-754 double) throughout, so the emitted range understated the actual precision. This never made Ontolith's own `to_yaml`/`from_yaml` round-trip lossy — the reverse mapping has always accepted both `float` and `double` back to `Float`, and the golden round-trip tests prove IR-level fidelity independent of which spelling is emitted — the defect only matters to a *downstream* LinkML-consuming tool (codegen, SHACL/JSON-Schema generation) that resolves `float` to a real 32-bit type. Compounding it: `schema/rdf.py`'s RDF/OWL bridge (ADR-0036) maps the identical `value_type="Float"` to `XSD.double` — the two bridges described the same value differently, and ADR-0036's own Consequences section disclosed the mismatch on its side (declining to reconcile it as outside that ADR's own scope) while this ADR carried no corresponding note at all, a one-sided disclosure found during that bridge's review (KI-068).
+
+**Fix:** `to_yaml` now emits `range: double` for `Float`. `from_yaml`'s reverse mapping already accepted `double` before this change (evidently anticipated, just never matched on the emission side) — that asymmetry is what made this the low-risk fix over the KI's documentation-only alternative: no new parsing logic, and the two mapping tables become consistent with each other, not just internally self-consistent. `float` stays accepted on import for backward compatibility — hand-authored LinkML and any schema exported by a pre-KI-068 Ontolith version both still use it, and Python's `float` parsing doesn't distinguish 32-bit from 64-bit on read regardless of which spelling produced it. That compatibility is at the IR level, not the YAML text level: a hand-authored file using `range: float` still imports as `Float` correctly, but re-exporting it now produces `range: double`, not a byte-identical copy — no regression (the same text-level instability existed in the opposite direction before this fix, since `double` in always produced `float` out), just not literally "your file is preserved verbatim."
+
 ## References
 
 - SPEC §6.1: One IR, two front-ends
 - SPEC Appendix B: Open implementation questions
 - ADR-0002: Schema Definition
 - ADR-0007: Interop Priority (LinkML → RDF/OWL → Agent Memory)
+- ADR-0036: RDF/OWL Bridge (`XSD.double` for the same `Float` value_type — the mapping this
+  Update reconciles with; ADR-0036's own Consequences section disclosed the mismatch and declined
+  to reconcile it as outside that ADR's own scope, rather than scheduling it as future work)
+- `docs/known-issues.md` KI-068 (resolved)

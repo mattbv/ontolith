@@ -24,6 +24,26 @@ class TestToYaml:
         assert "version: 1" in text
         assert "range: string" in text
 
+    def test_float_serializes_as_double_not_float(self) -> None:
+        """KI-068: emitting LinkML `range: float` (32-bit `xsd:float` in real
+        LinkML tooling) for a value Ontolith stores as a Python float/
+        IEEE-754 double was a lossy round-trip and diverged from
+        schema/rdf.py's own Float mapping (`XSD.double`) - `double` is the
+        precision-accurate choice, matching what's actually stored."""
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Sensor": ConceptDef(
+                    name="Sensor",
+                    properties={"reading": PropertyDef(name="reading", value_type="Float")},
+                )
+            },
+        )
+        text = to_yaml(schema)
+        assert "range: double" in text
+        assert "range: float" not in text
+
     def test_temporality_encoded_as_annotation(self) -> None:
         schema = SchemaIR(
             namespace="default",
@@ -153,6 +173,40 @@ class TestFromYaml:
         assert schema.version == 1
         assert schema.concepts["Person"].properties["name"].value_type == "Text"
         assert schema.concepts["Person"].properties["name"].required is True
+
+    def test_double_range_parses_as_float(self) -> None:
+        """KI-068: `double` is what to_yaml now emits for Float (see
+        TestToYaml.test_float_serializes_as_double_not_float) - the reverse
+        mapping must accept it back as Float, not treat it as unknown."""
+        text = """
+        id: default
+        version: 1
+        classes:
+          Sensor:
+            attributes:
+              reading:
+                range: double
+        """
+        schema = from_yaml(text)
+        assert schema.concepts["Sensor"].properties["reading"].value_type == "Float"
+
+    def test_float_range_still_parses_for_backward_compatibility(self) -> None:
+        """`range: float` - the legacy emission this bridge used before
+        KI-068 - must keep importing as Float: hand-authored LinkML files
+        and schemas exported by an older Ontolith version both still use
+        it, and Python's float parsing doesn't distinguish 32-bit from
+        64-bit on read anyway."""
+        text = """
+        id: default
+        version: 1
+        classes:
+          Sensor:
+            attributes:
+              reading:
+                range: float
+        """
+        schema = from_yaml(text)
+        assert schema.concepts["Sensor"].properties["reading"].value_type == "Float"
 
     def test_relation_range_matching_class_becomes_relation(self) -> None:
         text = """
@@ -472,3 +526,24 @@ class TestRoundTrip:
         assert reconstructed.concepts == schema.concepts
         assert reconstructed.namespace == schema.namespace
         assert reconstructed.version == schema.version
+
+
+class TestCrossBridgeConsistency:
+    """KI-068: the LinkML and RDF/OWL bridges must agree on Float's
+    precision. Pinned here, one level more specific than each bridge's own
+    per-module test coverage (TestToYaml.test_float_serializes_as_double_
+    not_float above; test_schema_rdf.py's own Float assertion) - those two
+    only prove each bridge is internally consistent with itself. A future
+    change to either mapping that reintroduces the divergence this KI
+    fixed would otherwise surface as two independently-passing tests that
+    happen to disagree with each other, with nothing pointing at the
+    actual invariant broken."""
+
+    def test_float_maps_to_the_same_precision_in_both_bridges(self) -> None:
+        from rdflib.namespace import XSD
+
+        from ontolith.schema.linkml import _VALUE_TYPE_TO_LINKML_RANGE
+        from ontolith.schema.rdf import _VALUE_TYPE_TO_XSD
+
+        assert _VALUE_TYPE_TO_LINKML_RANGE["Float"] == "double"
+        assert _VALUE_TYPE_TO_XSD["Float"] == XSD.double

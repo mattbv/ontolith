@@ -390,6 +390,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- `schema/linkml.py`'s LinkML bridge now emits `range: double` for `value_type="Float"`, not
+  `range: float` (closes KI-068): real LinkML tooling treats `float` as 32-bit `xsd:float`, but
+  Ontolith's `Float` is backed by Python's `float` (IEEE-754 double) throughout, so the old mapping
+  understated the actual precision and diverged from `schema/rdf.py`'s own RDF/OWL bridge, which
+  already mapped the identical `value_type` to `XSD.double` — a same-`value_type` inconsistency
+  ADR-0036 disclosed on its own side but ADR-0013 didn't (both now updated). `from_yaml` already
+  accepted `double` on import before this change; `float` stays accepted too, for backward
+  compatibility with hand-authored LinkML and schemas exported by a pre-KI-068 Ontolith version.
 - REST's `GET /contradictions`/GraphQL's `Query.contradictions`, `GET /proposals`/
   `Query.proposals`, and the CLI's `contradiction list --state`/`proposal list --state` all passed
   an unvalidated `state` filter straight to the backend's `WHERE state = ?` (closes KI-077, found

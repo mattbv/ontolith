@@ -1406,7 +1406,7 @@ Every MCP tool (`interfaces/mcp.py`) took `token: str` as a required parameter r
 
 ---
 
-## KI-068 — RDF/OWL bridge and LinkML bridge map `Float` to different XSD precisions, disclosed on only one side
+## KI-068 — RDF/OWL bridge and LinkML bridge map `Float` to different XSD precisions, disclosed on only one side ✓ RESOLVED (Backlog)
 
 **Severity:** Informational — export-only, non-normative for round-tripping
 **Milestone target:** Backlog
@@ -1418,7 +1418,7 @@ Every MCP tool (`interfaces/mcp.py`) took `token: str` as a required parameter r
 
 ### Fix
 
-Either change the LinkML bridge's `Float` mapping to something that round-trips to 64-bit precision, or add a cross-reference note to ADR-0013 so the inconsistency is discoverable from either bridge's own documentation, closing the one-sided disclosure.
+Changed the LinkML bridge's `Float` mapping (`schema/linkml.py`) from `range: float` to `range: double` — the precision-accurate choice given the two bridges now agree exactly (`double`/`XSD.double`, both 64-bit). This never made Ontolith's own `to_yaml`/`from_yaml` round-trip lossy (the reverse mapping accepted both spellings even before this fix, and the golden round-trip tests check IR fidelity, not the emitted string) — the old mapping's actual defect was a mis-declared precision that only matters to a downstream LinkML-consuming tool resolving `float` to a real 32-bit type. Low-risk fix: the reverse mapping (`from_yaml`) already accepted `double` before this change, apparently anticipated but never matched by the emission side, so this made the two tables consistent with each other rather than requiring new parsing logic. `float` stays accepted on import for backward compatibility (IR-level, not YAML-text-level: a hand-authored `range: float` file still imports as `Float`, but now re-exports as `range: double`, not a byte-identical copy — no regression, the same asymmetry existed in the opposite direction before this fix) — hand-authored LinkML and any schema exported by a pre-KI-068 Ontolith version both still use it, and Python's `float` parsing doesn't distinguish 32-bit from 64-bit on read regardless. ADR-0013 updated with a dated Update section and its own type-mapping table corrected; ADR-0036's "not reconciled here" Consequences bullet updated to point at the fix rather than left claiming an open gap.
 
 ---
 
