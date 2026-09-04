@@ -469,7 +469,10 @@ def list_proposals(
         # state" - the same bug KI-076/KI-077 already fixed on MCP/REST/
         # GraphQL, on the interface where a hand-typed typo is likeliest).
         if not all_states and state not in (None, *_PROPOSAL_STATES, "pending"):
-            raise ValidationError(f"Invalid state: {state!r}")
+            raise ValidationError(
+                f"Invalid state: {state!r} (expected one of "
+                f"{[*_PROPOSAL_STATES, 'pending']}, or pass --all for every state)"
+            )
         results = kb.proposals(state=None if all_states else state)
         if not results:
             typer.echo("No proposals found.")
@@ -634,7 +637,10 @@ def list_contradictions(
         # Only when --state will actually be used - see proposal list's
         # identical guard/rationale (KI-077 review).
         if not all_states and state not in (None, *_CONTRADICTION_STATES):
-            raise ValidationError(f"Invalid state: {state!r}")
+            raise ValidationError(
+                f"Invalid state: {state!r} (expected one of "
+                f"{list(_CONTRADICTION_STATES)}, or pass --all for every state)"
+            )
         results = kb.contradictions(state=None if all_states else state)
         if not results:
             typer.echo("No contradictions found.")
