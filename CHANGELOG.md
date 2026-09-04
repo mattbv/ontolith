@@ -390,6 +390,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- REST's `GET /contradictions`/GraphQL's `Query.contradictions`, `GET /proposals`/
+  `Query.proposals`, and the CLI's `contradiction list --state`/`proposal list --state` all passed
+  an unvalidated `state` filter straight to the backend's `WHERE state = ?` (closes KI-077, found
+  during KI-076's review): an unrecognized value (a typo, wrong case, or a plausible-sounding
+  synonym) silently matched zero rows instead of erroring — indistinguishable from "no results in
+  that state." Every one now raises/exits on anything outside its accepted set (`{"open",
+  "resolved", "all", None}` for contradictions; the 8 `Proposal.state` values plus
+  `"pending"`/`"all"`/`None` for proposals; the CLI has no `"all"` value for `--state` itself,
+  since `--all` is its own separate flag). `Proposal.state`/`Contradiction.state` are now named
+  `ProposalState`/`ContradictionState` `Literal` aliases (`govern/proposal.py`/
+  `govern/contradiction.py`) rather than inlined, so every interface — MCP's own
+  `ontolith.list_contradictions` included, previously a hand-written duplicate of the same tuple —
+  derives its accepted-value set from the same `get_args()` call on the shared alias instead of
+  four independent copies that could silently drift from each other.
 - `Ontology.flag_contradiction()`'s "extend" branch reading a malformed prior `rationale_history`
   blob (pre-existing since KI-071, found during KI-076's review): `existing.metadata.get(
   "rationale_history", [])` either raised (a non-iterable value) or, worse, silently corrupted the

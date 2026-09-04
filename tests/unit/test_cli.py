@@ -866,6 +866,30 @@ class TestProposalList:
         assert proposal.id in result.output
         assert "changes_requested" in result.output
 
+    def test_unrecognized_state_exits_nonzero(self, temp_db: Path) -> None:
+        """KI-077: an unrecognized --state value previously reached
+        kb.proposals()'s own WHERE state = ? unfiltered and silently
+        matched zero rows - indistinguishable from "no proposals in that
+        state." Must error instead (same class of bug KI-076/KI-077 already
+        fixed on MCP/REST/GraphQL)."""
+        for bad_state in ("Auto_accepted", "pendng", "all"):
+            result = runner.invoke(
+                app, ["--db", str(temp_db), "proposal", "list", "--state", bad_state]
+            )
+            assert result.exit_code == 1, bad_state
+            assert "Invalid state" in result.output, bad_state
+
+    def test_bogus_state_with_all_flag_is_ignored(self, temp_db: Path) -> None:
+        """--all bypasses --state entirely (unlike REST/GraphQL, the CLI
+        has no "all" sentinel value for --state itself - --all is its own
+        separate flag), so a bogus --state alongside --all must not error."""
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "proposal", "list", "--state", "bogus", "--all"],
+        )
+        assert result.exit_code == 0
+        assert "No proposals found." in result.output
+
 
 class TestProposalAccept:
     def test_accepts_pending_proposal_and_commits_operations(self, temp_db: Path) -> None:
@@ -1196,6 +1220,30 @@ class TestContradictionList:
 
         all_result = runner.invoke(app, ["--db", str(db), "contradiction", "list", "--all"])
         assert "state=resolved" in all_result.output
+
+    def test_unrecognized_state_exits_nonzero(self, temp_db: Path) -> None:
+        """KI-077: an unrecognized --state value previously reached
+        kb.contradictions()'s own WHERE state = ? unfiltered and silently
+        matched zero rows - indistinguishable from "no contradictions in
+        that state." Must error instead (same class of bug KI-076/KI-077
+        already fixed on MCP/REST/GraphQL)."""
+        for bad_state in ("Open", "unresolved", "all"):
+            result = runner.invoke(
+                app, ["--db", str(temp_db), "contradiction", "list", "--state", bad_state]
+            )
+            assert result.exit_code == 1, bad_state
+            assert "Invalid state" in result.output, bad_state
+
+    def test_bogus_state_with_all_flag_is_ignored(self, temp_db: Path) -> None:
+        """--all bypasses --state entirely (unlike REST/GraphQL, the CLI
+        has no "all" sentinel value for --state itself - --all is its own
+        separate flag), so a bogus --state alongside --all must not error."""
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "contradiction", "list", "--state", "bogus", "--all"],
+        )
+        assert result.exit_code == 0
+        assert "No contradictions found." in result.output
 
 
 class TestContradictionFlag:

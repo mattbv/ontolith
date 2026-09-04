@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args
 
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.exceptions import RequestValidationError
@@ -55,6 +55,8 @@ from ontolith.core.errors import (
     StorageError,
     ValidationError,
 )
+from ontolith.govern.contradiction import ContradictionState
+from ontolith.govern.proposal import ProposalState
 from ontolith.identity import Principal
 
 if TYPE_CHECKING:
@@ -62,6 +64,14 @@ if TYPE_CHECKING:
     from ontolith.ontology import Ontology
 
 _logger = logging.getLogger(__name__)
+
+# Derived from ProposalState's/ContradictionState's own named Literal alias
+# (govern/proposal.py, govern/contradiction.py), not hand-duplicated, so
+# neither can silently drift if either type ever gains/loses a state
+# (KI-077) — every interface that validates a state filter (MCP's own
+# ontolith.list_contradictions included) derives from the same alias.
+_PROPOSAL_STATES: tuple[str, ...] = get_args(ProposalState)
+_CONTRADICTION_STATES: tuple[str, ...] = get_args(ContradictionState)
 
 _STATUS_BY_ERROR_TYPE: dict[type[OntolithError], int] = {
     ValidationError: 400,
@@ -779,7 +789,22 @@ def create_rest_app(
         so ``"all"`` is used as an explicit sentinel instead (mirrors the
         CLI's ``proposal list --all`` flag, expressed as a query value
         here since REST has no separate boolean-flag convention).
+
+        Raises:
+            ValidationError: ``state`` is none of the values above — an
+                unrecognized value (a typo, wrong case, or a plausible-
+                sounding non-existent state) previously reached
+                ``kb.proposals()``'s own ``WHERE state = ?`` unfiltered and
+                silently matched zero rows, indistinguishable from "no
+                proposals in that state" (KI-077).
         """
+        # Structurally after auth, not just textually: `_principal` is a
+        # FastAPI `Depends`, resolved before this body ever runs - an
+        # unauthenticated caller gets 401 regardless of `state`, never a
+        # free pre-auth probe of the accepted-value set (matches MCP's own
+        # ontolith.list_contradictions, KI-076 review).
+        if state not in (None, *_PROPOSAL_STATES, "pending", "all"):
+            raise ValidationError(f"Invalid state: {state!r}")
         effective_state = None if state == "all" else state
         results = kb.proposals(state=effective_state)
         return [
@@ -1009,7 +1034,19 @@ def create_rest_app(
 
         Pass ``state=all`` to list contradictions in every state (mirrors
         GET /proposals's ``all`` sentinel — see that route for why).
+
+        Raises:
+            ValidationError: ``state`` is none of "open"/"resolved"/"all" —
+                an unrecognized value previously reached
+                ``kb.contradictions()``'s own ``WHERE state = ?`` unfiltered
+                and silently matched zero rows, indistinguishable from "no
+                contradictions in that state" (KI-077; same class of bug
+                KI-076 fixed for MCP's ``ontolith.list_contradictions``).
         """
+        # Structurally after auth, not just textually — see
+        # list_proposals_route's identical comment above.
+        if state not in (None, *_CONTRADICTION_STATES, "all"):
+            raise ValidationError(f"Invalid state: {state!r}")
         effective_state = None if state == "all" else state
         results = kb.contradictions(state=effective_state)
         return [

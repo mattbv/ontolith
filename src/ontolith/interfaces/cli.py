@@ -3,13 +3,24 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, get_args
 
 import typer
 
 from ontolith import Ontology
-from ontolith.govern.contradiction import safe_rationale_history
+from ontolith.core.errors import ValidationError
+from ontolith.govern.contradiction import ContradictionState, safe_rationale_history
+from ontolith.govern.proposal import ProposalState
 from ontolith.schema.linkml import from_yaml
+
+# Derived from ProposalState's/ContradictionState's own named Literal alias
+# (govern/proposal.py, govern/contradiction.py), not hand-duplicated, so
+# neither can silently drift if either type ever gains/loses a state
+# (KI-077 — mirrors rest.py's/graphql.py's/mcp.py's identical constants;
+# the CLI's own `--state` typo/case-mismatch shape is the same bug, on the
+# one interface where a hand-typed value is most likely).
+_PROPOSAL_STATES: tuple[str, ...] = get_args(ProposalState)
+_CONTRADICTION_STATES: tuple[str, ...] = get_args(ContradictionState)
 
 app = typer.Typer(
     name="ontolith",
@@ -448,6 +459,20 @@ def list_proposals(
     """
     kb = _kb()
     try:
+        # Only when --state will actually be used: --all already bypasses
+        # it entirely (below), so a leftover/bogus --state alongside --all
+        # is harmless and shouldn't error. Unlike REST/GraphQL's `state`,
+        # no "all" value here — --all is CLI's own separate boolean flag
+        # (KI-077 review: an unrecognized value previously reached
+        # kb.proposals()'s own WHERE state = ? unfiltered and silently
+        # matched zero rows, indistinguishable from "no proposals in that
+        # state" - the same bug KI-076/KI-077 already fixed on MCP/REST/
+        # GraphQL, on the interface where a hand-typed typo is likeliest).
+        if not all_states and state not in (None, *_PROPOSAL_STATES, "pending"):
+            raise ValidationError(
+                f"Invalid state: {state!r} (expected one of "
+                f"{[*_PROPOSAL_STATES, 'pending']}, or pass --all for every state)"
+            )
         results = kb.proposals(state=None if all_states else state)
         if not results:
             typer.echo("No proposals found.")
@@ -609,6 +634,13 @@ def list_contradictions(
     """List contradictions, defaulting to open (unresolved) ones."""
     kb = _kb()
     try:
+        # Only when --state will actually be used - see proposal list's
+        # identical guard/rationale (KI-077 review).
+        if not all_states and state not in (None, *_CONTRADICTION_STATES):
+            raise ValidationError(
+                f"Invalid state: {state!r} (expected one of "
+                f"{list(_CONTRADICTION_STATES)}, or pass --all for every state)"
+            )
         results = kb.contradictions(state=None if all_states else state)
         if not results:
             typer.echo("No contradictions found.")

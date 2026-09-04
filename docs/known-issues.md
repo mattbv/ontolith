@@ -1560,7 +1560,7 @@ Round 2 found the same "malformed/unexpected shape silently corrupts or breaks" 
 
 ---
 
-## KI-077 — REST's `GET /contradictions`/GraphQL's `Query.contradictions` pass an unvalidated `state` filter straight to the backend
+## KI-077 — REST's `GET /contradictions`/GraphQL's `Query.contradictions` pass an unvalidated `state` filter straight to the backend ✓ RESOLVED (Backlog)
 
 **Severity:** Correctness gap — an unrecognized value silently returns an empty result rather than an error
 **Milestone target:** Backlog
@@ -1572,7 +1572,11 @@ Round 2 found the same "malformed/unexpected shape silently corrupts or breaks" 
 
 ### Fix
 
-Validate `state` against `{"open", "resolved", "all", None}` before querying, returning a `validation_error`/`VALIDATION_ERROR` for anything else — the same set on both interfaces: GraphQL's `Query.contradictions` already documents and accepts `"all"` too (`graphql.py`'s own docstring: "Pass state="all" for every state"), not just a JSON `null`, so the fix is identical to what KI-076 already applied to `ontolith.list_contradictions`, not a narrower GraphQL-specific set. The same gap likely exists on `GET /proposals`/`Query.proposals`'s own `state` parameter (a similarly free-form filter, same `"all"` sentinel documented) — worth checking in the same pass.
+Both routes/resolvers now validate `state` before querying, raising `ValidationError` (400 on REST, `VALIDATION_ERROR` on GraphQL) for anything not in `{"open", "resolved", "all", None}` — the identical accepted set on both interfaces, since GraphQL's `Query.contradictions` already documents and accepts `"all"` too, the same as REST, not a narrower GraphQL-specific set limited to a JSON `null`. `GET /proposals`/`Query.proposals`'s own `state` parameter shared the identical shape (a larger accepted set: the 8 `Proposal.state` values plus `"pending"`/`"all"`/`None`) — fixed identically in the same pass, per this KI's own Fix text.
+
+`Proposal.state`/`Contradiction.state` were extracted into named `ProposalState`/`ContradictionState` `Literal` type aliases (`govern/proposal.py`/`govern/contradiction.py`) rather than left inlined, so every interface's own accepted-value tuple can derive from `typing.get_args()` on the shared alias — the exact `plugins/registry.py` pattern already used for `PluginKind` — instead of a hand-duplicated tuple that could silently drift if either type ever gains or loses a state.
+
+Review found the CLI (`ontolith proposal list --state`/`ontolith contradiction list --state`) had the identical bug, untouched by the initial REST/GraphQL fix and left with no open KI tracking it once this one closed — arguably the interface where a hand-typed typo is likeliest. Fixed in the same pass rather than filed separately: both commands now validate `--state` against the same derived tuple (skipped entirely when `--all` is passed, since the CLI has no `"all"` string sentinel for `--state` itself — that's its own separate boolean flag, unlike REST/GraphQL). MCP's `ontolith.list_contradictions` — hand-written with its own literal tuple when KI-076 shipped it, rather than derived — was also switched onto the same `get_args(ContradictionState)` derivation, closing the one remaining place a state Literal change could still silently desync one interface from the other three.
 
 ---
 

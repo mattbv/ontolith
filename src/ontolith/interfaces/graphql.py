@@ -70,7 +70,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal, get_args
 
 import strawberry
 from fastapi import FastAPI, Header
@@ -92,8 +92,8 @@ from ontolith.core.errors import (
     StorageError,
     ValidationError,
 )
-from ontolith.govern.contradiction import Contradiction, safe_rationale_history
-from ontolith.govern.proposal import Proposal
+from ontolith.govern.contradiction import Contradiction, ContradictionState, safe_rationale_history
+from ontolith.govern.proposal import Proposal, ProposalState
 from ontolith.identity import Principal
 from ontolith.ontology import Ontology
 
@@ -120,6 +120,13 @@ _logger = logging.getLogger(__name__)
 # case this isinstance check fails open on.
 _REDACT_MESSAGE_FOR: tuple[type[OntolithError], ...] = (StorageError, PluginError)
 _GENERIC_SERVER_ERROR_MESSAGE = "An internal error occurred"
+
+# Derived from ProposalState's/ContradictionState's own named Literal alias
+# (govern/proposal.py, govern/contradiction.py), not hand-duplicated, so
+# neither can silently drift if either type ever gains/loses a state
+# (KI-077; mirrors rest.py's/mcp.py's identical constants).
+_PROPOSAL_STATES: tuple[str, ...] = get_args(ProposalState)
+_CONTRADICTION_STATES: tuple[str, ...] = get_args(ContradictionState)
 
 # Deliberately NOT an ontolith.core.errors.OntolithError code: SPEC §16's
 # error taxonomy is for *domain* errors (schema, validation, auth,
@@ -629,13 +636,33 @@ def _build_provenance(kb: Ontology, assertion_id: str) -> ProvenanceType:
 
 
 def _list_proposals(kb: Ontology, state: str | None) -> list[ProposalType]:
-    """Blocking body of Query.proposals."""
+    """Blocking body of Query.proposals.
+
+    Raises:
+        ValidationError: ``state`` is none of the accepted values — an
+            unrecognized value previously reached ``kb.proposals()``'s own
+            ``WHERE state = ?`` unfiltered and silently matched zero rows,
+            indistinguishable from "no proposals in that state" (KI-077).
+    """
+    if state not in (None, *_PROPOSAL_STATES, "pending", "all"):
+        raise ValidationError(f"Invalid state: {state!r}")
     effective_state = None if state == "all" else state
     return [_proposal_type(p) for p in kb.proposals(state=effective_state)]
 
 
 def _list_contradictions(kb: Ontology, state: str | None) -> list[ContradictionType]:
-    """Blocking body of Query.contradictions."""
+    """Blocking body of Query.contradictions.
+
+    Raises:
+        ValidationError: ``state`` is none of "open"/"resolved"/"all" — an
+            unrecognized value previously reached ``kb.contradictions()``'s
+            own ``WHERE state = ?`` unfiltered and silently matched zero
+            rows, indistinguishable from "no contradictions in that state"
+            (KI-077; same class of bug KI-076 fixed for MCP's
+            ``ontolith.list_contradictions``).
+    """
+    if state not in (None, *_CONTRADICTION_STATES, "all"):
+        raise ValidationError(f"Invalid state: {state!r}")
     effective_state = None if state == "all" else state
     return [_contradiction_type(c) for c in kb.contradictions(state=effective_state)]
 
@@ -806,6 +833,17 @@ class Query:
         state="all" to list every state (mirrors REST's GET /proposals,
         including its "all" sentinel — see that route for why one is
         needed)."""
+        # _require_principal runs, and can raise AuthError, before
+        # _list_proposals (which validates state, KI-077) is even
+        # scheduled - an unauthenticated caller never gets a free pre-auth
+        # probe of the accepted-value set (matches MCP's own
+        # ontolith.list_contradictions, KI-076 review; pinned by
+        # test_bad_token_reports_auth_error_over_bad_state, round 2). This
+        # is also why `state` stays a plain `String`, not a GraphQL enum:
+        # an enum argument is checked during document validation, before
+        # any resolver runs at all - switching to one would silently move
+        # this check ahead of auth, the opposite of what this ordering
+        # exists for.
         _require_principal(info)
         kb = _kb(info)
         return await run_in_threadpool(_list_proposals, kb, state)
@@ -816,6 +854,8 @@ class Query:
     ) -> list[ContradictionType]:
         """List contradictions, defaulting to open ones. Pass state="all"
         for every state (mirrors REST's GET /contradictions)."""
+        # Structurally after auth, not just textually — see
+        # Query.proposals's identical comment above.
         _require_principal(info)
         kb = _kb(info)
         return await run_in_threadpool(_list_contradictions, kb, state)

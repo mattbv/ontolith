@@ -9,6 +9,24 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Named alias (not inlined in Proposal.state below) so every interface that
+# validates a caller-supplied state filter (REST/GraphQL's list routes,
+# KI-077; MCP's own list tools) can derive its accepted-values set via
+# ``typing.get_args(ProposalState)`` from this one source of truth, instead
+# of a hand-duplicated tuple that could silently drift if this Literal ever
+# gains or loses a state — same pattern ``plugins/registry.py`` already uses
+# for ``PluginKind``.
+ProposalState = Literal[
+    "draft",
+    "submitted",
+    "auto_accepted",
+    "require_review",
+    "under_review",
+    "accepted",
+    "rejected",
+    "changes_requested",
+]
+
 
 class Proposal(BaseModel):
     """Staged operations awaiting policy decision.
@@ -33,16 +51,7 @@ class Proposal(BaseModel):
     acting_as: str | None = None
 
     # State machine (SPEC §9.1)
-    state: Literal[
-        "draft",
-        "submitted",
-        "auto_accepted",
-        "require_review",
-        "under_review",
-        "accepted",
-        "rejected",
-        "changes_requested",
-    ] = "draft"
+    state: ProposalState = "draft"
 
     # Temporal
     created_at: datetime
@@ -92,4 +101,4 @@ class ProposalEvent(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
-__all__ = ["Proposal", "ProposalEvent"]
+__all__ = ["Proposal", "ProposalEvent", "ProposalState"]

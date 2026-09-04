@@ -9,6 +9,15 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Named alias (not inlined in Contradiction.state below) so every interface
+# that validates a caller-supplied state filter (REST/GraphQL's list routes
+# and MCP's ontolith.list_contradictions, KI-077) can derive its accepted-
+# values set via ``typing.get_args(ContradictionState)`` from this one
+# source of truth, instead of a hand-duplicated tuple per interface that
+# could silently drift if this Literal ever gains or loses a state — same
+# pattern ``plugins/registry.py`` already uses for ``PluginKind``.
+ContradictionState = Literal["open", "resolved"]
+
 
 class Contradiction(BaseModel):
     """Open or resolved conflict between static assertions.
@@ -34,7 +43,7 @@ class Contradiction(BaseModel):
     namespace: str
     subject: str
     predicate: str
-    state: Literal["open", "resolved"] = "open"
+    state: ContradictionState = "open"
     member_ids: list[str] = Field(default_factory=list)
     created_at: datetime
     raised_by: str | None = None
@@ -100,4 +109,4 @@ def safe_rationale_history(metadata: dict[str, Any]) -> list[dict[str, str]]:
     return result
 
 
-__all__ = ["Contradiction", "safe_rationale_history"]
+__all__ = ["Contradiction", "ContradictionState", "safe_rationale_history"]
