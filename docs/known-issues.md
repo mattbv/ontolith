@@ -1488,7 +1488,7 @@ New `Ontology.get_admin_events(author, *, actor=None, target=None)`, admin-gated
 
 ---
 
-## KI-073 — MCP has no way to require the `Authorization` header, so a deployment can't close the `token`-argument exposure outright
+## KI-073 — MCP has no way to require the `Authorization` header, so a deployment can't close the `token`-argument exposure outright ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — the fix KI-067 shipped makes the exposure avoidable, not eliminated
 **Milestone target:** Backlog
@@ -1500,7 +1500,7 @@ KI-067/ADR-0014 made every MCP tool's `token` argument optional and prefer a tra
 
 ### Fix
 
-Add an opt-in `require_header_token: bool = False` parameter to `create_mcp_server()` that, when set, makes `_bearer_token()` return the "No bearer token provided"/"Malformed Authorization header" errors even for a live HTTP request whose header is absent — i.e. disables the argument fallback entirely for HTTP transports (stdio, which has no header channel at all, would need its own carve-out or would simply be unusable with the flag set, which is fine since stdio-facing principals already need the argument). Not built as part of KI-067 itself — that KI's own Fix text scoped it to making the header path available and preferred, and this is a strictly opt-in hardening a deployment reaches for once available, not a fix for a live vulnerability.
+Added an opt-in `require_header_token: bool = False` keyword-only parameter to `create_mcp_server()`. When set, `_bearer_token()` returns "No bearer token provided" for a live request whose header is absent — even when the caller still supplies a valid `token` argument — disabling the fallback entirely; a *malformed* header (KI-067's existing fail-closed case) is unaffected either way. stdio (no header channel at all) simply becomes unusable under the flag, as the KI's own Fix text anticipated — not a bug, the flag is only for HTTP (SSE/streamable-HTTP) deployments that want to require the private channel outright. Every code path independently mutation-tested: the argument-still-works, no-request-context-at-all, and real-transport cases were each reproduced against the pre-fix code and confirmed clean after.
 
 ---
 
