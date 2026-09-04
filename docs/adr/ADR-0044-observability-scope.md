@@ -26,8 +26,10 @@ by `namespace`/`principal`/`acting_as`/`proposal_id`).
 
 None of the *metrics* or *logs* half exists today — no counters/gauges anywhere, and what logging
 exists is ad hoc, uncorrelated `logging.getLogger(__name__)` calls in four modules
-(`plugins/registry.py`, `interfaces/{rest,graphql,mcp}.py`, all four exception-handler-only), none
-of it structured, none of it carrying the correlation fields SPEC §18 names. The *events* half is
+(`plugins/registry.py`, `interfaces/{rest,graphql,mcp}.py`; five emission sites in total, since
+`graphql.py` logs from two places) — three of them exception-handler-only, plus one proactive
+capability-declaration warning in `plugins/registry.py`'s `register()` — none of it structured,
+none of it carrying the correlation fields SPEC §18 names. The *events* half is
 a subtler gap: `ProposalEvent`, `_record_assertion_event`, and `AdminEvent` already persist most of
 SPEC §18's named event list today — but those exist to satisfy SPEC §17's append-only audit-trail
 requirement (who did what, retrievable in provenance), not §18's observability-emission concern (a
@@ -101,8 +103,9 @@ started" as of this ADR). The plan below is what M4 implements, not what this PR
   the sink, it does not need a new context-propagation mechanism (no `contextvars`, no thread-local
   state) to get them.
 - **Minimum viable M4 scope, in priority order:** (a) structured, correlated logs replacing the
-  four existing ad hoc `logging.getLogger()` call sites, since these already exist in a
-  lower-value form and SPEC §18 calls logs out specifically for correlation; (b) the four named
+  four existing ad hoc `logging.getLogger()` calls (five emission sites — `graphql.py` logs from
+  two places), since these already exist in a lower-value form and SPEC §18 calls logs out
+  specifically for correlation; (b) the four named
   events (proposal lifecycle, contradiction open/resolve, schema migration, plugin load) — call
   site counts vary by event, not uniformly one each as a first pass might assume: plugin load has
   exactly one (`PluginRegistry.register`), but contradiction-opening already has two

@@ -966,7 +966,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ADR-0044): `observe/` stays an empty package for now, but the Implementation Plan's M4 scope
   column — which never named observability at all — now does, and the architecture (a single
   `Clock`/`IdProvider`-style port, `govern/policy` still emits nothing itself) and a priority
-  order (structured correlated logs, then the four named lifecycle events, then the 7-metric
+  order (structured correlated logs, then the four named lifecycle events, then the seven-metric
   surface) are decided ahead of M4 so the milestone doesn't have to re-litigate them. No code
   changes — a scoping decision, not a feature.
 
