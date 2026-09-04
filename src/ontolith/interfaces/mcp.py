@@ -222,9 +222,9 @@ def create_mcp_server(
                 Optional: an ``Authorization`` header takes priority when the
                 transport supplies one (KI-067, see module docstring); this
                 argument is the fallback, and the only channel on stdio —
-                unless the server was created with ``require_header_token=
-                True`` (KI-073), in which case this argument is never
-                accepted and stdio becomes unusable.
+                unless the server was created with ``require_header_token=True``
+                (KI-073), in which case this argument is never accepted and
+                stdio becomes unusable.
             namespace: Namespace to inspect (default: "default")
 
         Returns:
@@ -290,9 +290,9 @@ def create_mcp_server(
                 Optional: an ``Authorization`` header takes priority when the
                 transport supplies one (KI-067, see module docstring); this
                 argument is the fallback, and the only channel on stdio —
-                unless the server was created with ``require_header_token=
-                True`` (KI-073), in which case this argument is never
-                accepted and stdio becomes unusable.
+                unless the server was created with ``require_header_token=True``
+                (KI-073), in which case this argument is never accepted and
+                stdio becomes unusable.
 
         Returns:
             Dict with "entity" and "assertions" keys, or "error" if not found,
@@ -365,9 +365,9 @@ def create_mcp_server(
                 Optional: an ``Authorization`` header takes priority when the
                 transport supplies one (KI-067, see module docstring); this
                 argument is the fallback, and the only channel on stdio —
-                unless the server was created with ``require_header_token=
-                True`` (KI-073), in which case this argument is never
-                accepted and stdio becomes unusable.
+                unless the server was created with ``require_header_token=True``
+                (KI-073), in which case this argument is never accepted and
+                stdio becomes unusable.
             filters: Optional dict of property/relation name → value
                 (equality) — a relation filter matches the relation's
                 target entity id (e.g. {"employer": "org-123"}) — or
@@ -467,9 +467,9 @@ def create_mcp_server(
                 Optional: an ``Authorization`` header takes priority when the
                 transport supplies one (KI-067, see module docstring); this
                 argument is the fallback, and the only channel on stdio —
-                unless the server was created with ``require_header_token=
-                True`` (KI-073), in which case this argument is never
-                accepted and stdio becomes unusable.
+                unless the server was created with ``require_header_token=True``
+                (KI-073), in which case this argument is never accepted and
+                stdio becomes unusable.
 
         Returns:
             Dict with assertion details including author, confidence, source,
@@ -573,9 +573,9 @@ def create_mcp_server(
                 Optional: an ``Authorization`` header takes priority when the
                 transport supplies one (KI-067, see module docstring); this
                 argument is the fallback, and the only channel on stdio —
-                unless the server was created with ``require_header_token=
-                True`` (KI-073), in which case this argument is never
-                accepted and stdio becomes unusable.
+                unless the server was created with ``require_header_token=True``
+                (KI-073), in which case this argument is never accepted and
+                stdio becomes unusable.
 
         Returns:
             Dict with "contradictions" list and "count", or "error" if no
@@ -677,9 +677,9 @@ def create_mcp_server(
                 Optional: an ``Authorization`` header takes priority when the
                 transport supplies one (KI-067, see module docstring); this
                 argument is the fallback, and the only channel on stdio —
-                unless the server was created with ``require_header_token=
-                True`` (KI-073), in which case this argument is never
-                accepted and stdio becomes unusable.
+                unless the server was created with ``require_header_token=True``
+                (KI-073), in which case this argument is never accepted and
+                stdio becomes unusable.
             value: Literal value to assert (mutually exclusive with target)
             value_type: Type of value (e.g. "Text", "Integer", "Date"); required with value
             target: Target entity ID for a relation (mutually exclusive with value)
@@ -776,9 +776,9 @@ def create_mcp_server(
                 Optional: an ``Authorization`` header takes priority when the
                 transport supplies one (KI-067, see module docstring); this
                 argument is the fallback, and the only channel on stdio —
-                unless the server was created with ``require_header_token=
-                True`` (KI-073), in which case this argument is never
-                accepted and stdio becomes unusable.
+                unless the server was created with ``require_header_token=True``
+                (KI-073), in which case this argument is never accepted and
+                stdio becomes unusable.
             acting_as: Optional principal ID being acted on behalf of (delegation)
 
         Returns:
@@ -847,9 +847,9 @@ def create_mcp_server(
                 Optional: an ``Authorization`` header takes priority when the
                 transport supplies one (KI-067, see module docstring); this
                 argument is the fallback, and the only channel on stdio —
-                unless the server was created with ``require_header_token=
-                True`` (KI-073), in which case this argument is never
-                accepted and stdio becomes unusable.
+                unless the server was created with ``require_header_token=True``
+                (KI-073), in which case this argument is never accepted and
+                stdio becomes unusable.
             rationale: Optional explanation of the contradiction
 
         Returns:
@@ -917,9 +917,9 @@ def create_mcp_server(
                 Optional: an ``Authorization`` header takes priority when the
                 transport supplies one (KI-067, see module docstring); this
                 argument is the fallback, and the only channel on stdio —
-                unless the server was created with ``require_header_token=
-                True`` (KI-073), in which case this argument is never
-                accepted and stdio becomes unusable.
+                unless the server was created with ``require_header_token=True``
+                (KI-073), in which case this argument is never accepted and
+                stdio becomes unusable.
 
         Returns:
             Dict with "proposal" (id, state, policy_reason, decided_at) and
