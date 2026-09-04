@@ -1422,10 +1422,10 @@ Changed the LinkML bridge's `Float` mapping (`schema/linkml.py`) from `range: fl
 
 ---
 
-## KI-069 — SPEC §9.2 still names four unbuilt `PolicyStrategy` implementations
+## KI-069 — SPEC §9.2 still names four unbuilt `PolicyStrategy` implementations ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — a SPEC SHOULD-list gap with no open tracking item once KI-061 closes
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §9.2 (policy strategies)
 
 ### Description
@@ -1434,7 +1434,7 @@ SPEC §9.2 names six built-in `PolicyStrategy` implementations a conforming impl
 
 ### Fix
 
-Implement `ConfidenceThreshold`, `SourceRequired`, and `RequireReviewByRole` (or explicitly decide and record, per strategy, that it's out of scope for the foreseeable future) — each is a small, independent `PolicyStrategy`, not a combinator like `Composite`, so they can be picked up individually rather than as one large PR.
+Implemented all three (`docs/adr/ADR-0045-confidence-source-role-policy-strategies.md`), none deferred, in `govern/policy.py` following `SourceQuorum`'s established conventions exactly (KI-015 capability floor enforced explicitly, only the proposal's first staged operation inspected, retractions/unrecognized op kinds always require review). `ConfidenceThreshold(threshold, reviewers=None)` auto-accepts once the proposal's own staged `confidence` meets `threshold` (inclusive) — a missing confidence always requires review, never assumed as 0 or 1. `SourceRequired(reviewers=None)` auto-accepts only when the operation carries a non-empty `source` — no `kb` read, no corroboration count, a narrower unconditional cousin of `SourceQuorum` (compose both via `Composite` for "sourced AND quorum'd"). `RequireReviewByRole(role_reviewers, *, default=None)` never auto-accepts — its entire purpose is choosing reviewers, not deciding whether review is needed — reading `principal.metadata.get("role")` (no dedicated `Principal.role` field exists; `metadata` is the codebase's own documented extension point for exactly this) with role looked up on the real author, never `acting_as`, mirroring `ThresholdPolicy`'s "AI's own kind never laundered via delegation" precedent (ADR-0003). Unit tests (`tests/unit/test_govern.py`) cover every decision path per strategy; conformance vectors (`conformance/test_confidence_threshold_policy.py`, `test_source_required_policy.py`, `test_require_review_by_role_policy.py`) pin the SPEC §9.2 purity/determinism contract. All three added to the public API surface (`ontolith.govern.__all__`, pinned in `tests/unit/test_public_api_surface.py`).
 
 ---
 

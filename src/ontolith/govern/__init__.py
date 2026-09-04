@@ -12,12 +12,15 @@ from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.policy import (
     AutoAccept,
     Composite,
+    ConfidenceThreshold,
     Decision,
     KbView,
     PolicyStrategy,
     Reject,
     RequireReview,
+    RequireReviewByRole,
     SourceQuorum,
+    SourceRequired,
     ThresholdPolicy,
 )
 from ontolith.govern.proposal import Proposal, ProposalEvent
@@ -34,6 +37,9 @@ __all__ = [
     "PolicyStrategy",
     "ThresholdPolicy",
     "SourceQuorum",
+    "ConfidenceThreshold",
+    "SourceRequired",
+    "RequireReviewByRole",
     "Composite",
     "Activate",
     "Supersede",

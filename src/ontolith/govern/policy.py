@@ -8,7 +8,7 @@ no writes and deterministic given its inputs — a strategy MAY read via ``kb``
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Protocol
 
 from ontolith.govern.proposal import Proposal
@@ -291,6 +291,284 @@ class SourceQuorum:
         )
 
 
+class ConfidenceThreshold:
+    """Auto-accepts once a proposal's own asserted confidence meets ``threshold`` (SPEC §9.2).
+
+    Unlike ``SourceQuorum``, this never reads ``kb`` — the decision depends
+    only on the confidence value the proposal's own author already staged
+    on the operation (``propose``/``propose_ref``'s ``confidence``
+    parameter), not on any corroborating state. This deliberately does not
+    combine or average multiple assertions' confidence — SPEC's "confidence
+    is NEVER auto-combined in v1" invariant applies here exactly as it does
+    everywhere else; this strategy only ever compares the single scalar the
+    proposal itself carries.
+
+    A proposal with no confidence (``None`` — the default when a caller
+    doesn't pass one) always requires review, never auto-accepts: silently
+    treating "no stated confidence" as "confidence 0" or "confidence 1"
+    would both be a guess this strategy has no basis to make, and SPEC's own
+    confidence model has no concept of an implicit default.
+
+    Retractions and unrecognized operation kinds always require review, for
+    the same reason ``SourceQuorum`` does: a retraction carries no
+    confidence value at all (``Ontology.retract``'s payload has no
+    ``confidence`` key), so there's nothing here to threshold against. Only
+    the proposal's first staged operation is inspected — every current
+    caller (``propose``/``propose_ref``) stages exactly one.
+
+    Rejects principals without at least ``propose`` capability, mirroring
+    ``SourceQuorum``'s own KI-015 floor enforcement — this floor is not
+    inherited for free by any new ``PolicyStrategy``
+    (``docs/known-issues.md`` KI-015).
+
+    Does not special-case AI-authored proposals, for the same reason
+    ``SourceQuorum`` doesn't (ADR-0025 §5): ``ThresholdPolicy``'s "AI always
+    requires review" rule is that strategy's own design choice, not a
+    cross-cutting invariant. A deployment wanting both combines them via
+    ``Composite`` (ADR-0040).
+    """
+
+    def __init__(self, threshold: float, reviewers: list[str] | None = None) -> None:
+        """Configure the strategy.
+
+        Args:
+            threshold: Minimum confidence (inclusive) required to
+                auto-accept. Must be within [0.0, 1.0], matching SPEC's own
+                confidence scalar range.
+            reviewers: Reviewers assigned when confidence is below
+                threshold, missing, or the operation isn't evaluable.
+                Defaults to no reviewers assigned.
+
+        Raises:
+            ValueError: threshold is outside [0.0, 1.0]
+        """
+        if not 0.0 <= threshold <= 1.0:
+            raise ValueError("threshold must be between 0.0 and 1.0")
+        self.threshold = threshold
+        self.reviewers = list(reviewers) if reviewers is not None else []
+
+    def evaluate(
+        self,
+        proposal: Proposal,
+        principal: Principal,
+        kb: KbView | None = None,
+        acting_as: Principal | None = None,
+    ) -> Decision:
+        """Evaluate proposal based on capability and the operation's own confidence.
+
+        ``kb`` is accepted for ``PolicyStrategy`` conformance but never
+        read — this strategy's decision depends only on the proposal's own
+        payload and the acting principal's capability.
+        """
+        capability: str = principal.default_capability
+        if acting_as is not None:
+            capability = min_capability(capability, acting_as.default_capability)
+        if capability == "read":
+            return Reject(f"Principal {principal.id} has read-only access and cannot propose")
+
+        operations = proposal.payload.get("operations") or []
+        if not operations:
+            return RequireReview(self.reviewers, "Proposal has no staged operations")
+        op = operations[0]
+        kind = op.get("kind")
+
+        if kind == "retract":
+            return RequireReview(
+                self.reviewers, "ConfidenceThreshold does not auto-accept retractions"
+            )
+        if kind not in ("assert_literal", "assert_ref"):
+            return RequireReview(
+                self.reviewers, f"ConfidenceThreshold does not recognize op kind {kind!r}"
+            )
+
+        confidence = op.get("confidence")
+        if confidence is None:
+            return RequireReview(
+                self.reviewers,
+                "Proposal has no confidence value; cannot compare against threshold",
+            )
+
+        if confidence >= self.threshold:
+            return AutoAccept(f"Confidence {confidence} meets threshold {self.threshold}")
+        return RequireReview(
+            self.reviewers,
+            f"Confidence {confidence} below threshold {self.threshold}",
+        )
+
+
+class SourceRequired:
+    """Auto-accepts only when a proposal's operation carries a non-empty ``source`` (SPEC §9.2).
+
+    A narrower, unconditional cousin of ``SourceQuorum``: where
+    ``SourceQuorum`` counts *distinct* sources across the proposal and
+    existing corroborating assertions, ``SourceRequired`` only checks that
+    *this* proposal names *any* source at all — no ``kb`` read, no
+    corroboration count, no threshold. A deployment that wants both
+    ("every fact needs a source, AND at least 2 of them") composes
+    ``Composite(all=[SourceRequired(), SourceQuorum(2)])`` (ADR-0040)
+    rather than this strategy reimplementing quorum counting itself.
+
+    Retractions and unrecognized operation kinds always require review, the
+    same treatment ``SourceQuorum``/``ConfidenceThreshold`` give them:
+    ``Ontology.retract``'s payload carries no ``source`` key, so there's
+    nothing here to check. Only the proposal's first staged operation is
+    inspected, matching every sibling strategy in this module.
+
+    Rejects principals without at least ``propose`` capability (KI-015
+    floor, `docs/known-issues.md`) and does not special-case AI-authored
+    proposals, for the identical reasons ``SourceQuorum``/
+    ``ConfidenceThreshold`` document on themselves.
+    """
+
+    def __init__(self, reviewers: list[str] | None = None) -> None:
+        """Configure the strategy.
+
+        Args:
+            reviewers: Reviewers assigned when no source is present, or the
+                operation isn't evaluable. Defaults to no reviewers
+                assigned.
+        """
+        self.reviewers = list(reviewers) if reviewers is not None else []
+
+    def evaluate(
+        self,
+        proposal: Proposal,
+        principal: Principal,
+        kb: KbView | None = None,
+        acting_as: Principal | None = None,
+    ) -> Decision:
+        """Evaluate proposal based on capability and presence of a source.
+
+        ``kb`` is accepted for ``PolicyStrategy`` conformance but never
+        read — presence of a source is entirely determined by the
+        proposal's own payload.
+        """
+        capability: str = principal.default_capability
+        if acting_as is not None:
+            capability = min_capability(capability, acting_as.default_capability)
+        if capability == "read":
+            return Reject(f"Principal {principal.id} has read-only access and cannot propose")
+
+        operations = proposal.payload.get("operations") or []
+        if not operations:
+            return RequireReview(self.reviewers, "Proposal has no staged operations")
+        op = operations[0]
+        kind = op.get("kind")
+
+        if kind == "retract":
+            return RequireReview(self.reviewers, "SourceRequired does not auto-accept retractions")
+        if kind not in ("assert_literal", "assert_ref"):
+            return RequireReview(
+                self.reviewers, f"SourceRequired does not recognize op kind {kind!r}"
+            )
+
+        source = op.get("source")
+        if not source:
+            return RequireReview(self.reviewers, "Proposal has no source")
+        return AutoAccept(f"Source provided: {source!r}")
+
+
+class RequireReviewByRole:
+    """Always routes to review, assigning reviewers by the author's declared role (SPEC §9.2).
+
+    Unlike every other strategy in this module, ``RequireReviewByRole``
+    never auto-accepts and never inspects the proposal's payload at all —
+    its entire purpose is *which reviewers* a proposal gets routed to, not
+    whether it needs review in the first place. A deployment that also
+    wants some proposals to skip review entirely composes this with an
+    accepting strategy via ``Composite(any=[...])`` (ADR-0040); used alone,
+    every proposal it evaluates lands in ``require_review``.
+
+    "Role" has no dedicated field on ``Principal`` — SPEC names ``kind``
+    (human/ai/service), capability, and trust level, but nothing called
+    "role". This strategy reads ``principal.metadata.get("role")``:
+    ``Principal.metadata`` is already documented as "open JSON blob for
+    future extension", exactly the mechanism a deployment-specific concept
+    like organizational role is meant to use without requiring a schema
+    change to ``Principal`` itself. This is a deliberate, not accidental,
+    choice — see ADR-0045 for the alternatives considered (a dedicated
+    ``Principal.role`` field, keying by ``kind`` instead) and why they were
+    rejected.
+
+    Role is read from ``principal`` (the author) only, never from
+    ``acting_as`` — mirroring ``ThresholdPolicy``'s "AI's own kind is never
+    laundered away by delegating" precedent (ADR-0003): reviewer routing is
+    about who is really proposing, not who they're temporarily acting as,
+    so delegation can't be used to dodge a role's assigned reviewers.
+
+    A missing role or an unmapped role both fall back to ``default``
+    (distinguished in the returned reason text, so callers can tell
+    "nobody declared a role" from "a role was declared but nothing routes
+    it" without inspecting ``principal`` themselves) — never an error and
+    never an empty ``RequireReview`` with no explanation.
+
+    Rejects principals without at least ``propose`` capability (KI-015
+    floor, `docs/known-issues.md`), matching every sibling strategy in this
+    module, evaluated with the same effective (``acting_as``-aware)
+    capability ``ThresholdPolicy``/``SourceQuorum`` use — unlike role
+    itself, capability gating is deliberately not laundering-resistant in
+    the same way, since SPEC §8.4 already defines delegation's effective
+    capability as the more conservative of the two principals.
+    """
+
+    def __init__(
+        self,
+        role_reviewers: Mapping[str, Sequence[str]],
+        *,
+        default: Sequence[str] | None = None,
+    ) -> None:
+        """Configure the strategy.
+
+        Args:
+            role_reviewers: Maps a role name (as found in
+                ``principal.metadata["role"]``) to the reviewers assigned
+                when a proposal's author has that role.
+            default: Reviewers assigned when the author has no declared
+                role, or a role not present in ``role_reviewers``. Defaults
+                to no reviewers assigned.
+        """
+        self._role_reviewers: dict[str, list[str]] = {
+            role: list(reviewers) for role, reviewers in role_reviewers.items()
+        }
+        self._default = list(default) if default is not None else []
+
+    def evaluate(
+        self,
+        proposal: Proposal,
+        principal: Principal,
+        kb: KbView | None = None,
+        acting_as: Principal | None = None,
+    ) -> Decision:
+        """Route to review, with reviewers chosen by the author's declared role.
+
+        ``kb``/``proposal`` are accepted for ``PolicyStrategy`` conformance
+        but never read — this strategy's decision depends only on
+        ``principal``/``acting_as``, matching ``ThresholdPolicy``'s own
+        "kb defaults to None, never used" shape.
+        """
+        capability: str = principal.default_capability
+        if acting_as is not None:
+            capability = min_capability(capability, acting_as.default_capability)
+        if capability == "read":
+            return Reject(f"Principal {principal.id} has read-only access and cannot propose")
+
+        role = principal.metadata.get("role")
+        if role is None:
+            return RequireReview(
+                self._default,
+                f"Principal {principal.id} has no declared role; using default reviewers",
+            )
+        if role not in self._role_reviewers:
+            return RequireReview(
+                self._default,
+                f"No reviewers configured for role {role!r}; using default reviewers",
+            )
+        return RequireReview(
+            self._role_reviewers[role],
+            f"Requires review by role {role!r} (principal: {principal.id})",
+        )
+
+
 def _merge_reject(decisions: list[Reject]) -> Reject:
     """Combine multiple Reject decisions into one, concatenating reasons in
     input order (each retains its originating strategy's own wording)."""
@@ -492,5 +770,8 @@ __all__ = [
     "PolicyStrategy",
     "ThresholdPolicy",
     "SourceQuorum",
+    "ConfidenceThreshold",
+    "SourceRequired",
+    "RequireReviewByRole",
     "Composite",
 ]
