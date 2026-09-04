@@ -205,8 +205,9 @@ and every transcript, but still not zero. Deployments running MCP over stdio sho
 short-lived tokens for those principals precisely because there's no way to keep the token out of
 the client's own process environment the way the header keeps it out of the *model's* context.
 
-**Residual — the argument still works even when a header is available, so the exposure is made
-avoidable, not eliminated:** an HTTP deployment cannot currently *require* the header. `token`
+**Residual (at the time of this Update — closed below, KI-073) — the argument still works even
+when a header is available, so the exposure is made avoidable, not eliminated:** an HTTP
+deployment cannot currently *require* the header. `token`
 remains an accepted, schema-advertised argument on every tool, so a model that already has a token
 in context can keep emitting it and it will keep authenticating (the header only wins when both are
 present *and* well-formed). A `require_header_token: bool` flag on `create_mcp_server()` that
