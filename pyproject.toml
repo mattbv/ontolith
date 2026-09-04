@@ -20,17 +20,34 @@ classifiers = [
 ]
 
 dependencies = [
-	"pydantic>=2.0",
-	"typer>=0.9",
-	"python-ulid>=2.0",
+	# <3.0/<1.0/<4.0: KI-070 extends KI-065's <N.0 upper-bound convention
+	# (established for mcp, ADR-0026) past the two packages KI-065 itself
+	# covered - pydantic in particular underlies every domain model, a
+	# higher blast radius than either of those two. typer/python-ulid are
+	# lower-risk (CLI-only, ID generation) but bounded too for the same
+	# "downstream pip install resolves an unreviewed major, unbounded"
+	# reason, not because either has shown 0.x/minor-version breakage the
+	# way strawberry-graphql did (KI-065's own floor-bump evidence).
+	"pydantic>=2.0,<3.0",
+	"typer>=0.9,<1.0",
+	"python-ulid>=2.0,<4.0",
 	# Required, not optional (SPEC §12.1 MUST): the default SQLite backend
 	# uses sqlite-vec for embeddings (ADR-0020).
 	"sqlite-vec==0.1.3", # pinned: pre-v1, breaking changes possible (bumped for PYSEC-2026-1938)
 ]
 
 [project.optional-dependencies]
-store-duckdb = ["duckdb>=1.0"]
-rest = ["fastapi>=0.110", "uvicorn>=0.27"]
+store-duckdb = ["duckdb>=1.0,<2.0"] # <2.0: KI-070, mirrors mcp's upper-bound convention
+rest = [
+	# <1.0: KI-070 - fastapi sits on the same auth-bearing request path
+	# strawberry-graphql's own <1.0 bound (KI-065) was justified by; uvicorn
+	# is its ASGI server, same reasoning. Both are long-lived pre-1.0
+	# packages (like strawberry-graphql was before KI-065's own floor bump),
+	# so this guards against an eventual major release, not 0.x churn -
+	# security.yml's weekly pip-audit remains the real backstop for that.
+	"fastapi>=0.110,<1.0",
+	"uvicorn>=0.27,<1.0",
+]
 graphql = [
 	# >=0.316: create_graphql_app's extensions=[lambda: QueryDepthLimiter(...), ...]
 	# factory-callable pattern (KI-056) raises TypeError at request time on
@@ -43,12 +60,15 @@ graphql = [
 	# not the next 0.x drift - security.yml's weekly pip-audit/scheduled
 	# scan is the real backstop for that, same as any other dependency.
 	"strawberry-graphql[fastapi]>=0.316,<1.0",
-	"uvicorn>=0.27",
+	"uvicorn>=0.27,<1.0", # <1.0: KI-070, same reasoning as rest's own uvicorn bound above
 ]
 mcp = [
     "mcp>=1.28.1,<2.0", # >=1.28.1 fixes PYSEC-2026-3483; <2.0 avoids an unreviewed major bump
 ]
-interop = ["pyyaml>=6.0", "rdflib>=7.0,<8.0"] # <8.0: KI-065, mirrors mcp's upper-bound convention
+interop = [
+	"pyyaml>=6.0,<7.0", # <7.0: KI-070, mirrors mcp's upper-bound convention
+	"rdflib>=7.0,<8.0", # <8.0: KI-065, mirrors mcp's upper-bound convention
+]
 all = ["ontolith[rest,graphql,mcp,interop,store-duckdb]"]
 dev = [
 	"ontolith[all]",

@@ -1438,7 +1438,7 @@ Implement `ConfidenceThreshold`, `SourceRequired`, and `RequireReviewByRole` (or
 
 ---
 
-## KI-070 — Most direct dependencies still have no upper version bound
+## KI-070 — Most direct dependencies still have no upper version bound ✓ RESOLVED (Backlog)
 
 **Severity:** Supply-chain — inconsistent pinning policy, not an active vulnerability
 **Milestone target:** Backlog
@@ -1450,7 +1450,7 @@ KI-065 extended the `<N.0` upper-bound convention (established for `mcp`, ADR-00
 
 ### Fix
 
-Either apply the same `<N.0` convention to the remaining direct dependencies (`pydantic`, `fastapi`, `duckdb` first, given their blast radius and auth-adjacency), or explicitly record why they're treated differently (e.g. `typer`/`python-ulid`/`pyyaml` are lower-risk enough that the convention doesn't need to reach them yet).
+Applied the same `<N.0` convention to all seven: `pydantic>=2.0,<3.0`, `typer>=0.9,<1.0`, `python-ulid>=2.0,<4.0`, `fastapi>=0.110,<1.0`, `duckdb>=1.0,<2.0`, `uvicorn>=0.27,<1.0` (both places it's listed — `rest` and `graphql` extras each declare it independently), `pyyaml>=6.0,<7.0`. `fastapi`/`typer`/`uvicorn` are all long-lived pre-1.0 packages, like `strawberry-graphql` was before KI-065's own floor bump — the `<1.0` bound guards against an eventual major release, not 0.x churn; `security.yml`'s weekly `pip-audit`/scheduled scan remains the real backstop for that, same caveat KI-065 already documented. `uv lock` produced only an 8-line lockfile metadata diff — no package's resolved version actually changed, all seven were already resolving within the new bounds (verified: `pydantic` 2.13.4, `typer` 0.26.7, `python-ulid` 3.1.0, `fastapi` 0.138.0, `duckdb` 1.5.4, `uvicorn` 0.49.0, `pyyaml` 6.0.3).
 
 ---
 
