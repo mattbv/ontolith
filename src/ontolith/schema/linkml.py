@@ -41,7 +41,15 @@ _ValueType = Literal["Text", "Integer", "Float", "Boolean", "Date", "DateTime", 
 _VALUE_TYPE_TO_LINKML_RANGE: dict[str, str] = {
     "Text": "string",
     "Integer": "integer",
-    "Float": "float",
+    # "double" (64-bit), not "float" (32-bit) - Ontolith's Float is backed by
+    # Python's float/IEEE-754 double throughout (identical to what schema/rdf.py's
+    # RDF/OWL bridge already emits, XSD.double), so double is the round-trip-
+    # accurate choice, not a lossy 32-bit truncation on export (KI-068; ADR-0013
+    # Update, ADR-0036's own Consequences section named this exact reconciliation
+    # as future work when the RDF/OWL bridge shipped). The reverse mapping below
+    # has accepted "double" since before this change, so this makes the two
+    # tables consistent with each other, not just internally with themselves.
+    "Float": "double",
     "Boolean": "boolean",
     "Date": "date",
     "DateTime": "datetime",
@@ -52,6 +60,11 @@ _VALUE_TYPE_TO_LINKML_RANGE: dict[str, str] = {
 _LINKML_RANGE_TO_VALUE_TYPE: dict[str, str] = {
     "string": "Text",
     "integer": "Integer",
+    # "float" stays accepted on import (not just "double") for backward
+    # compatibility with hand-authored LinkML and any schema exported by an
+    # older Ontolith version before the emission side switched to "double"
+    # above (KI-068) - both losslessly represent Ontolith's own Float either
+    # way, since Python float parsing doesn't distinguish the two on read.
     "float": "Float",
     "double": "Float",
     "boolean": "Boolean",
