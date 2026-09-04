@@ -8,22 +8,33 @@
 
 **Related**: SPEC §18 (metrics, events, structured logs — SHOULD, not MUST), SPEC §19 (conformance —
 §18 names no conformance vector), `docs/Ontolith_Implementation_Plan.md` §2 (milestone table),
-ADR-0001 (Clock/IdProvider ports — the precedent this ADR follows for keeping I/O out of pure
-domain code), `docs/known-issues.md` KI-064
+`core/clock.py`/`core/ids.py` (the `Clock`/`IdProvider` port pattern this ADR follows for keeping
+I/O out of pure domain code — an established code pattern, not itself the subject of a dedicated
+ADR), ADR-0042 (admin-action event recording — the closest existing event-recording precedent),
+`docs/known-issues.md` KI-064
 
 ---
 
 ## Context
 
 `src/ontolith/observe/__init__.py` has been an empty package since M0's repository skeleton. SPEC
-§18 asks implementations to emit three things: **metrics** (proposal counts, auto-accept rate,
-review latency, open contradictions, human-vs-AI ratio, query latency, vector index size),
-**events** (proposal lifecycle, contradiction open/resolve, schema migration, plugin load), and
-**logs** (structured, correlated by `namespace`/`principal`/`acting_as`/`proposal_id`). None of
-this exists today. What exists instead is ad hoc, uncorrelated `logging.getLogger(__name__)` calls
-in four modules (`plugins/registry.py`, `interfaces/{rest,graphql,mcp}.py`) — none of them
-structured, none of them carrying the correlation fields SPEC §18 names, and none of them backed
-by a metrics or event sink of any kind.
+§18 asks implementations to emit three things: **metrics** (seven named: proposals
+created/accepted/rejected, auto-accept rate, review latency, open contradictions, human-vs-AI
+ratio, query latency (symbolic/semantic), vector index size), **events** (proposal lifecycle,
+contradiction open/resolve, schema migration, plugin load), and **logs** (structured, correlated
+by `namespace`/`principal`/`acting_as`/`proposal_id`).
+
+None of the *metrics* or *logs* half exists today — no counters/gauges anywhere, and what logging
+exists is ad hoc, uncorrelated `logging.getLogger(__name__)` calls in four modules
+(`plugins/registry.py`, `interfaces/{rest,graphql,mcp}.py`, all four exception-handler-only), none
+of it structured, none of it carrying the correlation fields SPEC §18 names. The *events* half is
+a subtler gap: `ProposalEvent`, `_record_assertion_event`, and `AdminEvent` already persist most of
+SPEC §18's named event list today — but those exist to satisfy SPEC §17's append-only audit-trail
+requirement (who did what, retrievable in provenance), not §18's observability-emission concern (a
+sink an operator's monitoring stack can subscribe to). The two can and likely should share the same
+underlying facts once M4 wires this up, but nothing today *emits* them anywhere an observability
+consumer could pick them up — the gap this ADR scopes is real, just narrower for events than for
+metrics/logs.
 
 This was flagged mid-M3 as a lower-confidence, informational note — SPEC §18 uses SHOULD, not
 MUST, and names no conformance vector (SPEC §19), so it never blocked a milestone gate. It stayed
@@ -55,17 +66,24 @@ started" as of this ADR). The plan below is what M4 implements, not what this PR
 
 - **A single abstract port, not three.** SPEC §18's metrics/events/logs are one concern
   (observability) with three shapes of output, not three independent subsystems. One
-  `ObservabilitySink` protocol (or similarly named port, final name decided at implementation time)
-  lives beside `Clock`/`IdProvider` in `core/`'s port definitions, with methods shaped roughly like
+  `ObservabilitySink` (an `ABC`, final name decided at implementation time — matching how `Clock`
+  and `IdProvider` are themselves `ABC`s, not `Protocol`s like `Embedder`) lives beside
+  `Clock`/`IdProvider` in `core/`'s port definitions, with methods shaped roughly like
   `record_metric(name, value, **tags)`, `record_event(kind, **fields)`, `log(level, msg, **fields)`.
   A default no-op implementation ships so instrumentation calls are always safe to make even when
-  no real sink is configured — mirroring `Clock`'s own "always injected, never optional at the call
-  site" shape, not an `if observer:` check scattered at every call site.
-- **Dependency rule holds.** `core/`, `schema/`, `govern/`, `query/` depend only on the abstract
-  port, exactly as they already do for `Clock`/`IdProvider`/`StorageBackend`. Concrete sinks
-  (stdlib `logging`-backed, OpenTelemetry-backed, a test-double recording sink, etc.) live in
-  `observe/` as adapters and are wired at the composition root — the same place `StorageBackend`
-  and `Clock` implementations are chosen today.
+  no real sink is configured — mirroring how `Ontology` already defaults `clock: Clock | None`
+  to a concrete `SystemClock()` when none is injected (`ontology.py`), not an `if observer:` check
+  scattered at every call site.
+- **Dependency rule holds, but `pyproject.toml`'s import-linter contract needs a new entry, not
+  just the same one.** `core/`, `schema/`, `govern/`, `query/` depend only on the abstract port,
+  exactly as they already do for `Clock`/`IdProvider`/`StorageBackend`. Concrete sinks (stdlib
+  `logging`-backed, OpenTelemetry-backed, a test-double recording sink, etc.) live in `observe/` as
+  adapters and are wired at the composition root — the same place `StorageBackend` and `Clock`
+  implementations are chosen today. The contract's `forbidden_modules` list currently reads
+  `["ontolith.store.sqlite", "ontolith.store.duckdb", "ontolith.interfaces"]` — it does **not**
+  name `ontolith.observe`, so nothing mechanically stops a domain module from importing a concrete
+  sink out of `observe/` today. M4's implementation work includes adding `ontolith.observe` to that
+  list; it isn't already covered.
 - **`govern/policy` stays pure.** Policy evaluation itself never calls the sink — SPEC's own
   purity requirement for the policy engine doesn't get a carve-out for observability. Instrumentation
   happens one layer up, at the proposal-acceptance orchestration in `Ontology` (mirroring where
@@ -85,13 +103,18 @@ started" as of this ADR). The plan below is what M4 implements, not what this PR
 - **Minimum viable M4 scope, in priority order:** (a) structured, correlated logs replacing the
   four existing ad hoc `logging.getLogger()` call sites, since these already exist in a
   lower-value form and SPEC §18 calls logs out specifically for correlation; (b) the four named
-  events (proposal lifecycle, contradiction open/resolve, schema migration, plugin load), each of
-  which already has exactly one call site to instrument (mirroring how ADR-0042's `AdminEvent`
-  found one call site per action); (c) the metrics list, which is the largest surface (8 named
-  metrics, several needing new counters/gauges that don't exist as tracked values anywhere today)
-  and the one most likely to need its own follow-up ADR for a concrete backend choice
-  (OpenTelemetry vs. a minimal counts-in-SQLite approach vs. Prometheus client library) once M4
-  actually starts.
+  events (proposal lifecycle, contradiction open/resolve, schema migration, plugin load) — call
+  site counts vary by event, not uniformly one each as a first pass might assume: plugin load has
+  exactly one (`PluginRegistry.register`), but contradiction-opening already has two
+  (`_apply_with_conflict_routing`'s and `flag_contradiction`'s own `Contradiction(...)`
+  construction) and proposal-lifecycle transitions at least four (`ontology.py`'s several
+  `ProposalEvent(...)` sites); wiring this tier means threading the sink call through each
+  existing site, not adding one call per event kind; (c) the metrics list, which is the largest
+  surface (SPEC §18 names seven top-level metrics, several themselves bundling sub-values —
+  proposals created/accepted/rejected, query latency symbolic/semantic — and needing new
+  counters/gauges that don't exist as tracked values anywhere today) and the one most likely to
+  need its own follow-up ADR for a concrete backend choice (OpenTelemetry vs. a minimal
+  counts-in-SQLite approach vs. Prometheus client library) once M4 actually starts.
 
 **4. Still SHOULD, not MUST — this does not become an M4 exit-gate criterion.** M4's exit criteria
 (security review, performance budgets, SemVer 1.0 freeze, `format_version` freeze) are unchanged by
@@ -109,17 +132,22 @@ that happens by nobody having planned for it.
 - The Implementation Plan's M4 scope column now names observability explicitly — the next
   milestone-boundary audit has something concrete to check against, closing the same "oversight,
   not decision" gap this ADR itself was written to fix.
-- The port-based architecture decided here reuses the exact `Clock`/`IdProvider` precedent
-  (ADR-0001) rather than inventing a new pattern, keeping the dependency rule's enforcement
-  (`import-linter`) mechanical rather than requiring a new contract.
+- The port-based architecture decided here reuses the exact `Clock`/`IdProvider` code pattern
+  (`core/clock.py`, `core/ids.py`) rather than inventing a new one — the port shape and
+  composition-root wiring are familiar, even though (see Negative/follow-ups below) the
+  `import-linter` contract itself still needs a new entry at implementation time, not just reuse
+  of the existing one.
 
 **Negative / follow-ups:**
 - `observe/` remains an empty package until M4 actually starts — this ADR plans the work, it does
   not do it. The production-deployment gap named in KI-064's own Description (no way to observe
   proposal-acceptance rate, review latency, etc., today) persists through M3's close and however
   long M4 takes to begin.
-- The metrics surface (SPEC §18's 8 named metrics) is deliberately left for a follow-up ADR at M4
-  implementation time rather than fully designed here — picking a concrete metrics backend is a
+- `pyproject.toml`'s import-linter contract does not yet forbid domain modules from importing
+  `ontolith.observe` — that entry has to be added when concrete sinks land in M4, it is not
+  already covered by the existing `store.sqlite`/`store.duckdb`/`interfaces` entries.
+- The metrics surface (SPEC §18's seven named metrics) is deliberately left for a follow-up ADR at
+  M4 implementation time rather than fully designed here — picking a concrete metrics backend is a
   real architectural decision (dependency footprint, whether it's pluggable like `StorageBackend`)
   better made against M4's actual requirements than speculatively now.
 - Because this ADR intentionally does not implement anything, `docs/known-issues.md`'s KI-064 is
@@ -157,8 +185,9 @@ that happens by nobody having planned for it.
 - SPEC §19: Conformance (names no vector for §18 — confirms SHOULD, not MUST)
 - `docs/Ontolith_Implementation_Plan.md` §2: Phasing & sequencing (M4 scope column, updated
   alongside this ADR)
-- ADR-0001: Clock & IdProvider ports (the precedent this ADR's port design follows)
-- ADR-0042: Admin-Action Audit Trail (the closest existing precedent for "one call site per
-  domain action" event recording, reused here for the proposal-lifecycle/contradiction/schema/
-  plugin events)
+- `core/clock.py`, `core/ids.py`: the `Clock`/`IdProvider` `ABC` port pattern this ADR's port
+  design follows — an established code pattern with no dedicated ADR of its own
+- ADR-0042: Admin-Action Audit Trail (the closest existing precedent for per-action event
+  recording; call-site counts for the SPEC §18 events this ADR scopes vary by event, see Decision
+  above — not uniformly "one," unlike `AdminEvent`'s own three actions)
 - `docs/known-issues.md` KI-064 (resolved by this ADR)
