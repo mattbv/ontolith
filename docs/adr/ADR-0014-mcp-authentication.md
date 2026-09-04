@@ -205,16 +205,17 @@ and every transcript, but still not zero. Deployments running MCP over stdio sho
 short-lived tokens for those principals precisely because there's no way to keep the token out of
 the client's own process environment the way the header keeps it out of the *model's* context.
 
-**Residual — the argument still works even when a header is available, so the exposure is made
-avoidable, not eliminated:** an HTTP deployment cannot currently *require* the header. `token`
-remains an accepted, schema-advertised argument on every tool, so a model that already has a token
-in context can keep emitting it and it will keep authenticating (the header only wins when both are
-present *and* well-formed). A `require_header_token: bool` flag on `create_mcp_server()` that
-disables the argument fallback entirely for HTTP transports would let a deployment close this
-outright — not built here: it's an opt-in hardening a deployment could reach for once available,
-not a fix for a live vulnerability (the default behavior changes nothing on its own), so it was
-judged out of scope for this pass rather than blocking it. Tracked as KI-073 rather than left as
-ADR prose only.
+**Residual (at the time of this 2026-09-01 Update — closed below, KI-073) — the argument still
+works even when a header is available, so the exposure is made avoidable, not eliminated:** an
+HTTP deployment cannot currently *require* the header. `token` remains an accepted,
+schema-advertised argument on every tool, so a model that already has a token in context can keep
+emitting it and it will keep authenticating (the header only wins when both are present *and*
+well-formed). A `require_header_token: bool` flag on `create_mcp_server()` that disables the
+argument fallback entirely for HTTP transports would let a deployment close this outright — not
+built here: it's an opt-in hardening a deployment could reach for once available, not a fix for a
+live vulnerability (the default behavior changes nothing on its own), so it was judged out of
+scope for this pass rather than blocking it. Tracked as KI-073 rather than left as ADR prose only
+— since built, see this ADR's own 2026-09-04 Update below.
 
 ## Update (2026-09-02, closes KI-074): one blanket error handler, not a per-tool per-type catch
 
@@ -289,6 +290,30 @@ only checks `isError` (rather than the response's own `code` field) will treat a
 `StorageError` as success — callers of MCP tools should always check `code`, not rely on
 `isError` alone.
 
+## Update (2026-09-04, closes KI-073): opt-in `require_header_token` closes the residual named above
+
+KI-067's own Update left one residual open by name: `token` remains an accepted argument on every
+tool even when a deployment would rather require the header outright, so a model that already has
+a token in context can keep authenticating via the argument indefinitely — the exposure is made
+avoidable, not eliminated. That Update named the exact shape of the fix (`require_header_token:
+bool` on `create_mcp_server()`) and deferred it as KI-073, judged strictly opt-in hardening rather
+than a live vulnerability.
+
+**Fix:** `create_mcp_server()` gains a keyword-only `require_header_token: bool = False` parameter.
+When `True`, `_bearer_token()` treats an absent (or no-request-context-at-all) header the same as
+no credential supplied at all — returning "No bearer token provided" — even when the caller still
+supplies a valid `token` argument, disabling the fallback entirely. A *malformed* header (KI-067's
+own fail-closed case) is unaffected either way: it was never a fallback candidate to begin with.
+`False` by default, since the argument fallback is what keeps stdio (no header channel exists
+there) usable at all — the flag is for an HTTP (SSE/streamable-HTTP) deployment that wants to
+require the private channel outright, not a change to the out-of-the-box default.
+
+**stdio under the flag:** setting `require_header_token=True` makes stdio transports unusable
+outright, exactly as anticipated when this was deferred — there is no header channel for stdio to
+satisfy the requirement with. This is the documented, deliberate tradeoff, not a carve-out gap: a
+deployment that needs both stdio and this flag isn't a supported configuration, and none was asked
+for.
+
 ## References
 
 - ADR-0008 (MCP surface — this ADR implements its "server stamps `author`" provenance claim,
@@ -301,4 +326,4 @@ only checks `isError` (rather than the response's own `code` field) will treat a
   isinstance-based redaction precedent this update follows instead of REST's exact-type lookup)
 - SPEC §8.2 (Authentication), §14.4 (MCP server), §16 (stable, machine-readable error codes)
 - `identity/ports.py` (`AuthProvider`, stubbed since M0)
-- `docs/known-issues.md` KI-024, KI-059, KI-067, KI-074 (all resolved), KI-073 (the deferred `require_header_token` follow-up)
+- `docs/known-issues.md` KI-024, KI-059, KI-067, KI-073, KI-074 (all resolved)

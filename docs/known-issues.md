@@ -1488,7 +1488,7 @@ New `Ontology.get_admin_events(author, *, actor=None, target=None)`, admin-gated
 
 ---
 
-## KI-073 — MCP has no way to require the `Authorization` header, so a deployment can't close the `token`-argument exposure outright
+## KI-073 — MCP has no way to require the `Authorization` header, so a deployment can't close the `token`-argument exposure outright ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — the fix KI-067 shipped makes the exposure avoidable, not eliminated
 **Milestone target:** Backlog
@@ -1500,7 +1500,7 @@ KI-067/ADR-0014 made every MCP tool's `token` argument optional and prefer a tra
 
 ### Fix
 
-Add an opt-in `require_header_token: bool = False` parameter to `create_mcp_server()` that, when set, makes `_bearer_token()` return the "No bearer token provided"/"Malformed Authorization header" errors even for a live HTTP request whose header is absent — i.e. disables the argument fallback entirely for HTTP transports (stdio, which has no header channel at all, would need its own carve-out or would simply be unusable with the flag set, which is fine since stdio-facing principals already need the argument). Not built as part of KI-067 itself — that KI's own Fix text scoped it to making the header path available and preferred, and this is a strictly opt-in hardening a deployment reaches for once available, not a fix for a live vulnerability.
+Added an opt-in `require_header_token: bool = False` keyword-only parameter to `create_mcp_server()`. When set, `_bearer_token()` returns "No bearer token provided" for a live request whose header is absent — even when the caller still supplies a valid `token` argument — disabling the fallback entirely; a *malformed* header (KI-067's existing fail-closed case) is unaffected either way. stdio (no header channel at all) simply becomes unusable under the flag, as anticipated when this was deferred (KI-067/ADR-0014's own Residual paragraph) — not a bug, the flag is only for HTTP (SSE/streamable-HTTP) deployments that want to require the private channel outright. All 9 tools' `token` parameter docstrings (the actual MCP tool-schema descriptions a calling model reads) updated to disclose the flag's effect, not just the module/constructor docs. Every code path independently mutation-tested: the argument-still-works, no-request-context-at-all, and real-transport cases were each reproduced against the pre-fix code and confirmed clean after. Review found two gaps the first test pass didn't cover — a valid header alongside a still-present `token` argument (the exact migration case the flag exists to support: a client that hasn't stopped sending `token` yet, behind a now header-injecting proxy), and the flag being captured per-server-instance rather than shared/global state — both closed with dedicated tests, each independently mutation-tested the same way.
 
 ---
 

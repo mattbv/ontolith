@@ -954,6 +954,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Security
 
+- MCP's `create_mcp_server()` gains an opt-in `require_header_token: bool = False` keyword-only
+  parameter (closes KI-073, ADR-0014 update) — when set, an HTTP (SSE/streamable-HTTP) deployment
+  can require the `Authorization` header outright instead of merely preferring it (KI-067): an
+  absent header now fails the call the same way no credential at all would, even when the caller
+  still supplies a valid `token` argument. `False` by default — the argument fallback KI-067 added
+  is what keeps stdio transports (no header channel exists there) usable at all, so this is a
+  strictly opt-in hardening for HTTP deployments, not a fix for a live vulnerability. A malformed
+  header still fails closed either way, unchanged from KI-067.
 - `pydantic`, `typer`, `python-ulid`, `fastapi`, `duckdb`, `uvicorn`, and `pyyaml` now all carry an
   upper version bound (closes KI-070) — `pydantic>=2.0,<3.0`, `typer>=0.9,<1.0`,
   `python-ulid>=2.0,<4.0`, `fastapi>=0.110,<1.0`, `duckdb>=1.0,<2.0`, `uvicorn>=0.27,<1.0` (both
