@@ -526,3 +526,24 @@ class TestRoundTrip:
         assert reconstructed.concepts == schema.concepts
         assert reconstructed.namespace == schema.namespace
         assert reconstructed.version == schema.version
+
+
+class TestCrossBridgeConsistency:
+    """KI-068: the LinkML and RDF/OWL bridges must agree on Float's
+    precision. Pinned here, one level more specific than each bridge's own
+    per-module test coverage (TestToYaml.test_float_serializes_as_double_
+    not_float above; test_schema_rdf.py's own Float assertion) - those two
+    only prove each bridge is internally consistent with itself. A future
+    change to either mapping that reintroduces the divergence this KI
+    fixed would otherwise surface as two independently-passing tests that
+    happen to disagree with each other, with nothing pointing at the
+    actual invariant broken."""
+
+    def test_float_maps_to_the_same_precision_in_both_bridges(self) -> None:
+        from rdflib.namespace import XSD
+
+        from ontolith.schema.linkml import _VALUE_TYPE_TO_LINKML_RANGE
+        from ontolith.schema.rdf import _VALUE_TYPE_TO_XSD
+
+        assert _VALUE_TYPE_TO_LINKML_RANGE["Float"] == "double"
+        assert _VALUE_TYPE_TO_XSD["Float"] == XSD.double

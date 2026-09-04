@@ -43,12 +43,16 @@ _VALUE_TYPE_TO_LINKML_RANGE: dict[str, str] = {
     "Integer": "integer",
     # "double" (64-bit), not "float" (32-bit) - Ontolith's Float is backed by
     # Python's float/IEEE-754 double throughout (identical to what schema/rdf.py's
-    # RDF/OWL bridge already emits, XSD.double), so double is the round-trip-
-    # accurate choice, not a lossy 32-bit truncation on export (KI-068; ADR-0013
-    # Update, ADR-0036's own Consequences section named this exact reconciliation
-    # as future work when the RDF/OWL bridge shipped). The reverse mapping below
-    # has accepted "double" since before this change, so this makes the two
-    # tables consistent with each other, not just internally with themselves.
+    # RDF/OWL bridge already emits, XSD.double). Ontolith's own IR -> YAML -> IR
+    # round-trip was never lossy either way (the reverse table below has always
+    # accepted both spellings) - the defect this fixes is a mis-declared
+    # precision that only matters to a downstream LinkML-consuming tool (codegen,
+    # SHACL/JSON-Schema generation) resolving `float` to 32-bit xsd:float, not
+    # anything Ontolith itself round-trips through. (KI-068; ADR-0013 Update -
+    # ADR-0036's own Consequences section disclosed the mismatch and declined to
+    # reconcile it as out of that ADR's scope, not "named it as future work".)
+    # The reverse mapping already accepted "double" before this change, so this
+    # makes the two tables consistent with each other, not just internally.
     "Float": "double",
     "Boolean": "boolean",
     "Date": "date",
