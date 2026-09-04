@@ -1998,6 +1998,26 @@ class TestRequireHeaderToken:
 
         assert result == {"concepts": []}
 
+    def test_valid_header_still_authenticates_alongside_a_token_argument(
+        self, tmp_path: Path
+    ) -> None:
+        """The migration case the flag exists to support: a client that
+        hasn't been updated yet keeps sending `token` out of habit while a
+        header-injecting proxy now also supplies the header. `token` being
+        present must not itself trigger the "argument fallback disabled"
+        rejection - only an *absent* header does that. Mirrors
+        TestBearerTokenTransport.test_header_takes_priority_over_token_argument's
+        own flag-off case (review finding: this flag-on analogue was the one
+        gap two independent mutations both slipped through)."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb, require_header_token=True)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request(f"Bearer {token}"):
+            result = mcp._tool_manager.get_tool("ontolith.schema").fn(token="not-a-real-token")
+
+        assert result == {"concepts": []}
+
     def test_no_header_rejects_even_a_valid_token_argument(self, tmp_path: Path) -> None:
         """The whole point of the flag: a live HTTP request with no header
         must fail, even though the token argument alone would have
@@ -2076,6 +2096,29 @@ class TestRequireHeaderToken:
             _call_tool_over_real_transport(mcp, "ontolith.schema", {}, f"Bearer {token}")
         )
         assert result == {"concepts": []}
+
+    def test_flag_is_per_server_instance_not_shared_process_wide(self, tmp_path: Path) -> None:
+        """require_header_token is a closure-captured constructor argument,
+        not module or process state - two servers built from the same kb
+        must each honor their own setting independently. Review finding:
+        a refactor hoisting the flag onto shared state (e.g. a module-level
+        default) would have shipped green against every other test in this
+        class, since none of them build more than one server."""
+        kb = _kb(tmp_path)
+        hardened, _ = _server(kb, require_header_token=True)
+        lenient, _ = _server(kb, require_header_token=False)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+
+        with _http_request(None):
+            hardened_result = hardened._tool_manager.get_tool("ontolith.schema").fn(token=token)
+            lenient_result = lenient._tool_manager.get_tool("ontolith.schema").fn(token=token)
+
+        assert hardened_result == {
+            "error": "No bearer token provided",
+            "code": "AUTH_ERROR",
+            "detail": {},
+        }
+        assert lenient_result == {"concepts": []}
 
 
 # ---------------------------------------------------------------------------
