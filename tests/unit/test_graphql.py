@@ -983,6 +983,25 @@ class TestProposalsQuery:
             )
             assert _error_codes(body) == ["VALIDATION_ERROR"], bad_state
 
+    def test_bad_token_reports_auth_error_over_bad_state(self, tmp_path: Path) -> None:
+        """`state` is validated after `_require_principal` (KI-077 review,
+        round 2) - an unauthenticated caller with a bad `state` should
+        learn "no valid token" first, not get a free pre-auth probe of the
+        accepted-value set. Pins the ordering as an actual test, not just
+        the comment on Query.proposals - round 1's comment-only fix left
+        this reorderable with no test failing (verified: hoisting the
+        state check above _require_principal left the rest of this suite
+        green)."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        body = _gql(
+            client,
+            "query($s: String) { proposals(state: $s) { id } }",
+            variables={"s": "not-a-real-state"},
+            headers=_auth("not-a-real-token"),
+        )
+        assert _error_codes(body) == ["AUTH_ERROR"]
+
 
 class TestContradictionsQuery:
     def test_defaults_to_open(self, tmp_path: Path) -> None:
@@ -1022,11 +1041,19 @@ class TestContradictionsQuery:
         assert body["data"]["contradictions"][0]["state"] == "resolved"
 
     def test_all_sentinel_returns_every_state(self, tmp_path: Path) -> None:
+        """Seeds one resolved + one still-open contradiction (KI-077
+        review, round 2) - a single-resolved fixture can't distinguish
+        "all" genuinely returning every state from a mapping bug that
+        coincidentally maps "all" to "resolved" alone."""
         kb = _kb(tmp_path)
-        e = kb.create_entity("Person", author=HUMAN)
-        a1 = kb.assert_literal(e.id, "Person.name", "Ada", "Text", author=HUMAN)
-        kb.assert_literal(e.id, "Person.name", "Ida", "Text", author=ADMIN)
-        [contradiction] = kb.contradictions()
+        e1 = kb.create_entity("Person", author=HUMAN)
+        a1 = kb.assert_literal(e1.id, "Person.name", "Ada", "Text", author=HUMAN)
+        kb.assert_literal(e1.id, "Person.name", "Ida", "Text", author=ADMIN)
+        [resolved_contradiction] = kb.contradictions()
+
+        e2 = kb.create_entity("Person", author=HUMAN)
+        kb.assert_literal(e2.id, "Person.name", "Grace", "Text", author=HUMAN)
+        kb.assert_literal(e2.id, "Person.name", "Gina", "Text", author=ADMIN)
 
         client, _ = _client(kb)
         reviewer_token, _ = kb.issue_token(REVIEWER, author=ADMIN)
@@ -1034,14 +1061,14 @@ class TestContradictionsQuery:
             client,
             "mutation($cid: String!, $w: String!) { "
             "resolveContradiction(contradictionId: $cid, winnerAssertionId: $w) { state } }",
-            variables={"cid": contradiction.id, "w": a1.id},
+            variables={"cid": resolved_contradiction.id, "w": a1.id},
             headers=_auth(reviewer_token),
         )
 
         token, _ = kb.issue_token(HUMAN, author=ADMIN)
         body = _gql(client, '{ contradictions(state: "all") { id state } }', headers=_auth(token))
-        assert len(body["data"]["contradictions"]) == 1
-        assert body["data"]["contradictions"][0]["state"] == "resolved"
+        assert len(body["data"]["contradictions"]) == 2
+        assert {c["state"] for c in body["data"]["contradictions"]} == {"open", "resolved"}
 
     def test_null_returns_every_state(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
@@ -1081,6 +1108,19 @@ class TestContradictionsQuery:
                 headers=_auth(token),
             )
             assert _error_codes(body) == ["VALIDATION_ERROR"], bad_state
+
+    def test_bad_token_reports_auth_error_over_bad_state(self, tmp_path: Path) -> None:
+        """`state` is validated after `_require_principal` (KI-077 review,
+        round 2) - mirrors Query.proposals's identical test above."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        body = _gql(
+            client,
+            "query($s: String) { contradictions(state: $s) { id } }",
+            variables={"s": "not-a-real-state"},
+            headers=_auth("not-a-real-token"),
+        )
+        assert _error_codes(body) == ["AUTH_ERROR"]
 
 
 class TestPrincipalsQuery:

@@ -837,7 +837,13 @@ class Query:
         # _list_proposals (which validates state, KI-077) is even
         # scheduled - an unauthenticated caller never gets a free pre-auth
         # probe of the accepted-value set (matches MCP's own
-        # ontolith.list_contradictions, KI-076 review).
+        # ontolith.list_contradictions, KI-076 review; pinned by
+        # test_bad_token_reports_auth_error_over_bad_state, round 2). This
+        # is also why `state` stays a plain `String`, not a GraphQL enum:
+        # an enum argument is checked during document validation, before
+        # any resolver runs at all - switching to one would silently move
+        # this check ahead of auth, the opposite of what this ordering
+        # exists for.
         _require_principal(info)
         kb = _kb(info)
         return await run_in_threadpool(_list_proposals, kb, state)
