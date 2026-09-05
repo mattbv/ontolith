@@ -7,10 +7,13 @@ import pytest
 from ontolith.core import Assertion
 from ontolith.govern import (
     AutoAccept,
+    ConfidenceThreshold,
     Proposal,
     Reject,
     RequireReview,
+    RequireReviewByRole,
     SourceQuorum,
+    SourceRequired,
     ThresholdPolicy,
 )
 from ontolith.identity import Principal
@@ -47,6 +50,64 @@ class TestProposal:
 
         with pytest.raises(ValidationError):
             proposal.state = "accepted"  # type: ignore
+
+
+class TestRequireReviewDoesNotAliasItsReviewersList:
+    """RequireReview copies its `reviewers` argument rather than aliasing it
+    (found in review, KI-069): a strategy that hands its own config list
+    (e.g. `SourceQuorum.reviewers`, `RequireReviewByRole`'s internal
+    role->reviewers mapping) directly to this constructor must not have that
+    config silently rewritten by a caller mutating a returned Decision."""
+
+    def test_mutating_the_input_list_after_construction_does_not_affect_the_decision(
+        self,
+    ) -> None:
+        source = ["a@example.com"]
+        decision = RequireReview(source, "reason")
+
+        source.append("b@example.com")
+
+        assert decision.reviewers == ["a@example.com"]
+
+    def test_mutating_the_decisions_reviewers_does_not_affect_the_original_list(
+        self,
+    ) -> None:
+        source = ["a@example.com"]
+        decision = RequireReview(source, "reason")
+
+        decision.reviewers.append("b@example.com")
+
+        assert source == ["a@example.com"]
+
+    def test_role_reviewers_mapping_survives_a_mutated_decision(self) -> None:
+        """Regression for the concrete scenario found in review: mutating a
+        RequireReviewByRole decision's `.reviewers` must not corrupt what
+        the *next* evaluation for the same role returns."""
+        policy = RequireReviewByRole({"legal": ["legal-reviewer@example.com"]})
+        principal = Principal(
+            id="author",
+            kind="human",
+            auth_method="oidc",
+            default_capability="propose",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            metadata={"role": "legal"},
+        )
+        proposal = Proposal(
+            id="prop-001",
+            namespace="test",
+            author="author",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            payload={},
+        )
+
+        first = policy.evaluate(proposal, principal)
+        assert isinstance(first, RequireReview)
+        first.reviewers.append("attacker@example.com")
+
+        second = policy.evaluate(proposal, principal)
+
+        assert isinstance(second, RequireReview)
+        assert second.reviewers == ["legal-reviewer@example.com"]
 
 
 class TestThresholdPolicy:
@@ -466,6 +527,39 @@ class TestSourceQuorum:
 
         assert isinstance(decision, Reject)
 
+    def test_propose_author_delegating_to_read_is_also_capped_and_rejected(self) -> None:
+        """The other attenuation direction (found in review, KI-069, and
+        backfilled here for the strategy that set this pattern): a
+        propose-capability author delegating to a read-capability principal
+        is capped down, not left at their own higher capability - proves
+        min_capability is actually applied, not just that a pre-rejected
+        reader stays rejected regardless."""
+        policy = SourceQuorum(threshold=1)
+        author = Principal(
+            id="author",
+            kind="human",
+            auth_method="oidc",
+            default_capability="propose",
+            created_at=self.T0,
+        )
+        delegate = Principal(
+            id="delegate",
+            kind="human",
+            auth_method="oidc",
+            default_capability="read",
+            created_at=self.T0,
+        )
+        kb = _FakeKbView([])
+
+        decision = policy.evaluate(
+            self._proposal([self._assert_literal_op(source="source-a")]),
+            author,
+            kb,
+            acting_as=delegate,
+        )
+
+        assert isinstance(decision, Reject)
+
     def test_empty_operations_requires_review(self) -> None:
         """An empty operations list requires review rather than raising
         IndexError - defensive handling for a payload shape no current
@@ -488,3 +582,490 @@ class TestSourceQuorum:
         decision = policy.evaluate(self._proposal([op]), self.PRINCIPAL, kb)
 
         assert isinstance(decision, RequireReview)
+
+
+class TestConfidenceThreshold:
+    """ConfidenceThreshold (KI-069, SPEC §9.2): auto-accepts once a proposal's
+    own asserted confidence meets `threshold`."""
+
+    T0 = datetime(2025, 1, 1, tzinfo=UTC)
+    # Never reads `kb` - a dummy suffices for every test.
+    PRINCIPAL = Principal(id="author", kind="human", auth_method="oidc", created_at=T0)
+
+    def _proposal(self, operations: list[dict[str, object]]) -> Proposal:
+        return Proposal(
+            id="prop-001",
+            namespace="test",
+            author="author",
+            created_at=self.T0,
+            payload={"operations": operations},
+        )
+
+    def _op(self, confidence: float | None, kind: str = "assert_literal") -> dict[str, object]:
+        return {
+            "kind": kind,
+            "subject": "e-1",
+            "predicate": "Person.name",
+            "value": "Ada",
+            "value_type": "Text",
+            "confidence": confidence,
+        }
+
+    def test_constructor_rejects_threshold_outside_unit_interval(self) -> None:
+        with pytest.raises(ValueError, match="threshold"):
+            ConfidenceThreshold(threshold=1.5)
+        with pytest.raises(ValueError, match="threshold"):
+            ConfidenceThreshold(threshold=-0.1)
+
+    def test_boundary_thresholds_are_valid(self) -> None:
+        """0.0 and 1.0 are both valid thresholds (inclusive range)."""
+        ConfidenceThreshold(threshold=0.0)
+        ConfidenceThreshold(threshold=1.0)
+
+    def test_confidence_at_threshold_auto_accepts(self) -> None:
+        """Threshold comparison is inclusive (>=), not strict (>)."""
+        policy = ConfidenceThreshold(threshold=0.8)
+
+        decision = policy.evaluate(self._proposal([self._op(0.8)]), self.PRINCIPAL)
+
+        assert isinstance(decision, AutoAccept)
+        assert "0.8" in decision.reason
+
+    def test_confidence_above_threshold_auto_accepts(self) -> None:
+        policy = ConfidenceThreshold(threshold=0.5)
+
+        decision = policy.evaluate(self._proposal([self._op(0.9)]), self.PRINCIPAL)
+
+        assert isinstance(decision, AutoAccept)
+
+    def test_confidence_below_threshold_requires_review(self) -> None:
+        policy = ConfidenceThreshold(threshold=0.8, reviewers=["reviewer@example.com"])
+
+        decision = policy.evaluate(self._proposal([self._op(0.7)]), self.PRINCIPAL)
+
+        assert isinstance(decision, RequireReview)
+        assert decision.reviewers == ["reviewer@example.com"]
+        assert "0.7" in decision.reason and "0.8" in decision.reason
+
+    def test_missing_confidence_requires_review(self) -> None:
+        """A proposal with no confidence never auto-accepts, regardless of
+        threshold - not treated as confidence 0 or confidence 1."""
+        policy = ConfidenceThreshold(threshold=0.0)
+
+        decision = policy.evaluate(self._proposal([self._op(None)]), self.PRINCIPAL)
+
+        assert isinstance(decision, RequireReview)
+        assert "no confidence" in decision.reason.lower()
+
+    def test_retraction_always_requires_review(self) -> None:
+        policy = ConfidenceThreshold(threshold=0.0)
+
+        decision = policy.evaluate(
+            self._proposal([{"kind": "retract", "assertion_id": "a-1"}]), self.PRINCIPAL
+        )
+
+        assert isinstance(decision, RequireReview)
+        assert "retract" in decision.reason.lower()
+
+    def test_assert_ref_confidence_is_evaluated(self) -> None:
+        """assert_ref operations carry confidence the same way assert_literal does."""
+        policy = ConfidenceThreshold(threshold=0.5)
+        op = self._op(0.9, kind="assert_ref")
+
+        decision = policy.evaluate(self._proposal([op]), self.PRINCIPAL)
+
+        assert isinstance(decision, AutoAccept)
+
+    def test_empty_operations_requires_review(self) -> None:
+        policy = ConfidenceThreshold(threshold=0.0)
+
+        decision = policy.evaluate(self._proposal([]), self.PRINCIPAL)
+
+        assert isinstance(decision, RequireReview)
+
+    def test_unknown_operation_kind_requires_review(self) -> None:
+        policy = ConfidenceThreshold(threshold=0.0)
+        op = {"kind": "create_entity", "subject": "e-1"}
+
+        decision = policy.evaluate(self._proposal([op]), self.PRINCIPAL)
+
+        assert isinstance(decision, RequireReview)
+
+    def test_read_capability_principal_rejected(self) -> None:
+        """Enforces the KI-015 capability floor itself, mirroring SourceQuorum."""
+        policy = ConfidenceThreshold(threshold=0.0)
+        reader = Principal(
+            id="reader",
+            kind="human",
+            auth_method="oidc",
+            default_capability="read",
+            created_at=self.T0,
+        )
+
+        decision = policy.evaluate(self._proposal([self._op(1.0)]), reader)
+
+        assert isinstance(decision, Reject)
+
+    def test_delegated_read_capability_capped_and_rejected(self) -> None:
+        """min(capability) applies here too - delegating to a write-capability
+        principal doesn't lift a read-capability author above the floor."""
+        policy = ConfidenceThreshold(threshold=0.0)
+        reader = Principal(
+            id="reader",
+            kind="human",
+            auth_method="oidc",
+            default_capability="read",
+            created_at=self.T0,
+        )
+        delegate = Principal(
+            id="delegate",
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            created_at=self.T0,
+        )
+
+        decision = policy.evaluate(self._proposal([self._op(1.0)]), reader, acting_as=delegate)
+
+        assert isinstance(decision, Reject)
+
+    def test_propose_author_delegating_to_read_is_also_capped_and_rejected(self) -> None:
+        """The other attenuation direction: a propose-capability author
+        delegating to a read-capability principal is capped down, not left
+        at their own higher capability - proves min_capability is actually
+        applied here, not just that a pre-rejected reader stays rejected
+        (that alone doesn't distinguish min() being called from not)."""
+        policy = ConfidenceThreshold(threshold=0.0)
+        author = Principal(
+            id="author",
+            kind="human",
+            auth_method="oidc",
+            default_capability="propose",
+            created_at=self.T0,
+        )
+        delegate = Principal(
+            id="delegate",
+            kind="human",
+            auth_method="oidc",
+            default_capability="read",
+            created_at=self.T0,
+        )
+
+        decision = policy.evaluate(self._proposal([self._op(1.0)]), author, acting_as=delegate)
+
+        assert isinstance(decision, Reject)
+
+
+class TestSourceRequired:
+    """SourceRequired (KI-069, SPEC §9.2): auto-accepts only when the
+    proposal's operation carries a non-empty `source`."""
+
+    T0 = datetime(2025, 1, 1, tzinfo=UTC)
+    PRINCIPAL = Principal(id="author", kind="human", auth_method="oidc", created_at=T0)
+
+    def _proposal(self, operations: list[dict[str, object]]) -> Proposal:
+        return Proposal(
+            id="prop-001",
+            namespace="test",
+            author="author",
+            created_at=self.T0,
+            payload={"operations": operations},
+        )
+
+    def _op(self, source: str | None, kind: str = "assert_literal") -> dict[str, object]:
+        return {
+            "kind": kind,
+            "subject": "e-1",
+            "predicate": "Person.name",
+            "value": "Ada",
+            "value_type": "Text",
+            "source": source,
+        }
+
+    def test_source_present_auto_accepts(self) -> None:
+        policy = SourceRequired()
+
+        decision = policy.evaluate(self._proposal([self._op("some-source")]), self.PRINCIPAL)
+
+        assert isinstance(decision, AutoAccept)
+        assert "some-source" in decision.reason
+
+    def test_source_missing_requires_review(self) -> None:
+        policy = SourceRequired(reviewers=["reviewer@example.com"])
+
+        decision = policy.evaluate(self._proposal([self._op(None)]), self.PRINCIPAL)
+
+        assert isinstance(decision, RequireReview)
+        assert decision.reviewers == ["reviewer@example.com"]
+        assert "no source" in decision.reason.lower()
+
+    def test_empty_string_source_requires_review(self) -> None:
+        """An empty string source is treated the same as no source at all."""
+        policy = SourceRequired()
+
+        decision = policy.evaluate(self._proposal([self._op("")]), self.PRINCIPAL)
+
+        assert isinstance(decision, RequireReview)
+
+    def test_retraction_always_requires_review(self) -> None:
+        policy = SourceRequired()
+
+        decision = policy.evaluate(
+            self._proposal([{"kind": "retract", "assertion_id": "a-1"}]), self.PRINCIPAL
+        )
+
+        assert isinstance(decision, RequireReview)
+        assert "retract" in decision.reason.lower()
+
+    def test_assert_ref_source_is_evaluated(self) -> None:
+        policy = SourceRequired()
+        op = self._op("some-source", kind="assert_ref")
+
+        decision = policy.evaluate(self._proposal([op]), self.PRINCIPAL)
+
+        assert isinstance(decision, AutoAccept)
+
+    def test_empty_operations_requires_review(self) -> None:
+        policy = SourceRequired()
+
+        decision = policy.evaluate(self._proposal([]), self.PRINCIPAL)
+
+        assert isinstance(decision, RequireReview)
+
+    def test_unknown_operation_kind_requires_review(self) -> None:
+        policy = SourceRequired()
+        op = {"kind": "create_entity", "subject": "e-1"}
+
+        decision = policy.evaluate(self._proposal([op]), self.PRINCIPAL)
+
+        assert isinstance(decision, RequireReview)
+
+    def test_read_capability_principal_rejected(self) -> None:
+        policy = SourceRequired()
+        reader = Principal(
+            id="reader",
+            kind="human",
+            auth_method="oidc",
+            default_capability="read",
+            created_at=self.T0,
+        )
+
+        decision = policy.evaluate(self._proposal([self._op("some-source")]), reader)
+
+        assert isinstance(decision, Reject)
+
+    def test_delegated_read_capability_capped_and_rejected(self) -> None:
+        policy = SourceRequired()
+        reader = Principal(
+            id="reader",
+            kind="human",
+            auth_method="oidc",
+            default_capability="read",
+            created_at=self.T0,
+        )
+        delegate = Principal(
+            id="delegate",
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            created_at=self.T0,
+        )
+
+        decision = policy.evaluate(
+            self._proposal([self._op("some-source")]), reader, acting_as=delegate
+        )
+
+        assert isinstance(decision, Reject)
+
+    def test_propose_author_delegating_to_read_is_also_capped_and_rejected(self) -> None:
+        """The other attenuation direction: a propose-capability author
+        delegating to a read-capability principal is capped down, not left
+        at their own higher capability."""
+        policy = SourceRequired()
+        author = Principal(
+            id="author",
+            kind="human",
+            auth_method="oidc",
+            default_capability="propose",
+            created_at=self.T0,
+        )
+        delegate = Principal(
+            id="delegate",
+            kind="human",
+            auth_method="oidc",
+            default_capability="read",
+            created_at=self.T0,
+        )
+
+        decision = policy.evaluate(
+            self._proposal([self._op("some-source")]), author, acting_as=delegate
+        )
+
+        assert isinstance(decision, Reject)
+
+
+class TestRequireReviewByRole:
+    """RequireReviewByRole (KI-069, SPEC §9.2): always routes to review,
+    assigning reviewers by `principal.metadata["role"]`."""
+
+    T0 = datetime(2025, 1, 1, tzinfo=UTC)
+    # `proposal` isn't read at all by this strategy - a minimal stand-in suffices.
+    PROPOSAL = Proposal(id="prop-001", namespace="test", author="author", created_at=T0, payload={})
+
+    def _principal(self, role: str | None = None, capability: str = "propose") -> Principal:
+        return Principal(
+            id="author",
+            kind="human",
+            auth_method="oidc",
+            default_capability=capability,
+            created_at=self.T0,
+            metadata={"role": role} if role is not None else {},
+        )
+
+    def test_mapped_role_gets_its_configured_reviewers(self) -> None:
+        policy = RequireReviewByRole(
+            {"legal": ["legal-reviewer@example.com"], "eng": ["tech-lead@example.com"]}
+        )
+
+        decision = policy.evaluate(self.PROPOSAL, self._principal(role="legal"))
+
+        assert isinstance(decision, RequireReview)
+        assert decision.reviewers == ["legal-reviewer@example.com"]
+        assert "legal" in decision.reason
+
+    def test_different_mapped_role_gets_its_own_reviewers(self) -> None:
+        """Proves the role lookup is keyed correctly, not just returning the
+        first configured entry regardless of which role was declared."""
+        policy = RequireReviewByRole(
+            {"legal": ["legal-reviewer@example.com"], "eng": ["tech-lead@example.com"]}
+        )
+
+        decision = policy.evaluate(self.PROPOSAL, self._principal(role="eng"))
+
+        assert isinstance(decision, RequireReview)
+        assert decision.reviewers == ["tech-lead@example.com"]
+
+    def test_unmapped_role_falls_back_to_default(self) -> None:
+        policy = RequireReviewByRole(
+            {"legal": ["legal-reviewer@example.com"]}, default=["fallback@example.com"]
+        )
+
+        decision = policy.evaluate(self.PROPOSAL, self._principal(role="marketing"))
+
+        assert isinstance(decision, RequireReview)
+        assert decision.reviewers == ["fallback@example.com"]
+        assert "no reviewers configured" in decision.reason.lower()
+
+    def test_no_declared_role_falls_back_to_default(self) -> None:
+        policy = RequireReviewByRole(
+            {"legal": ["legal-reviewer@example.com"]}, default=["fallback@example.com"]
+        )
+
+        decision = policy.evaluate(self.PROPOSAL, self._principal(role=None))
+
+        assert isinstance(decision, RequireReview)
+        assert decision.reviewers == ["fallback@example.com"]
+        assert "no declared role" in decision.reason.lower()
+
+    def test_non_str_role_falls_back_to_default_without_raising(self) -> None:
+        """A non-str `role` (e.g. a list - non-hashable, would otherwise
+        raise TypeError from the `in` check) falls back to default
+        reviewers, not a crash out of evaluate() - with a reason distinct
+        from "no declared role" (a role WAS declared, just not usably)."""
+        policy = RequireReviewByRole(
+            {"legal": ["legal-reviewer@example.com"]}, default=["fallback@example.com"]
+        )
+        principal = Principal(
+            id="author",
+            kind="human",
+            auth_method="oidc",
+            default_capability="propose",
+            created_at=self.T0,
+            metadata={"role": ["legal"]},
+        )
+
+        decision = policy.evaluate(self.PROPOSAL, principal)
+
+        assert isinstance(decision, RequireReview)
+        assert decision.reviewers == ["fallback@example.com"]
+        assert "not a string" in decision.reason.lower()
+        assert "no declared role" not in decision.reason.lower()
+
+    def test_no_declared_role_and_no_default_is_empty_not_an_error(self) -> None:
+        policy = RequireReviewByRole({"legal": ["legal-reviewer@example.com"]})
+
+        decision = policy.evaluate(self.PROPOSAL, self._principal(role=None))
+
+        assert isinstance(decision, RequireReview)
+        assert decision.reviewers == []
+
+    def test_never_auto_accepts(self) -> None:
+        """Even a mapped role with configured reviewers still requires
+        review - this strategy's whole purpose is routing, not approving."""
+        policy = RequireReviewByRole({"legal": ["legal-reviewer@example.com"]})
+
+        decision = policy.evaluate(self.PROPOSAL, self._principal(role="legal"))
+
+        assert isinstance(decision, RequireReview)
+
+    def test_role_read_from_principal_not_acting_as(self) -> None:
+        """Delegation doesn't change which reviewers get assigned - role
+        attaches to the real author, not whoever they're acting as (mirrors
+        ThresholdPolicy's AI-kind-never-laundered-via-delegation precedent)."""
+        policy = RequireReviewByRole(
+            {"legal": ["legal-reviewer@example.com"], "eng": ["tech-lead@example.com"]}
+        )
+        author = self._principal(role="eng")
+        delegate = Principal(
+            id="delegate",
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            created_at=self.T0,
+            metadata={"role": "legal"},
+        )
+
+        decision = policy.evaluate(self.PROPOSAL, author, acting_as=delegate)
+
+        assert isinstance(decision, RequireReview)
+        assert decision.reviewers == ["tech-lead@example.com"]
+
+    def test_read_capability_principal_rejected(self) -> None:
+        policy = RequireReviewByRole({"legal": ["legal-reviewer@example.com"]})
+
+        decision = policy.evaluate(self.PROPOSAL, self._principal(role="legal", capability="read"))
+
+        assert isinstance(decision, Reject)
+
+    def test_delegated_read_capability_capped_and_rejected(self) -> None:
+        policy = RequireReviewByRole({"legal": ["legal-reviewer@example.com"]})
+        reader = self._principal(role="legal", capability="read")
+        delegate = Principal(
+            id="delegate",
+            kind="human",
+            auth_method="oidc",
+            default_capability="write",
+            created_at=self.T0,
+        )
+
+        decision = policy.evaluate(self.PROPOSAL, reader, acting_as=delegate)
+
+        assert isinstance(decision, Reject)
+
+    def test_propose_author_delegating_to_read_is_also_capped_and_rejected(self) -> None:
+        """The other attenuation direction: a propose-capability author
+        delegating to a read-capability principal is capped down, not left
+        at their own higher capability."""
+        policy = RequireReviewByRole({"legal": ["legal-reviewer@example.com"]})
+        author = self._principal(role="legal", capability="propose")
+        delegate = Principal(
+            id="delegate",
+            kind="human",
+            auth_method="oidc",
+            default_capability="read",
+            created_at=self.T0,
+        )
+
+        decision = policy.evaluate(self.PROPOSAL, author, acting_as=delegate)
+
+        assert isinstance(decision, Reject)

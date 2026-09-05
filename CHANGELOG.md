@@ -10,6 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- Three new `PolicyStrategy` implementations closing out SPEC §9.2's built-in strategy list (closes
+  KI-069, ADR-0045): `ConfidenceThreshold(threshold, reviewers=None)` auto-accepts once a
+  proposal's own staged confidence meets `threshold` (a missing confidence always requires review,
+  never assumed as 0 or 1); `SourceRequired(reviewers=None)` auto-accepts only when the operation
+  carries a non-empty `source` (no `kb` read — a narrower, unconditional cousin of `SourceQuorum`,
+  composable with it via `Composite` for "sourced AND quorum'd"); `RequireReviewByRole(
+  role_reviewers, *, default=None)` never auto-accepts — it always routes to review, choosing
+  reviewers by `principal.metadata.get("role")` (no dedicated `Principal.role` field exists;
+  `metadata` is the existing documented extension point), read from the real author, never
+  `acting_as`, so delegation can't be used to dodge a role's reviewers. All three enforce the
+  KI-015 capability floor themselves, mirroring `SourceQuorum`, and are exported from
+  `ontolith.govern`. SPEC §9.2's six-strategy SHOULD-list is now fully built (`ThresholdPolicy`
+  continues to cover roughly what `TrustLevel` would; no class of that name exists separately).
+  Also fixed along the way: `RequireReview.__init__` now copies its `reviewers` argument instead
+  of aliasing it — a caller mutating a returned decision's `.reviewers` previously rewrote the
+  issuing strategy's own configuration for good, a latent bug in every pre-existing strategy too.
+  Filed KI-078 during review: nothing in the system persists or surfaces a `RequireReview`'s
+  `reviewers` anywhere yet — pre-existing, but `RequireReviewByRole`'s entire purpose being
+  reviewer routing makes it far more consequential now.
 - New MCP tool `ontolith.list_contradictions` (closes KI-076): `read`-tier, mirroring REST's
   `GET /contradictions`/GraphQL's `Query.contradictions` — `ontolith.flag_contradiction`
   (propose-tier, mutates) was previously the only MCP surface that returned a contradiction at
