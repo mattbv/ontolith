@@ -133,6 +133,86 @@ def _kb(make_kb: KbFactory) -> Ontology:
 
 
 # ===========================================================================
+# Reviewer persistence (KI-078)
+# ===========================================================================
+
+
+class TestReviewerPersistence:
+    """A PolicyStrategy's RequireReview.reviewers is persisted onto the
+    proposal at creation time, not just returned and discarded (KI-078) —
+    every PolicyStrategy computed this, but nothing stored it before."""
+
+    def test_reviewers_persisted_from_policy_decision_at_creation(self, make_kb: KbFactory) -> None:
+        """ThresholdPolicy routes AI proposals to the accountable owner
+        (ADR-0003) - proves that reviewer list actually lands on the
+        persisted Proposal, not just the transient Decision object."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+
+        proposal, decision = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        assert isinstance(decision, RequireReview)
+        assert decision.reviewers == [AI_OWNER]
+        assert proposal.reviewers == [AI_OWNER]
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.reviewers == [AI_OWNER]
+
+    def test_reviewers_survive_accept(self, make_kb: KbFactory) -> None:
+        """reviewers remain a historical record after a decision is made -
+        not cleared on accept, the same way policy_reason isn't."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        accepted = kb.accept_proposal(proposal.id, REVIEWER)
+        assert accepted.reviewers == [AI_OWNER]
+
+    def test_reviewers_refresh_on_resubmit(self, make_kb: KbFactory) -> None:
+        """A resubmission re-evaluates policy against a live kb (KI-027) -
+        if the freshly-computed reviewers differ from the original
+        assignment, the stored list is refreshed to match, not left stale."""
+
+        class _ChangingReviewers:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def evaluate(
+                self,
+                proposal: object,
+                principal: Principal,
+                kb: KbView,
+                acting_as: Principal | None = None,
+            ) -> Decision:
+                self.calls += 1
+                reviewers = ["first@example.com"] if self.calls == 1 else ["second@example.com"]
+                return RequireReview(reviewers=reviewers, reason=f"pass {self.calls}")
+
+        kb = make_kb(FixedClock(T0), FixedIdProvider(["e-1", "prop-1", "prop-2"]))
+        kb.policy = _ChangingReviewers()
+        kb.create_principal(
+            HUMAN_AUTHOR, kind="human", auth_method="oidc", default_capability="write"
+        )
+        kb.create_principal(REVIEWER, kind="human", auth_method="oidc", default_capability="review")
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
+        assert proposal.reviewers == ["first@example.com"]
+        kb.request_changes(proposal.id, REVIEWER)
+
+        resubmitted, decision = kb.resubmit(proposal.id, HUMAN_AUTHOR)
+
+        assert isinstance(decision, RequireReview)
+        assert resubmitted.reviewers == ["second@example.com"]
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.reviewers == ["second@example.com"]
+
+
+# ===========================================================================
 # Accept path
 # ===========================================================================
 
@@ -417,6 +497,152 @@ class TestRequestChanges:
             kb.reject_proposal(proposal.id, REVIEWER)
         with pytest.raises(ValidationError, match="not pending review"):
             kb.request_changes(proposal.id, REVIEWER)
+
+
+# ===========================================================================
+# Assign path (SPEC §9.4's `assign` action, KI-078)
+# ===========================================================================
+
+
+class TestAssignReviewers:
+    """assign_reviewers() reassigns a pending proposal's reviewers - the
+    read half of KI-078 (a PolicyStrategy's own reviewer choice) plus the
+    write half (SPEC §9.4's `assign` action, previously unimplemented)."""
+
+    def test_reviewers_replaced_wholesale(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        assert proposal.reviewers == [AI_OWNER]
+
+        updated = kb.assign_reviewers(proposal.id, ["carol@example.com"], REVIEWER)
+
+        assert updated.reviewers == ["carol@example.com"]
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.reviewers == ["carol@example.com"]
+
+    def test_reviewers_can_be_cleared(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        updated = kb.assign_reviewers(proposal.id, [], REVIEWER)
+
+        assert updated.reviewers == []
+
+    def test_assign_recorded_as_proposal_event(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        kb.assign_reviewers(proposal.id, ["carol@example.com", "dave@example.com"], REVIEWER)
+
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert len(events) == 1
+        assert events[0].type == "assign"
+        assert events[0].actor == REVIEWER
+        assert events[0].detail == "carol@example.com, dave@example.com"
+
+    def test_assign_does_not_change_proposal_state(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        updated = kb.assign_reviewers(proposal.id, ["carol@example.com"], REVIEWER)
+
+        assert updated.state == "require_review"
+
+    def test_write_only_principal_cannot_assign(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        with pytest.raises(CapabilityError, match="lacks review capability"):
+            kb.assign_reviewers(proposal.id, ["carol@example.com"], HUMAN_AUTHOR)
+
+    def test_ai_reviewer_cannot_assign(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "misconfigured-ai-reviewer",
+            kind="ai",
+            auth_method="apikey",
+            owner=HUMAN_AUTHOR,
+            default_capability="review",
+        )
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        with pytest.raises(CapabilityError, match="AI principal"):
+            kb.assign_reviewers(proposal.id, ["carol@example.com"], "misconfigured-ai-reviewer")
+
+    def test_unknown_actor_raises(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+
+        with pytest.raises(AuthError, match="Principal not found"):
+            kb.assign_reviewers(proposal.id, ["carol@example.com"], "nobody@example.com")
+
+    def test_unknown_proposal_raises(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        with pytest.raises(NotFoundError, match="Proposal not found"):
+            kb.assign_reviewers("nonexistent-id", ["carol@example.com"], REVIEWER)
+
+    def test_already_accepted_proposal_raises(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        kb.accept_proposal(proposal.id, REVIEWER)
+
+        with pytest.raises(ValidationError, match="not pending review"):
+            kb.assign_reviewers(proposal.id, ["carol@example.com"], REVIEWER)
+
+    def test_author_cannot_assign_own_proposal_reviewers(self, make_kb: KbFactory) -> None:
+        """Reuses the self-review guard: an author who could freely pick
+        their own proposal's reviewer set would undermine the guard's
+        purpose just as much as picking their own accept/reject outcome."""
+        kb = _kb(make_kb)
+        kb.create_principal(
+            "carol@example.com", kind="human", auth_method="oidc", default_capability="review"
+        )
+        kb.create_principal(
+            "erin@example.com",
+            kind="human",
+            auth_method="oidc",
+            owner="carol@example.com",
+            default_capability="propose",
+            trust_level=0,
+        )
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            "erin@example.com",
+            acting_as="carol@example.com",
+        )
+        assert proposal.state == "require_review"
+
+        with pytest.raises(CapabilityError, match="cannot review their own proposal"):
+            kb.assign_reviewers(proposal.id, ["dave@example.com"], "carol@example.com")
 
 
 # ===========================================================================

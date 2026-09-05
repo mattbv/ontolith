@@ -40,6 +40,7 @@ class Proposal(BaseModel):
         created_at: When the proposal was created
         decided_at: When the proposal was accepted/rejected
         policy_reason: Why the policy made its decision
+        reviewers: Principal IDs assigned to review this proposal
         payload: Staged operations as JSON
         metadata: Open JSON blob
     """
@@ -59,6 +60,14 @@ class Proposal(BaseModel):
 
     # Policy
     policy_reason: str | None = None
+    # Set from the policy's own RequireReview.reviewers at creation time
+    # (Ontology._finalize_non_accepted_decision) and refreshed on resubmit
+    # (KI-027) or an explicit Ontology.assign_reviewers() call (SPEC §9.4's
+    # `assign` action). Not cleared on accept/reject/request_changes — it
+    # remains a historical record of who was asked, same as policy_reason
+    # (KI-078: previously computed by every PolicyStrategy but never
+    # persisted or surfaced anywhere).
+    reviewers: list[str] = Field(default_factory=list)
 
     # Operations
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -71,30 +80,31 @@ class ProposalEvent(BaseModel):
     """A structured action recorded against a proposal (SPEC §9.4 plus
     `resubmit`, KI-027).
 
-    Covers the three SPEC §9.4 review actions implemented as Ontology
-    methods (accept, reject, request_changes) and `resubmit` — an author
-    action, not a reviewer one, but recorded here anyway because
+    Covers four of SPEC §9.4's named review actions implemented as Ontology
+    methods (accept, reject, request_changes, assign) and `resubmit` — an
+    author action, not a reviewer one, but recorded here anyway because
     `resubmit` re-evaluates policy against an already-persisted proposal
     (ADR-0025's `kb_view` pin is the resubmission instant, not
     `proposal.created_at`) and without an event, a `require_review`
     outcome would leave no trace of when that evaluation happened.
-    assign/comment are not implemented as methods yet, so no event type
-    exists for them — this is a scoped subset of SPEC §9.4's full action
-    vocabulary, not the complete review workflow.
+    `comment` is not implemented as a method yet, so no event type exists
+    for it — this is a scoped subset of SPEC §9.4's full action vocabulary,
+    not the complete review workflow.
 
     Attributes:
         id: Unique event ID (ULID)
         proposal_id: Proposal this event was recorded against
         actor: Principal ID who performed the action
         type: Which action this event records
-        detail: Optional free-text detail (e.g. a rejection reason)
+        detail: Optional free-text detail (e.g. a rejection reason, or the
+            comma-joined reviewer list for `assign`)
         at: When the action occurred
     """
 
     id: str
     proposal_id: str
     actor: str
-    type: Literal["accept", "reject", "request_changes", "resubmit"]
+    type: Literal["accept", "reject", "request_changes", "resubmit", "assign"]
     detail: str | None = None
     at: datetime
 

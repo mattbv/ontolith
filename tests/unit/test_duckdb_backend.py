@@ -856,6 +856,40 @@ class TestDuckDBBackend:
         finally:
             backend.close()
 
+    def test_proposal_reviewers_migration_adds_new_column_to_existing_db(
+        self, temp_db: Path
+    ) -> None:
+        """A database file created before `reviewers` existed gets it added
+        on next open (KI-078) — simulates that by building the table in its
+        pre-KI-078 shape directly, bypassing DuckDBBackend's own
+        (already-migrated) schema setup."""
+        raw = duckdb.connect(str(temp_db))
+        raw.execute(
+            "CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT NOT NULL, "
+            "author TEXT NOT NULL, acting_as TEXT, state TEXT NOT NULL DEFAULT 'draft', "
+            "created_at TEXT NOT NULL, decided_at TEXT, policy_reason TEXT, "
+            "payload TEXT NOT NULL DEFAULT '{}', metadata TEXT NOT NULL DEFAULT '{}')"
+        )
+        raw.execute(
+            "INSERT INTO proposal (id, namespace, author, state, created_at, policy_reason) "
+            "VALUES ('old-prop', 'default', 'alice@test.com', 'require_review', "
+            "'2025-01-01T00:00:00+00:00', 'needs review')"
+        )
+        raw.close()
+
+        backend = DuckDBBackend(temp_db)
+        try:
+            columns = {
+                row[1] for row in backend.conn.execute("PRAGMA table_info('proposal')").fetchall()
+            }
+            assert "reviewers" in columns
+            old = backend.get_proposal("old-prop")
+            assert old is not None
+            assert old.policy_reason == "needs review"
+            assert old.reviewers == []
+        finally:
+            backend.close()
+
     def _put_proposal(self, backend: DuckDBBackend, proposal_id: str) -> None:
         backend.put_proposal(
             Proposal(
@@ -1003,6 +1037,34 @@ class TestDuckDBBackend:
     def test_update_proposal_state_nonexistent_raises(self, backend: DuckDBBackend) -> None:
         with pytest.raises(StorageError, match="not found"):
             backend.update_proposal_state("nonexistent", "accepted")
+
+    def test_update_proposal_reviewers_replaces_wholesale(self, backend: DuckDBBackend) -> None:
+        """Unlike policy_reason's COALESCE, reviewers is always replaced
+        with what's passed - including an empty list (KI-078)."""
+        backend.put_proposal(
+            Proposal(
+                id="prop-1",
+                namespace="default",
+                author="alice@test.com",
+                state="require_review",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                reviewers=["bob@test.com"],
+            )
+        )
+
+        backend.update_proposal_reviewers("prop-1", ["carol@test.com", "dave@test.com"])
+        updated = backend.get_proposal("prop-1")
+        assert updated is not None
+        assert updated.reviewers == ["carol@test.com", "dave@test.com"]
+
+        backend.update_proposal_reviewers("prop-1", [])
+        cleared = backend.get_proposal("prop-1")
+        assert cleared is not None
+        assert cleared.reviewers == []
+
+    def test_update_proposal_reviewers_nonexistent_raises(self, backend: DuckDBBackend) -> None:
+        with pytest.raises(StorageError, match="not found"):
+            backend.update_proposal_reviewers("nonexistent", ["alice@test.com"])
 
     def test_put_and_get_schema(self, backend: DuckDBBackend) -> None:
         """Schema can be persisted and retrieved."""

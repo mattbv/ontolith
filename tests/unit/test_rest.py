@@ -1331,6 +1331,89 @@ class TestReviewProposalRoute:
 
 
 # ---------------------------------------------------------------------------
+# POST /proposals/{proposal_id}/assign (SPEC §9.4's `assign` action, KI-078)
+# ---------------------------------------------------------------------------
+
+
+class TestAssignReviewersRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        response = client.post(f"/proposals/{proposal.id}/assign", json={"reviewers": []})
+        assert response.status_code == 401
+
+    def test_reviewer_reassigns(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, decision = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        assert decision.__class__.__name__ == "RequireReview"
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+
+        response = client.post(
+            f"/proposals/{proposal.id}/assign",
+            json={"reviewers": ["carol@example.com"]},
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["reviewers"] == ["carol@example.com"]
+        assert body["state"] == "require_review"
+
+    def test_reviewers_can_be_cleared(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+
+        response = client.post(
+            f"/proposals/{proposal.id}/assign", json={"reviewers": []}, headers=_auth(token)
+        )
+
+        assert response.status_code == 200
+        assert response.json()["reviewers"] == []
+
+    def test_missing_reviewers_field_rejected(self, tmp_path: Path) -> None:
+        """`reviewers` has no default - a caller must explicitly say what
+        the new list is, including an explicit empty list to clear it."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+
+        response = client.post(f"/proposals/{proposal.id}/assign", json={}, headers=_auth(token))
+
+        assert response.status_code == 400
+
+    def test_not_found_returns_404(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+        response = client.post(
+            "/proposals/nonexistent/assign", json={"reviewers": []}, headers=_auth(token)
+        )
+        assert response.status_code == 404
+        assert response.json()["code"] == "NOT_FOUND"
+
+    def test_reviewer_lacking_capability_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="m1")
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)  # HUMAN has write, not review
+        response = client.post(
+            f"/proposals/{proposal.id}/assign", json={"reviewers": []}, headers=_auth(token)
+        )
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
+
+# ---------------------------------------------------------------------------
 # POST /proposals/{proposal_id}/resubmit
 # ---------------------------------------------------------------------------
 

@@ -697,6 +697,27 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def update_proposal_reviewers(self, proposal_id: str, reviewers: list[str]) -> None:
+        """Replace a proposal's assigned reviewers (SPEC §9.4's `assign` action).
+
+        Unlike `update_proposal_state`'s `policy_reason`, there is no
+        "leave unchanged" sentinel here — `reviewers` is always replaced
+        wholesale with what's passed, including an empty list (which
+        clears every assignment). A dedicated method rather than folding
+        this into `update_proposal_state`: `assign` doesn't change
+        `state`, and `update_proposal_state` already has enough
+        state/decided_at/policy_reason parameters with their own distinct
+        semantics without adding a fourth (KI-078).
+
+        Args:
+            proposal_id: Proposal to update
+            reviewers: New reviewer list, replacing whatever was there before
+
+        Raises:
+            StorageError: proposal_id does not name an existing proposal
+        """
+        ...
+
     def put_proposal_event(self, event: ProposalEvent) -> None:
         """Persist a structured review-action event (SPEC §9.4).
 

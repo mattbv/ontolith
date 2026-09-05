@@ -1582,10 +1582,10 @@ Review found the CLI (`ontolith proposal list --state`/`ontolith contradiction l
 
 ---
 
-## KI-078 — A `RequireReview` decision's `reviewers` are never persisted or surfaced through any interface
+## KI-078 — A `RequireReview` decision's `reviewers` are never persisted or surfaced through any interface ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — a SPEC §9.4 MUST-level gap (`assign` is one of five named review actions), made newly consequential by KI-069
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §9.4 (review workflow — names an `assign` action), SPEC §9.2 (policy engine contract)
 
 ### Description
@@ -1596,7 +1596,7 @@ KI-069's `RequireReviewByRole` (ADR-0045) makes this gap materially worse: its *
 
 ### Fix
 
-Wire `Decision.reviewers` through to a persisted, queryable review-assignment surface — likely a `Proposal.reviewers: list[str]` field (or a dedicated event alongside `ProposalEvent`, mirroring `AdminEvent`'s own precedent for a previously-unattributed action, ADR-0042) plus the `assign` action SPEC §9.4 already names, exposed through at least REST (a natural first target, per KI-072's own precedent for "which interface first") so `RequireReviewByRole`'s routing is actually actionable by whoever it names, not just visible to the SDK.
+Closed both halves in one PR (**ADR-0046**). New `Proposal.reviewers: list[str]` field, populated from `RequireReview.reviewers` at proposal-creation time and refreshed on `resubmit`'s policy re-evaluation (KI-027) — not cleared on accept/reject/request_changes, a historical record the same way `policy_reason` is. New `Ontology.assign_reviewers(proposal_id, reviewers, actor)` implements SPEC §9.4's `assign` action: replaces the reviewer list wholesale, records a `ProposalEvent(type="assign")`, and reuses the exact eligibility checks `accept_proposal`/`reject_proposal`/`request_changes` already share (capability, non-AI, no self-review). Exposed via REST only (`POST /proposals/{proposal_id}/assign`, `ProposalOut.reviewers` on every proposal route) — GraphQL/CLI/MCP deliberately deferred, no consumer-motivating scenario for them yet. **Breaking:** `StorageBackend` gains a required `update_proposal_reviewers()` method; both backends needed a schema migration for the new column on existing database files (DuckDB's `ALTER TABLE ADD COLUMN` rejects constraints, so its migrated column is added nullable and backfilled, unlike a fresh database's `NOT NULL DEFAULT '[]'`).
 
 ---
 
