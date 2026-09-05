@@ -40,7 +40,16 @@ class RequireReview(Decision):
     reason: str
 
     def __init__(self, reviewers: list[str], reason: str) -> None:
-        self.reviewers = reviewers
+        # Copied, not aliased: several strategies (SourceQuorum,
+        # ConfidenceThreshold, SourceRequired, RequireReviewByRole) hand this
+        # constructor their own `self.reviewers`/config list directly. Without
+        # a copy here, a caller mutating a returned Decision's `.reviewers`
+        # (e.g. `decision.reviewers.append(...)`) would silently rewrite the
+        # strategy's own configuration for every future evaluation - breaking
+        # SPEC §9.2 purity (a strategy's decisions must depend only on its
+        # declared inputs, not on what some earlier caller did to a decision
+        # object) (found in review, KI-069).
+        self.reviewers = list(reviewers)
         self.reason = reason
 
 
@@ -553,7 +562,13 @@ class RequireReviewByRole:
             return Reject(f"Principal {principal.id} has read-only access and cannot propose")
 
         role = principal.metadata.get("role")
-        if role is None:
+        # `metadata` is an unvalidated `dict[str, Any]` - a non-str value
+        # (e.g. a list, accidentally hashable-looking int) is treated the
+        # same as "no role declared" rather than raising a non-taxonomy
+        # error out of `evaluate()` (SPEC §16). This also sidesteps a
+        # non-hashable value (e.g. `{"role": ["legal"]}`) raising `TypeError`
+        # from the `in` check below (found in review, KI-069).
+        if role is None or not isinstance(role, str):
             return RequireReview(
                 self._default,
                 f"Principal {principal.id} has no declared role; using default reviewers",

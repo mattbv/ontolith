@@ -101,7 +101,8 @@ proposals: `ThresholdPolicy`'s "AI always requires review" rule (ADR-0003) is th
 design choice, not a cross-cutting invariant every `PolicyStrategy` must reimplement — an
 AI-authored proposal auto-accepts here once quorum is reached, pinned by a conformance vector so
 the behavior stays deliberate. Combining a source-quorum rule with an AI-review rule is what SPEC
-§9.2's `Composite` strategy is for, not built here (still unbuilt — out of scope for KI-017).
+§9.2's `Composite` strategy is for, not built here (out of scope for KI-017; built by KI-061,
+ADR-0040).
 
 **6. `SourceQuorum` rejects principals below `propose` capability, mirroring `ThresholdPolicy`'s
 read-only rejection.** `Ontology.propose`/`propose_ref`/`retract` have no capability pre-check of
@@ -162,14 +163,17 @@ duplicates logic `Composite` (SPEC §9.2) already exists to combine; not needed 
 the already-documented `acting_as` addition). `SourceQuorum` is fully usable via
 `Ontology(policy=SourceQuorum(threshold=N))`. The replayability question ADR-0018 left open has a
 concrete answer — pinned at `created_at`, exact on replay only absent a same-instant write
-afterward (see Context) — for future KB-inspecting strategies (`ConfidenceThreshold`, `TrustLevel`,
-`SourceRequired`, `RequireReviewByRole`, `Composite` — still unbuilt, but now unblocked by this same
-`kb`/`KbView` machinery).
+afterward (see Context) — for future KB-inspecting strategies, unblocked by this same `kb`/`KbView`
+machinery. All five named at the time (`ConfidenceThreshold`, `TrustLevel`, `SourceRequired`,
+`RequireReviewByRole`, `Composite`) are now built: `Composite` by KI-061 (ADR-0040);
+`ConfidenceThreshold`/`SourceRequired`/`RequireReviewByRole` by KI-069 (ADR-0045); `ThresholdPolicy`
+continues to cover roughly what `TrustLevel` would.
 
 **Negative / follow-ups:** `PolicyStrategy.evaluate()`'s required-parameter list is a breaking
 change for any third-party implementer (a new required positional parameter) — flagged
-`**Breaking:**` in `CHANGELOG.md` per ADR-0019's public API stability policy. `Composite` and the
-other three SHOULD-have strategies named above remain unbuilt; nothing about this ADR blocks them.
+`**Breaking:**` in `CHANGELOG.md` per ADR-0019's public API stability policy. ~~`Composite` and the
+other three SHOULD-have strategies named above remain unbuilt; nothing about this ADR blocks
+them.~~ All now built — see the Positive note above.
 
 ## References
 

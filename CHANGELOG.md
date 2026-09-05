@@ -21,7 +21,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `metadata` is the existing documented extension point), read from the real author, never
   `acting_as`, so delegation can't be used to dodge a role's reviewers. All three enforce the
   KI-015 capability floor themselves, mirroring `SourceQuorum`, and are exported from
-  `ontolith.govern`. SPEC §9.2's six-strategy SHOULD-list is now fully built.
+  `ontolith.govern`. SPEC §9.2's six-strategy SHOULD-list is now fully built (`ThresholdPolicy`
+  continues to cover roughly what `TrustLevel` would; no class of that name exists separately).
+  Also fixed along the way: `RequireReview.__init__` now copies its `reviewers` argument instead
+  of aliasing it — a caller mutating a returned decision's `.reviewers` previously rewrote the
+  issuing strategy's own configuration for good, a latent bug in every pre-existing strategy too.
 - New MCP tool `ontolith.list_contradictions` (closes KI-076): `read`-tier, mirroring REST's
   `GET /contradictions`/GraphQL's `Query.contradictions` — `ontolith.flag_contradiction`
   (propose-tier, mutates) was previously the only MCP surface that returned a contradiction at

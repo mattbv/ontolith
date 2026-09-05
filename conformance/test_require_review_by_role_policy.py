@@ -5,12 +5,23 @@ the KI-015 capability floor) lives in
 tests/unit/test_govern.py::TestRequireReviewByRole — this file only pins
 the SPEC-level contract: pure, deterministic, and that it always routes to
 review with reviewers chosen by `principal.metadata["role"]`.
+
+Every test above `test_end_to_end_role_is_read_through_a_real_principal`
+hand-constructs a `Principal` and calls `evaluate()` directly - the one
+`make_kb`-driven test below proves this strategy sees the same `metadata`
+a principal created via `kb.create_principal(..., metadata=...)` and
+retrieved through a real `kb.propose()` call actually carries, not just
+what this file's own fixtures happen to construct (found in review, KI-069,
+same category of gap as the payload-key vectors added to
+`test_confidence_threshold_policy.py`/`test_source_required_policy.py`).
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from conformance.conftest import KbFactory
+from ontolith.core import FixedClock, FixedIdProvider
 from ontolith.govern.policy import RequireReview, RequireReviewByRole
 from ontolith.govern.proposal import Proposal
 from ontolith.identity import Principal
@@ -86,3 +97,32 @@ def test_policy_is_stateless() -> None:
     assert d1.reviewers == ["legal-reviewer@example.com"]
     assert d2.reviewers == ["tech-lead@example.com"]
     assert d3.reviewers == ["legal-reviewer@example.com"]
+
+
+def test_end_to_end_role_is_read_through_a_real_principal(make_kb: KbFactory) -> None:
+    """A principal created via `kb.create_principal(..., metadata=...)` and
+    proposing through a real `kb.propose()` call is routed by this
+    strategy exactly as a hand-constructed `Principal` would be - proves
+    `principal.metadata["role"]` isn't just an assumption shared between
+    this file's own fixtures and the strategy."""
+    kb = make_kb(
+        FixedClock(T0),
+        FixedIdProvider(["e-1", "prop-1"]),
+        policy=RequireReviewByRole(
+            {"legal": ["legal-reviewer@example.com"]}, default=["fallback@example.com"]
+        ),
+    )
+    kb.create_principal(
+        "author",
+        kind="human",
+        auth_method="oidc",
+        default_capability="propose",
+        metadata={"role": "legal"},
+    )
+    entity = kb.create_entity("Person", author="author")
+
+    proposal, decision = kb.propose(entity.id, "Person.name", "Ada", "Text", "author")
+
+    assert isinstance(decision, RequireReview)
+    assert decision.reviewers == ["legal-reviewer@example.com"]
+    assert proposal.state == "require_review"

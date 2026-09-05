@@ -114,11 +114,14 @@ caller convenience) more than `SourceQuorum`'s (which genuinely reads `kb.assert
 corroboration).
 
 **Why capability floor enforcement is duplicated three more times instead of factored into a
-shared base class or helper:** every existing strategy (`ThresholdPolicy`, `SourceQuorum`) already
-duplicates this exact ~4-line block rather than sharing it, and this ADR follows that established
-convention rather than introducing a new one unilaterally mid-KI. A future refactor extracting a
-shared `_effective_capability(principal, acting_as)` helper is straightforward and backward
-compatible whenever someone wants it — not blocking for this ADR's own scope.
+shared base class or helper:** `SourceQuorum` already has this exact ~3-line
+`capability`/`min_capability`/read-rejection block, and this ADR follows that established
+convention rather than introducing a new one unilaterally mid-KI (`ThresholdPolicy`'s own version
+is a related but not identical shape — it also derives an effective `trust_level` and checks the
+read-rejection after its write/admin auto-accept branches, since it has more capability tiers to
+route than a binary accept/review split needs). A future refactor extracting a shared
+`_effective_capability(principal, acting_as)` helper is straightforward and backward compatible
+whenever someone wants it — not blocking for this ADR's own scope.
 
 **Why `RequireReviewByRole` doesn't validate that `role_reviewers`' keys are non-empty, unlike
 `Composite`'s "at least one strategy" constructor guard:** `Composite()` with nothing to compose
@@ -184,6 +187,35 @@ deployment genuinely wants both rules.
   without restarting needs to construct a new policy instance and swap it in (`Ontology.policy` is
   already a public, reassignable attribute, used exactly this way in this codebase's own test
   suite).
+- **`ConfidenceThreshold`/`SourceRequired` gate on author-controlled data, not corroborated KB
+  state — a materially weaker guarantee than `SourceQuorum`'s own precedent, worth stating
+  plainly.** Both read a value the proposal's own author supplied (`confidence`/`source` are
+  `propose()`/`propose_ref()` parameters, self-attested at call time); an AI principal holding only
+  `propose` capability (KI-015 has no author-side capability pre-check) can auto-accept its own
+  write simply by asserting `confidence=1.0` or `source="anything"`. `SourceQuorum` at least
+  requires *persisted, independently-authored* corroborating assertions before auto-accepting — a
+  deployment relying on either new strategy alone should understand it is trusting the author's own
+  stated confidence/sourcing, not verifying it against anything.
+- **`RequireReviewByRole`'s chosen `reviewers` are not currently consumed anywhere in the
+  system** (found in review): `Proposal` has no `reviewers` field, `Ontology`'s
+  non-auto-accept path persists only `policy_reason`, and no `assign` review action exists yet
+  despite SPEC §9.4 naming one. Every other strategy's `RequireReview.reviewers` has this same
+  gap — `RequireReviewByRole` just makes it far more consequential, since routing reviewers by
+  role is its entire stated purpose (see Decision above), not an incidental detail the way it is
+  for `ThresholdPolicy`'s empty-list default. Today, only a direct SDK caller inspecting the
+  returned `Decision` object sees the assignment; REST/MCP/CLI callers see only the reason string
+  (which does name the role, e.g. `"Requires review by role 'legal' (principal: a@x.com)"`).
+  Wiring `reviewers` through to a persisted, queryable review-assignment surface is real,
+  pre-existing scope (SPEC §9.4's `assign` action) that this ADR does not attempt — tracked
+  separately as KI-078, filed alongside this ADR.
+- `ConfidenceThreshold`'s own `threshold` is validated to `[0.0, 1.0]` at construction, but the
+  *proposal's* confidence value it compares against is not independently range-checked at the
+  policy layer — `propose()`/`propose_ref()` type `confidence` as `float | None` with no range
+  enforcement of their own (SPEC-level `[0.0, 1.0]` enforcement only happens later, on
+  `Assertion`'s own field validator, and only on the auto-accept path). A confidence outside
+  `[0.0, 1.0]` (e.g. `1.5`) is compared as given — a pre-existing input-validation gap upstream of
+  this strategy, not introduced by it, but worth knowing this strategy doesn't add a defensive
+  check of its own.
 
 ## References
 
