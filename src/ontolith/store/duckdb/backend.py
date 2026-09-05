@@ -354,16 +354,18 @@ class DuckDBBackend:
         # file that already has this table. Unlike SQLite, DuckDB supports
         # `ADD COLUMN IF NOT EXISTS` natively (same pattern as
         # principal_credential's issued_by/revoked_by, KI-060) - but unlike
-        # that migration, this column can't carry a `NOT NULL` constraint at
-        # ALTER time: DuckDB's parser specifically rejects `NOT NULL` on
-        # `ADD COLUMN` ("Adding columns with constraints not yet supported"),
-        # verified against the pinned duckdb version. A plain `DEFAULT` is
-        # accepted, though, and DuckDB backfills every existing row with it
-        # (verified directly, not assumed) - so one statement both adds the
-        # column and leaves no row NULL, unlike a `NOT NULL`-rejecting ALTER
-        # would have required a separate backfill for. A fresh database's own
-        # `CREATE TABLE` above still gets the stronger `NOT NULL DEFAULT '[]'`
-        # constraint this migrated column can't carry.
+        # that migration, this column can't carry any constraint at ALTER
+        # time: DuckDB's parser rejects `NOT NULL`, `UNIQUE`, and `CHECK`
+        # alike on `ADD COLUMN` ("Adding columns with constraints not yet
+        # supported"), verified directly against the pinned duckdb version
+        # (all three tried, all three rejected identically). A plain
+        # `DEFAULT` is not treated as a constraint, though, and DuckDB
+        # backfills every existing row with it (also verified directly) -
+        # so one statement both adds the column and leaves no row NULL,
+        # unlike the constraint-rejecting ALTER above would have required a
+        # separate backfill for. A fresh database's own `CREATE TABLE`
+        # above still gets the stronger `NOT NULL DEFAULT '[]'` constraint
+        # this migrated column can't carry.
         self.conn.execute(
             "ALTER TABLE proposal ADD COLUMN IF NOT EXISTS reviewers TEXT DEFAULT '[]'"
         )

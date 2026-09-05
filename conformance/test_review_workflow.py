@@ -205,6 +205,46 @@ class TestReviewerPersistence:
 
         assert proposal.reviewers == []
 
+    def test_non_str_elements_in_reviewers_are_filtered_not_persisted_raw(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A list-typed but element-malformed `reviewers` (a real list,
+        containing something other than strings) is filtered down to its
+        valid entries, not persisted raw (found in review, KI-078):
+        `model_copy(update=...)` bypasses pydantic validation on write, so
+        a non-str element would otherwise reach storage unnoticed and only
+        surface later as a ValidationError on *read back* - corrupting
+        every subsequent read of the row, not just this one result."""
+
+        class _MalformedDecision:
+            reason = "malformed"
+            reviewers = ["carol@example.com", 42, {"nested": "object"}, None]
+
+        class _ReturnsMalformedDecision:
+            def evaluate(
+                self,
+                proposal: object,
+                principal: Principal,
+                kb: KbView,
+                acting_as: Principal | None = None,
+            ) -> Decision:
+                return _MalformedDecision()  # type: ignore[return-value]
+
+        kb = make_kb(FixedClock(T0), FixedIdProvider(["e-1", "prop-1"]))
+        kb.policy = _ReturnsMalformedDecision()
+        kb.create_principal(
+            HUMAN_AUTHOR, kind="human", auth_method="oidc", default_capability="write"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
+
+        assert proposal.reviewers == ["carol@example.com"]
+        # Reads back cleanly - the whole point of filtering before write.
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.reviewers == ["carol@example.com"]
+
     def test_reviewers_refresh_on_resubmit(self, make_kb: KbFactory) -> None:
         """A resubmission re-evaluates policy against a live kb (KI-027) -
         if the freshly-computed reviewers differ from the original
@@ -648,9 +688,11 @@ class TestAssignReviewers:
             kb.assign_reviewers(proposal.id, ["carol@example.com"], REVIEWER)
 
     def test_author_cannot_assign_own_proposal_reviewers(self, make_kb: KbFactory) -> None:
-        """Reuses the self-review guard: an author who could freely pick
-        their own proposal's reviewer set would undermine the guard's
-        purpose just as much as picking their own accept/reject outcome."""
+        """Reuses the self-review guard for consistency with
+        accept/reject/request_changes - not currently a load-bearing
+        security control, since `reviewers` isn't itself checked at
+        accept time (see ADR-0046), but pinned here as the deliberate
+        current behavior."""
         kb = _kb(make_kb)
         kb.create_principal(
             "carol@example.com", kind="human", auth_method="oidc", default_capability="review"
@@ -689,14 +731,25 @@ class TestAssignReviewers:
             entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
         )
         assert proposal.reviewers == [AI_OWNER]
-        kb.assign_reviewers(proposal.id, ["carol@example.com"], REVIEWER)
+        assigned = kb.assign_reviewers(proposal.id, ["carol@example.com"], REVIEWER)
+        # Pin the manual assignment actually took effect before proceeding -
+        # otherwise this test's own premise (something real gets discarded)
+        # is unverified.
+        assert assigned.reviewers == ["carol@example.com"]
         kb.request_changes(proposal.id, REVIEWER)
 
         resubmitted, _ = kb.resubmit(proposal.id, AI_AUTHOR)
 
         # ThresholdPolicy deterministically recomputes [AI_OWNER] for this
         # AI author regardless of what was manually assigned in between.
+        # Checked against the persisted row, not just the returned object -
+        # the in-memory return would look correct even if only the store
+        # write were skipped (found in review, mirrors
+        # test_reviewers_refresh_on_resubmit's own store-level assertion).
         assert resubmitted.reviewers == [AI_OWNER]
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.reviewers == [AI_OWNER]
 
 
 # ===========================================================================

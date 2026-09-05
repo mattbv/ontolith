@@ -75,12 +75,13 @@ differently-shaped parameter.
 Both backends needed a schema migration for existing database files (`CREATE TABLE IF NOT EXISTS`
 is a no-op against one that already has the table) — the same pattern ADR-0042 established for
 `principal_credential.issued_by`/`revoked_by`. **DuckDB's migration path differs from SQLite's**:
-DuckDB's `ALTER TABLE ADD COLUMN` specifically rejects a `NOT NULL` constraint ("Adding columns
-with constraints not yet supported", verified against the pinned version) — a plain `DEFAULT` is
-accepted, though, and DuckDB backfills every existing row with it (also verified directly, not
-assumed), so the migrated column is added as `TEXT DEFAULT '[]'` in one statement, with no row
-left `NULL` and no separate backfill needed. A freshly-created database's own `CREATE TABLE` still
-gets the stronger `NOT NULL DEFAULT '[]'` constraint this migrated column can't carry. SQLite's
+DuckDB's `ALTER TABLE ADD COLUMN` rejects any constraint — `NOT NULL`, `UNIQUE`, and `CHECK` all
+fail identically ("Adding columns with constraints not yet supported", verified directly against
+the pinned version, all three tried). A plain `DEFAULT` is not itself treated as a constraint,
+though, and DuckDB backfills every existing row with it (also verified directly, not assumed), so
+the migrated column is added as `TEXT DEFAULT '[]'` in one statement, with no row left `NULL` and
+no separate backfill needed. A freshly-created database's own `CREATE TABLE` still gets the
+stronger `NOT NULL DEFAULT '[]'` constraint this migrated column can't carry. SQLite's
 `ALTER TABLE ADD COLUMN` has no such restriction and uses the identical `NOT NULL DEFAULT '[]'` in
 both paths.
 
@@ -89,18 +90,20 @@ both paths.
 `assign_reviewers` reuses `_require_pending_proposal`'s existing self-review check (the proposal's
 own author/delegate can't call it) for consistency with `accept_proposal`/`reject_proposal`/
 `request_changes`, which all share it. **This is a conservative default, not currently a load-bearing
-security control**: `reviewers` is advisory metadata today — nothing in `accept_proposal` checks
-that the accepting principal actually appears in `proposal.reviewers` before accepting. So an
-author picking their own reviewer list cannot presently steer their proposal toward a reviewer who
-will "rubber-stamp" it in any way `accept_proposal`'s own guard doesn't already block regardless of
-who's listed; any review-capable, non-author principal can still accept, listed or not. The real,
-non-hypothetical cost of reusing the guard here is the opposite direction: a review-capable author
-who legitimately wants to route their own proposal to a specific reviewer (e.g. "I wrote this,
-please have the domain expert look at it") is blocked, with an error message about *reviewing*
-one's own proposal for an action that isn't a review decision at all. This is accepted as the
-simpler, more consistent choice for now — not because the security argument for it actually holds
-today — and should be revisited together if `reviewers` is ever made enforcement-relevant at
-accept time (at which point the guard would become genuinely load-bearing, matching the original
+security control**: `reviewers` is not itself checked by `accept_proposal` — nothing there confirms
+the accepting principal actually appears in `proposal.reviewers` before accepting. So an author
+picking their own reviewer list cannot presently determine who is *authorized* to accept in any way
+`accept_proposal`'s own guard doesn't already control regardless of who's listed; any
+review-capable, non-author principal can still accept, listed or not. What an author *can* steer is
+who gets queued or notified in a deployment that routes its review workflow on this field — a real,
+if narrower, effect than "authorized to accept." The real, non-hypothetical cost of reusing the
+guard here is the opposite direction: a review-capable author who legitimately wants to route their
+own proposal to a specific reviewer (e.g. "I wrote this, please have the domain expert look at it")
+is blocked, with an error message about *reviewing* one's own proposal for an action that isn't a
+review decision at all. This is accepted as the simpler, more consistent choice for now — not
+because the security argument for it actually holds today — and should be revisited if `reviewers`
+is ever made enforcement-relevant at accept time (at which point the guard would become genuinely
+load-bearing, matching the original
 intent here).
 
 ## Consequences

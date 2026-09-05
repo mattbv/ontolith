@@ -459,9 +459,22 @@ class Ontology:
             # isinstance-checked, not `or []`: a truthy non-list (e.g. a
             # custom subclass whose `.reviewers` is a bare string) would
             # otherwise sail through `list(...)` and silently explode into
-            # one "reviewer" per character instead of failing safe.
+            # one "reviewer" per character instead of failing safe. Non-str
+            # *elements* are filtered the same way, not just rejected
+            # wholesale: `model_copy(update=...)` below bypasses pydantic
+            # validation, so a non-str element would otherwise reach
+            # `put_proposal` unnoticed and only fail later, on *read back*
+            # (`_row_to_proposal`'s `Proposal(...)` does validate) - by then
+            # corrupting every subsequent read of the row, and any
+            # `proposals()` listing that includes it, not just this one
+            # decision's own result (found in review, worse than the
+            # bare-string case this guard was first added for).
             raw_reviewers = getattr(decision, "reviewers", None)
-            reviewers = list(raw_reviewers) if isinstance(raw_reviewers, list) else []
+            reviewers = (
+                [r for r in raw_reviewers if isinstance(r, str)]
+                if isinstance(raw_reviewers, list)
+                else []
+            )
             pending = proposal.model_copy(
                 update={
                     "state": "require_review",
