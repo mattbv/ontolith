@@ -114,9 +114,10 @@ caller convenience) more than `SourceQuorum`'s (which genuinely reads `kb.assert
 corroboration).
 
 **Why capability floor enforcement is duplicated three more times instead of factored into a
-shared base class or helper:** `SourceQuorum` already has this exact ~3-line
-`capability`/`min_capability`/read-rejection block, and this ADR follows that established
-convention rather than introducing a new one unilaterally mid-KI (`ThresholdPolicy`'s own version
+shared base class or helper:** `SourceQuorum` already has this exact
+`capability`/`min_capability`/read-rejection block (`policy.py`'s `SourceQuorum.evaluate`, its
+first few statements), and this ADR follows that established convention rather than introducing a
+new one unilaterally mid-KI (`ThresholdPolicy`'s own version
 is a related but not identical shape — it also derives an effective `trust_level` and checks the
 read-rejection after its write/admin auto-accept branches, since it has more capability tiers to
 route than a binary accept/review split needs). A future refactor extracting a shared

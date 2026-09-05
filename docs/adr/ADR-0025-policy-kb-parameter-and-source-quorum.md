@@ -164,7 +164,9 @@ the already-documented `acting_as` addition). `SourceQuorum` is fully usable via
 `Ontology(policy=SourceQuorum(threshold=N))`. The replayability question ADR-0018 left open has a
 concrete answer — pinned at `created_at`, exact on replay only absent a same-instant write
 afterward (see Context) — for future KB-inspecting strategies, unblocked by this same `kb`/`KbView`
-machinery. All five named at the time (`ConfidenceThreshold`, `TrustLevel`, `SourceRequired`,
+machinery (though of the five named at the time, only `Composite` genuinely composes KB-inspecting
+strategies; `ConfidenceThreshold`/`SourceRequired`/`RequireReviewByRole` turned out not to need a
+`kb` read at all — see ADR-0045). All five (`ConfidenceThreshold`, `TrustLevel`, `SourceRequired`,
 `RequireReviewByRole`, `Composite`) are now built: `Composite` by KI-061 (ADR-0040);
 `ConfidenceThreshold`/`SourceRequired`/`RequireReviewByRole` by KI-069 (ADR-0045); `ThresholdPolicy`
 continues to cover roughly what `TrustLevel` would.

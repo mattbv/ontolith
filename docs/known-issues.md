@@ -216,6 +216,8 @@ This was considered and explicitly rejected for Ontolith's `ThresholdPolicy`. Bo
 
 `ThresholdPolicy` always returns `RequireReview` for `kind == "ai"` principals, regardless of confidence or trust level. Confidence is still captured and visible to reviewers — it's stored on both `Proposal.payload["operations"][0]["confidence"]` and the resulting `Assertion.confidence` field — but it is a provenance/triage signal only, never a policy input. No code changes were needed for this decision since that storage already existed; this entry documents the choice so it isn't re-litigated as a "missing feature" in a future gap audit.
 
+**Update (2026-09-04, KI-069/ADR-0045):** this Resolution's guarantee is specific to `ThresholdPolicy` (the default), not a codebase-wide invariant. KI-069 added `ConfidenceThreshold`, a `PolicyStrategy` that deliberately does *not* special-case AI authorship (matching `SourceQuorum`'s own precedent, ADR-0025 §5) — a deployment configured with `Ontology(policy=ConfidenceThreshold(0.9))` reproduces exactly the confidence-0.9-auto-accepts-for-an-AI-proposal scenario this entry rejected for the shipped default. This is not a regression of this KI's decision (`ThresholdPolicy` is unchanged, and remains the default), but it does mean the AI-safety guarantee described above is a property of which `PolicyStrategy` is installed, not something SPEC or Ontolith enforces structurally across every possible one — the same caveat ADR-0040 already documents for `Composite`/`SourceQuorum` not making the AI-review rule "structural." See ADR-0045's own Consequences section for the trade-off spelled out directly.
+
 ---
 
 ## KI-012 — Property tests (Hypothesis) only covered bitemporal reconstruction ✓ RESOLVED (M2)
@@ -1582,19 +1584,23 @@ Review found the CLI (`ontolith proposal list --state`/`ontolith contradiction l
 
 ## KI-078 — A `RequireReview` decision's `reviewers` are never persisted or surfaced through any interface
 
-**Severity:** Architecture gap — a SPEC §9.4 SHOULD-adjacent gap made newly consequential by KI-069
+**Severity:** Architecture gap — a SPEC §9.4 MUST-level gap (`assign` is one of five named review actions), made newly consequential by KI-069
 **Milestone target:** Backlog
 **SPEC reference:** SPEC §9.4 (review workflow — names an `assign` action), SPEC §9.2 (policy engine contract)
 
 ### Description
 
-Every `PolicyStrategy` that returns `RequireReview(reviewers, reason)` computes a `reviewers` list, but nothing downstream ever stores or exposes it: `Proposal` has no `reviewers` field, `Ontology`'s non-auto-accept path (`_finalize_non_accepted_decision`) persists only `policy_reason`, and no `assign` review action exists anywhere in `src/` despite SPEC §9.4 naming one (`assign`, `comment`, `accept`, `reject`, `request_changes`). This has been true since `ThresholdPolicy`'s own `reviewers=[]` default shipped in M1, but stayed low-consequence because every existing strategy's reviewer list was either always empty (`ThresholdPolicy`'s default case) or a secondary detail alongside an accept/review decision that mattered more on its own (`SourceQuorum`).
+Every `PolicyStrategy` that returns `RequireReview(reviewers, reason)` computes a `reviewers` list, but nothing downstream ever stores or exposes it: `Proposal` has no `reviewers` field, `Ontology`'s non-auto-accept path (`_finalize_non_accepted_decision`) persists only `policy_reason`, and no `assign` review action exists anywhere in `src/` despite SPEC §9.4 naming one among five review actions it says MUST be recorded (`assign`, `comment`, `accept`, `reject`, `request_changes` — only the latter three actually exist today). This has been true since `ThresholdPolicy`'s own `reviewers=[]` default shipped in M1, but stayed low-consequence because every existing strategy's reviewer list was either always empty (`ThresholdPolicy`'s default case) or a secondary detail alongside an accept/review decision that mattered more on its own (`SourceQuorum`).
 
 KI-069's `RequireReviewByRole` (ADR-0045) makes this gap materially worse: its *entire stated purpose* is choosing which reviewers a proposal routes to, not deciding whether review is needed at all (it never auto-accepts). Configuring it today produces a `Decision.reviewers` value that only a direct SDK caller inspecting the returned object ever sees — REST/MCP/CLI callers see only the free-text `policy_reason` (which does name the role, e.g. `"Requires review by role 'legal' (principal: a@x.com)"`, but that's a string a caller would have to parse, not a queryable assignment).
 
 ### Fix
 
 Wire `Decision.reviewers` through to a persisted, queryable review-assignment surface — likely a `Proposal.reviewers: list[str]` field (or a dedicated event alongside `ProposalEvent`, mirroring `AdminEvent`'s own precedent for a previously-unattributed action, ADR-0042) plus the `assign` action SPEC §9.4 already names, exposed through at least REST (a natural first target, per KI-072's own precedent for "which interface first") so `RequireReviewByRole`'s routing is actually actionable by whoever it names, not just visible to the SDK.
+
+---
+
+## Format
 
 Each entry follows this structure:
 

@@ -505,11 +505,13 @@ class RequireReviewByRole:
     about who is really proposing, not who they're temporarily acting as,
     so delegation can't be used to dodge a role's assigned reviewers.
 
-    A missing role or an unmapped role both fall back to ``default``
-    (distinguished in the returned reason text, so callers can tell
-    "nobody declared a role" from "a role was declared but nothing routes
-    it" without inspecting ``principal`` themselves) — never an error and
-    never an empty ``RequireReview`` with no explanation.
+    A missing role, a non-``str`` role (``metadata`` is an unvalidated
+    ``dict[str, Any]``), and an unmapped role all fall back to ``default``
+    — each distinguished in the returned reason text, so callers can tell
+    "nobody declared a role" from "a declared role isn't usable" from "a
+    role was declared but nothing routes it" without inspecting
+    ``principal`` themselves — never an error and never an empty
+    ``RequireReview`` with no explanation.
 
     Rejects principals without at least ``propose`` capability (KI-015
     floor, `docs/known-issues.md`), matching every sibling strategy in this
@@ -562,16 +564,24 @@ class RequireReviewByRole:
             return Reject(f"Principal {principal.id} has read-only access and cannot propose")
 
         role = principal.metadata.get("role")
-        # `metadata` is an unvalidated `dict[str, Any]` - a non-str value
-        # (e.g. a list, accidentally hashable-looking int) is treated the
-        # same as "no role declared" rather than raising a non-taxonomy
-        # error out of `evaluate()` (SPEC §16). This also sidesteps a
-        # non-hashable value (e.g. `{"role": ["legal"]}`) raising `TypeError`
-        # from the `in` check below (found in review, KI-069).
-        if role is None or not isinstance(role, str):
+        if role is None:
             return RequireReview(
                 self._default,
                 f"Principal {principal.id} has no declared role; using default reviewers",
+            )
+        # `metadata` is an unvalidated `dict[str, Any]` - a non-str value
+        # (e.g. a list, accidentally hashable-looking int) gets its own
+        # reason distinct from "no role declared" above, kept a third,
+        # explicit case rather than an error out of evaluate() (SPEC §16) or
+        # a silent re-use of the "missing" wording (which would misreport a
+        # role that *was* declared, just not usably). This also sidesteps a
+        # non-hashable value (e.g. `{"role": ["legal"]}`) raising `TypeError`
+        # from the `in` check below (found in review, KI-069).
+        if not isinstance(role, str):
+            return RequireReview(
+                self._default,
+                f"Principal {principal.id}'s declared role is not a string "
+                f"({role!r}); using default reviewers",
             )
         if role not in self._role_reviewers:
             return RequireReview(

@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Also fixed along the way: `RequireReview.__init__` now copies its `reviewers` argument instead
   of aliasing it — a caller mutating a returned decision's `.reviewers` previously rewrote the
   issuing strategy's own configuration for good, a latent bug in every pre-existing strategy too.
+  Filed KI-078 during review: nothing in the system persists or surfaces a `RequireReview`'s
+  `reviewers` anywhere yet — pre-existing, but `RequireReviewByRole`'s entire purpose being
+  reviewer routing makes it far more consequential now.
 - New MCP tool `ontolith.list_contradictions` (closes KI-076): `read`-tier, mirroring REST's
   `GET /contradictions`/GraphQL's `Query.contradictions` — `ontolith.flag_contradiction`
   (propose-tier, mutates) was previously the only MCP surface that returned a contradiction at

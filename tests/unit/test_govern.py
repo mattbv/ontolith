@@ -527,6 +527,39 @@ class TestSourceQuorum:
 
         assert isinstance(decision, Reject)
 
+    def test_propose_author_delegating_to_read_is_also_capped_and_rejected(self) -> None:
+        """The other attenuation direction (found in review, KI-069, and
+        backfilled here for the strategy that set this pattern): a
+        propose-capability author delegating to a read-capability principal
+        is capped down, not left at their own higher capability - proves
+        min_capability is actually applied, not just that a pre-rejected
+        reader stays rejected regardless."""
+        policy = SourceQuorum(threshold=1)
+        author = Principal(
+            id="author",
+            kind="human",
+            auth_method="oidc",
+            default_capability="propose",
+            created_at=self.T0,
+        )
+        delegate = Principal(
+            id="delegate",
+            kind="human",
+            auth_method="oidc",
+            default_capability="read",
+            created_at=self.T0,
+        )
+        kb = _FakeKbView([])
+
+        decision = policy.evaluate(
+            self._proposal([self._assert_literal_op(source="source-a")]),
+            author,
+            kb,
+            acting_as=delegate,
+        )
+
+        assert isinstance(decision, Reject)
+
     def test_empty_operations_requires_review(self) -> None:
         """An empty operations list requires review rather than raising
         IndexError - defensive handling for a payload shape no current
@@ -936,8 +969,9 @@ class TestRequireReviewByRole:
 
     def test_non_str_role_falls_back_to_default_without_raising(self) -> None:
         """A non-str `role` (e.g. a list - non-hashable, would otherwise
-        raise TypeError from the `in` check) is treated the same as no
-        declared role, not a crash out of evaluate()."""
+        raise TypeError from the `in` check) falls back to default
+        reviewers, not a crash out of evaluate() - with a reason distinct
+        from "no declared role" (a role WAS declared, just not usably)."""
         policy = RequireReviewByRole(
             {"legal": ["legal-reviewer@example.com"]}, default=["fallback@example.com"]
         )
@@ -954,6 +988,8 @@ class TestRequireReviewByRole:
 
         assert isinstance(decision, RequireReview)
         assert decision.reviewers == ["fallback@example.com"]
+        assert "not a string" in decision.reason.lower()
+        assert "no declared role" not in decision.reason.lower()
 
     def test_no_declared_role_and_no_default_is_empty_not_an_error(self) -> None:
         policy = RequireReviewByRole({"legal": ["legal-reviewer@example.com"]})
