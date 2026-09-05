@@ -2343,14 +2343,19 @@ class Ontology:
         proposal to a specific reviewer).
 
         A manual assignment made here does NOT survive a later
-        `request_changes` + `resubmit` round trip: `resubmit` re-evaluates
-        policy against a live kb and overwrites `reviewers` with whatever
-        that fresh decision computes (`_finalize_non_accepted_decision`),
-        discarding this call's own list with no event and no trace. This
-        is a deliberate choice (policy is treated as authoritative on
-        re-evaluation, the same way `resubmit` already overwrites
-        `policy_reason`), not an oversight — but it means `assign_reviewers`
-        is only durable until the next `resubmit`, not permanent.
+        `request_changes` + `resubmit` round trip *if* the resubmission's
+        fresh policy evaluation lands back in `require_review`: that branch
+        of `_finalize_non_accepted_decision` overwrites `reviewers` with
+        whatever the new decision computes, discarding this call's own
+        list with no event and no trace. If resubmission instead
+        auto-accepts or gets rejected, `reviewers` is untouched (those
+        branches never call `update_proposal_reviewers`) and this call's
+        assignment survives as the historical record. The require_review
+        overwrite is a deliberate choice (policy is treated as
+        authoritative on re-evaluation there, the same way `resubmit`
+        already overwrites `policy_reason`), not an oversight — but it
+        means `assign_reviewers` is durable only until the next
+        `require_review`-bound `resubmit`, not unconditionally.
 
         Args:
             proposal_id: ID of the proposal to reassign

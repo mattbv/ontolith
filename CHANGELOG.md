@@ -26,9 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   constraint (`NOT NULL`, `UNIQUE`, `CHECK` all fail identically), but a plain `DEFAULT` isn't
   itself a constraint, so its migrated column uses `DEFAULT '[]'` instead, which DuckDB backfills
   into existing rows automatically, unlike a fresh database's stronger `NOT NULL DEFAULT '[]'`. A
-  manual `assign_reviewers` call also doesn't survive
-  a later `resubmit` (policy re-evaluation overwrites it) — documented and pinned by a test as
-  deliberate.
+  manual `assign_reviewers` call also doesn't survive a later `resubmit` that lands back in
+  `require_review` (that branch's policy re-evaluation overwrites `reviewers`) — a `resubmit` that
+  instead auto-accepts or gets rejected leaves a manual assignment untouched. Documented and pinned
+  by tests covering all three resubmit outcomes.
 - Three new `PolicyStrategy` implementations closing out SPEC §9.2's built-in strategy list (closes
   KI-069, ADR-0045): `ConfidenceThreshold(threshold, reviewers=None)` auto-accepts once a
   proposal's own staged confidence meets `threshold` (a missing confidence always requires review,

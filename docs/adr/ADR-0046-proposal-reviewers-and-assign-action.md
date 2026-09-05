@@ -81,9 +81,11 @@ the pinned version, all three tried). A plain `DEFAULT` is not itself treated as
 though, and DuckDB backfills every existing row with it (also verified directly, not assumed), so
 the migrated column is added as `TEXT DEFAULT '[]'` in one statement, with no row left `NULL` and
 no separate backfill needed. A freshly-created database's own `CREATE TABLE` still gets the
-stronger `NOT NULL DEFAULT '[]'` constraint this migrated column can't carry. SQLite's
-`ALTER TABLE ADD COLUMN` has no such restriction and uses the identical `NOT NULL DEFAULT '[]'` in
-both paths.
+stronger `NOT NULL DEFAULT '[]'` constraint this migrated column can't carry. SQLite has its own
+`ADD COLUMN` restrictions too (bare `NOT NULL` or `UNIQUE` alone are rejected, verified directly) —
+but `NOT NULL DEFAULT '...'` specifically is accepted and backfills existing rows, so SQLite's
+migration uses the identical `NOT NULL DEFAULT '[]'` in both the fresh-table and the migrated-table
+path, with no DuckDB-style asymmetry.
 
 ### Why `assign_reviewers` reuses the self-review guard — and the honest limit of that reasoning
 
@@ -103,8 +105,7 @@ is blocked, with an error message about *reviewing* one's own proposal for an ac
 review decision at all. This is accepted as the simpler, more consistent choice for now — not
 because the security argument for it actually holds today — and should be revisited if `reviewers`
 is ever made enforcement-relevant at accept time (at which point the guard would become genuinely
-load-bearing, matching the original
-intent here).
+load-bearing, matching the original intent here).
 
 ## Consequences
 
@@ -133,13 +134,17 @@ intent here).
   review-capable principal. This matches `ThresholdPolicy`'s own pre-existing behavior (its
   `reviewers=[principal.owner]` was never validated either) rather than introducing a new
   validation gap; tightening it is separable future work if it matters for a deployment.
-- **A manual `assign_reviewers` call does not survive a later `resubmit`** (found in review):
-  `resubmit` re-evaluates policy against a live kb and overwrites `reviewers` with whatever that
-  fresh decision computes, discarding a prior manual assignment silently — no event, no trace.
-  This is a deliberate consequence of treating policy as authoritative on re-evaluation (the same
-  way `resubmit` already overwrites `policy_reason`), not a bug, but it means an `assign_reviewers`
-  call is only durable until the next `resubmit`, which the original PR did not test or document
-  until this note and a pinning conformance test were added.
+- **A manual `assign_reviewers` call does not survive a later `resubmit` that lands back in
+  `require_review`** (found in review, and initially documented too broadly as "any `resubmit`" —
+  corrected here): only that one branch of `_finalize_non_accepted_decision` overwrites
+  `reviewers` with the fresh decision's own list, discarding a prior manual assignment silently —
+  no event, no trace. A `resubmit` that instead auto-accepts or gets rejected never calls
+  `update_proposal_reviewers` at all, so the manual assignment survives untouched in those cases.
+  The require_review overwrite is a deliberate consequence of treating policy as authoritative on
+  re-evaluation there (the same way `resubmit` already overwrites `policy_reason`), not a bug, but
+  it means an `assign_reviewers` call's durability depends on what the next `resubmit` decides —
+  not unconditional, and not zero — which the original PR did not test or document precisely until
+  this note and pinning conformance tests (covering all three resubmit outcomes) were added.
 - DuckDB's migrated `reviewers` column lacks the `NOT NULL` constraint a fresh database's column
   has (see Decision above) — the migration's own `DEFAULT '[]'` backfill means no row is ever
   actually `NULL` in practice, so this is a schema-level asymmetry only (a hand-written `INSERT`

@@ -284,6 +284,68 @@ class TestReviewerPersistence:
         assert stored is not None
         assert stored.reviewers == ["second@example.com"]
 
+    def test_manual_assignment_survives_resubmit_that_auto_accepts(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The reviewers-overwrite only happens in resubmit's require_review
+        branch (found in review: an earlier version of this ADR/docstring
+        claimed unconditionally that a manual assignment never survives any
+        resubmit, which was too broad) - if resubmission instead
+        auto-accepts, update_proposal_reviewers is never called, so a
+        manual assign_reviewers() call survives untouched."""
+        kb = make_kb(
+            FixedClock(T0),
+            FixedIdProvider(["e-1", "a-1", "a-2", "prop-1", "prop-2", "prop-3"]),
+            policy=_RequireReviewThenAutoAccept(),
+        )
+        kb.create_principal(
+            HUMAN_AUTHOR, kind="human", auth_method="oidc", default_capability="write"
+        )
+        kb.create_principal(REVIEWER, kind="human", auth_method="oidc", default_capability="review")
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+
+        proposal, decision = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
+        assert isinstance(decision, RequireReview)
+        kb.assign_reviewers(proposal.id, ["carol@example.com"], REVIEWER)
+        kb.request_changes(proposal.id, REVIEWER)
+
+        resubmitted, decision = kb.resubmit(proposal.id, HUMAN_AUTHOR)
+
+        assert isinstance(decision, AutoAccept)
+        assert resubmitted.reviewers == ["carol@example.com"]
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.reviewers == ["carol@example.com"]
+
+    def test_manual_assignment_survives_resubmit_that_rejects(self, make_kb: KbFactory) -> None:
+        """Same as the auto-accept case above, for resubmit's reject
+        branch - update_proposal_reviewers is only called from the
+        require_review branch, so a manual assignment survives a
+        resubmission that instead gets rejected."""
+        kb = make_kb(
+            FixedClock(T0),
+            FixedIdProvider(["e-1", "prop-1", "prop-2", "prop-3"]),
+            policy=_RequireReviewThenReject(),
+        )
+        kb.create_principal(
+            HUMAN_AUTHOR, kind="human", auth_method="oidc", default_capability="write"
+        )
+        kb.create_principal(REVIEWER, kind="human", auth_method="oidc", default_capability="review")
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+
+        proposal, decision = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
+        assert isinstance(decision, RequireReview)
+        kb.assign_reviewers(proposal.id, ["carol@example.com"], REVIEWER)
+        kb.request_changes(proposal.id, REVIEWER)
+
+        resubmitted, decision = kb.resubmit(proposal.id, HUMAN_AUTHOR)
+
+        assert isinstance(decision, Reject)
+        assert resubmitted.reviewers == ["carol@example.com"]
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.reviewers == ["carol@example.com"]
+
 
 # ===========================================================================
 # Accept path
