@@ -172,6 +172,39 @@ class TestReviewerPersistence:
         accepted = kb.accept_proposal(proposal.id, REVIEWER)
         assert accepted.reviewers == [AI_OWNER]
 
+    def test_non_list_reviewers_from_a_malformed_decision_is_treated_as_empty(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A structurally-noncompliant Decision (reviewers is a bare string,
+        not a list) is treated as no reviewers, not silently exploded into
+        one 'reviewer' per character by list(str) (found in review,
+        KI-078) - `getattr(...) or []` would have let this through."""
+
+        class _MalformedDecision:
+            reason = "malformed"
+            reviewers = "alice@example.com"
+
+        class _ReturnsMalformedDecision:
+            def evaluate(
+                self,
+                proposal: object,
+                principal: Principal,
+                kb: KbView,
+                acting_as: Principal | None = None,
+            ) -> Decision:
+                return _MalformedDecision()  # type: ignore[return-value]
+
+        kb = make_kb(FixedClock(T0), FixedIdProvider(["e-1", "prop-1"]))
+        kb.policy = _ReturnsMalformedDecision()
+        kb.create_principal(
+            HUMAN_AUTHOR, kind="human", auth_method="oidc", default_capability="write"
+        )
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN_AUTHOR)
+
+        assert proposal.reviewers == []
+
     def test_reviewers_refresh_on_resubmit(self, make_kb: KbFactory) -> None:
         """A resubmission re-evaluates policy against a live kb (KI-027) -
         if the freshly-computed reviewers differ from the original
@@ -643,6 +676,27 @@ class TestAssignReviewers:
 
         with pytest.raises(CapabilityError, match="cannot review their own proposal"):
             kb.assign_reviewers(proposal.id, ["dave@example.com"], "carol@example.com")
+
+    def test_manual_assignment_does_not_survive_resubmit(self, make_kb: KbFactory) -> None:
+        """A resubmission re-evaluates policy and overwrites reviewers with
+        the fresh decision's own list (KI-078 review finding) - a manual
+        assign_reviewers() call is only durable until the next resubmit,
+        not permanent. Pinned here as documented, deliberate behavior, not
+        a bug, so a future change to it is a conscious decision."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=HUMAN_AUTHOR)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI_AUTHOR, model="test-model-v1"
+        )
+        assert proposal.reviewers == [AI_OWNER]
+        kb.assign_reviewers(proposal.id, ["carol@example.com"], REVIEWER)
+        kb.request_changes(proposal.id, REVIEWER)
+
+        resubmitted, _ = kb.resubmit(proposal.id, AI_AUTHOR)
+
+        # ThresholdPolicy deterministically recomputes [AI_OWNER] for this
+        # AI author regardless of what was manually assigned in between.
+        assert resubmitted.reviewers == [AI_OWNER]
 
 
 # ===========================================================================

@@ -1596,7 +1596,23 @@ KI-069's `RequireReviewByRole` (ADR-0045) makes this gap materially worse: its *
 
 ### Fix
 
-Closed both halves in one PR (**ADR-0046**). New `Proposal.reviewers: list[str]` field, populated from `RequireReview.reviewers` at proposal-creation time and refreshed on `resubmit`'s policy re-evaluation (KI-027) — not cleared on accept/reject/request_changes, a historical record the same way `policy_reason` is. New `Ontology.assign_reviewers(proposal_id, reviewers, actor)` implements SPEC §9.4's `assign` action: replaces the reviewer list wholesale, records a `ProposalEvent(type="assign")`, and reuses the exact eligibility checks `accept_proposal`/`reject_proposal`/`request_changes` already share (capability, non-AI, no self-review). Exposed via REST only (`POST /proposals/{proposal_id}/assign`, `ProposalOut.reviewers` on every proposal route) — GraphQL/CLI/MCP deliberately deferred, no consumer-motivating scenario for them yet. **Breaking:** `StorageBackend` gains a required `update_proposal_reviewers()` method; both backends needed a schema migration for the new column on existing database files (DuckDB's `ALTER TABLE ADD COLUMN` rejects constraints, so its migrated column is added nullable and backfilled, unlike a fresh database's `NOT NULL DEFAULT '[]'`).
+Closed both halves in one PR (**ADR-0046**). New `Proposal.reviewers: list[str]` field, populated from `RequireReview.reviewers` at proposal-creation time and refreshed on `resubmit`'s policy re-evaluation (KI-027) — not cleared on accept/reject/request_changes, a historical record the same way `policy_reason` is. New `Ontology.assign_reviewers(proposal_id, reviewers, actor)` implements SPEC §9.4's `assign` action: replaces the reviewer list wholesale, records a `ProposalEvent(type="assign")`, and reuses the exact eligibility checks `accept_proposal`/`reject_proposal`/`request_changes` already share (capability, non-AI, no self-review — though review found this guard isn't currently load-bearing, since `reviewers` isn't itself enforced at accept time; kept for consistency, see ADR-0046). Exposed via REST only (`POST /proposals/{proposal_id}/assign`, `ProposalOut.reviewers` on every proposal route) — GraphQL/CLI/MCP deliberately deferred, filed as **KI-079**. **Breaking:** `StorageBackend` gains a required `update_proposal_reviewers()` method; both backends needed a schema migration for the new column on existing database files (DuckDB's `ALTER TABLE ADD COLUMN` rejects a `NOT NULL` constraint specifically, not any constraint — a plain `DEFAULT '[]'` is accepted and backfills existing rows in one statement, verified directly during review; a fresh database's own `CREATE TABLE` still gets the stronger `NOT NULL DEFAULT '[]'`). Review also found a manual `assign_reviewers` call doesn't survive a later `resubmit` (policy re-evaluation overwrites it) — documented and pinned by a test as deliberate, not fixed.
+
+---
+
+## KI-079 — `Proposal.reviewers`/`assign_reviewers()` (KI-078) not exposed through GraphQL, CLI, or MCP
+
+**Severity:** Architecture gap — a deliberately scoped-down interface surface, not a defect
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §9.4 (review workflow — `assign` action), SPEC §9.2 (policy engine contract)
+
+### Description
+
+KI-078 (ADR-0046) added `Proposal.reviewers` and `Ontology.assign_reviewers()`, exposing both through REST only (`ProposalOut.reviewers`, `POST /proposals/{proposal_id}/assign`). GraphQL's `ProposalType` still has no `reviewers` field (unlike REST's `ProposalOut`), the CLI has no `proposal assign` command, and MCP has no `assign` tool. A deployment using any of those three interfaces can't read or change reviewer assignments through them — `RequireReviewByRole` (ADR-0045) is actionable via REST only, not the other three shipped interfaces.
+
+### Fix
+
+Add `reviewers` to GraphQL's `ProposalType` (a small, low-risk addition — `policy_reason` is already there) and, separately, decide whether `assign` warrants a GraphQL mutation, a CLI command, and/or an MCP tool. Unlike KI-072's own admin-event precedent (which added CLI alongside REST because "who did this" auditing is a CLI-first workflow), `assign` has no equivalent motivating scenario tying it to any one of these three — pick whichever a real consumer needs first rather than assuming CLI by default.
 
 ---
 

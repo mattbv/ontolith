@@ -456,7 +456,12 @@ class Ontology:
             # literally be RequireReview" caution `reason` already uses
             # here (a custom third-party Decision subclass isn't ruled out
             # structurally, only by the Reject/AutoAccept checks above).
-            reviewers = list(getattr(decision, "reviewers", []) or [])
+            # isinstance-checked, not `or []`: a truthy non-list (e.g. a
+            # custom subclass whose `.reviewers` is a bare string) would
+            # otherwise sail through `list(...)` and silently explode into
+            # one "reviewer" per character instead of failing safe.
+            raw_reviewers = getattr(decision, "reviewers", None)
+            reviewers = list(raw_reviewers) if isinstance(raw_reviewers, list) else []
             pending = proposal.model_copy(
                 update={
                     "state": "require_review",
@@ -2316,9 +2321,23 @@ class Ontology:
         `actor` must hold `review`/`admin` capability, be non-AI, and not
         be the proposal's own author or delegate. Reusing the self-review
         guard here (not just for accept/reject/request_changes) is a
-        deliberate choice: an author who could freely pick their own
-        proposal's reviewer set would undermine the guard's own purpose
-        just as much as picking their own outcome would.
+        deliberate consistency choice, not currently a load-bearing
+        security control: `reviewers` is advisory metadata today, not
+        checked by `accept_proposal`, so self-assignment can't presently
+        steer who actually approves a proposal. See ADR-0046 for the full
+        reasoning, including the real cost this guard has today (blocking
+        a review-capable author from legitimately routing their own
+        proposal to a specific reviewer).
+
+        A manual assignment made here does NOT survive a later
+        `request_changes` + `resubmit` round trip: `resubmit` re-evaluates
+        policy against a live kb and overwrites `reviewers` with whatever
+        that fresh decision computes (`_finalize_non_accepted_decision`),
+        discarding this call's own list with no event and no trace. This
+        is a deliberate choice (policy is treated as authoritative on
+        re-evaluation, the same way `resubmit` already overwrites
+        `policy_reason`), not an oversight — but it means `assign_reviewers`
+        is only durable until the next `resubmit`, not permanent.
 
         Args:
             proposal_id: ID of the proposal to reassign

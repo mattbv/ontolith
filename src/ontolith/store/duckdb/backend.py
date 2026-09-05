@@ -354,17 +354,19 @@ class DuckDBBackend:
         # file that already has this table. Unlike SQLite, DuckDB supports
         # `ADD COLUMN IF NOT EXISTS` natively (same pattern as
         # principal_credential's issued_by/revoked_by, KI-060) - but unlike
-        # that migration, this column can't carry `NOT NULL DEFAULT` at ALTER
-        # time: DuckDB's parser rejects any constraint on `ADD COLUMN`
-        # ("Adding columns with constraints not yet supported"), so the
-        # column is added nullable here and explicitly backfilled instead —
-        # a fresh database's own `CREATE TABLE` above still gets the real
-        # `NOT NULL DEFAULT '[]'` constraint. `_row_to_proposal` also treats
-        # a NULL value defensively, in case a backend file predates even
-        # this backfill (e.g. a row inserted between the ALTER and the
-        # UPDATE below in a concurrent-startup scenario).
-        self.conn.execute("ALTER TABLE proposal ADD COLUMN IF NOT EXISTS reviewers TEXT")
-        self.conn.execute("UPDATE proposal SET reviewers = '[]' WHERE reviewers IS NULL")
+        # that migration, this column can't carry a `NOT NULL` constraint at
+        # ALTER time: DuckDB's parser specifically rejects `NOT NULL` on
+        # `ADD COLUMN` ("Adding columns with constraints not yet supported"),
+        # verified against the pinned duckdb version. A plain `DEFAULT` is
+        # accepted, though, and DuckDB backfills every existing row with it
+        # (verified directly, not assumed) - so one statement both adds the
+        # column and leaves no row NULL, unlike a `NOT NULL`-rejecting ALTER
+        # would have required a separate backfill for. A fresh database's own
+        # `CREATE TABLE` above still gets the stronger `NOT NULL DEFAULT '[]'`
+        # constraint this migrated column can't carry.
+        self.conn.execute(
+            "ALTER TABLE proposal ADD COLUMN IF NOT EXISTS reviewers TEXT DEFAULT '[]'"
+        )
 
         # Proposal event table (SPEC §9.4) — structured review actions.
         # Scoped to accept/reject/request_changes/assign, the four review
@@ -1380,7 +1382,7 @@ class DuckDBBackend:
             created_at=datetime.fromisoformat(row["created_at"]),
             decided_at=datetime.fromisoformat(row["decided_at"]) if row["decided_at"] else None,
             policy_reason=row["policy_reason"],
-            reviewers=json.loads(row["reviewers"]) if row["reviewers"] else [],
+            reviewers=json.loads(row["reviewers"]),
             payload=json.loads(row["payload"]),
             metadata=json.loads(row["metadata"]),
         )

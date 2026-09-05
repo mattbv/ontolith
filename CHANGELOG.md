@@ -17,14 +17,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (KI-027), not cleared on accept/reject/request_changes. `assign_reviewers()` replaces the
   reviewer list wholesale, records a `ProposalEvent(type="assign")`, and reuses the exact
   eligibility checks accept/reject/request_changes already share (review/admin capability, non-AI,
-  no self-review — an author who could pick their own proposal's reviewers would defeat the guard
-  as much as picking their own outcome would). Exposed via REST only: `POST
-  /proposals/{proposal_id}/assign`, and `reviewers` added to `ProposalOut` on every proposal route.
-  GraphQL/CLI/MCP deliberately deferred — no consumer-motivating scenario for them yet. **Breaking:**
+  no self-review — kept for consistency with the sibling actions, though not currently
+  load-bearing since `reviewers` itself isn't enforced at accept time; see ADR-0046). Exposed via
+  REST only: `POST /proposals/{proposal_id}/assign`, and `reviewers` added to `ProposalOut` on
+  every proposal route. GraphQL/CLI/MCP deliberately deferred (filed as KI-079). **Breaking:**
   `StorageBackend` gains a required `update_proposal_reviewers()` method; both backends migrate
-  existing database files to add the new column (DuckDB's `ALTER TABLE ADD COLUMN` rejects
-  constraints, so its migrated column is nullable and backfilled with `'[]'`, unlike a fresh
-  database's `NOT NULL DEFAULT '[]'`).
+  existing database files to add the new column — DuckDB's `ALTER TABLE ADD COLUMN` rejects a
+  `NOT NULL` constraint specifically (not any constraint), so its migrated column uses a plain
+  `DEFAULT '[]'` instead, which DuckDB backfills into existing rows automatically, unlike a fresh
+  database's stronger `NOT NULL DEFAULT '[]'`. A manual `assign_reviewers` call also doesn't survive
+  a later `resubmit` (policy re-evaluation overwrites it) — documented and pinned by a test as
+  deliberate.
 - Three new `PolicyStrategy` implementations closing out SPEC §9.2's built-in strategy list (closes
   KI-069, ADR-0045): `ConfidenceThreshold(threshold, reviewers=None)` auto-accepts once a
   proposal's own staged confidence meets `threshold` (a missing confidence always requires review,

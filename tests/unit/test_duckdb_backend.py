@@ -883,12 +883,37 @@ class TestDuckDBBackend:
                 row[1] for row in backend.conn.execute("PRAGMA table_info('proposal')").fetchall()
             }
             assert "reviewers" in columns
+            # Asserts the raw stored value directly, not just the value
+            # `_row_to_proposal` parses it into - proves the migration's own
+            # `DEFAULT '[]'` backfill actually ran, independent of any
+            # NULL-tolerant parsing on the read side (KI-078 review finding:
+            # the two previously masked each other, leaving neither tested).
+            raw_value = backend.conn.execute(
+                "SELECT reviewers FROM proposal WHERE id = 'old-prop'"
+            ).fetchone()[0]
+            assert raw_value == "[]"
             old = backend.get_proposal("old-prop")
             assert old is not None
             assert old.policy_reason == "needs review"
             assert old.reviewers == []
         finally:
             backend.close()
+
+        # Migration must be idempotent - a second open of the now-migrated
+        # file must not error (re-adding an already-present column) or
+        # disturb an assignment made in between.
+        backend2 = DuckDBBackend(temp_db)
+        try:
+            backend2.update_proposal_reviewers("old-prop", ["bob@test.com"])
+        finally:
+            backend2.close()
+        backend3 = DuckDBBackend(temp_db)
+        try:
+            reopened = backend3.get_proposal("old-prop")
+            assert reopened is not None
+            assert reopened.reviewers == ["bob@test.com"]
+        finally:
+            backend3.close()
 
     def _put_proposal(self, backend: DuckDBBackend, proposal_id: str) -> None:
         backend.put_proposal(

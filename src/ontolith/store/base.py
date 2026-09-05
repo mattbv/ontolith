@@ -694,6 +694,9 @@ class StorageBackend(Protocol):
                 policy-engine reason set at proposal-creation time is
                 distinct from, and not overwritten by, review actions
                 recorded via put_proposal_event.
+
+        Raises:
+            StorageError: proposal_id does not name an existing proposal
         """
         ...
 

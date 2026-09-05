@@ -2,7 +2,7 @@
 
 **Status**: Accepted
 
-**Date**: 2026-09-05
+**Date**: 2026-09-04
 
 **Deciders**: Ontolith Core Team
 
@@ -75,20 +75,33 @@ differently-shaped parameter.
 Both backends needed a schema migration for existing database files (`CREATE TABLE IF NOT EXISTS`
 is a no-op against one that already has the table) — the same pattern ADR-0042 established for
 `principal_credential.issued_by`/`revoked_by`. **DuckDB's migration path differs from SQLite's**:
-DuckDB's `ALTER TABLE ADD COLUMN` rejects any constraint ("Adding columns with constraints not yet
-supported"), so the migrated column is added nullable and explicitly backfilled with `'[]'`
-afterward, while a freshly-created database's own `CREATE TABLE` still gets the real
-`NOT NULL DEFAULT '[]'` constraint. SQLite's `ALTER TABLE ADD COLUMN` has no such restriction and
-uses the same `NOT NULL DEFAULT '[]'` in both paths.
+DuckDB's `ALTER TABLE ADD COLUMN` specifically rejects a `NOT NULL` constraint ("Adding columns
+with constraints not yet supported", verified against the pinned version) — a plain `DEFAULT` is
+accepted, though, and DuckDB backfills every existing row with it (also verified directly, not
+assumed), so the migrated column is added as `TEXT DEFAULT '[]'` in one statement, with no row
+left `NULL` and no separate backfill needed. A freshly-created database's own `CREATE TABLE` still
+gets the stronger `NOT NULL DEFAULT '[]'` constraint this migrated column can't carry. SQLite's
+`ALTER TABLE ADD COLUMN` has no such restriction and uses the identical `NOT NULL DEFAULT '[]'` in
+both paths.
 
-### Why `assign_reviewers` reuses the self-review guard
+### Why `assign_reviewers` reuses the self-review guard — and the honest limit of that reasoning
 
-An author who could freely pick their own proposal's reviewer set would undermine
-`_require_pending_proposal`'s guard just as much as picking their own accept/reject outcome would
-— routing your own proposal to a reviewer you expect to rubber-stamp is a real way to defeat human
-review, not a hypothetical one. Reusing the identical check `accept_proposal`/`reject_proposal`/
-`request_changes` already share, rather than inventing a looser rule for `assign` specifically,
-keeps the guard's actual security property intact.
+`assign_reviewers` reuses `_require_pending_proposal`'s existing self-review check (the proposal's
+own author/delegate can't call it) for consistency with `accept_proposal`/`reject_proposal`/
+`request_changes`, which all share it. **This is a conservative default, not currently a load-bearing
+security control**: `reviewers` is advisory metadata today — nothing in `accept_proposal` checks
+that the accepting principal actually appears in `proposal.reviewers` before accepting. So an
+author picking their own reviewer list cannot presently steer their proposal toward a reviewer who
+will "rubber-stamp" it in any way `accept_proposal`'s own guard doesn't already block regardless of
+who's listed; any review-capable, non-author principal can still accept, listed or not. The real,
+non-hypothetical cost of reusing the guard here is the opposite direction: a review-capable author
+who legitimately wants to route their own proposal to a specific reviewer (e.g. "I wrote this,
+please have the domain expert look at it") is blocked, with an error message about *reviewing*
+one's own proposal for an action that isn't a review decision at all. This is accepted as the
+simpler, more consistent choice for now — not because the security argument for it actually holds
+today — and should be revisited together if `reviewers` is ever made enforcement-relevant at
+accept time (at which point the guard would become genuinely load-bearing, matching the original
+intent here).
 
 ## Consequences
 
@@ -117,13 +130,27 @@ keeps the guard's actual security property intact.
   review-capable principal. This matches `ThresholdPolicy`'s own pre-existing behavior (its
   `reviewers=[principal.owner]` was never validated either) rather than introducing a new
   validation gap; tightening it is separable future work if it matters for a deployment.
+- **A manual `assign_reviewers` call does not survive a later `resubmit`** (found in review):
+  `resubmit` re-evaluates policy against a live kb and overwrites `reviewers` with whatever that
+  fresh decision computes, discarding a prior manual assignment silently — no event, no trace.
+  This is a deliberate consequence of treating policy as authoritative on re-evaluation (the same
+  way `resubmit` already overwrites `policy_reason`), not a bug, but it means an `assign_reviewers`
+  call is only durable until the next `resubmit`, which the original PR did not test or document
+  until this note and a pinning conformance test were added.
 - DuckDB's migrated `reviewers` column lacks the `NOT NULL` constraint a fresh database's column
-  has (see Decision above) — application code (`_row_to_proposal`) treats a `NULL` defensively, so
-  this is not a correctness gap, but it is a real, documented asymmetry between a migrated and a
-  fresh DuckDB file that a future schema audit should know about.
+  has (see Decision above) — the migration's own `DEFAULT '[]'` backfill means no row is ever
+  actually `NULL` in practice, so this is a schema-level asymmetry only (a hand-written `INSERT`
+  bypassing `put_proposal` could still write `NULL` there, unlike on a fresh database), not a
+  correctness gap in anything this codebase's own write paths produce.
 
 ## Alternatives Considered
 
+- **A `Proposal.request_review(assignee=None)` object method, matching SPEC's own informative SDK
+  sketch (§9.4's state-machine diagram) literally:** not adopted — this codebase's own review
+  actions (`accept_proposal`, `reject_proposal`, `request_changes`) are already `Ontology` methods
+  taking a `proposal_id`, not `Proposal` object methods, and already diverge from that sketch's
+  object-method style. `assign_reviewers(proposal_id, reviewers, actor)` follows the established
+  convention rather than reintroducing the sketch's own shape for this one action alone.
 - **Store reviewers only as `ProposalEvent` details, deriving "current reviewers" by replaying the
   latest `assign` event (or falling back to the original policy decision):** rejected — this would
   introduce an "authoritative state lives in the event log" pattern this codebase doesn't otherwise
@@ -137,8 +164,10 @@ keeps the guard's actual security property intact.
   (updating reviewers alone) that doesn't need `state` touched at all.
 - **A looser eligibility check for `assign` than accept/reject/request_changes** (e.g., allowing the
   proposal's own author to self-assign reviewers, on the theory that routing isn't a decision):
-  rejected — see the Decision section's own rationale; self-assignment is a real way to defeat
-  human review, not a hypothetical one.
+  rejected for consistency and simplicity, not because the strict version currently prevents a
+  concrete attack — see the "honest limit" note in the Decision section above; `reviewers` isn't
+  enforced at accept time today, so self-assignment can't presently steer who ends up approving a
+  proposal. Revisit this specific alternative if `reviewers` ever becomes enforcement-relevant.
 - **Expose `assign` through every interface (REST, GraphQL, CLI, MCP) in this same PR:** rejected —
   REST is the natural first target (the same reasoning ADR-0042's KI-072 update used); speculatively
   wiring three more surfaces before any consumer needs them is scope beyond what closing KI-078

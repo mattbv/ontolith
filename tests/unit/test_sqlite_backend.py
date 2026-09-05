@@ -972,6 +972,22 @@ class TestSQLiteBackend:
         finally:
             backend.close()
 
+        # Migration must be idempotent - a second open of the now-migrated
+        # file must not error (re-adding an already-present column) or
+        # disturb an assignment made in between.
+        backend2 = SQLiteBackend(temp_db)
+        try:
+            backend2.update_proposal_reviewers("old-prop", ["bob@test.com"])
+        finally:
+            backend2.close()
+        backend3 = SQLiteBackend(temp_db)
+        try:
+            reopened = backend3.get_proposal("old-prop")
+            assert reopened is not None
+            assert reopened.reviewers == ["bob@test.com"]
+        finally:
+            backend3.close()
+
     def _put_proposal(self, backend: SQLiteBackend, proposal_id: str) -> None:
         backend.put_proposal(
             Proposal(
