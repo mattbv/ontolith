@@ -478,7 +478,7 @@ def list_proposals(
             typer.echo("No proposals found.")
             return
         for p in results:
-            reviewers_suffix = f"  reviewers={','.join(p.reviewers)}" if p.reviewers else ""
+            reviewers_suffix = f"  reviewers={', '.join(p.reviewers)}" if p.reviewers else ""
             typer.echo(
                 f"{p.id}  state={p.state}  author={p.author}  created={p.created_at}"
                 f"{reviewers_suffix}"
@@ -583,16 +583,25 @@ def assign_reviewers(
     proposal_id: Annotated[str, typer.Argument(help="Proposal ID to reassign reviewers on.")],
     actor: Annotated[
         str,
-        typer.Option("--actor", "--author", help="Principal performing the reassignment."),
+        # No --author alias, unlike accept/reject/review's --reviewer: on
+        # this command the proposal's own author is exactly the principal
+        # the self-review guard forbids from calling it, so an --author
+        # alias here would name the one role that can't use it.
+        typer.Option("--actor", help="Principal performing the reassignment."),
     ],
     reviewer: Annotated[
         list[str] | None,
         typer.Option(
             "--reviewer",
-            help="Reviewer to assign (repeatable). Replaces the current list wholesale — "
-            "pass none to clear every assignment.",
+            help="Reviewer to assign (repeatable). Replaces the current list wholesale.",
         ),
     ] = None,
+    clear: Annotated[
+        bool,
+        typer.Option(
+            "--clear", help="Remove every reviewer assignment. Required instead of --reviewer."
+        ),
+    ] = False,
 ) -> None:
     """Reassign a pending proposal's reviewers (SPEC §9.4's `assign` action, KI-078/KI-079).
 
@@ -601,12 +610,30 @@ def assign_reviewers(
     same guard `accept`/`reject`/`review` share. The proposal must be in
     `require_review` or `under_review` state. `--reviewer` replaces the
     entire list, not merges with it; pass every name that should remain.
+
+    Exactly one of `--reviewer` (one or more) or `--clear` is required —
+    unlike REST/GraphQL, where an empty list is just an ordinary argument
+    value, a bare CLI invocation with neither has no natural "did the
+    caller mean to clear everything, or forget the flag?" default. Since
+    clearing discards the assignment with no way to recover it (no event
+    records the prior list, only that a change happened), this command
+    requires the caller to say which they meant rather than silently
+    treating "no flags" as "clear everything."
     """
     kb = _kb()
     try:
+        if not reviewer and not clear:
+            typer.echo(
+                "Error: pass --reviewer (repeatable) to assign, or --clear to remove "
+                "every assignment",
+                err=True,
+            )
+            raise typer.Exit(1)
         proposal = kb.assign_reviewers(proposal_id, reviewer or [], actor)
         shown = ", ".join(proposal.reviewers) or "-"
         typer.echo(f"Reviewers assigned: {proposal.id}  reviewers={shown}")
+    except typer.Exit:
+        raise
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None

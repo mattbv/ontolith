@@ -807,6 +807,27 @@ class TestProposalList:
         assert result.exit_code == 0
         assert pending.id in result.output
         assert "require_review" in result.output
+        # ThresholdPolicy routes an AI-authored proposal's review to its
+        # accountable owner (ADR-0003) - proves the reviewers=<...> suffix
+        # actually renders for a proposal that has some (found in review:
+        # this line's own suffix wasn't asserted anywhere before).
+        assert f"reviewers={alice.id}" in result.output
+
+    def test_list_output_omits_reviewers_suffix_when_empty(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        """A human write-capability author's proposal auto-accepts with no
+        reviewers assigned - the suffix must not render as an empty
+        trailing 'reviewers=' (found in review: the non-empty case above
+        was the only one ever asserted)."""
+        db, author, entity_id = seeded_db
+        kb = Ontology.connect(db)
+        kb.propose(entity_id, "Person.name", "Ada", "Text", author)  # auto_accepted, no reviewers
+        kb.close()
+
+        result = runner.invoke(app, ["--db", str(db), "proposal", "list", "--all"])
+        assert result.exit_code == 0
+        assert "reviewers=" not in result.output
 
     def test_no_proposals_message(self, temp_db: Path) -> None:
         result = runner.invoke(app, ["--db", str(temp_db), "proposal", "list"])
@@ -1182,7 +1203,50 @@ class TestProposalAssign:
         assert events[-1].type == "assign"
         kb.close()
 
-    def test_assign_with_no_reviewer_flags_clears_the_list(self, temp_db: Path) -> None:
+    def test_assign_with_clear_flag_clears_the_list(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        actor = kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        bot = kb.create_principal(
+            "bot@example.com",
+            kind="ai",
+            auth_method="apikey",
+            owner=alice.id,
+            default_capability="propose",
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", bot.id, model="v1")
+        assert proposal.reviewers == [alice.id]
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "proposal",
+                "assign",
+                proposal.id,
+                "--actor",
+                actor.id,
+                "--clear",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "reviewers=-" in result.output
+
+        kb = Ontology.connect(temp_db)
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.reviewers == []
+        kb.close()
+
+    def test_assign_with_neither_reviewer_nor_clear_is_rejected(self, temp_db: Path) -> None:
+        """Unlike REST/GraphQL (where an empty list is just an ordinary
+        argument value), the CLI has no natural default for "no flags at
+        all" - clearing is irreversible (no event records the prior list),
+        so the caller must say --clear explicitly rather than have a bare
+        invocation silently wipe the assignment (found in review)."""
         kb = Ontology.connect(temp_db)
         alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
         actor = kb.create_principal("carol@example.com", kind="human", default_capability="review")
@@ -1202,13 +1266,18 @@ class TestProposalAssign:
             app,
             ["--db", str(temp_db), "proposal", "assign", proposal.id, "--actor", actor.id],
         )
-        assert result.exit_code == 0
-        assert "reviewers=-" in result.output
+        assert result.exit_code == 1
+        assert "reviewer" in result.output.lower()
+        # The typer.Exit raised for this specific denial must not also be
+        # caught by the generic `except Exception` below it and re-echoed
+        # as a second, spurious "Error: 1" line (same KI-054 pattern
+        # test_second_principal_requires_author already pins elsewhere).
+        assert "Error: 1" not in result.output
 
         kb = Ontology.connect(temp_db)
         stored = kb.backend.get_proposal(proposal.id)
         assert stored is not None
-        assert stored.reviewers == []
+        assert stored.reviewers == [alice.id]
         kb.close()
 
     def test_assign_nonexistent_proposal_reports_not_found(self, temp_db: Path) -> None:
@@ -1226,6 +1295,8 @@ class TestProposalAssign:
                 "nonexistent",
                 "--actor",
                 "carol@example.com",
+                "--reviewer",
+                "dave@example.com",
             ],
         )
         assert result.exit_code == 1
@@ -1236,7 +1307,18 @@ class TestProposalAssign:
     ) -> None:
         db, author, _ = seeded_db
         result = runner.invoke(
-            app, ["--db", str(db), "proposal", "assign", "nonexistent", "--actor", author]
+            app,
+            [
+                "--db",
+                str(db),
+                "proposal",
+                "assign",
+                "nonexistent",
+                "--actor",
+                author,
+                "--reviewer",
+                "dave@example.com",
+            ],
         )
         assert result.exit_code == 1
         assert "lacks review capability" in result.output

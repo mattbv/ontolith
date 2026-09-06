@@ -1291,6 +1291,28 @@ class TestProposalReviewMutations:
         )
         assert body["data"]["assignReviewers"]["reviewers"] == ["carol@example.com"]
 
+    def test_assign_reviewers_self_review_is_blocked(self, tmp_path: Path) -> None:
+        """Pins that the mutation resolves the acting principal from the
+        bearer token (never a client-supplied value) and passes it through
+        Ontology.assign_reviewers's own self-review guard - mutation-tested
+        in review by hardcoding a different actor, which passed every other
+        test but not this one."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _decision = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", REVIEWER, source="human"
+        )
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+        body = _gql(
+            client,
+            "mutation($id: String!, $r: [String!]!) { "
+            "assignReviewers(proposalId: $id, reviewers: $r) { id } }",
+            variables={"id": proposal.id, "r": ["carol@example.com"]},
+            headers=_auth(token),
+        )
+        assert _error_codes(body) == ["CAPABILITY_ERROR"]
+
     def test_request_changes_then_resubmit(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         proposal_id = self._pending_proposal_id(kb)
