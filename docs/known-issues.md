@@ -1582,10 +1582,10 @@ Review found the CLI (`ontolith proposal list --state`/`ontolith contradiction l
 
 ---
 
-## KI-078 — A `RequireReview` decision's `reviewers` are never persisted or surfaced through any interface
+## KI-078 — A `RequireReview` decision's `reviewers` are never persisted or surfaced through any interface ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — a SPEC §9.4 MUST-level gap (`assign` is one of five named review actions), made newly consequential by KI-069
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §9.4 (review workflow — names an `assign` action), SPEC §9.2 (policy engine contract)
 
 ### Description
@@ -1596,7 +1596,25 @@ KI-069's `RequireReviewByRole` (ADR-0045) makes this gap materially worse: its *
 
 ### Fix
 
-Wire `Decision.reviewers` through to a persisted, queryable review-assignment surface — likely a `Proposal.reviewers: list[str]` field (or a dedicated event alongside `ProposalEvent`, mirroring `AdminEvent`'s own precedent for a previously-unattributed action, ADR-0042) plus the `assign` action SPEC §9.4 already names, exposed through at least REST (a natural first target, per KI-072's own precedent for "which interface first") so `RequireReviewByRole`'s routing is actually actionable by whoever it names, not just visible to the SDK.
+Closed both halves in one PR (**ADR-0046**). New `Proposal.reviewers: list[str]` field, populated from `RequireReview.reviewers` at proposal-creation time and refreshed on `resubmit`'s policy re-evaluation (KI-027) — not cleared on accept/reject/request_changes, a historical record the same way `policy_reason` is. New `Ontology.assign_reviewers(proposal_id, reviewers, actor)` implements SPEC §9.4's `assign` action: replaces the reviewer list wholesale, records a `ProposalEvent(type="assign")`, and reuses the exact eligibility checks `accept_proposal`/`reject_proposal`/`request_changes` already share (capability, non-AI, no self-review — though review found this guard isn't currently load-bearing, since `reviewers` isn't itself enforced at accept time; kept for consistency, see ADR-0046). Exposed via REST only (`POST /proposals/{proposal_id}/assign`, `ProposalOut.reviewers` on every proposal route) — GraphQL/CLI/MCP deliberately deferred, filed as **KI-079**. **Breaking:** `StorageBackend` gains a required `update_proposal_reviewers()` method; both backends needed a schema migration for the new column on existing database files (DuckDB's `ALTER TABLE ADD COLUMN` rejects any constraint — `NOT NULL`, `UNIQUE`, `CHECK` all fail identically, verified directly during review — but a plain `DEFAULT '[]'` isn't itself a constraint, is accepted, and backfills existing rows in one statement; a fresh database's own `CREATE TABLE` still gets the stronger `NOT NULL DEFAULT '[]'`). Review also found a manual `assign_reviewers` call doesn't survive a later `resubmit` that lands back in `require_review` (that branch's policy re-evaluation overwrites `reviewers`) — a `resubmit` that instead auto-accepts or gets rejected leaves a manual assignment untouched — documented and pinned by tests covering all three resubmit outcomes, not fixed (deliberate).
+
+---
+
+## KI-079 — `Proposal.reviewers`/`assign_reviewers()` (KI-078) not exposed through GraphQL or CLI; MCP deliberately excluded
+
+**Severity:** Architecture gap — a deliberately scoped-down interface surface, not a defect
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §9.4 (review workflow — `assign` action), SPEC §9.2 (policy engine contract), SPEC §14.4/ADR-0008 (MCP surface — no direct-write tool)
+
+### Description
+
+KI-078 (ADR-0046) added `Proposal.reviewers` and `Ontology.assign_reviewers()`, exposing both through REST only (`ProposalOut.reviewers`, `POST /proposals/{proposal_id}/assign`). GraphQL's `ProposalType` still has no `reviewers` field (unlike REST's `ProposalOut`), and the CLI has no `proposal assign` command — a deployment using either interface can't read or change reviewer assignments through it, so `RequireReviewByRole` (ADR-0045) is actionable via REST only.
+
+MCP is a different case, not just an unclosed gap: every MCP tool today is `read`- or `propose`-tier (`schema`/`get`/`query`/`provenance`/`list_contradictions` read; `propose`/`retract`/`resubmit`/`flag_contradiction` propose/author-tier) — none require `review`/`admin` capability. `assign_reviewers()` does, so an `ontolith.assign` MCP tool would be MCP's first review-capability write tool, a genuine new precedent against SPEC §14.4/ADR-0008's surface constraint, not a mechanical port of the REST route.
+
+### Fix
+
+Add `reviewers` to GraphQL's `ProposalType` (a small, low-risk addition — `policy_reason` is already there) and decide whether `assign` warrants a GraphQL mutation and/or a CLI command. Unlike KI-072's own admin-event precedent (which added CLI alongside REST because "who did this" auditing is a CLI-first workflow), `assign` has no equivalent motivating scenario tying it to either — pick whichever a real consumer needs first rather than assuming CLI by default. MCP is out of scope for this KI: adding a review-tier tool there is a deliberate architectural decision to make if/when an actual MCP consumer needs it (mirroring ADR-0042's own reasoning for leaving `get_admin_events()` off MCP), not something this KI should close by default.
 
 ---
 

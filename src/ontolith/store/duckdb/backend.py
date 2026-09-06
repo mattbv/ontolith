@@ -342,15 +342,39 @@ class DuckDBBackend:
                 created_at TEXT NOT NULL,
                 decided_at TEXT,
                 policy_reason TEXT,
+                reviewers TEXT NOT NULL DEFAULT '[]',
                 payload TEXT NOT NULL DEFAULT '{}',
                 metadata TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY(author) REFERENCES principal(id)
             )
         """)
 
+        # KI-078: `reviewers` was added after this table was first shipped —
+        # `CREATE TABLE IF NOT EXISTS` above is a no-op against a database
+        # file that already has this table. Unlike SQLite, DuckDB supports
+        # `ADD COLUMN IF NOT EXISTS` natively (same pattern as
+        # principal_credential's issued_by/revoked_by, KI-060, whose own
+        # `issued_by`/`revoked_by` columns carry no constraint and needed no
+        # backfill) - but this column can't carry any constraint at ALTER
+        # time: DuckDB's parser rejects `NOT NULL`, `UNIQUE`, and `CHECK`
+        # alike on `ADD COLUMN` ("Adding columns with constraints not yet
+        # supported"), verified directly against the pinned duckdb version
+        # (all three tried, all three rejected identically). A plain
+        # `DEFAULT` is not treated as a constraint, though, and DuckDB
+        # backfills every existing row with it (also verified directly) -
+        # so this one statement both adds the column and leaves no row
+        # NULL, without needing a separate backfill statement the way a
+        # constraint-rejecting `ADD COLUMN` alone would have left one
+        # short of. A fresh database's own `CREATE TABLE` above still gets
+        # the stronger `NOT NULL DEFAULT '[]'` constraint this migrated
+        # column can't carry.
+        self.conn.execute(
+            "ALTER TABLE proposal ADD COLUMN IF NOT EXISTS reviewers TEXT DEFAULT '[]'"
+        )
+
         # Proposal event table (SPEC §9.4) — structured review actions.
-        # Scoped to accept/reject/request_changes, the three review actions
-        # that exist as Ontology methods; assign/comment are not implemented
+        # Scoped to accept/reject/request_changes/assign, the four review
+        # actions that exist as Ontology methods; comment is not implemented
         # yet (see ProposalEvent docstring).
         #
         # No CHECK on `type` — matches SPEC §12.2's own DDL and this
@@ -1320,8 +1344,8 @@ class DuckDBBackend:
             self.conn.execute(
                 """
                 INSERT INTO proposal (id, namespace, author, acting_as, state,
-                    created_at, decided_at, policy_reason, payload, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, decided_at, policy_reason, reviewers, payload, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     proposal.id,
@@ -1332,6 +1356,7 @@ class DuckDBBackend:
                     proposal.created_at.isoformat(),
                     proposal.decided_at.isoformat() if proposal.decided_at else None,
                     proposal.policy_reason,
+                    json.dumps(proposal.reviewers),
                     json.dumps(proposal.payload),
                     json.dumps(proposal.metadata),
                 ],
@@ -1361,6 +1386,7 @@ class DuckDBBackend:
             created_at=datetime.fromisoformat(row["created_at"]),
             decided_at=datetime.fromisoformat(row["decided_at"]) if row["decided_at"] else None,
             policy_reason=row["policy_reason"],
+            reviewers=json.loads(row["reviewers"]),
             payload=json.loads(row["payload"]),
             metadata=json.loads(row["metadata"]),
         )
@@ -1407,6 +1433,27 @@ class DuckDBBackend:
             )
         except duckdb.Error as e:
             raise StorageError(f"Failed to update proposal (id={proposal_id}): {e}") from e
+
+    @_synchronized
+    def update_proposal_reviewers(self, proposal_id: str, reviewers: list[str]) -> None:
+        """Replace a proposal's assigned reviewers (SPEC §9.4's `assign` action)."""
+        try:
+            # Existence check + plain UPDATE, not `UPDATE ... RETURNING` —
+            # same FK-reference reason as update_proposal_state above.
+            if (
+                self.conn.execute("SELECT 1 FROM proposal WHERE id = ?", [proposal_id]).fetchone()
+                is None
+            ):
+                raise StorageError(f"Proposal not found: {proposal_id}")
+
+            self.conn.execute(
+                "UPDATE proposal SET reviewers = ? WHERE id = ?",
+                [json.dumps(reviewers), proposal_id],
+            )
+        except duckdb.Error as e:
+            raise StorageError(
+                f"Failed to update proposal reviewers (id={proposal_id}): {e}"
+            ) from e
 
     @_synchronized
     def put_proposal_event(self, event: ProposalEvent) -> None:

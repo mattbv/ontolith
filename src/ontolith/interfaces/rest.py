@@ -1,8 +1,9 @@
 """REST interface for Ontolith (SPEC §14.3, ADR-0021).
 
 Exposes read, propose, direct write, retraction (governed, KI-057), proposal
-review (accept/reject/request_changes/resubmit), contradiction listing/
-flagging/resolution, namespace listing, and principal/token admin over HTTP.
+review (accept/reject/request_changes/resubmit/assign, KI-078), contradiction
+listing/flagging/resolution, namespace listing, and principal/token admin
+over HTTP.
 Full SPEC §14.3
 resource parity (``/query`` offset pagination, GraphQL) is out of scope
 (KI-022).
@@ -275,6 +276,7 @@ class ProposalOut(BaseModel):
     created_at: str
     decided_at: str | None
     policy_reason: str | None
+    reviewers: list[str]
 
 
 class ProposeOut(BaseModel):
@@ -340,6 +342,15 @@ class ReviewIn(BaseModel):
     """Request body for POST /proposals/{proposal_id}/review."""
 
     reason: str = ""
+
+
+class AssignIn(BaseModel):
+    """Request body for POST /proposals/{proposal_id}/assign (SPEC §9.4,
+    KI-078). Replaces the proposal's reviewer list wholesale — pass the
+    full desired set, including any names from the current assignment
+    that should be kept."""
+
+    reviewers: list[str]
 
 
 class ContradictionOut(BaseModel):
@@ -763,6 +774,7 @@ def create_rest_app(
                 created_at=proposal.created_at.isoformat(),
                 decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
                 policy_reason=proposal.policy_reason,
+                reviewers=proposal.reviewers,
             ),
             decision=type(decision).__name__,
         )
@@ -817,6 +829,7 @@ def create_rest_app(
                 created_at=p.created_at.isoformat(),
                 decided_at=p.decided_at.isoformat() if p.decided_at else None,
                 policy_reason=p.policy_reason,
+                reviewers=p.reviewers,
             )
             for p in results
         ]
@@ -917,6 +930,7 @@ def create_rest_app(
                 created_at=proposal.created_at.isoformat(),
                 decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
                 policy_reason=proposal.policy_reason,
+                reviewers=proposal.reviewers,
             ),
             decision=type(decision).__name__,
         )
@@ -943,6 +957,7 @@ def create_rest_app(
             created_at=proposal.created_at.isoformat(),
             decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
             policy_reason=proposal.policy_reason,
+            reviewers=proposal.reviewers,
         )
 
     # ------------------------------------------------------------------
@@ -967,6 +982,7 @@ def create_rest_app(
             created_at=proposal.created_at.isoformat(),
             decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
             policy_reason=proposal.policy_reason,
+            reviewers=proposal.reviewers,
         )
 
     # ------------------------------------------------------------------
@@ -992,6 +1008,34 @@ def create_rest_app(
             created_at=proposal.created_at.isoformat(),
             decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
             policy_reason=proposal.policy_reason,
+            reviewers=proposal.reviewers,
+        )
+
+    # ------------------------------------------------------------------
+    # POST /proposals/{proposal_id}/assign
+    # ------------------------------------------------------------------
+
+    @app.post("/proposals/{proposal_id}/assign")
+    def assign_reviewers_route(
+        proposal_id: str,
+        body: AssignIn,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> ProposalOut:
+        """Reassign a pending proposal's reviewers (SPEC §9.4's `assign`
+        action, KI-078). Requires review or admin capability; same
+        self-review guard as accept/reject/review — replaces the reviewer
+        list wholesale, including clearing it via an empty list."""
+        proposal = kb.assign_reviewers(proposal_id, body.reviewers, principal.id)
+        return ProposalOut(
+            id=proposal.id,
+            namespace=proposal.namespace,
+            author=proposal.author,
+            acting_as=proposal.acting_as,
+            state=proposal.state,
+            created_at=proposal.created_at.isoformat(),
+            decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
+            policy_reason=proposal.policy_reason,
+            reviewers=proposal.reviewers,
         )
 
     # ------------------------------------------------------------------
@@ -1017,6 +1061,7 @@ def create_rest_app(
                 created_at=proposal.created_at.isoformat(),
                 decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
                 policy_reason=proposal.policy_reason,
+                reviewers=proposal.reviewers,
             ),
             decision=type(decision).__name__,
         )

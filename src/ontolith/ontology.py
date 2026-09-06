@@ -450,10 +450,36 @@ class Ontology:
             return rejected, decision
 
         if not isinstance(decision, AutoAccept):
+            # KI-078: RequireReview.reviewers was computed by every
+            # PolicyStrategy but never persisted anywhere before this -
+            # getattr defensively, matching the same "decision might not
+            # literally be RequireReview" caution `reason` already uses
+            # here (a custom third-party Decision subclass isn't ruled out
+            # structurally, only by the Reject/AutoAccept checks above).
+            # isinstance-checked, not `or []`: a truthy non-list (e.g. a
+            # custom subclass whose `.reviewers` is a bare string) would
+            # otherwise sail through `list(...)` and silently explode into
+            # one "reviewer" per character instead of failing safe. Non-str
+            # *elements* are filtered the same way, not just rejected
+            # wholesale: `model_copy(update=...)` below bypasses pydantic
+            # validation, so a non-str element would otherwise reach
+            # `put_proposal` unnoticed and only fail later, on *read back*
+            # (`_row_to_proposal`'s `Proposal(...)` does validate) - by then
+            # corrupting every subsequent read of the row, and any
+            # `proposals()` listing that includes it, not just this one
+            # decision's own result (found in review, worse than the
+            # bare-string case this guard was first added for).
+            raw_reviewers = getattr(decision, "reviewers", None)
+            reviewers = (
+                [r for r in raw_reviewers if isinstance(r, str)]
+                if isinstance(raw_reviewers, list)
+                else []
+            )
             pending = proposal.model_copy(
                 update={
                     "state": "require_review",
                     "policy_reason": getattr(decision, "reason", None),
+                    "reviewers": reviewers,
                 }
             )
             if is_new:
@@ -462,6 +488,11 @@ class Ontology:
                 self.backend.update_proposal_state(
                     proposal.id, "require_review", policy_reason=getattr(decision, "reason", None)
                 )
+                # Resubmission re-evaluates policy against a live kb - the
+                # freshly-computed reviewers may differ from whatever was
+                # assigned before, so they're refreshed here too rather than
+                # left stale from the proposal's original creation.
+                self.backend.update_proposal_reviewers(proposal.id, reviewers)
             return pending, decision
 
         return None
@@ -2278,6 +2309,85 @@ class Ontology:
                     actor=reviewer,
                     type="request_changes",
                     detail=reason or None,
+                    at=now,
+                )
+            )
+
+        updated = self.backend.get_proposal(proposal_id)
+        assert updated is not None
+        return updated
+
+    def assign_reviewers(self, proposal_id: str, reviewers: list[str], actor: str) -> Proposal:
+        """Reassign a pending proposal's reviewers (SPEC §9.4's `assign` action, KI-078).
+
+        A `PolicyStrategy` (e.g. `RequireReviewByRole`, ADR-0045) already
+        chooses reviewers when a proposal is first created — this lets that
+        initial assignment be corrected or supplemented later, the same way
+        `request_changes` lets a decision be revisited rather than only
+        ever set once. `reviewers` is replaced wholesale, not merged: pass
+        the full desired list, including any names from the current
+        assignment that should be kept.
+
+        Uses the same reviewer-eligibility and proposal-state checks as
+        `accept_proposal`/`reject_proposal`/`request_changes`
+        (`_require_reviewer_principal`/`_require_pending_proposal`) —
+        `actor` must hold `review`/`admin` capability, be non-AI, and not
+        be the proposal's own author or delegate. Reusing the self-review
+        guard here (not just for accept/reject/request_changes) is a
+        deliberate consistency choice, not currently a load-bearing
+        security control: `reviewers` is advisory metadata today, not
+        checked by `accept_proposal`, so self-assignment can't presently
+        steer who actually approves a proposal. See ADR-0046 for the full
+        reasoning, including the real cost this guard has today (blocking
+        a review-capable author from legitimately routing their own
+        proposal to a specific reviewer).
+
+        A manual assignment made here does NOT survive a later
+        `request_changes` + `resubmit` round trip *if* the resubmission's
+        fresh policy evaluation lands back in `require_review`: that branch
+        of `_finalize_non_accepted_decision` overwrites `reviewers` with
+        whatever the new decision computes, discarding this call's own
+        list with no event and no trace. If resubmission instead
+        auto-accepts or gets rejected, `reviewers` is untouched (those
+        branches never call `update_proposal_reviewers`) and this call's
+        assignment survives as the historical record. The require_review
+        overwrite is a deliberate choice (policy is treated as
+        authoritative on re-evaluation there, the same way `resubmit`
+        already overwrites `policy_reason`), not an oversight — but it
+        means `assign_reviewers` is durable only until the next
+        `require_review`-bound `resubmit`, not unconditionally.
+
+        Args:
+            proposal_id: ID of the proposal to reassign
+            reviewers: New reviewer list, replacing whatever was assigned
+                before (an empty list clears every assignment)
+            actor: Principal ID performing the reassignment
+
+        Returns:
+            Updated Proposal with the new `reviewers` list
+
+        Raises:
+            AuthError: actor is not a known principal
+            NotFoundError: proposal_id does not name an existing proposal
+            CapabilityError: actor lacks review/admin capability, is
+                AI-kind, or is the proposal's own author/delegate
+            ValidationError: proposal is not pending review (including when
+                a concurrent transition already moved it out of that state,
+                KI-035)
+        """
+        self._require_reviewer_principal(actor)
+
+        now = self.clock.now()
+        with self.backend.transaction():
+            self._require_pending_proposal(proposal_id, actor)
+            self.backend.update_proposal_reviewers(proposal_id, reviewers)
+            self.backend.put_proposal_event(
+                ProposalEvent(
+                    id=self.id_provider.next(),
+                    proposal_id=proposal_id,
+                    actor=actor,
+                    type="assign",
+                    detail=", ".join(reviewers) if reviewers else None,
                     at=now,
                 )
             )

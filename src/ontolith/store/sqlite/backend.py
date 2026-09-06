@@ -362,15 +362,25 @@ class SQLiteBackend:
                 created_at TEXT NOT NULL,
                 decided_at TEXT,
                 policy_reason TEXT,
+                reviewers TEXT NOT NULL DEFAULT '[]',
                 payload TEXT NOT NULL DEFAULT '{}',
                 metadata TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY(author) REFERENCES principal(id)
             )
         """)
 
+        # KI-078: `reviewers` was added after this table was first shipped —
+        # `CREATE TABLE IF NOT EXISTS` above is a no-op against a database
+        # file that already has this table, so a pre-existing file needs an
+        # explicit, idempotent migration step (same pattern as
+        # principal_credential's issued_by/revoked_by, KI-060).
+        proposal_columns = {row[1] for row in cursor.execute("PRAGMA table_info(proposal)")}
+        if "reviewers" not in proposal_columns:
+            cursor.execute("ALTER TABLE proposal ADD COLUMN reviewers TEXT NOT NULL DEFAULT '[]'")
+
         # Proposal event table (SPEC §9.4) — structured review actions.
-        # Scoped to accept/reject/request_changes, the three review actions
-        # that exist as Ontology methods; assign/comment are not implemented
+        # Scoped to accept/reject/request_changes/assign, the four review
+        # actions that exist as Ontology methods; comment is not implemented
         # yet (see ProposalEvent docstring).
         #
         # No CHECK on `type` — matches SPEC §12.2's own DDL (`type TEXT NOT
@@ -1471,8 +1481,8 @@ class SQLiteBackend:
             cursor.execute(
                 """
                 INSERT INTO proposal (id, namespace, author, acting_as, state,
-                    created_at, decided_at, policy_reason, payload, metadata)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, decided_at, policy_reason, reviewers, payload, metadata)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     proposal.id,
@@ -1483,6 +1493,7 @@ class SQLiteBackend:
                     proposal.created_at.isoformat(),
                     proposal.decided_at.isoformat() if proposal.decided_at else None,
                     proposal.policy_reason,
+                    json.dumps(proposal.reviewers),
                     json.dumps(proposal.payload),
                     json.dumps(proposal.metadata),
                 ),
@@ -1515,6 +1526,7 @@ class SQLiteBackend:
             created_at=datetime.fromisoformat(row["created_at"]),
             decided_at=datetime.fromisoformat(row["decided_at"]) if row["decided_at"] else None,
             policy_reason=row["policy_reason"],
+            reviewers=json.loads(row["reviewers"]),
             payload=json.loads(row["payload"]),
             metadata=json.loads(row["metadata"]),
         )
@@ -1558,6 +1570,24 @@ class SQLiteBackend:
                 self.conn.commit()
         except sqlite3.Error as e:
             raise StorageError(f"Failed to update proposal (id={proposal_id}): {e}") from e
+
+    @_synchronized
+    def update_proposal_reviewers(self, proposal_id: str, reviewers: list[str]) -> None:
+        """Replace a proposal's assigned reviewers (SPEC §9.4's `assign` action)."""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute(
+                "UPDATE proposal SET reviewers = ? WHERE id = ?",
+                (json.dumps(reviewers), proposal_id),
+            )
+            if cursor.rowcount == 0:
+                raise StorageError(f"Proposal not found: {proposal_id}")
+            if not self._in_transaction:
+                self.conn.commit()
+        except sqlite3.Error as e:
+            raise StorageError(
+                f"Failed to update proposal reviewers (id={proposal_id}): {e}"
+            ) from e
 
     @_synchronized
     def put_proposal_event(self, event: ProposalEvent) -> None:
