@@ -478,7 +478,11 @@ def list_proposals(
             typer.echo("No proposals found.")
             return
         for p in results:
-            typer.echo(f"{p.id}  state={p.state}  author={p.author}  created={p.created_at}")
+            reviewers_suffix = f"  reviewers={','.join(p.reviewers)}" if p.reviewers else ""
+            typer.echo(
+                f"{p.id}  state={p.state}  author={p.author}  created={p.created_at}"
+                f"{reviewers_suffix}"
+            )
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None
@@ -567,6 +571,42 @@ def review_proposal(
     try:
         proposal = kb.request_changes(proposal_id, reviewer, reason=reason)
         typer.echo(f"Changes requested: {proposal.id}  state={proposal.state}")
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    finally:
+        kb.close()
+
+
+@proposal_app.command("assign")
+def assign_reviewers(
+    proposal_id: Annotated[str, typer.Argument(help="Proposal ID to reassign reviewers on.")],
+    actor: Annotated[
+        str,
+        typer.Option("--actor", "--author", help="Principal performing the reassignment."),
+    ],
+    reviewer: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--reviewer",
+            help="Reviewer to assign (repeatable). Replaces the current list wholesale — "
+            "pass none to clear every assignment.",
+        ),
+    ] = None,
+) -> None:
+    """Reassign a pending proposal's reviewers (SPEC §9.4's `assign` action, KI-078/KI-079).
+
+    Requires the `--actor` principal to hold `review` (or `admin`) capability,
+    not be AI-kind, and not be the proposal's own author or delegate — the
+    same guard `accept`/`reject`/`review` share. The proposal must be in
+    `require_review` or `under_review` state. `--reviewer` replaces the
+    entire list, not merges with it; pass every name that should remain.
+    """
+    kb = _kb()
+    try:
+        proposal = kb.assign_reviewers(proposal_id, reviewer or [], actor)
+        shown = ", ".join(proposal.reviewers) or "-"
+        typer.echo(f"Reviewers assigned: {proposal.id}  reviewers={shown}")
     except Exception as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from None

@@ -1600,10 +1600,10 @@ Closed both halves in one PR (**ADR-0046**). New `Proposal.reviewers: list[str]`
 
 ---
 
-## KI-079 — `Proposal.reviewers`/`assign_reviewers()` (KI-078) not exposed through GraphQL or CLI; MCP deliberately excluded
+## KI-079 — `Proposal.reviewers`/`assign_reviewers()` (KI-078) not exposed through GraphQL or CLI; MCP deliberately excluded ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — a deliberately scoped-down interface surface, not a defect
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §9.4 (review workflow — `assign` action), SPEC §9.2 (policy engine contract), SPEC §14.4/ADR-0008 (MCP surface — no direct-write tool)
 
 ### Description
@@ -1614,7 +1614,7 @@ MCP is a different case, not just an unclosed gap: every MCP tool today is `read
 
 ### Fix
 
-Add `reviewers` to GraphQL's `ProposalType` (a small, low-risk addition — `policy_reason` is already there) and decide whether `assign` warrants a GraphQL mutation and/or a CLI command. Unlike KI-072's own admin-event precedent (which added CLI alongside REST because "who did this" auditing is a CLI-first workflow), `assign` has no equivalent motivating scenario tying it to either — pick whichever a real consumer needs first rather than assuming CLI by default. MCP is out of scope for this KI: adding a review-tier tool there is a deliberate architectural decision to make if/when an actual MCP consumer needs it (mirroring ADR-0042's own reasoning for leaving `get_admin_events()` off MCP), not something this KI should close by default.
+Closed for GraphQL and CLI in one PR (**ADR-0046**'s own Update section). `ProposalType` gains `reviewers: list[str]`, projected by the same shared helper every other proposal-returning field already uses; new `Mutation.assignReviewers(proposalId, reviewers)`, structurally identical to `requestChanges`/`rejectProposal` — GraphQL's ninth mutation, still within ADR-0037 §1's query/propose/review scope. CLI gains `proposal assign <proposal_id> --actor <id> [--reviewer <id> ...]` (repeatable, replaces wholesale, omitting it clears); `proposal list` gains a `reviewers=<comma-joined>` suffix when non-empty, mirroring KI-075's `rationale_entries=<n>` convention. No real consumer signal ever distinguished "GraphQL first" from "CLI first" for this one, and by the time it was picked up every other review action already had full three-interface parity, so both were closed together rather than picking one arbitrarily. MCP remains excluded, unchanged from this KI's own Description: `assign_reviewers()` would be MCP's first review-capability write tool, left for a real MCP consumer to motivate rather than added speculatively.
 
 ---
 

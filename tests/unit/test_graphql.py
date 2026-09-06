@@ -523,6 +523,9 @@ class TestAuthCoversEveryField:
         "acceptProposal": 'mutation { acceptProposal(proposalId: "nope") { id } }',
         "rejectProposal": 'mutation { rejectProposal(proposalId: "nope") { id } }',
         "requestChanges": 'mutation { requestChanges(proposalId: "nope") { id } }',
+        "assignReviewers": (
+            'mutation { assignReviewers(proposalId: "nope", reviewers: ["r"]) { id } }'
+        ),
         "resubmitProposal": 'mutation { resubmitProposal(proposalId: "nope") { decision } }',
         "retract": 'mutation { retract(assertionId: "nope") { decision } }',
         "flagContradiction": (
@@ -547,10 +550,10 @@ class TestAuthCoversEveryField:
 
     def test_mutation_field_probe_set_matches_schema(self, tmp_path: Path) -> None:
         """Also enforces ADR-0037 §1's scope boundary: this must be exactly
-        the eight query/propose/review/retract operations (retract added
-        for KI-057, ADR-0039), no direct-write or principal-admin mutation
-        (mirrors test_mcp_server.py's test_no_write_tool_registered
-        precedent)."""
+        the nine query/propose/review/retract operations (retract added for
+        KI-057, ADR-0039; assignReviewers added for KI-079/ADR-0046), no
+        direct-write or principal-admin mutation (mirrors
+        test_mcp_server.py's test_no_write_tool_registered precedent)."""
         kb = _kb(tmp_path)
         app = create_graphql_app(kb, TokenAuthProvider(kb.backend), introspection=True)
         client = TestClient(app)
@@ -1273,6 +1276,20 @@ class TestProposalReviewMutations:
             headers=_auth(token),
         )
         assert body["data"]["rejectProposal"]["state"] == "rejected"
+
+    def test_assign_reviewers(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        proposal_id = self._pending_proposal_id(kb)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+        body = _gql(
+            client,
+            "mutation($id: String!, $r: [String!]!) { "
+            "assignReviewers(proposalId: $id, reviewers: $r) { reviewers } }",
+            variables={"id": proposal_id, "r": ["carol@example.com"]},
+            headers=_auth(token),
+        )
+        assert body["data"]["assignReviewers"]["reviewers"] == ["carol@example.com"]
 
     def test_request_changes_then_resubmit(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)

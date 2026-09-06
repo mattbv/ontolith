@@ -315,6 +315,7 @@ class ProposalType:
     created_at: str
     decided_at: str | None
     policy_reason: str | None
+    reviewers: list[str]
 
 
 @strawberry.type
@@ -417,6 +418,7 @@ def _proposal_type(proposal: Proposal) -> ProposalType:
         created_at=proposal.created_at.isoformat(),
         decided_at=proposal.decided_at.isoformat() if proposal.decided_at else None,
         policy_reason=proposal.policy_reason,
+        reviewers=proposal.reviewers,
     )
 
 
@@ -735,6 +737,13 @@ def _do_request_changes(kb: Ontology, proposal_id: str, reviewer: str, reason: s
     return _proposal_type(kb.request_changes(proposal_id, reviewer, reason=reason))
 
 
+def _do_assign_reviewers(
+    kb: Ontology, proposal_id: str, reviewers: list[str], actor: str
+) -> ProposalType:
+    """Blocking body of Mutation.assignReviewers (SPEC §9.4, KI-078/KI-079)."""
+    return _proposal_type(kb.assign_reviewers(proposal_id, reviewers, actor))
+
+
 def _do_resubmit_proposal(kb: Ontology, proposal_id: str, author: str) -> ProposeResultType:
     """Blocking body of Mutation.resubmitProposal."""
     proposal, decision = kb.resubmit(proposal_id, author)
@@ -917,6 +926,20 @@ class Mutation:
         principal = _require_principal(info)
         kb = _kb(info)
         return await run_in_threadpool(_do_request_changes, kb, proposal_id, principal.id, reason)
+
+    @strawberry.mutation
+    async def assign_reviewers(
+        self, info: strawberry.Info, proposal_id: str, reviewers: list[str]
+    ) -> ProposalType:
+        """Reassign a pending proposal's reviewers (SPEC §9.4's `assign`
+        action, KI-078/KI-079). Requires review or admin capability; same
+        self-review guard as accept/reject/requestChanges — replaces the
+        reviewer list wholesale, including clearing it via an empty list."""
+        principal = _require_principal(info)
+        kb = _kb(info)
+        return await run_in_threadpool(
+            _do_assign_reviewers, kb, proposal_id, reviewers, principal.id
+        )
 
     @strawberry.mutation
     async def resubmit_proposal(self, info: strawberry.Info, proposal_id: str) -> ProposeResultType:

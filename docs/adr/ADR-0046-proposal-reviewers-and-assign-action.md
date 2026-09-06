@@ -186,6 +186,41 @@ load-bearing, matching the original intent here).
   there's no comparable reason to prioritize it over GraphQL/MCP here. Left for whichever interface
   a real consumer needs first, not assumed to be CLI by default.
 
+## Update (2026-09-06, closes KI-079): GraphQL and CLI parity; MCP still excluded
+
+The gap this ADR's own Consequences named — `reviewers`/`assign` reachable through REST only — is
+closed for GraphQL and the CLI. Unlike KI-072's own admin-event precedent, no real consumer signal
+ever distinguished "GraphQL first" from "CLI first" for this KI, and by the time it was picked up
+every other review action (`accept`/`reject`/`request_changes`/`resubmit`) already had full parity
+across REST, GraphQL, and the CLI — leaving `assign` as the one exception on two of three interfaces
+was a bigger, more surprising gap than choosing between them, so both were closed together instead
+of picking one.
+
+**GraphQL**: `ProposalType` gains `reviewers: list[str]`, populated by the same `_proposal_type()`
+helper every other proposal-returning query/mutation already shares — no new projection logic.
+New `Mutation.assignReviewers(proposalId, reviewers)`, structurally identical to
+`requestChanges`/`rejectProposal` (`_require_principal` resolves the acting principal from the
+bearer token, never from the input; the blocking body runs in a thread pool like every other
+mutation here). This is GraphQL's ninth mutation, still within ADR-0037 §1's query/propose/review
+scope — no direct-write or principal-admin mutation was added alongside it.
+
+**CLI**: new `ontolith proposal assign <proposal_id> --actor <id> [--reviewer <id> ...]` command,
+matching `accept`/`reject`/`review`'s existing structure exactly (`--actor`/`--author` for the
+acting principal, matching `assign_reviewers`'s own parameter name rather than reusing `--reviewer`
+for two different things — the flag names the *new* reviewer set, the actor is who's assigning it).
+`--reviewer` is repeatable and replaces the list wholesale, same semantics as the REST/GraphQL
+routes; omitting it entirely clears the assignment (mirrors passing an empty list at every other
+layer). `proposal list`'s existing output line also gains a `reviewers=<comma-joined>` suffix (only
+shown when non-empty) — the same optional-suffix convention KI-075's `rationale_entries=<n>`
+established for `contradiction list`.
+
+**Why MCP is still excluded, not just deferred again:** unchanged from this ADR's original
+Consequences and KI-079's own Description — `assign_reviewers()` requires `review`/`admin`
+capability, and every MCP tool today is `read`- or `propose`-tier, so an MCP `assign` tool would be
+a genuine new precedent (MCP's first review-capability write tool) against SPEC §14.4/ADR-0008's
+surface constraint, not a mechanical port of what GraphQL/CLI just received. Left for a real MCP
+consumer to motivate, per KI-079's own Fix text.
+
 ## References
 
 - SPEC §9.2: Policy engine contract (`RequireReview.reviewers`)

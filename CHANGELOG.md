@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- GraphQL and CLI parity for `Proposal.reviewers`/`assign_reviewers()` (closes KI-079, ADR-0046
+  Update): `ProposalType` gains `reviewers: list[str]`; new `Mutation.assignReviewers(proposalId,
+  reviewers)` (GraphQL's ninth mutation, structurally identical to `requestChanges`/
+  `rejectProposal`). CLI gains `proposal assign <proposal_id> --actor <id> [--reviewer <id> ...]`
+  (repeatable, replaces wholesale, omitting it clears); `proposal list` gains a
+  `reviewers=<comma-joined>` suffix when non-empty (mirrors KI-075's `rationale_entries=<n>`
+  convention). MCP remains deliberately excluded — `assign_reviewers()` would be its first
+  review-capability write tool, left for a real consumer to motivate.
 - `Proposal.reviewers: list[str]` and `Ontology.assign_reviewers(proposal_id, reviewers, actor)`,
   implementing SPEC §9.4's `assign` review action (closes KI-078, ADR-0046). A `PolicyStrategy`'s
   `RequireReview.reviewers` was computed by every strategy but never persisted or surfaced anywhere

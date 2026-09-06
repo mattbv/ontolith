@@ -1138,6 +1138,110 @@ class TestProposalReview:
         assert "lacks review capability" in result.output
 
 
+class TestProposalAssign:
+    def test_assigns_reviewers_to_a_pending_proposal(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        actor = kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        bot = kb.create_principal(
+            "bot@example.com",
+            kind="ai",
+            auth_method="apikey",
+            owner=alice.id,
+            default_capability="propose",
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", bot.id, model="v1")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "proposal",
+                "assign",
+                proposal.id,
+                "--actor",
+                actor.id,
+                "--reviewer",
+                "dave@example.com",
+                "--reviewer",
+                "erin@example.com",
+            ],
+        )
+        assert result.exit_code == 0
+        assert proposal.id in result.output
+        assert "dave@example.com, erin@example.com" in result.output
+
+        kb = Ontology.connect(temp_db)
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.reviewers == ["dave@example.com", "erin@example.com"]
+        events = kb.backend.get_proposal_events(proposal.id)
+        assert events[-1].type == "assign"
+        kb.close()
+
+    def test_assign_with_no_reviewer_flags_clears_the_list(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        actor = kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        bot = kb.create_principal(
+            "bot@example.com",
+            kind="ai",
+            auth_method="apikey",
+            owner=alice.id,
+            default_capability="propose",
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", bot.id, model="v1")
+        assert proposal.reviewers == [alice.id]
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            ["--db", str(temp_db), "proposal", "assign", proposal.id, "--actor", actor.id],
+        )
+        assert result.exit_code == 0
+        assert "reviewers=-" in result.output
+
+        kb = Ontology.connect(temp_db)
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.reviewers == []
+        kb.close()
+
+    def test_assign_nonexistent_proposal_reports_not_found(self, temp_db: Path) -> None:
+        kb = Ontology.connect(temp_db)
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "proposal",
+                "assign",
+                "nonexistent",
+                "--actor",
+                "carol@example.com",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "not found" in result.output.lower()
+
+    def test_assign_without_review_capability_exits_nonzero(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        db, author, _ = seeded_db
+        result = runner.invoke(
+            app, ["--db", str(db), "proposal", "assign", "nonexistent", "--actor", author]
+        )
+        assert result.exit_code == 1
+        assert "lacks review capability" in result.output
+
+
 class TestProposalResubmit:
     def test_resubmits_proposal_after_changes_requested(self, temp_db: Path) -> None:
         kb = Ontology.connect(temp_db)
