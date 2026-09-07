@@ -98,7 +98,7 @@ dev = [
 	# SBOM generation for security.yml (Implementation Plan §7.1).
 	"cyclonedx-bom>=7.3.1",
 	# Documentation
-	"mkdocs-material>=9.5",
+	"mkdocs-material>=9.7.7",  # CVE-2026-73295 (KI-087), fixed in 9.7.7
 	"mkdocstrings[python]>=0.24",
 	# Tools
 	"pre-commit>=3.6",

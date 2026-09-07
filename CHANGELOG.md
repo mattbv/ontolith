@@ -1022,6 +1022,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Security
 
+- `mkdocs-material`'s floor bumped `>=9.5` → `>=9.7.7` (closes KI-087, found in the pre-M4 deep +
+  security audit) to move past CVE-2026-73295 (a DOM-based XSS in the optional `search.suggest`
+  feature) — `pip-audit`'s unconditional CI step had been failing on every PR since this advisory
+  landed. Dev-only, docs-build dependency; never ships in the `ontolith` wheel or any runtime
+  extra. `uv lock` resolved `9.7.7` (one patch release past the floor); no upper bound added,
+  matching KI-070's precedent of leaving the `dev` extra's tooling dependencies otherwise
+  unbounded.
 - MCP's `create_mcp_server()` gains an opt-in `require_header_token: bool = False` keyword-only
   parameter (closes KI-073, ADR-0014 update) — when set, an HTTP (SSE/streamable-HTTP) deployment
   can require the `Authorization` header outright instead of merely preferring it (KI-067): an
