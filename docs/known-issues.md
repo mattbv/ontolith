@@ -258,7 +258,7 @@ Both call sites now use `assertions(status=None)` to search across all statuses.
 
 ## KI-014 — No plugin capability isolation (deny-by-default network/fs/write, manifest enforcement) — PARTIALLY RESOLVED (M3)
 
-**Severity:** Architecture gap — security-relevant, but not yet exploitable since no plugin loading mechanism exists to secure
+**Severity:** Architecture gap — security-relevant; originally filed as "not yet exploitable since no plugin loading mechanism exists to secure," which is now stale (a working registry and four reference plugins ship today — see the 2026-09-07 update below)
 **Milestone target:** M3 — storage-capability isolation resolved via ADR-0015; network/filesystem enforcement remains open, tracked alongside KI-010's closure
 **SPEC reference:** SPEC §13 (plugin protocols and discovery), §17 (security model, plugin sandboxing); Implementation Plan `plugins/` module (registry, protocols, lifecycle, sandbox)
 
@@ -279,6 +279,8 @@ Surfaced during the 2026-07-08 post-remediation security re-audit: a hypothetica
 **Partial mitigation added:** `PluginRegistry.register()` now logs a `WARNING`, on successful registration, when a plugin's manifest declares `network=True` or `filesystem=True`, naming the plugin and stating explicitly that these are not enforced — closes the gap between what the manifest API visually implies (a control) and what's actually true, at the moment (registration) that's an operator's only real lever (there's no separate "grant" step for network/filesystem the way there is for storage capability; the plugin author declares intent, the operator decides whether to register at all). This is a visibility fix, not an enforcement fix — SPEC §17's MUST itself remains unmet for network/filesystem, and real process/subprocess/wasm isolation remains the only actual fix — a materially larger, separate infrastructure project, tracked via the Implementation Plan's existing phasing, not newly deferred here.
 
 Separately, and unrelated to the warning above: `QueryBuilder`'s reachable-backend gap (previous paragraph) was also re-examined and left unchanged. "Materializing" `query()`'s results eagerly to stop it carrying a backend reference was considered and rejected: it would break the fluent builder API (`.where(...).limit(n).all()`) that's the entire point of `QueryBuilder`, for a property Python's object model can't provide regardless. See ADR-0015's 2026-08-30 update for the full record.
+
+**Update (2026-09-07, pre-M4 deep + security audit):** independently re-confirmed, no drift — network/filesystem enforcement is still unenforced (manifest declares intent, registration only warns via `_warn_if_unenforced_capabilities_requested`). The severity line above is updated to reflect that four reference plugins (`plugins/reference/`: csv_importer, json_exporter, rdf_exporter, required_fields_validator) now ship against this contract, which the original filing's "not yet exploitable" framing didn't anticipate. Flagging explicitly for M4 planning: this should be scoped as real M4 work (process/wasm isolation) rather than carried forward again as backlog, since "production" milestone exit criteria and "plugin sandbox is advisory only" are in direct tension.
 
 ---
 
@@ -1390,6 +1392,8 @@ Immutability of `assertion_event`/`proposal_event` was enforced solely by `Stora
 
 Added `BEFORE UPDATE`/`BEFORE DELETE` triggers on `assertion_event` and `proposal_event` that `RAISE(ABORT, ...)` — `SQLiteBackend` only. Review (round 1) found the initial version incomplete: `INSERT OR REPLACE` performs an implicit conflict-row delete that a plain `BEFORE DELETE` trigger only catches when `PRAGMA recursive_triggers` is ON (SQLite defaults it OFF) — added the pragma to `SQLiteBackend.__init__`. Review (round 2) found *that* still incomplete: the pragma is per-*connection*, not persisted in the database file, so a second raw connection to the same file (reachable via `backend.path`, a public attribute) revived the bypass with no privilege escalation needed. Closed durably with a third trigger per table — `BEFORE INSERT ... WHEN EXISTS(SELECT 1 FROM <table> WHERE id = NEW.id)` — which persists in the schema itself and blocks `INSERT OR REPLACE` regardless of pragma state or which connection issues it; the pragma is kept as defense in depth but is no longer load-bearing for this case. `DuckDBBackend` gained no equivalent: verified DuckDB (1.5.4) has no `CREATE TRIGGER` support at all, and no connection-level access-restriction mechanism exists to work around that (DuckDB's embedded, single-user connection model has no role/grant system to revoke). Documented explicitly as a currently-unfixable backend asymmetry in `DuckDBBackend`'s own docstring, mirroring ADR-0032's precedent for the same kind of documented DuckDB limitation — not silently left unaddressed. `conformance/test_audit_table_immutability.py` pins the SQLite guarantee (`sqlite3.IntegrityError` on UPDATE/DELETE/`INSERT OR REPLACE` × both tables, including from a second raw connection that never sets the pragma) and the DuckDB gap (the same operations currently still succeed, re-verified by re-reading the row) as executable tests. ADR-0041.
 
+**Update (2026-09-07, pre-M4 audit):** re-confirmed the DuckDB gap is unchanged and remains a genuine, currently-unfixable backend asymmetry (no upstream trigger/grant mechanism exists to close it). No dedicated deployment guide exists yet in this repo to carry the operational implication, so recording it directly here: a deployment choosing the DuckDB backend does not get a tamper-evident audit trail at the database layer — that guarantee is SQLite-only. Anyone selecting a storage backend for a production deployment should treat this as a real input to that decision, not an implementation detail; worth surfacing prominently once a deployment guide exists (tracked informally here until one does).
+
 ---
 
 ## KI-067 — MCP tools take bearer tokens as arguments, placing a live credential in model context ✓ RESOLVED (Backlog)
@@ -1615,6 +1619,162 @@ MCP is a different case, not just an unclosed gap: every MCP tool today is `read
 ### Fix
 
 Closed for GraphQL and CLI in one PR (**ADR-0046**'s own Update section). `ProposalType` gains `reviewers: list[str]`, projected by the same shared helper every other proposal-returning field already uses; new `Mutation.assignReviewers(proposalId, reviewers)`, structurally identical to `requestChanges`/`rejectProposal` — GraphQL's ninth mutation, still within ADR-0037 §1's query/propose/review scope. CLI gains `proposal assign <proposal_id> --actor <id> [--reviewer <id> ...] [--clear]` (`--reviewer` repeatable, replaces wholesale; `--reviewer`/`--clear` are mutually exclusive-by-requirement — passing neither is a usage error, not an implicit clear, since clearing is irreversible and the CLI has no other natural "the caller meant to clear everything" signal); `proposal list` gains a `reviewers=<comma-joined>` suffix when non-empty, mirroring KI-075's `rationale_entries=<n>` convention. No real consumer signal ever distinguished "GraphQL first" from "CLI first" for this one, and by the time it was picked up every other review action already had full three-interface parity, so both were closed together rather than picking one arbitrarily. MCP remains excluded, unchanged from this KI's own Description: `assign_reviewers()` would be MCP's first review-capability write tool, left for a real MCP consumer to motivate rather than added speculatively.
+
+---
+
+## KI-080 — `cardinality="many"` has no effect on `time_varying` properties — concurrent multi-valued facts silently collapse to one
+
+**Severity:** Architecture gap — `cardinality="many"` is unreachable for `time_varying` properties; current behavior is SPEC-conformant (§10.1/§10.2's pseudocode never mentions `cardinality`), so this is a design-scope gap in `cardinality`, not a SPEC violation
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §4 (`cardinality: single (default) | many`), SPEC §10.1/§10.2 (temporal supersession routing, no `cardinality` parameter in either); ADR-0017 (cardinality-aware routing)
+
+### Description
+
+`govern/conflict.route()` accepts a `cardinality` parameter but only threads it into `_route_static()` — `_route_time_varying()` takes no `cardinality` argument at all and supersedes *every* existing assertion whose window overlaps the incoming one and whose value differs, regardless of what the schema declares. Reproducible directly: declaring `Person.role` as `cardinality="many", temporality="time_varying"` and asserting two different, genuinely-concurrent values with the same `valid_from` causes the second write to immediately supersede the first, collapsing what the schema says should be an independently-tracked pair of concurrent facts (e.g. two concurrent job titles) down to one. SPEC §10.1/§10.2's own routing pseudocode never references `cardinality` at all, so today's behavior does not violate SPEC as written — it's `cardinality`'s own §4 contract that reads as unconditional ("single (default) | many") but is, in practice, only honored for `static` properties.
+
+This is not an oversight — ADR-0017 (which introduced cardinality-aware routing for `static` properties) explicitly considered and declined to extend it to `time_varying`: "two overlapping-window, differing-value `time_varying` assertions are a genuine supersession regardless of cardinality... the newer one replaces the older." That reasoning holds for the *single*-concurrent-value case (an update to the one fact that's true right now), but it implicitly assumes there's only one "slot" to replace — which is exactly what `cardinality="many"` says isn't true. The ADR's own stated goal for `static` — "a schema author declaring `cardinality=many` has no way to express that intent" — applies identically to `time_varying`, and today it's just as unaddressed there as it was for `static` before ADR-0017.
+
+### Fix
+
+Thread `cardinality` into `_route_time_varying`. This needs a real design decision, not a mechanical port of the `static` fix: for `many`, an incoming assertion should only supersede an existing one that's a genuine update *to the same logical value slot*, not any differing-value assertion on an overlapping window. That likely needs an explicit way to say "this proposal replaces that specific prior assertion" (an optional `supersedes` hint on `propose()`?) rather than inferring it from window overlap alone, since window overlap alone can't distinguish "replace my old title" from "I now also hold a second, concurrent title." Worth a fresh ADR amending ADR-0017 rather than silently changing behavior — record the new decision, don't just patch the code.
+
+---
+
+## KI-081 — `QueryBuilder` never exposes SPEC §11.2's `.include_flagged()`/`.include_history()` opt-ins
+
+**Severity:** Architecture gap — a SPEC MUST-adjacent requirement unmet at the primary query API
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §11.2 ("Flagged/superseded/retracted assertions are excluded by default; `.include_flagged()` / `.include_history()` opt in"), SPEC §10.3 ("A flagged assertion... MUST be excluded from default (unflagged) retrieval unless explicitly requested")
+
+### Description
+
+`StorageBackend.entities_where()` accepts an `include_flagged: bool` parameter (`store/base.py:403`), but `QueryBuilder._base_candidates()` never passes it through — the call defaults it to `False` unconditionally, and `QueryBuilder` has no `.include_flagged()`/`.include_history()` method at all (confirmed: neither name appears anywhere in `query/builder.py`). (`entities()`, the other port method `_base_candidates()` can call, has no `include_flagged` parameter at all — only `entities_where()` and `assertions()` support it.) `store/base.py`'s own docstring already discloses this in passing, and a passing mention in `docs/known-issues.md`'s own KI-040 discussion (`.include_history()`) implies this is live functionality when it isn't. The gap is real but partially mitigated by existing SDK-level access that doesn't go through `QueryBuilder`: `kb.assertions(status="flagged")` returns all flagged assertions unscoped, and `kb.contradictions()`/MCP's `ontolith.list_contradictions` (KI-076) already answer "which entities have an open contradiction" directly — so the missing piece is specifically entity-level filtering *through `kb.query(Concept)`*, not flagged-assertion visibility altogether.
+
+SPEC §10.3's MUST ("A flagged assertion is retained and queryable but MUST be excluded from default (unflagged) retrieval unless explicitly requested") is satisfiable today via those SDK-level calls, but not through the primary, documented `QueryBuilder` fluent API (`kb.query(Person).where(...)`) — despite SPEC §11.2 naming `.include_flagged()`/`.include_history()` as `QueryBuilder`'s own opt-ins.
+
+### Fix
+
+Add `.include_flagged()` to `QueryBuilder`, threading through to `entities_where()`'s existing backend parameter — note both SQLite and DuckDB backends currently only consult `include_flagged` inside their `as_of_time` branch, so giving `.include_flagged()` an effect on current-state (non-`as_of`) queries needs backend changes too, not just a `QueryBuilder` passthrough. Separately, decide what `.include_history()` should mean — full assertion history per matched entity is a bigger surface than a single boolean. If either is deliberately deferred rather than built now, record that as an ADR (matching ADR-0027's precedent for the multi-hop-traversal deferral) and correct SPEC §11.2's own wording plus any doc that currently implies this already works.
+
+---
+
+## KI-082 — No entity-creation capability on REST, GraphQL, or MCP — CLI-only
+
+**Severity:** Architecture gap — a real interface-parity/DX gap; note SPEC §14.1's normative SDK surface doesn't itself list `create_entity`, and §14.4's MCP tool table is an enumerated closed default set that excludes it, so this reads as an unaddressed gap rather than an unmet SPEC MUST
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §14.1 (normative SDK surface), §14.3 (REST resource list names `/entities`, but only `/proposals` carries a documented `POST`; GraphQL scoped to "query, propose, and review operations"), §14.4 (MCP default tool table)
+
+### Description
+
+`Ontology.create_entity()` is exposed on exactly one interface: the CLI (`entity create`, `interfaces/cli.py:251`) and the plugin sandbox facade (`plugins/views.py:97`). REST has no `POST /entities` route (only `GET /entities/{entity_id}`) despite SPEC §14.3 listing `/entities` among REST's resources — the spec text doesn't say what verbs it supports beyond naming `POST` explicitly for `/proposals`, so this reads as ambiguous rather than clearly unaddressed by REST's own contract. GraphQL's `Mutation` type has no `createEntity`, and MCP has no `ontolith.create_entity`-style tool (confirmed: zero hits for entity-creation across `rest.py`/`graphql.py`/`mcp.py`). None of the governed write paths those three interfaces *do* expose (`propose`/`propose_ref`/`assert_literal`/`assert_ref`) validate or create the target `subject` entity — they all assume it already exists.
+
+This means an AI agent or application talking only to REST/GraphQL/MCP can assert facts about entities that already exist, but can never introduce a genuinely new individual into the KB — a real limitation on the "agent proposes new knowledge" story those interfaces exist to serve, and a first-run trap for a REST/GraphQL adopter who hasn't also reached for the CLI or raw SDK. Worth weighing against KI-079's precedent for *not* adding an MCP tool speculatively (there, `assign_reviewers` was deliberately left out pending a real consumer) — entity creation is a stronger case since REST/GraphQL/MCP callers otherwise have no path to it at all, not merely a narrower one.
+
+### Fix
+
+Expose `create_entity` (propose-tier, matching its existing capability gate) on REST (`POST /entities`), GraphQL (`Mutation.createEntity`), and MCP (`ontolith.create_entity`) — or record an ADR if entity creation is meant to stay human/CLI-gated by deliberate design, since today it reads as an oversight rather than a decision.
+
+---
+
+## KI-083 — Asserting against a nonexistent subject surfaces as an opaque, redacted `StorageError` instead of `NotFoundError`
+
+**Severity:** Bug — wrong error taxonomy for caller-input error
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §16 (error taxonomy — `NotFoundError` for missing entity/assertion/namespace vs. `StorageError` for backend failure)
+
+### Description
+
+None of `propose()`/`assert_literal()`/`assert_ref()`/`propose_ref()` pre-check that the `subject` entity id actually exists before writing — they rely entirely on the DB's `FOREIGN KEY` constraint to fail late, inside the write, which raises a generic `sqlite3.IntegrityError` caught only as `StorageError(f"Assertion conflict (id=..., subject=...): FOREIGN KEY constraint failed")`. Reproduced directly: `kb.assert_literal("nonexistent-entity-id", ...)` raises exactly this. `StorageError` is one of exactly two error types (`interfaces/rest.py`, `interfaces/mcp.py`, `interfaces/graphql.py`) whose message is deliberately redacted before being returned to a caller, since it's meant to represent internal/unexpected backend failures, not caller input mistakes — so a REST/GraphQL/MCP caller who typos an entity id gets a generic, message-redacted 500-class error with no indication of what went wrong, and the message that *is* logged server-side ("conflict") actively misdescribes the actual problem (a missing row, not a conflicting one).
+
+### Fix
+
+Add an explicit `get_entity(subject)` check ahead of the write in `assert_literal`/`assert_ref`/`propose`/`propose_ref`, raising `NotFoundError` naming the entity id when it's missing — mirroring how other governed write paths already validate their inputs before touching the backend.
+
+---
+
+## KI-084 — No documented or enforced cross-process write-safety guarantee for the SQLite default backend
+
+**Severity:** Architecture gap — a real deployment-safety gap, but the actual failure mode is a hard, opaque error under contention, not silent data corruption
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §12.1 ("single SQLite database file... require no external services")
+
+### Description
+
+The entire concurrency story for `SQLiteBackend` (ADR-0010's KI-023 update) is an in-process `threading.RLock` around one shared connection; `begin()` issues a plain `"BEGIN"`, not `"BEGIN IMMEDIATE"` (confirmed: `store/sqlite/backend.py`). ADR-0001 already names "Single-writer limitation (fine for proposals/review workflow)" as a known consequence of the SQLite choice, but that's a one-line acknowledgment at the storage-selection level, not an elaborated deployment constraint — nothing describes what actually happens under two-process contention or what an operator running more than one server process should do about it.
+
+Verified empirically (WAL mode is on — `PRAGMA journal_mode = WAL`, `backend.py:133` — with two separate connections to the same file: connection B `BEGIN`s and reads active assertions for conflict routing, connection A commits a write to the same row via `BEGIN IMMEDIATE`, then B attempts its own write): the second writer does **not** silently race to an inconsistent result — it fails hard, with `sqlite3.OperationalError: database is locked`, in well under a millisecond. That's *not* ordinary lock contention timing out: `sqlite3.connect()` (`backend.py:110`) takes no explicit `timeout=`, so Python's 5-second default `busy_timeout` is actually in effect (verified: `PRAGMA busy_timeout` reports `5000` on a real backend connection, and a plain write-write contention test on the same connect args does block for the full ~5s before raising, confirming the retry mechanism itself works). The immediate failure here is a *different*, non-retryable case: B already took a read snapshot under a deferred `BEGIN`, and upgrading that stale snapshot to a write is `SQLITE_BUSY_SNAPSHOT`, which SQLite deliberately does not route through the busy handler at all — no amount of `busy_timeout` would help, since retrying can't succeed until B's transaction rolls back and re-reads. Because `StorageError` is caught broadly around `sqlite3.Error` (`store/sqlite/backend.py:1115`) and redacted at every interface boundary (`rest.py`/`graphql.py`/`mcp.py`), a concurrent writer under real multi-process load sees an opaque, message-redacted 500-class error with nothing indicating it's a stale-snapshot conflict it could safely retry from scratch — a hard, confusing error under a workload SQLite itself is actually preventing from corrupting, not the silent inconsistency a read-then-route race might otherwise suggest.
+
+### Fix
+
+Use `BEGIN IMMEDIATE` for write transactions so a writer claims the write lock before it takes its read snapshot, converting stale-snapshot races into either an early, retryable `SQLITE_BUSY` (which the existing 5s busy timeout already handles) or serialized ordering — this is the fix that actually addresses the observed failure; raising `busy_timeout` further would not, since `SQLITE_BUSY_SNAPSHOT` bypasses it regardless of the value. Distinguish "lock contention, caller should retry" from genuine storage failure in the error taxonomy rather than folding both into a redacted `StorageError`. Document the single-writer-process constraint explicitly as a deployment note (ADR-0001 names it in passing; nowhere describes the operational implication or a recommended topology). Worth resolving before M4's own exit criteria (which include performance budgets under real deployment shapes) are evaluated against a deployment topology this hasn't actually been designed for.
+
+---
+
+## KI-085 — MCP's "no write tool" test is a blocklist/subset check, not a closed-set check
+
+**Severity:** Test gap — protects the single most safety-critical guarantee in the project, currently via a heuristic
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §14.4 ("MCP exposing no direct-write tool"), SPEC §19 conformance item 5
+
+### Description
+
+`tests/unit/test_mcp_server.py::test_no_write_tool_registered` asserts the registered tool-name set is disjoint from a 4-item blocklist (`{"ontolith.write", "ontolith.update", "ontolith.delete", "ontolith.assert"}`); `test_all_required_tools_registered` asserts a 9-item `required` set is a *subset* of the registered names, not equal to them. Neither test would fail if a future PR added a 10th tool with unrestricted write semantics under any name other than the four blocklisted strings (e.g. `ontolith.commit`, `ontolith.apply`) — the exact scenario KI-079 explicitly declined to do for `assign_reviewers` (documented as deliberately excluded, "would be MCP's first review-capability write tool"), but nothing structurally stops a less careful future change from doing it accidentally.
+
+### Fix
+
+Change `test_all_required_tools_registered`'s assertion from `required.issubset(tool_names)` to `tool_names == required` (or add a companion test asserting the full registered set is a subset of an explicitly-reviewed allowlist), so a future PR that adds a tool has to consciously update this test rather than merely avoid four specific forbidden strings.
+
+---
+
+## KI-086 — Provenance assembly is hand-duplicated across REST, GraphQL, and MCP instead of living once in the domain layer
+
+**Severity:** Architecture gap — a recurring source of the exact parity-gap class this session's KI history keeps finding
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §5.4 ("Provenance is a derived view... MUST be able to return it for any assertion in one call"), SPEC §14.1 (normative `Entity` shape: `history()`, `provenance(predicate)`, `contradictions()`)
+
+### Description
+
+Each of REST's `provenance_route`, MCP's `provenance_tool`, and GraphQL's `_build_provenance` independently reassembles the same `backend.get_assertion()` + `get_proposal_events()` + `get_assertion_events_by_successor()` logic — three separate implementations of one concept, not one shared implementation called three times. `core/entity.py` is a flat, frozen Pydantic value object with no methods at all, and `Ontology` has no `history`/`provenance` method under any name — so SPEC §14.1's own normative SDK-level shape (`Entity.history()`, `Entity.provenance(predicate)`, `Entity.contradictions()`) doesn't exist either; the capability is satisfied only at the interface layer, three times over, never at the domain layer once.
+
+This project's own KI history (KI-058/059/075/076/077/079, among others) shows this exact pattern — logic implemented once per interface — repeatedly causing parity gaps that needed a dedicated KI each time to close after the fact. A shared domain-layer method removes that recurring risk class at the source rather than requiring another cross-interface parity sweep the next time provenance logic needs to change.
+
+### Fix
+
+Extract the shared assembly into one `Ontology.provenance(assertion_id)` method (or a small `core/provenance.py` helper), and have all three interfaces call it instead of reimplementing it. Consider also adding the SPEC §14.1 SDK-level convenience methods (`Entity.history()` etc.) if they're meant to exist — or record an ADR if dropping them from the SDK surface in favor of interface-level-only access was a deliberate (if undocumented) choice. While reconciling §14.1 against the actual SDK surface, note a second, unrelated drift in the same section worth folding into that pass: §14.1 names a single `kb.principal(id, *, kind, ...)` factory method, but the SDK actually splits this into separate `create_principal()`/`get_principal()` methods (`ontology.py:259`, `:342`) — `kb.principal(...)` doesn't exist and raises `AttributeError`. Either update SPEC §14.1's signature to match the shipped two-method API, or add a `principal()` alias if the single-method shape is still the intended contract.
+
+---
+
+## KI-087 — `mkdocs-material` has an unpatched CVE; `pip-audit` CI gate is currently red
+
+**Severity:** Supply-chain — dev-only exposure, but `.github/workflows/security.yml`'s unconditional `pip-audit` step is failing on every PR right now, not just a missing upper bound
+**Milestone target:** Backlog
+**SPEC reference:** n/a (dependency management / supply-chain hygiene)
+
+### Description
+
+`uv run pip-audit` reports `mkdocs-material 9.7.6` (the version `uv.lock` currently resolves, matching `pyproject.toml`'s unbounded `mkdocs-material>=9.5`) is vulnerable to **CVE-2026-73295** (DOM-based XSS in the `search.suggest` feature, fixed in 9.7.7). `mkdocs-material` is a `dev`-extra, docs-build-only dependency — never runs in the deployed service — so practical exposure is low, but `security.yml:38-39` runs `uv run pip-audit` unconditionally and is currently failing because of this finding. KI-062 already resolved exactly this situation once before (an unfiltered `pip-audit` failure on a dev-only CVE, which that KI's own history notes once masked two genuine `bandit` findings by making the gate noisy) — this is new drift of the same class since KI-062 closed, not a fresh category of problem. It's also new drift since KI-070, whose scope was explicitly limited to the seven named runtime dependencies (KI-070 left the `dev` extra's ~20 tooling dependencies out of scope as lock-pinned in practice, since CI installs from the committed `uv.lock` rather than a fresh resolve — a different rationale than "pip-audit is sufficient coverage for that subgroup").
+
+### Fix
+
+Bump the pin to `mkdocs-material>=9.7.7` to turn the CI gate green again. Separately, revisit whether KI-062's resolution (an unconditional `pip-audit` gate) needs a documented triage path for dev-only findings so a future one doesn't block every PR until someone notices and bumps the pin — or explicitly accept that as the intended behavior.
+
+---
+
+## KI-088 — `RequireReviewForAI` remains a docstring-only sketch, not a shippable class — revisits KI-061/ADR-0040's chosen resolution
+
+**Severity:** Informational — KI-061/ADR-0040 already reviewed this exact question and consciously chose the documentation-only pattern over shipping a new strategy; this KI only questions whether that choice should be revisited now that `Composite` has real users, not a newly-discovered gap
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §9.2 (`PolicyStrategy`, `Composite`), §8.3 ("Agents MUST default to `propose`...", unaffected by this)
+
+### Description
+
+Only the default `ThresholdPolicy` unconditionally routes AI-kind principals to `RequireReview`, checked first in its `evaluate()` before any capability math (`govern/policy.py:156-163`, comment attributes this to ADR-0003 — though ADR-0003 itself is actually scoped to accountable-owner/model-capture/delegation and doesn't discuss review requirements; this attribution in the code predates this KI and isn't corrected here). `ConfidenceThreshold`/`SourceRequired`/`SourceQuorum` (KI-069, ADR-0045; `SourceQuorum` itself is KI-017/ADR-0025) each carry an explicit "does not special-case AI-authored proposals" docstring — this is a deliberate, already-reviewed design (KI-061/ADR-0040): `SourceQuorum`'s AI-auto-accept behavior was explicitly *not* silently reversed, and `Composite(all=[…], any=[…])` was built precisely so a deployment can compose an AI-blocking rule back in. KI-061's own Fix already states plainly that no new "AI-always-reviews" strategy was shipped — the pattern lives only as an inline example in `Composite`'s own docstring (`govern/policy.py:687-700`; KI-061 calls it "five-line," but the actual sketch spans 14 lines — a pre-existing inaccuracy in KI-061's own text, not introduced here), and MCP's tool docstrings were corrected at the time to attribute the guarantee to the *default* `ThresholdPolicy` specifically, not state it unconditionally. Note also that KI-061's own **SPEC reference** line still cites "ADR-0003 (AI/low-trust principals require review)" — the same ADR-0003 misattribution named above; this KI doesn't correct KI-061's text, only avoids repeating the error in its own citations.
+
+This does not violate SPEC: §9.2 doesn't mandate that any particular strategy special-case AI authorship, and §8.3's own MUST ("Agents MUST default to `propose` and MUST NOT be granted `write` implicitly") still holds regardless of which `PolicyStrategy` is installed — no direct write occurs under any of them. "AI proposals always require review" is not itself a named SPEC guarantee; it's `ThresholdPolicy`-specific behavior, and KI-061 already corrected the one place (MCP docstrings) that used to imply otherwise. What remains open is narrower than "the guarantee is silently lost": a deployer composing a non-default strategy still has to hand-write the `RequireReviewForAI` pattern correctly from a docstring rather than importing a tested class — worth a modest DX/safety improvement, not a re-opened safety hole.
+
+### Fix
+
+Consider promoting the docstring's `RequireReviewForAI` sketch to an actual exported, tested class, so `Composite(all=[RequireReviewForAI(), SourceQuorum(2)])` becomes copy-pasteable rather than something every deployer re-derives from a comment. This is an incremental improvement on KI-061/ADR-0040's already-settled design, not a reversal of it — if the project judges the docstring pattern sufficient (KI-061 already made that call once), this can stay closed as-is.
 
 ---
 
