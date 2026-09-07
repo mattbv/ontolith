@@ -822,12 +822,19 @@ class TestProposalList:
         was the only one ever asserted)."""
         db, author, entity_id = seeded_db
         kb = Ontology.connect(db)
-        kb.propose(entity_id, "Person.name", "Ada", "Text", author)  # auto_accepted, no reviewers
+        proposal, _ = kb.propose(
+            entity_id, "Person.name", "Ada", "Text", author
+        )  # auto_accepted, no reviewers
         kb.close()
 
         result = runner.invoke(app, ["--db", str(db), "proposal", "list", "--all"])
         assert result.exit_code == 0
-        assert "reviewers=" not in result.output
+        # Scoped to this proposal's own line, not the whole output - a
+        # fixture change elsewhere in the DB adding a reviewer-bearing
+        # proposal shouldn't make this test pass or fail for the wrong
+        # reason (found in review).
+        [line] = [line for line in result.output.splitlines() if proposal.id in line]
+        assert "reviewers=" not in line
 
     def test_no_proposals_message(self, temp_db: Path) -> None:
         result = runner.invoke(app, ["--db", str(temp_db), "proposal", "list"])
@@ -1272,6 +1279,49 @@ class TestProposalAssign:
         # caught by the generic `except Exception` below it and re-echoed
         # as a second, spurious "Error: 1" line (same KI-054 pattern
         # test_second_principal_requires_author already pins elsewhere).
+        assert "Error: 1" not in result.output
+
+        kb = Ontology.connect(temp_db)
+        stored = kb.backend.get_proposal(proposal.id)
+        assert stored is not None
+        assert stored.reviewers == [alice.id]
+        kb.close()
+
+    def test_assign_with_both_reviewer_and_clear_is_rejected(self, temp_db: Path) -> None:
+        """--reviewer and --clear are contradictory (assign these, or clear
+        everything?) - an earlier version only rejected passing neither,
+        so `--reviewer x --clear` together silently ignored --clear and
+        assigned anyway (found in review)."""
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        actor = kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        bot = kb.create_principal(
+            "bot@example.com",
+            kind="ai",
+            auth_method="apikey",
+            owner=alice.id,
+            default_capability="propose",
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        proposal, _ = kb.propose(entity.id, "Person.name", "Ada", "Text", bot.id, model="v1")
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "proposal",
+                "assign",
+                proposal.id,
+                "--actor",
+                actor.id,
+                "--reviewer",
+                "dave@example.com",
+                "--clear",
+            ],
+        )
+        assert result.exit_code == 1
         assert "Error: 1" not in result.output
 
         kb = Ontology.connect(temp_db)

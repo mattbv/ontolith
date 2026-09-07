@@ -239,10 +239,10 @@ fixed in the same PR:
   docstring's own "unauthenticated, like REST's docs_url" comparison.
 - **Scope boundary (Decision §1) had no test enforcing it.** Added an
   introspection-based test asserting `Mutation`'s field set is exactly the
-  seven named operations — mirrors `test_mcp_server.py`'s existing
-  `test_no_write_tool_registered` precedent — so a future PR that quietly
-  adds a write-shaped mutation fails a test instead of silently widening
-  this ADR's stated boundary.
+  seven named operations (now nine — see the 2026-09-05 Update below) —
+  mirrors `test_mcp_server.py`'s existing `test_no_write_tool_registered`
+  precedent — so a future PR that quietly adds a write-shaped mutation
+  fails a test instead of silently widening this ADR's stated boundary.
 
 **Deliberately not fixed, recorded here instead** (both were MEDIUM/LOW
 findings, not correctness or security regressions against this module's

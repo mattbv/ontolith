@@ -23,18 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   review-capability write tool, left for a real consumer to motivate.
 - `Proposal.reviewers: list[str]` and `Ontology.assign_reviewers(proposal_id, reviewers, actor)`,
   implementing SPEC §9.4's `assign` review action (closes KI-078, ADR-0046 — GraphQL/CLI parity
-  closed separately above, KI-079). A `PolicyStrategy`'s
-  `RequireReview.reviewers` was computed by every strategy but never persisted or surfaced anywhere
-  — now populated on `Proposal` at creation time and refreshed on `resubmit`'s re-evaluation
-  (KI-027), not cleared on accept/reject/request_changes. `assign_reviewers()` replaces the
-  reviewer list wholesale, records a `ProposalEvent(type="assign")`, and reuses the exact
-  eligibility checks accept/reject/request_changes already share (review/admin capability, non-AI,
-  no self-review — kept for consistency with the sibling actions, though not currently
-  load-bearing since `reviewers` itself isn't enforced at accept time; see ADR-0046). Exposed via
-  REST only at first: `POST /proposals/{proposal_id}/assign`, and `reviewers` added to
-  `ProposalOut` on every proposal route. **Breaking:**
-  `StorageBackend` gains a required `update_proposal_reviewers()` method; both backends migrate
-  existing database files to add the new column — DuckDB's `ALTER TABLE ADD COLUMN` rejects any
+  closed separately above, KI-079). A `PolicyStrategy`'s `RequireReview.reviewers` was computed by
+  every strategy but never persisted or surfaced anywhere — now populated on `Proposal` at creation
+  time and refreshed on `resubmit`'s re-evaluation (KI-027), not cleared on accept/reject/
+  request_changes. `assign_reviewers()` replaces the reviewer list wholesale, records a
+  `ProposalEvent(type="assign")`, and reuses the exact eligibility checks accept/reject/
+  request_changes already share (review/admin capability, non-AI, no self-review — kept for
+  consistency with the sibling actions, though not currently load-bearing since `reviewers` itself
+  isn't enforced at accept time; see ADR-0046). Exposed via REST only at first: `POST
+  /proposals/{proposal_id}/assign`, and `reviewers` added to `ProposalOut` on every proposal
+  route. **Breaking:** `StorageBackend` gains a required `update_proposal_reviewers()` method; both
+  backends migrate existing database files to add the new column — DuckDB's `ALTER TABLE ADD
+  COLUMN` rejects any
   constraint (`NOT NULL`, `UNIQUE`, `CHECK` all fail identically), but a plain `DEFAULT` isn't
   itself a constraint, so its migrated column uses `DEFAULT '[]'` instead, which DuckDB backfills
   into existing rows automatically, unlike a fresh database's stronger `NOT NULL DEFAULT '[]'`. A

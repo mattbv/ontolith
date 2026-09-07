@@ -622,10 +622,17 @@ def assign_reviewers(
     """
     kb = _kb()
     try:
-        if not reviewer and not clear:
+        if bool(reviewer) == clear:
+            # Covers both "neither" (ambiguous: forgot the flag, or meant to
+            # clear?) and "both" (contradictory: assign these, or clear
+            # everything?) - `bool(reviewer) == clear` is True for exactly
+            # those two cases (False==False, True==True), False whenever
+            # exactly one was given. Found in review: an earlier version
+            # only rejected "neither", so `--reviewer x --clear` silently
+            # ignored --clear and assigned anyway.
             typer.echo(
                 "Error: pass --reviewer (repeatable) to assign, or --clear to remove "
-                "every assignment",
+                "every assignment — not both, not neither",
                 err=True,
             )
             raise typer.Exit(1)
