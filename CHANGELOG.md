@@ -10,26 +10,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- GraphQL and CLI parity for `Proposal.reviewers`/`assign_reviewers()` (closes KI-079, ADR-0046
+  Update — see the KI-078 entry below for the feature this closes the interface gap on):
+  `ProposalType` gains `reviewers: list[str]`; new `Mutation.assignReviewers(proposalId,
+  reviewers)` (GraphQL's ninth mutation, structurally identical to `requestChanges`/
+  `rejectProposal`). CLI gains `proposal assign <proposal_id> --actor <id> [--reviewer <id> ...]
+  [--clear]` — `--reviewer`/`--clear` are mutually exclusive-by-requirement, since clearing is
+  irreversible and the CLI has no other natural "the caller meant to clear everything" signal the
+  way REST/GraphQL's explicit empty-list argument does; `proposal list` gains a
+  `reviewers=<comma-joined>` suffix when non-empty (mirrors KI-075's `rationale_entries=<n>`
+  convention). MCP remains deliberately excluded — `assign_reviewers()` would be its first
+  review-capability write tool, left for a real consumer to motivate.
 - `Proposal.reviewers: list[str]` and `Ontology.assign_reviewers(proposal_id, reviewers, actor)`,
-  implementing SPEC §9.4's `assign` review action (closes KI-078, ADR-0046). A `PolicyStrategy`'s
-  `RequireReview.reviewers` was computed by every strategy but never persisted or surfaced anywhere
-  — now populated on `Proposal` at creation time and refreshed on `resubmit`'s re-evaluation
-  (KI-027), not cleared on accept/reject/request_changes. `assign_reviewers()` replaces the
-  reviewer list wholesale, records a `ProposalEvent(type="assign")`, and reuses the exact
-  eligibility checks accept/reject/request_changes already share (review/admin capability, non-AI,
-  no self-review — kept for consistency with the sibling actions, though not currently
-  load-bearing since `reviewers` itself isn't enforced at accept time; see ADR-0046). Exposed via
-  REST only: `POST /proposals/{proposal_id}/assign`, and `reviewers` added to `ProposalOut` on
-  every proposal route. GraphQL/CLI/MCP deliberately deferred (filed as KI-079). **Breaking:**
-  `StorageBackend` gains a required `update_proposal_reviewers()` method; both backends migrate
-  existing database files to add the new column — DuckDB's `ALTER TABLE ADD COLUMN` rejects any
-  constraint (`NOT NULL`, `UNIQUE`, `CHECK` all fail identically), but a plain `DEFAULT` isn't
-  itself a constraint, so its migrated column uses `DEFAULT '[]'` instead, which DuckDB backfills
-  into existing rows automatically, unlike a fresh database's stronger `NOT NULL DEFAULT '[]'`. A
-  manual `assign_reviewers` call also doesn't survive a later `resubmit` that lands back in
-  `require_review` (that branch's policy re-evaluation overwrites `reviewers`) — a `resubmit` that
-  instead auto-accepts or gets rejected leaves a manual assignment untouched. Documented and pinned
-  by tests covering all three resubmit outcomes.
+  implementing SPEC §9.4's `assign` review action (closes KI-078, ADR-0046 — GraphQL/CLI parity
+  closed separately above, KI-079). A `PolicyStrategy`'s `RequireReview.reviewers` was computed by
+  every strategy but never persisted or surfaced anywhere — now populated on `Proposal` at creation
+  time and refreshed on `resubmit`'s re-evaluation (KI-027), not cleared on accept/reject/
+  request_changes. `assign_reviewers()` replaces the reviewer list wholesale, records a
+  `ProposalEvent(type="assign")`, and reuses the exact eligibility checks accept/reject/
+  request_changes already share (review/admin capability, non-AI, no self-review — kept for
+  consistency with the sibling actions, though not currently load-bearing since `reviewers` itself
+  isn't enforced at accept time; see ADR-0046). Exposed via REST only at first: `POST
+  /proposals/{proposal_id}/assign`, and `reviewers` added to `ProposalOut` on every proposal
+  route. **Breaking:** `StorageBackend` gains a required `update_proposal_reviewers()` method; both
+  backends migrate existing database files to add the new column — DuckDB's `ALTER TABLE ADD
+  COLUMN` rejects any constraint (`NOT NULL`, `UNIQUE`, `CHECK` all fail identically), but a plain
+  `DEFAULT` isn't itself a constraint, so its migrated column uses `DEFAULT '[]'` instead, which
+  DuckDB backfills into existing rows automatically, unlike a fresh database's stronger `NOT NULL
+  DEFAULT '[]'`. A manual `assign_reviewers` call also doesn't survive a later `resubmit` that
+  lands back in `require_review` (that branch's policy re-evaluation overwrites `reviewers`) — a
+  `resubmit` that instead auto-accepts or gets rejected leaves a manual assignment untouched.
+  Documented and pinned by tests covering all three resubmit outcomes.
 - Three new `PolicyStrategy` implementations closing out SPEC §9.2's built-in strategy list (closes
   KI-069, ADR-0045): `ConfidenceThreshold(threshold, reviewers=None)` auto-accepts once a
   proposal's own staged confidence meets `threshold` (a missing confidence always requires review,

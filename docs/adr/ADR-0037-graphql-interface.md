@@ -239,10 +239,10 @@ fixed in the same PR:
   docstring's own "unauthenticated, like REST's docs_url" comparison.
 - **Scope boundary (Decision §1) had no test enforcing it.** Added an
   introspection-based test asserting `Mutation`'s field set is exactly the
-  seven named operations — mirrors `test_mcp_server.py`'s existing
-  `test_no_write_tool_registered` precedent — so a future PR that quietly
-  adds a write-shaped mutation fails a test instead of silently widening
-  this ADR's stated boundary.
+  seven named operations (now nine — see the 2026-09-05 Update below) —
+  mirrors `test_mcp_server.py`'s existing `test_no_write_tool_registered`
+  precedent — so a future PR that quietly adds a write-shaped mutation
+  fails a test instead of silently widening this ADR's stated boundary.
 
 **Deliberately not fixed, recorded here instead** (both were MEDIUM/LOW
 findings, not correctness or security regressions against this module's
@@ -420,6 +420,22 @@ fresh `pip install ontolith[graphql]` resolves to, not this repo's own CI.
 `<1.0` is a coarser guarantee here than `mcp`'s `<2.0`: a *minor* pre-1.0
 release already broke this exact integration once, so the upper bound
 only guards against the next major, not the next 0.x break.
+
+## Update (2026-09-05, KI-057/KI-079): the enumerated mutation list has grown to nine
+
+Decision §1's mutation list above (`propose`, `acceptProposal`, `rejectProposal`,
+`requestChanges`, `resubmitProposal`, `flagContradiction`, `resolveContradiction` — seven) predates
+two additions that were never folded back into it: `retract` (KI-057, ADR-0039, "governed
+retraction through the same propose/policy/conflict-routing pipeline as `POST /proposals`") and
+`assignReviewers` (KI-079, ADR-0046, SPEC §9.4's `assign` action). The schema's actual `Mutation`
+type has nine fields today. This note exists so a reader comparing the enumerated list against the
+live schema isn't misled into thinking either addition was an oversight — both are within this
+ADR's own §1 scope boundary ("every SDK-level propose/review operation REST already wraps") and
+neither is a direct-write or principal-admin mutation, so the boundary itself hasn't moved, only
+the roster of what's already inside it. `retract`, `flagContradiction`, and `resolveContradiction`
+already stretched "propose/review" to cover conflict-routing and contradiction-resolution
+operations too, so `assignReviewers` (a review-workflow action, SPEC §9.4) fits the same pattern
+rather than widening it further.
 
 ## References
 

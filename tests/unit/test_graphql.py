@@ -523,6 +523,9 @@ class TestAuthCoversEveryField:
         "acceptProposal": 'mutation { acceptProposal(proposalId: "nope") { id } }',
         "rejectProposal": 'mutation { rejectProposal(proposalId: "nope") { id } }',
         "requestChanges": 'mutation { requestChanges(proposalId: "nope") { id } }',
+        "assignReviewers": (
+            'mutation { assignReviewers(proposalId: "nope", reviewers: ["r"]) { id } }'
+        ),
         "resubmitProposal": 'mutation { resubmitProposal(proposalId: "nope") { decision } }',
         "retract": 'mutation { retract(assertionId: "nope") { decision } }',
         "flagContradiction": (
@@ -547,10 +550,10 @@ class TestAuthCoversEveryField:
 
     def test_mutation_field_probe_set_matches_schema(self, tmp_path: Path) -> None:
         """Also enforces ADR-0037 §1's scope boundary: this must be exactly
-        the eight query/propose/review/retract operations (retract added
-        for KI-057, ADR-0039), no direct-write or principal-admin mutation
-        (mirrors test_mcp_server.py's test_no_write_tool_registered
-        precedent)."""
+        the nine query/propose/review/retract operations (retract added for
+        KI-057, ADR-0039; assignReviewers added for KI-079/ADR-0046), no
+        direct-write or principal-admin mutation (mirrors
+        test_mcp_server.py's test_no_write_tool_registered precedent)."""
         kb = _kb(tmp_path)
         app = create_graphql_app(kb, TokenAuthProvider(kb.backend), introspection=True)
         client = TestClient(app)
@@ -917,6 +920,22 @@ class TestProposalsQuery:
         assert len(body["data"]["proposals"]) == 1
         assert body["data"]["proposals"][0]["state"] == "require_review"
 
+    def test_reviewers_field_is_readable(self, tmp_path: Path) -> None:
+        """KI-079: reviewers is readable through the query path, not just
+        as the assignReviewers mutation's own return value (found in
+        review - only the mutation's return was ever asserted before)."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.propose(entity.id, "Person.name", "Ada", "Text", AI, model="gpt-test")
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(client, "{ proposals { reviewers } }", headers=_auth(token))
+        assert len(body["data"]["proposals"]) == 1
+        # ThresholdPolicy routes an AI-authored proposal's review to its
+        # accountable owner (ADR-0003).
+        assert body["data"]["proposals"][0]["reviewers"] == [AI_OWNER]
+
     def test_all_sentinel_returns_every_state(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
@@ -1273,6 +1292,69 @@ class TestProposalReviewMutations:
             headers=_auth(token),
         )
         assert body["data"]["rejectProposal"]["state"] == "rejected"
+
+    def test_assign_reviewers(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        proposal_id = self._pending_proposal_id(kb)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+        body = _gql(
+            client,
+            "mutation($id: String!, $r: [String!]!) { "
+            "assignReviewers(proposalId: $id, reviewers: $r) { reviewers } }",
+            variables={"id": proposal_id, "r": ["carol@example.com"]},
+            headers=_auth(token),
+        )
+        assert body["data"]["assignReviewers"]["reviewers"] == ["carol@example.com"]
+        # Direct pin that the token principal, not some other value, is what
+        # gets recorded as the acting actor - the self-review test below
+        # only observes this indirectly (via which error a mismatched actor
+        # produces), so this asserts it head-on too (found in review).
+        events = kb.backend.get_proposal_events(proposal_id)
+        assert events[-1].type == "assign"
+        assert events[-1].actor == REVIEWER
+
+    def test_assign_reviewers_self_review_is_blocked(self, tmp_path: Path) -> None:
+        """Mirrors acceptProposal's own test_self_review_is_blocked -
+        confirms Ontology.assign_reviewers's self-review guard is actually
+        reachable through this mutation. This test alone catches a
+        hardcoded-actor mutation only indirectly (via which error a
+        mismatched actor produces, since the proposal here isn't left
+        pending) - test_assign_reviewers's own direct actor assertion above
+        is the more precise pin for that specific property (found in
+        review)."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _decision = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", REVIEWER, source="human"
+        )
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+        body = _gql(
+            client,
+            "mutation($id: String!, $r: [String!]!) { "
+            "assignReviewers(proposalId: $id, reviewers: $r) { id } }",
+            variables={"id": proposal.id, "r": ["carol@example.com"]},
+            headers=_auth(token),
+        )
+        assert _error_codes(body) == ["CAPABILITY_ERROR"]
+
+    def test_assign_reviewers_empty_list_clears(self, tmp_path: Path) -> None:
+        """An empty list is GraphQL's own way to clear every assignment
+        (REST has an equivalent test; this one was missing - found in
+        review)."""
+        kb = _kb(tmp_path)
+        proposal_id = self._pending_proposal_id(kb)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(REVIEWER, author=ADMIN)
+        body = _gql(
+            client,
+            "mutation($id: String!, $r: [String!]!) { "
+            "assignReviewers(proposalId: $id, reviewers: $r) { reviewers } }",
+            variables={"id": proposal_id, "r": []},
+            headers=_auth(token),
+        )
+        assert body["data"]["assignReviewers"]["reviewers"] == []
 
     def test_request_changes_then_resubmit(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
