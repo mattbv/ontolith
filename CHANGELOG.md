@@ -34,14 +34,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   /proposals/{proposal_id}/assign`, and `reviewers` added to `ProposalOut` on every proposal
   route. **Breaking:** `StorageBackend` gains a required `update_proposal_reviewers()` method; both
   backends migrate existing database files to add the new column — DuckDB's `ALTER TABLE ADD
-  COLUMN` rejects any
-  constraint (`NOT NULL`, `UNIQUE`, `CHECK` all fail identically), but a plain `DEFAULT` isn't
-  itself a constraint, so its migrated column uses `DEFAULT '[]'` instead, which DuckDB backfills
-  into existing rows automatically, unlike a fresh database's stronger `NOT NULL DEFAULT '[]'`. A
-  manual `assign_reviewers` call also doesn't survive a later `resubmit` that lands back in
-  `require_review` (that branch's policy re-evaluation overwrites `reviewers`) — a `resubmit` that
-  instead auto-accepts or gets rejected leaves a manual assignment untouched. Documented and pinned
-  by tests covering all three resubmit outcomes.
+  COLUMN` rejects any constraint (`NOT NULL`, `UNIQUE`, `CHECK` all fail identically), but a plain
+  `DEFAULT` isn't itself a constraint, so its migrated column uses `DEFAULT '[]'` instead, which
+  DuckDB backfills into existing rows automatically, unlike a fresh database's stronger `NOT NULL
+  DEFAULT '[]'`. A manual `assign_reviewers` call also doesn't survive a later `resubmit` that
+  lands back in `require_review` (that branch's policy re-evaluation overwrites `reviewers`) — a
+  `resubmit` that instead auto-accepts or gets rejected leaves a manual assignment untouched.
+  Documented and pinned by tests covering all three resubmit outcomes.
 - Three new `PolicyStrategy` implementations closing out SPEC §9.2's built-in strategy list (closes
   KI-069, ADR-0045): `ConfidenceThreshold(threshold, reviewers=None)` auto-accepts once a
   proposal's own staged confidence meets `threshold` (a missing confidence always requires review,
