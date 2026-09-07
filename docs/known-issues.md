@@ -1744,10 +1744,10 @@ Extract the shared assembly into one `Ontology.provenance(assertion_id)` method 
 
 ---
 
-## KI-087 — `mkdocs-material` has an unpatched CVE; `pip-audit` CI gate is currently red
+## KI-087 — `mkdocs-material` has an unpatched CVE; `pip-audit` CI gate is currently red ✓ RESOLVED (Backlog)
 
 **Severity:** Supply-chain — dev-only exposure, but `.github/workflows/security.yml`'s unconditional `pip-audit` step is failing on every PR right now, not just a missing upper bound
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** n/a (dependency management / supply-chain hygiene)
 
 ### Description
@@ -1756,7 +1756,9 @@ Extract the shared assembly into one `Ontology.provenance(assertion_id)` method 
 
 ### Fix
 
-Bump the pin to `mkdocs-material>=9.7.7` to turn the CI gate green again. Separately, revisit whether KI-062's resolution (an unconditional `pip-audit` gate) needs a documented triage path for dev-only findings so a future one doesn't block every PR until someone notices and bumps the pin — or explicitly accept that as the intended behavior.
+Bumped the pin to `mkdocs-material>=9.7.7` (`pyproject.toml`), re-locked (`uv lock` resolves `9.7.7`) and synced the venv — `uv run pip-audit` now reports zero findings. Kept the fix minimal and scoped, matching KI-070's precedent for the `dev` extra: no upper bound added here either, only the floor moved past the vulnerable version.
+
+Left open, deliberately out of scope for this fix: whether KI-062's resolution (an unconditional `pip-audit` CI gate) needs a documented triage path for dev-only findings so a future one doesn't block every PR until someone notices and bumps the pin. That's a process question about the gate itself, not a dependency fix — worth its own KI if it recurs.
 
 ---
 
