@@ -633,21 +633,22 @@ class Ontology:
         Called from all four write paths that take a caller-supplied
         `subject` (`assert_literal`/`assert_ref`/`propose`/`propose_ref`).
         For `propose`/`propose_ref` this runs before the proposal is even
-        constructed — checking here, once, at submission time is sufficient
-        because entities are never deleted: no `StorageBackend` method or
-        interface exposes entity deletion today. This is an emergent
-        property of the current implementation, not a SPEC guarantee (SPEC
-        §5's append-only invariant is scoped to assertions, not entities —
-        unlike the identical reasoning for `retract()`'s own subject check,
-        which correctly cites it), so a subject validated now can't later
-        become invalid by the time a `require_review` proposal is
-        eventually accepted only as long as that remains true.
+        constructed. Checking here, once, at submission time is enough:
+        no `StorageBackend` method or interface exposes entity deletion
+        today, so a subject validated now can't later become invalid by
+        the time a `require_review` proposal is eventually accepted. That
+        permanence is an emergent property of the current implementation,
+        not a SPEC guarantee — SPEC §5's append-only invariant is scoped to
+        assertions, not entities (unlike `retract()`'s own analogous
+        existence check on `assertion_id`, which correctly cites it).
 
         Only `subject` is checked, not a ref assertion's `target` — the
-        `assertion` table has no `FOREIGN KEY` on its `value` column for
-        ref-kind rows, so an unknown target doesn't fail at all today
-        (silently creates a dangling reference); that's a distinct, more
-        severe gap, tracked separately (KI-089).
+        `assertion` table's `value_ref` column (where a ref-kind row's
+        target entity id actually lives; `value_lit` holds literal values,
+        `value_kind` picks between them) has no `FOREIGN KEY` on either
+        backend, so an unknown target doesn't fail at all today (silently
+        creates a dangling reference); that's a distinct, more severe gap,
+        tracked separately (KI-089).
         """
         if self.get_entity(subject) is None:
             raise NotFoundError(f"Entity not found: {subject!r}")
