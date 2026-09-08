@@ -634,9 +634,14 @@ class Ontology:
         `subject` (`assert_literal`/`assert_ref`/`propose`/`propose_ref`).
         For `propose`/`propose_ref` this runs before the proposal is even
         constructed — checking here, once, at submission time is sufficient
-        because entities are never deleted (append-only, SPEC §5), so a
-        subject validated now can't later become invalid by the time a
-        `require_review` proposal is eventually accepted.
+        because entities are never deleted: no `StorageBackend` method or
+        interface exposes entity deletion today. This is an emergent
+        property of the current implementation, not a SPEC guarantee (SPEC
+        §5's append-only invariant is scoped to assertions, not entities —
+        unlike the identical reasoning for `retract()`'s own subject check,
+        which correctly cites it), so a subject validated now can't later
+        become invalid by the time a `require_review` proposal is
+        eventually accepted only as long as that remains true.
 
         Only `subject` is checked, not a ref assertion's `target` — the
         `assertion` table has no `FOREIGN KEY` on its `value` column for
