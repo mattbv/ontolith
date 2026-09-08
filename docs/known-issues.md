@@ -1710,10 +1710,10 @@ Use `BEGIN IMMEDIATE` for write transactions so a writer claims the write lock b
 
 ---
 
-## KI-085 — MCP's "no write tool" test is a blocklist/subset check, not a closed-set check
+## KI-085 — MCP's "no write tool" test is a blocklist/subset check, not a closed-set check ✓ RESOLVED (Backlog)
 
 **Severity:** Test gap — protects the single most safety-critical guarantee in the project, currently via a heuristic
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §14.4 ("MCP exposing no direct-write tool"), SPEC §19 conformance item 5
 
 ### Description
@@ -1722,7 +1722,7 @@ Use `BEGIN IMMEDIATE` for write transactions so a writer claims the write lock b
 
 ### Fix
 
-Change `test_all_required_tools_registered`'s assertion from `required.issubset(tool_names)` to `tool_names == required` (or add a companion test asserting the full registered set is a subset of an explicitly-reviewed allowlist), so a future PR that adds a tool has to consciously update this test rather than merely avoid four specific forbidden strings.
+Changed `test_all_required_tools_registered`'s assertion from `required.issubset(tool_names)` to `tool_names == required` (`tests/unit/test_mcp_server.py`) — `test_no_write_tool_registered`'s blocklist check is kept alongside it, since its failure message documents *why* those four names specifically are forbidden, but the exact-set check is now what actually closes the gap. Mutation-tested directly: registering a 10th tool under a non-blocklisted name (e.g. `ontolith.commit`) still passes both the old blocklist and the old subset check, but fails the new equality check — confirming this is exactly the scenario the fix closes.
 
 ---
 
