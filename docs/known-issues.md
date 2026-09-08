@@ -1692,7 +1692,7 @@ Added `Ontology._require_existing_subject(subject)`, called from all four write 
 
 **Behavior note:** on all four paths, this check now runs before `_require_known_predicate`, so a call with both an unknown subject and an unknown predicate raises `NotFoundError` where it previously raised `ValidationError`. No caller depended on the old ordering (full suite unaffected).
 
-Found and filed separately while implementing this (KI-089): `assert_ref`/`propose_ref`'s `target` (stored in the `assertion` table's `value_ref` column) has no equivalent check — and unlike `subject`, has no `FOREIGN KEY` backing it either (confirmed on both SQLite and DuckDB), so a nonexistent target silently succeeds today rather than erroring at all.
+Found and filed separately while implementing this (KI-089, closed the following day): `assert_ref`/`propose_ref`'s `target` (stored in the `assertion` table's `value_ref` column) had no equivalent check — and unlike `subject`, had no `FOREIGN KEY` backing it either (confirmed on both SQLite and DuckDB), so a nonexistent target silently succeeded rather than erroring at all.
 
 ---
 
@@ -1798,11 +1798,13 @@ Two of KI-083's four call sites (`assert_ref`/`propose_ref` — the two literal-
 
 ### Fix
 
-Added `Ontology._require_existing_target(target)`, mirroring KI-083's `_require_existing_subject` (a separate method rather than a shared parametrized one, since the two ended up in separate KIs and need distinct error context) — called from `assert_ref`/`propose_ref` right after the existing subject check, raising `NotFoundError(f"Entity not found: {target!r}")` when `get_entity(target) is None`. Applied only the application-level check, not the `FOREIGN KEY(value_ref)` alternative the Fix also named — the check alone already closes the gap, and adding a DB constraint too would need its own migration-path decision (KI-048) for existing databases, which isn't necessary just to fix this.
+Added `Ontology._require_existing_target(target)`, mirroring KI-083's `_require_existing_subject` — called from `assert_ref`/`propose_ref` right after the existing subject check, raising `NotFoundError(f"Target not found: {target!r}")` when `get_entity(target) is None`. Kept as a separate method rather than a shared parametrized one so each error message names *which* endpoint is missing (`_require_existing_subject`'s own message was changed alongside this, from a shared "Entity not found" to "Subject not found", for the same reason) — matching the codebase's existing `"<kind> not found: <id>"` convention. Applied only the application-level check, not a real `FOREIGN KEY(value_ref) REFERENCES entity(id)` — verified directly that such a constraint would also work cleanly (`value_ref` is its own dedicated, nullable column: literal rows leave it `NULL`, which a `FOREIGN KEY` permits unconstrained, so no partial/conditional form is needed), but a DB constraint would need its own migration-path decision (KI-048) for existing databases, so the application-level check alone is the safer, sufficient fix to ship.
+
+**Behavior note:** on both paths, this check now runs before `_require_known_predicate`, matching KI-083's own identical precedence change for `subject` — a call with both an unknown target and an unknown predicate now raises `NotFoundError` where it previously raised `ValidationError`. No caller depended on the old ordering (full suite unaffected).
 
 Found and fixed along the way: three existing tests (`test_ontology_validators.py`) exercised `assert_ref`/`propose_ref`'s `Validator` invocation by passing a fictional string as `target`, relying on this exact gap (no target existence check) to get a rejectable value into the write path. Fixed by giving those tests a `FixedIdProvider` that hands out the marker value as a *real* entity's id first, so the target is genuinely valid while the validator's own rejection logic (matching on that value) still exercises the intended code path.
 
-Mutation-tested directly: reverting each of the two call sites individually reproduces the pre-fix silent-success behavior (confirmed via a dedicated `test_..._does_not_persist_a_dangling_reference` test) and is caught by exactly its own new test, no cross-coverage.
+Mutation-tested directly: reverting each of the two call sites individually reproduces the pre-fix silent-success behavior (confirmed via a dedicated `test_..._does_not_persist_a_dangling_reference` test for both `assert_ref` and `propose_ref`) and is caught only by its own new test(s), no cross-coverage between the two sites.
 
 ---
 

@@ -448,7 +448,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message-redacted at any interface boundary, so REST/GraphQL/MCP callers who typo an entity id
   now see the real error instead of an opaque 500. Found along the way, filed separately: `assert_ref`/
   `propose_ref`'s `target` has no equivalent check and, unlike `subject`, no `FOREIGN KEY` backing
-  it either — a nonexistent target silently succeeds today (KI-089, closed below).
+  it either — a nonexistent target silently succeeded (KI-089, closed below).
 - `assert_ref`/`propose_ref` now raise `NotFoundError` naming the entity id when `target` (a
   relation's other endpoint) doesn't exist, instead of silently persisting a dangling reference
   (closes KI-089, found while fixing KI-083). Unlike `subject`, `target` (the `assertion` table's

@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from ontolith import Ontology
-from ontolith.core import Assertion, FixedClock, FixedIdProvider, SequentialIdProvider
+from ontolith.core import Assertion, FixedClock, SequentialIdProvider
 from ontolith.core.errors import ValidationError
 from ontolith.govern import AutoAccept, Decision, RequireReview
 from ontolith.govern.proposal import Proposal
@@ -26,15 +26,23 @@ REJECT_VALUE = "REJECT-ME"
 
 
 class _RejectMarkerValue:
-    """Test double Validator: rejects any assertion whose value is the marker."""
+    """Test double Validator: rejects any assertion whose value is the
+    marker. `reject` defaults to the module-level `REJECT_VALUE` (used by
+    every literal-write test below, where the marker is just a string
+    value, never looked up as an entity) but is a plain settable instance
+    attribute so a ref-assertion test can instead point it at a *real*
+    entity's own id (KI-089: `assert_ref`/`propose_ref` now validate that
+    `target` exists, so a fictional string there is rejected before ever
+    reaching this validator)."""
 
     def __init__(self, message: str = "marker value rejected") -> None:
         self.message = message
+        self.reject = REJECT_VALUE
         self.seen: list[str] = []
 
     def validate(self, assertion: Assertion, kb: Any) -> list[str]:
         self.seen.append(assertion.id)
-        if assertion.value == REJECT_VALUE:
+        if assertion.value == self.reject:
             return [self.message]
         return []
 
@@ -75,11 +83,11 @@ def _temp_db() -> Path:
         return Path(f.name)
 
 
-def _connect(*, id_provider: Any = None, **kwargs: Any) -> Ontology:
+def _connect(**kwargs: Any) -> Ontology:
     return Ontology.connect(
         _temp_db(),
         clock=FixedClock("2025-01-01T00:00:00Z"),
-        id_provider=id_provider or SequentialIdProvider(prefix="t"),
+        id_provider=SequentialIdProvider(prefix="t"),
         **kwargs,
     )
 
@@ -111,21 +119,18 @@ class TestPerAssertionValidatorsDirectWrites:
 
     def test_assert_ref_rejected_and_not_persisted(self) -> None:
         # The rejected target must be a real entity (KI-089: assert_ref now
-        # checks target existence before validators run) — an id_provider
-        # that hands out REJECT_VALUE first lets the org's real id double
-        # as the validator's marker value.
+        # checks target existence before validators run) — point the
+        # validator's marker at a real org's own id instead of a fictional
+        # string.
         validator = _RejectMarkerValue()
-        kb = _connect(
-            validators=[validator],
-            id_provider=FixedIdProvider([REJECT_VALUE, "person", "assertion"]),
-        )
+        kb = _connect(validators=[validator])
         kb.create_principal("alice", kind="human", default_capability="write")
         org = kb.create_entity("Organization", author="alice")
-        assert org.id == REJECT_VALUE
         person = kb.create_entity("Person", author="alice")
+        validator.reject = org.id
 
         with pytest.raises(ValidationError, match="marker value rejected"):
-            kb.assert_ref(person.id, "Person.employer", REJECT_VALUE, author="alice")
+            kb.assert_ref(person.id, "Person.employer", org.id, author="alice")
 
         assert kb.assertions(subject=person.id) == []
         kb.close()
@@ -166,17 +171,14 @@ class TestPerAssertionValidatorsProposeAutoAccept:
         # target must be a real entity now that propose_ref checks target
         # existence up front (KI-089).
         validator = _RejectMarkerValue()
-        kb = _connect(
-            validators=[validator],
-            id_provider=FixedIdProvider([REJECT_VALUE, "person", "proposal", "assertion"]),
-        )
+        kb = _connect(validators=[validator])
         kb.create_principal("alice", kind="human", default_capability="write")
         org = kb.create_entity("Organization", author="alice")
-        assert org.id == REJECT_VALUE
         person = kb.create_entity("Person", author="alice")
+        validator.reject = org.id
 
         with pytest.raises(ValidationError, match="marker value rejected"):
-            kb.propose_ref(person.id, "Person.employer", REJECT_VALUE, author="alice")
+            kb.propose_ref(person.id, "Person.employer", org.id, author="alice")
 
         assert kb.assertions(subject=person.id) == []
         kb.close()
@@ -240,19 +242,14 @@ class TestPerAssertionValidatorsAcceptProposalReplay:
         # rejection surfacing only later, at accept_proposal's replay) is
         # still reachable once the target itself is real.
         validator = _RejectMarkerValue()
-        kb = _connect(
-            validators=[validator],
-            id_provider=FixedIdProvider([REJECT_VALUE, "person", "proposal", "assertion"]),
-        )
+        kb = _connect(validators=[validator])
         kb.create_principal("bob", kind="human", default_capability="propose")
         kb.create_principal("carol", kind="human", default_capability="review")
         org = kb.create_entity("Organization", author="bob")
-        assert org.id == REJECT_VALUE
         person = kb.create_entity("Person", author="bob")
+        validator.reject = org.id
 
-        proposal, decision = kb.propose_ref(
-            person.id, "Person.employer", REJECT_VALUE, author="bob"
-        )
+        proposal, decision = kb.propose_ref(person.id, "Person.employer", org.id, author="bob")
         assert isinstance(decision, RequireReview)
 
         with pytest.raises(ValidationError, match="marker value rejected"):

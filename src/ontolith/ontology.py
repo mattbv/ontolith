@@ -644,17 +644,22 @@ class Ontology:
 
         Only `subject` is checked here — `assert_ref`/`propose_ref` also
         call `_require_existing_target` for a ref assertion's `target`
-        (KI-089), a separate method rather than a second call to this one
-        because the two need distinct error messages and, historically,
-        landed in separate KIs (KI-083 then KI-089): `subject` at least
-        had a `FOREIGN KEY` to fail on before this check existed; `target`
-        (the `assertion` table's `value_ref` column — `value_lit` holds
-        literal values instead, `value_kind` picks between them) has none
-        on either backend, so an unknown target didn't fail at all before
-        KI-089, not even with a confusing error.
+        (KI-089). Kept as a separate method, not a second call to this one
+        with a renamed parameter, so each raises a message naming *which*
+        endpoint is missing ("Subject not found" vs "Target not found") —
+        matching the codebase's own `"<kind> not found: <id>"` convention
+        ("Assertion not found: ...", "Proposal not found: ...") rather than
+        a single ambiguous "Entity not found" a caller couldn't attribute
+        to either id. The two also, historically, landed in separate KIs
+        (KI-083 then KI-089): `subject` at least had a `FOREIGN KEY` to
+        fail on before this check existed; `target` (the `assertion`
+        table's `value_ref` column — `value_lit` holds literal values
+        instead, `value_kind` picks between them) has none on either
+        backend, so an unknown target didn't fail at all before KI-089,
+        not even with a confusing error.
         """
         if self.get_entity(subject) is None:
-            raise NotFoundError(f"Entity not found: {subject!r}")
+            raise NotFoundError(f"Subject not found: {subject!r}")
 
     def _require_existing_target(self, target: str) -> None:
         """Reject an unknown `target` entity id before a ref assertion
@@ -670,7 +675,7 @@ class Ontology:
         write paths (`assert_literal`/`propose`) have no `target`.
         """
         if self.get_entity(target) is None:
-            raise NotFoundError(f"Entity not found: {target!r}")
+            raise NotFoundError(f"Target not found: {target!r}")
 
     def _validate_literal_value(self, value: str, value_type: str) -> None:
         """Parse `value` against its schema-declared `value_type` and raise

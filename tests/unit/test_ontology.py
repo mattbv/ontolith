@@ -445,21 +445,21 @@ class TestSubjectExistenceCheck:
     up front, not a redacted StorageError from a late FOREIGN KEY failure."""
 
     def test_assert_literal_unknown_subject_raises_not_found(self, kb: Ontology) -> None:
-        with pytest.raises(NotFoundError, match="Entity not found"):
+        with pytest.raises(NotFoundError, match="Subject not found"):
             kb.assert_literal("nonexistent-id", "Person.name", "Ada", "Text", "alice@example.com")
 
     def test_assert_ref_unknown_subject_raises_not_found(self, kb: Ontology) -> None:
         org = kb.create_entity("Organization", author="alice@example.com")
-        with pytest.raises(NotFoundError, match="Entity not found"):
+        with pytest.raises(NotFoundError, match="Subject not found"):
             kb.assert_ref("nonexistent-id", "Person.employer", org.id, "alice@example.com")
 
     def test_propose_unknown_subject_raises_not_found(self, kb: Ontology) -> None:
-        with pytest.raises(NotFoundError, match="Entity not found"):
+        with pytest.raises(NotFoundError, match="Subject not found"):
             kb.propose("nonexistent-id", "Person.name", "Ada", "Text", "alice@example.com")
 
     def test_propose_ref_unknown_subject_raises_not_found(self, kb: Ontology) -> None:
         org = kb.create_entity("Organization", author="alice@example.com")
-        with pytest.raises(NotFoundError, match="Entity not found"):
+        with pytest.raises(NotFoundError, match="Subject not found"):
             kb.propose_ref("nonexistent-id", "Person.employer", org.id, "alice@example.com")
 
     def test_assert_literal_existing_subject_unaffected(self, kb: Ontology) -> None:
@@ -477,12 +477,12 @@ class TestTargetExistenceCheck:
 
     def test_assert_ref_unknown_target_raises_not_found(self, kb: Ontology) -> None:
         person = kb.create_entity("Person", author="alice@example.com")
-        with pytest.raises(NotFoundError, match="Entity not found"):
+        with pytest.raises(NotFoundError, match="Target not found"):
             kb.assert_ref(person.id, "Person.employer", "nonexistent-id", "alice@example.com")
 
     def test_propose_ref_unknown_target_raises_not_found(self, kb: Ontology) -> None:
         person = kb.create_entity("Person", author="alice@example.com")
-        with pytest.raises(NotFoundError, match="Entity not found"):
+        with pytest.raises(NotFoundError, match="Target not found"):
             kb.propose_ref(person.id, "Person.employer", "nonexistent-id", "alice@example.com")
 
     def test_assert_ref_unknown_target_does_not_persist_a_dangling_reference(
@@ -493,6 +493,17 @@ class TestTargetExistenceCheck:
         person = kb.create_entity("Person", author="alice@example.com")
         with pytest.raises(NotFoundError):
             kb.assert_ref(person.id, "Person.employer", "nonexistent-id", "alice@example.com")
+        assert kb.assertions(subject=person.id) == []
+
+    def test_propose_ref_unknown_target_does_not_persist_a_dangling_reference(
+        self, kb: Ontology
+    ) -> None:
+        """Same regression as the assert_ref test above, via the governed
+        propose path — alice has write capability, so this would otherwise
+        auto-accept and persist just as directly."""
+        person = kb.create_entity("Person", author="alice@example.com")
+        with pytest.raises(NotFoundError):
+            kb.propose_ref(person.id, "Person.employer", "nonexistent-id", "alice@example.com")
         assert kb.assertions(subject=person.id) == []
 
     def test_assert_ref_existing_target_unaffected(self, kb: Ontology) -> None:
