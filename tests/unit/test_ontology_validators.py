@@ -26,15 +26,23 @@ REJECT_VALUE = "REJECT-ME"
 
 
 class _RejectMarkerValue:
-    """Test double Validator: rejects any assertion whose value is the marker."""
+    """Test double Validator: rejects any assertion whose value is the
+    marker. `reject` defaults to the module-level `REJECT_VALUE` (used by
+    every literal-write test below, where the marker is just a string
+    value, never looked up as an entity) but is a plain settable instance
+    attribute so a ref-assertion test can instead point it at a *real*
+    entity's own id (KI-089: `assert_ref`/`propose_ref` now validate that
+    `target` exists, so a fictional string there is rejected before ever
+    reaching this validator)."""
 
     def __init__(self, message: str = "marker value rejected") -> None:
         self.message = message
+        self.reject = REJECT_VALUE
         self.seen: list[str] = []
 
     def validate(self, assertion: Assertion, kb: Any) -> list[str]:
         self.seen.append(assertion.id)
-        if assertion.value == REJECT_VALUE:
+        if assertion.value == self.reject:
             return [self.message]
         return []
 
@@ -110,13 +118,19 @@ class TestPerAssertionValidatorsDirectWrites:
         kb.close()
 
     def test_assert_ref_rejected_and_not_persisted(self) -> None:
+        # The rejected target must be a real entity (KI-089: assert_ref now
+        # checks target existence before validators run) — point the
+        # validator's marker at a real org's own id instead of a fictional
+        # string.
         validator = _RejectMarkerValue()
         kb = _connect(validators=[validator])
         kb.create_principal("alice", kind="human", default_capability="write")
+        org = kb.create_entity("Organization", author="alice")
         person = kb.create_entity("Person", author="alice")
+        validator.reject = org.id
 
         with pytest.raises(ValidationError, match="marker value rejected"):
-            kb.assert_ref(person.id, "Person.employer", REJECT_VALUE, author="alice")
+            kb.assert_ref(person.id, "Person.employer", org.id, author="alice")
 
         assert kb.assertions(subject=person.id) == []
         kb.close()
@@ -153,13 +167,18 @@ class TestPerAssertionValidatorsProposeAutoAccept:
         kb.close()
 
     def test_propose_ref_auto_accept_rejected_leaves_nothing_persisted(self) -> None:
+        # See test_assert_ref_rejected_and_not_persisted above: the rejected
+        # target must be a real entity now that propose_ref checks target
+        # existence up front (KI-089).
         validator = _RejectMarkerValue()
         kb = _connect(validators=[validator])
         kb.create_principal("alice", kind="human", default_capability="write")
+        org = kb.create_entity("Organization", author="alice")
         person = kb.create_entity("Person", author="alice")
+        validator.reject = org.id
 
         with pytest.raises(ValidationError, match="marker value rejected"):
-            kb.propose_ref(person.id, "Person.employer", REJECT_VALUE, author="alice")
+            kb.propose_ref(person.id, "Person.employer", org.id, author="alice")
 
         assert kb.assertions(subject=person.id) == []
         kb.close()
@@ -216,15 +235,21 @@ class TestPerAssertionValidatorsAcceptProposalReplay:
         kb.close()
 
     def test_accept_proposal_replay_runs_validators_on_assert_ref_ops_too(self) -> None:
+        # See test_assert_ref_rejected_and_not_persisted above: the rejected
+        # target must be a real entity now that propose_ref checks target
+        # existence up front (KI-089), before this proposal is even
+        # constructed — the existing gap this test exercises (a validator
+        # rejection surfacing only later, at accept_proposal's replay) is
+        # still reachable once the target itself is real.
         validator = _RejectMarkerValue()
         kb = _connect(validators=[validator])
         kb.create_principal("bob", kind="human", default_capability="propose")
         kb.create_principal("carol", kind="human", default_capability="review")
+        org = kb.create_entity("Organization", author="bob")
         person = kb.create_entity("Person", author="bob")
+        validator.reject = org.id
 
-        proposal, decision = kb.propose_ref(
-            person.id, "Person.employer", REJECT_VALUE, author="bob"
-        )
+        proposal, decision = kb.propose_ref(person.id, "Person.employer", org.id, author="bob")
         assert isinstance(decision, RequireReview)
 
         with pytest.raises(ValidationError, match="marker value rejected"):

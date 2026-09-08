@@ -642,16 +642,40 @@ class Ontology:
         assertions, not entities (unlike `retract()`'s own analogous
         existence check on `assertion_id`, which correctly cites it).
 
-        Only `subject` is checked, not a ref assertion's `target` — the
-        `assertion` table's `value_ref` column (where a ref-kind row's
-        target entity id actually lives; `value_lit` holds literal values,
-        `value_kind` picks between them) has no `FOREIGN KEY` on either
-        backend, so an unknown target doesn't fail at all today (silently
-        creates a dangling reference); that's a distinct, more severe gap,
-        tracked separately (KI-089).
+        Only `subject` is checked here — `assert_ref`/`propose_ref` also
+        call `_require_existing_target` for a ref assertion's `target`
+        (KI-089). Kept as a separate method, not a second call to this one
+        with a renamed parameter, so each raises a message naming *which*
+        endpoint is missing ("Subject not found" vs "Target not found") —
+        matching the codebase's own `"<kind> not found: <id>"` convention
+        ("Assertion not found: ...", "Proposal not found: ...") rather than
+        a single ambiguous "Entity not found" a caller couldn't attribute
+        to either id. The two also, historically, landed in separate KIs
+        (KI-083 then KI-089): `subject` at least had a `FOREIGN KEY` to
+        fail on before this check existed; `target` (the `assertion`
+        table's `value_ref` column — `value_lit` holds literal values
+        instead, `value_kind` picks between them) has none on either
+        backend, so an unknown target didn't fail at all before KI-089,
+        not even with a confusing error.
         """
         if self.get_entity(subject) is None:
-            raise NotFoundError(f"Entity not found: {subject!r}")
+            raise NotFoundError(f"Subject not found: {subject!r}")
+
+    def _require_existing_target(self, target: str) -> None:
+        """Reject an unknown `target` entity id before a ref assertion
+        write reaches the backend (KI-089) — mirrors
+        `_require_existing_subject` (KI-083), but for a relation's *other*
+        endpoint. Unlike `subject`, `target` (the `assertion` table's
+        `value_ref` column) has no `FOREIGN KEY` on either backend, so
+        without this check an unknown target doesn't fail at all: the
+        write silently succeeds and the KB ends up with a dangling
+        reference to an entity that was never created.
+
+        Called only from `assert_ref`/`propose_ref` — the two literal-only
+        write paths (`assert_literal`/`propose`) have no `target`.
+        """
+        if self.get_entity(target) is None:
+            raise NotFoundError(f"Target not found: {target!r}")
 
     def _validate_literal_value(self, value: str, value_type: str) -> None:
         """Parse `value` against its schema-declared `value_type` and raise
@@ -965,7 +989,8 @@ class Ontology:
             Assertion as persisted (status/supersedes reflect conflict routing)
 
         Raises:
-            NotFoundError: subject is not a known entity id (KI-083)
+            NotFoundError: subject or target is not a known entity id
+                (KI-083, KI-089)
             ValidationError: predicate is not declared in the active
                 schema, predicate is declared a property rather than a
                 relation (KI-040), or a registered `Validator` rejects the
@@ -973,6 +998,7 @@ class Ontology:
         """
         self._check_direct_write_capability(author, acting_as)
         self._require_existing_subject(subject)
+        self._require_existing_target(target)
         self._require_known_predicate(predicate, expected_kind="relation")
         temporality = self._resolve_temporality(predicate)
 
@@ -1315,7 +1341,8 @@ class Ontology:
         Raises:
             AuthError: author or acting_as is not a known principal
             CapabilityError: delegation is unauthorized
-            NotFoundError: subject is not a known entity id (KI-083)
+            NotFoundError: subject or target is not a known entity id
+                (KI-083, KI-089)
             ValidationError: author is ai-kind and model is not provided,
                 predicate is not declared in the active schema, predicate
                 is declared a property rather than a relation (KI-040), or
@@ -1325,6 +1352,7 @@ class Ontology:
         principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
         self._require_existing_subject(subject)
+        self._require_existing_target(target)
         self._require_known_predicate(predicate, expected_kind="relation")
         delegating = self._resolve_delegation(principal, author, acting_as)
         temporality = self._resolve_temporality(predicate)

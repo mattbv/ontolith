@@ -448,7 +448,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message-redacted at any interface boundary, so REST/GraphQL/MCP callers who typo an entity id
   now see the real error instead of an opaque 500. Found along the way, filed separately: `assert_ref`/
   `propose_ref`'s `target` has no equivalent check and, unlike `subject`, no `FOREIGN KEY` backing
-  it either — a nonexistent target silently succeeds today (KI-089, not yet fixed).
+  it either — a nonexistent target silently succeeded (KI-089, closed below).
+- `assert_ref`/`propose_ref` now raise `NotFoundError` naming the entity id when `target` (a
+  relation's other endpoint) doesn't exist, instead of silently persisting a dangling reference
+  (closes KI-089, found while fixing KI-083). Unlike `subject`, `target` (the `assertion` table's
+  `value_ref` column) had no `FOREIGN KEY` to fail on either — before this fix, the write just
+  succeeded and the KB ended up with a reference to an entity that was never created. Adds
+  `Ontology._require_existing_target()`, called from both write paths right after the existing
+  subject check.
 - `schema/linkml.py`'s LinkML bridge now emits `range: double` for `value_type="Float"`, not
   `range: float` (closes KI-068): real LinkML tooling treats `float` as 32-bit `xsd:float`, but
   Ontolith's `Float` is backed by Python's `float` (IEEE-754 double) throughout, so the old mapping

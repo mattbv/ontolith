@@ -1688,11 +1688,11 @@ None of `propose()`/`assert_literal()`/`assert_ref()`/`propose_ref()` pre-check 
 
 ### Fix
 
-Added `Ontology._require_existing_subject(subject)`, called from all four write paths (`assert_literal`/`assert_ref` right after the direct-write capability check; `propose`/`propose_ref` right after the AI-model check, before the proposal is even constructed — sufficient because entities are never deleted, so a subject validated at submission time can't later become invalid by accept time), raising `NotFoundError(f"Entity not found: {subject!r}")`. `NotFoundError` is not in any interface's message-redaction list, so the real message now reaches REST/GraphQL/MCP callers unchanged; each interface's existing generic `OntolithError` handler required no changes. Mutation-tested directly: reverting each of the four call sites one at a time reproduces the original `StorageError`/FOREIGN KEY failure and is caught by exactly its own new test, no cross-coverage. A new `tests/unit/test_cross_interface_error_codes.py::TestSubjectNotFoundMessageParity` test locks in the unredacted-message behavior specifically (not just the error code, which alone wouldn't catch `NotFoundError` silently joining a redaction list) — mutation-tested the same way, by adding `NotFoundError` to `graphql.py`/`mcp.py`'s own `_REDACT_MESSAGE_FOR` tuples and confirming the new test catches it.
+Added `Ontology._require_existing_subject(subject)`, called from all four write paths (`assert_literal`/`assert_ref` right after the direct-write capability check; `propose`/`propose_ref` right after the AI-model check, before the proposal is even constructed — sufficient because entities are never deleted, so a subject validated at submission time can't later become invalid by accept time), raising `NotFoundError(f"Entity not found: {subject!r}")` (message later changed to `"Subject not found: ..."` when KI-089 added the analogous `target` check and split it into a separate method with its own distinct message). `NotFoundError` is not in any interface's message-redaction list, so the real message now reaches REST/GraphQL/MCP callers unchanged; each interface's existing generic `OntolithError` handler required no changes. Mutation-tested directly: reverting each of the four call sites one at a time reproduces the original `StorageError`/FOREIGN KEY failure and is caught by exactly its own new test, no cross-coverage. A new `tests/unit/test_cross_interface_error_codes.py::TestSubjectNotFoundMessageParity` test locks in the unredacted-message behavior specifically (not just the error code, which alone wouldn't catch `NotFoundError` silently joining a redaction list) — mutation-tested the same way, by adding `NotFoundError` to `graphql.py`/`mcp.py`'s own `_REDACT_MESSAGE_FOR` tuples and confirming the new test catches it.
 
 **Behavior note:** on all four paths, this check now runs before `_require_known_predicate`, so a call with both an unknown subject and an unknown predicate raises `NotFoundError` where it previously raised `ValidationError`. No caller depended on the old ordering (full suite unaffected).
 
-Found and filed separately while implementing this (KI-089): `assert_ref`/`propose_ref`'s `target` (stored in the `assertion` table's `value_ref` column) has no equivalent check — and unlike `subject`, has no `FOREIGN KEY` backing it either (confirmed on both SQLite and DuckDB), so a nonexistent target silently succeeds today rather than erroring at all.
+Found and filed separately while implementing this (KI-089, closed the following day): `assert_ref`/`propose_ref`'s `target` (stored in the `assertion` table's `value_ref` column) had no equivalent check — and unlike `subject`, had no `FOREIGN KEY` backing it either (confirmed on both SQLite and DuckDB), so a nonexistent target silently succeeded rather than erroring at all.
 
 ---
 
@@ -1784,10 +1784,10 @@ Consider promoting the docstring's `RequireReviewForAI` sketch to an actual expo
 
 ---
 
-## KI-089 — `assert_ref`/`propose_ref` never validate that a relation's `target` entity exists — a dangling reference silently succeeds
+## KI-089 — `assert_ref`/`propose_ref` never validate that a relation's `target` entity exists — a dangling reference silently succeeds ✓ RESOLVED (Backlog)
 
 **Severity:** Bug — a write silently produces a reference to nothing, more severe than KI-083 (which only closed the equivalent gap for `subject`)
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §16 (error taxonomy — `NotFoundError` for missing entity)
 
 ### Description
@@ -1798,7 +1798,13 @@ Two of KI-083's four call sites (`assert_ref`/`propose_ref` — the two literal-
 
 ### Fix
 
-Add the same `get_entity(target) is None` pre-check KI-083 added for `subject`, in `assert_ref`/`propose_ref` only, raising `NotFoundError` naming the target entity id. A real `FOREIGN KEY(value_ref) REFERENCES entity(id)` is also viable here — unlike a hypothetical constraint on a value shared between literals and refs, `value_ref` is already its own dedicated, nullable column (literal rows leave it `NULL`, which a `FOREIGN KEY` permits unconstrained), so a plain constraint works with no partial/conditional form needed; verified directly (literal rows and valid-target ref rows insert fine, a ref row to a missing entity is rejected). The tradeoff is the same as any new constraint: cheap to add on a fresh database, no migration path for existing ones (KI-048) — so the application-level check is the safer default to ship first regardless, with the `FOREIGN KEY` as a defense-in-depth option for new databases only.
+Added `Ontology._require_existing_target(target)`, mirroring KI-083's `_require_existing_subject` — called from `assert_ref`/`propose_ref` right after the existing subject check, raising `NotFoundError(f"Target not found: {target!r}")` when `get_entity(target) is None`. Kept as a separate method rather than a shared parametrized one so each error message names *which* endpoint is missing (`_require_existing_subject`'s own message was changed alongside this, from a shared "Entity not found" to "Subject not found", for the same reason) — matching the codebase's existing `"<kind> not found: <id>"` convention. Applied only the application-level check, not a real `FOREIGN KEY(value_ref) REFERENCES entity(id)` — verified directly that such a constraint would also work cleanly (`value_ref` is its own dedicated, nullable column: literal rows leave it `NULL`, which a `FOREIGN KEY` permits unconstrained, so no partial/conditional form is needed), but a DB constraint would need its own migration-path decision (KI-048) for existing databases, so the application-level check alone is the safer, sufficient fix to ship.
+
+**Behavior note:** on both paths, this check now runs before `_require_known_predicate`, matching KI-083's own identical precedence change for `subject` — a call with both an unknown target and an unknown predicate now raises `NotFoundError` where it previously raised `ValidationError`. No caller depended on the old ordering (full suite unaffected).
+
+Found and fixed along the way: three existing tests (`test_ontology_validators.py`) exercised `assert_ref`/`propose_ref`'s `Validator` invocation by passing a fictional string as `target`, relying on this exact gap (no target existence check) to get a rejectable value into the write path. Fixed by making the test double's rejection marker (`_RejectMarkerValue.reject`) a plain settable attribute, pointed at a real entity's own generated id instead of a fictional string, so the target is genuinely valid while the validator's own rejection logic (matching on that value) still exercises the intended code path.
+
+Mutation-tested directly: reverting each of the two call sites individually reproduces the pre-fix silent-success behavior (confirmed via a dedicated `test_..._does_not_persist_a_dangling_reference` test for both `assert_ref` and `propose_ref`) and is caught only by its own new test(s), no cross-coverage between the two sites.
 
 ---
 
