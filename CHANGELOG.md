@@ -440,6 +440,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- `assert_literal`/`assert_ref`/`propose`/`propose_ref` now raise `NotFoundError` naming the
+  entity id when `subject` doesn't exist, instead of relying on the `assertion` table's
+  `FOREIGN KEY` constraint to fail late with a generic, redacted `StorageError` ("Assertion
+  conflict ... FOREIGN KEY constraint failed") that misdescribed a missing entity as a conflict
+  (closes KI-083, found in the pre-M4 deep + security audit). `NotFoundError` isn't
+  message-redacted at any interface boundary, so REST/GraphQL/MCP callers who typo an entity id
+  now see the real error instead of an opaque 500. Found along the way, filed separately: `assert_ref`/
+  `propose_ref`'s `target` has no equivalent check and, unlike `subject`, no `FOREIGN KEY` backing
+  it either — a nonexistent target silently succeeds today (KI-089, not yet fixed).
 - `schema/linkml.py`'s LinkML bridge now emits `range: double` for `value_type="Float"`, not
   `range: float` (closes KI-068): real LinkML tooling treats `float` as 32-bit `xsd:float`, but
   Ontolith's `Float` is backed by Python's `float` (IEEE-754 double) throughout, so the old mapping

@@ -624,6 +624,35 @@ class Ontology:
                 f"asserts a {expected_kind}. Use {right_call} instead."
             )
 
+    def _require_existing_subject(self, subject: str) -> None:
+        """Reject an unknown `subject` entity id before a write reaches the
+        backend (KI-083), rather than relying on the DB's `FOREIGN KEY`
+        constraint to fail late with a generic, redacted `StorageError` that
+        misdescribes a missing row as a "conflict".
+
+        Called from all four write paths that take a caller-supplied
+        `subject` (`assert_literal`/`assert_ref`/`propose`/`propose_ref`).
+        For `propose`/`propose_ref` this runs before the proposal is even
+        constructed. Checking here, once, at submission time is enough:
+        no `StorageBackend` method or interface exposes entity deletion
+        today, so a subject validated now can't later become invalid by
+        the time a `require_review` proposal is eventually accepted. That
+        permanence is an emergent property of the current implementation,
+        not a SPEC guarantee — SPEC §5's append-only invariant is scoped to
+        assertions, not entities (unlike `retract()`'s own analogous
+        existence check on `assertion_id`, which correctly cites it).
+
+        Only `subject` is checked, not a ref assertion's `target` — the
+        `assertion` table's `value_ref` column (where a ref-kind row's
+        target entity id actually lives; `value_lit` holds literal values,
+        `value_kind` picks between them) has no `FOREIGN KEY` on either
+        backend, so an unknown target doesn't fail at all today (silently
+        creates a dangling reference); that's a distinct, more severe gap,
+        tracked separately (KI-089).
+        """
+        if self.get_entity(subject) is None:
+            raise NotFoundError(f"Entity not found: {subject!r}")
+
     def _validate_literal_value(self, value: str, value_type: str) -> None:
         """Parse `value` against its schema-declared `value_type` and raise
         `ValidationError` if it isn't well-formed content for that type
@@ -860,6 +889,7 @@ class Ontology:
             Assertion as persisted (status/supersedes reflect conflict routing)
 
         Raises:
+            NotFoundError: subject is not a known entity id (KI-083)
             ValidationError: predicate is not declared in the active schema,
                 value_type does not match the schema-declared value_type
                 for predicate (KI-031), value does not parse as that
@@ -868,6 +898,7 @@ class Ontology:
                 `Validator` rejects the assertion (KI-042)
         """
         self._check_direct_write_capability(author, acting_as)
+        self._require_existing_subject(subject)
         self._require_known_predicate(predicate, value_type, value, expected_kind="property")
         temporality = self._resolve_temporality(predicate)
 
@@ -934,12 +965,14 @@ class Ontology:
             Assertion as persisted (status/supersedes reflect conflict routing)
 
         Raises:
+            NotFoundError: subject is not a known entity id (KI-083)
             ValidationError: predicate is not declared in the active
                 schema, predicate is declared a property rather than a
                 relation (KI-040), or a registered `Validator` rejects the
                 assertion (KI-042)
         """
         self._check_direct_write_capability(author, acting_as)
+        self._require_existing_subject(subject)
         self._require_known_predicate(predicate, expected_kind="relation")
         temporality = self._resolve_temporality(predicate)
 
@@ -1151,6 +1184,7 @@ class Ontology:
         Raises:
             AuthError: author or acting_as is not a known principal
             CapabilityError: delegation is unauthorized
+            NotFoundError: subject is not a known entity id (KI-083)
             ValidationError: author is ai-kind and model is not provided,
                 predicate is not declared in the active schema, value_type
                 does not match the schema-declared value_type for predicate
@@ -1161,6 +1195,7 @@ class Ontology:
         """
         principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
+        self._require_existing_subject(subject)
         self._require_known_predicate(predicate, value_type, value, expected_kind="property")
         delegating = self._resolve_delegation(principal, author, acting_as)
         temporality = self._resolve_temporality(predicate)
@@ -1280,6 +1315,7 @@ class Ontology:
         Raises:
             AuthError: author or acting_as is not a known principal
             CapabilityError: delegation is unauthorized
+            NotFoundError: subject is not a known entity id (KI-083)
             ValidationError: author is ai-kind and model is not provided,
                 predicate is not declared in the active schema, predicate
                 is declared a property rather than a relation (KI-040), or
@@ -1288,6 +1324,7 @@ class Ontology:
         """
         principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
+        self._require_existing_subject(subject)
         self._require_known_predicate(predicate, expected_kind="relation")
         delegating = self._resolve_delegation(principal, author, acting_as)
         temporality = self._resolve_temporality(predicate)

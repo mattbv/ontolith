@@ -440,6 +440,35 @@ class TestOntology:
             )
 
 
+class TestSubjectExistenceCheck:
+    """KI-083: writing against a nonexistent subject raises NotFoundError
+    up front, not a redacted StorageError from a late FOREIGN KEY failure."""
+
+    def test_assert_literal_unknown_subject_raises_not_found(self, kb: Ontology) -> None:
+        with pytest.raises(NotFoundError, match="Entity not found"):
+            kb.assert_literal("nonexistent-id", "Person.name", "Ada", "Text", "alice@example.com")
+
+    def test_assert_ref_unknown_subject_raises_not_found(self, kb: Ontology) -> None:
+        org = kb.create_entity("Organization", author="alice@example.com")
+        with pytest.raises(NotFoundError, match="Entity not found"):
+            kb.assert_ref("nonexistent-id", "Person.employer", org.id, "alice@example.com")
+
+    def test_propose_unknown_subject_raises_not_found(self, kb: Ontology) -> None:
+        with pytest.raises(NotFoundError, match="Entity not found"):
+            kb.propose("nonexistent-id", "Person.name", "Ada", "Text", "alice@example.com")
+
+    def test_propose_ref_unknown_subject_raises_not_found(self, kb: Ontology) -> None:
+        org = kb.create_entity("Organization", author="alice@example.com")
+        with pytest.raises(NotFoundError, match="Entity not found"):
+            kb.propose_ref("nonexistent-id", "Person.employer", org.id, "alice@example.com")
+
+    def test_assert_literal_existing_subject_unaffected(self, kb: Ontology) -> None:
+        """The check doesn't false-positive on a real entity."""
+        entity = kb.create_entity("Person", author="alice@example.com")
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", "alice@example.com")
+        assert assertion.subject == entity.id
+
+
 class TestModelCapture:
     """model is required for ai-kind authors on the governed proposal path
     (SPEC §7.4/§14.4); optional and never required for human/service authors.

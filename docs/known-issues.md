@@ -1676,10 +1676,10 @@ Expose `create_entity` (propose-tier, matching its existing capability gate) on 
 
 ---
 
-## KI-083 — Asserting against a nonexistent subject surfaces as an opaque, redacted `StorageError` instead of `NotFoundError`
+## KI-083 — Asserting against a nonexistent subject surfaces as an opaque, redacted `StorageError` instead of `NotFoundError` ✓ RESOLVED (Backlog)
 
 **Severity:** Bug — wrong error taxonomy for caller-input error
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §16 (error taxonomy — `NotFoundError` for missing entity/assertion/namespace vs. `StorageError` for backend failure)
 
 ### Description
@@ -1688,7 +1688,11 @@ None of `propose()`/`assert_literal()`/`assert_ref()`/`propose_ref()` pre-check 
 
 ### Fix
 
-Add an explicit `get_entity(subject)` check ahead of the write in `assert_literal`/`assert_ref`/`propose`/`propose_ref`, raising `NotFoundError` naming the entity id when it's missing — mirroring how other governed write paths already validate their inputs before touching the backend.
+Added `Ontology._require_existing_subject(subject)`, called from all four write paths (`assert_literal`/`assert_ref` right after the direct-write capability check; `propose`/`propose_ref` right after the AI-model check, before the proposal is even constructed — sufficient because entities are never deleted, so a subject validated at submission time can't later become invalid by accept time), raising `NotFoundError(f"Entity not found: {subject!r}")`. `NotFoundError` is not in any interface's message-redaction list, so the real message now reaches REST/GraphQL/MCP callers unchanged; each interface's existing generic `OntolithError` handler required no changes. Mutation-tested directly: reverting each of the four call sites one at a time reproduces the original `StorageError`/FOREIGN KEY failure and is caught by exactly its own new test, no cross-coverage. A new `tests/unit/test_cross_interface_error_codes.py::TestSubjectNotFoundMessageParity` test locks in the unredacted-message behavior specifically (not just the error code, which alone wouldn't catch `NotFoundError` silently joining a redaction list) — mutation-tested the same way, by adding `NotFoundError` to `graphql.py`/`mcp.py`'s own `_REDACT_MESSAGE_FOR` tuples and confirming the new test catches it.
+
+**Behavior note:** on all four paths, this check now runs before `_require_known_predicate`, so a call with both an unknown subject and an unknown predicate raises `NotFoundError` where it previously raised `ValidationError`. No caller depended on the old ordering (full suite unaffected).
+
+Found and filed separately while implementing this (KI-089): `assert_ref`/`propose_ref`'s `target` (stored in the `assertion` table's `value_ref` column) has no equivalent check — and unlike `subject`, has no `FOREIGN KEY` backing it either (confirmed on both SQLite and DuckDB), so a nonexistent target silently succeeds today rather than erroring at all.
 
 ---
 
@@ -1777,6 +1781,24 @@ This does not violate SPEC: §9.2 doesn't mandate that any particular strategy s
 ### Fix
 
 Consider promoting the docstring's `RequireReviewForAI` sketch to an actual exported, tested class, so `Composite(all=[RequireReviewForAI(), SourceQuorum(2)])` becomes copy-pasteable rather than something every deployer re-derives from a comment. This is an incremental improvement on KI-061/ADR-0040's already-settled design, not a reversal of it — if the project judges the docstring pattern sufficient (KI-061 already made that call once), this can stay closed as-is.
+
+---
+
+## KI-089 — `assert_ref`/`propose_ref` never validate that a relation's `target` entity exists — a dangling reference silently succeeds
+
+**Severity:** Bug — a write silently produces a reference to nothing, more severe than KI-083 (which only closed the equivalent gap for `subject`)
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §16 (error taxonomy — `NotFoundError` for missing entity)
+
+### Description
+
+Found while fixing KI-083 (which checks that `subject` exists before a write). The `assertion` table's `FOREIGN KEY` constraint is declared only on `subject` — `FOREIGN KEY(subject) REFERENCES entity(id)` in both `store/sqlite/backend.py` and `store/duckdb/backend.py` — the `value_ref` column, which holds the target entity id for `ref`-kind assertions (`value_lit` holds literal values instead; `value_kind` picks between them, per KI-030), carries no such constraint in either backend. Reproduced directly on both: `kb.assert_ref(person.id, "Person.employer", "nonexistent-org-id", author=...)` returns a normal, persisted `Assertion` with `value="nonexistent-org-id"` — no error of any kind, and `kb.get_entity("nonexistent-org-id")` confirms the target genuinely doesn't exist. Unlike KI-083's gap (a real row rejected late, with a confusing error), this is worse: the write just succeeds, and the KB now contains a `Person.employer` reference to an entity that was never created and may never be — a query that traverses the relation would need to handle a target lookup silently returning nothing, and nothing today signals that this ever happened.
+
+Two of KI-083's four call sites (`assert_ref`/`propose_ref` — the two literal-only paths, `assert_literal`/`propose`, have no `target` to check), but a distinct fix: `subject` got a `FOREIGN KEY` on both backends (rejects at the DB layer, KI-083 replaces its opaque surfacing with a clean pre-check) while `target` has no DB-level protection to lean on at all, on either backend.
+
+### Fix
+
+Add the same `get_entity(target) is None` pre-check KI-083 added for `subject`, in `assert_ref`/`propose_ref` only, raising `NotFoundError` naming the target entity id. A real `FOREIGN KEY(value_ref) REFERENCES entity(id)` is also viable here — unlike a hypothetical constraint on a value shared between literals and refs, `value_ref` is already its own dedicated, nullable column (literal rows leave it `NULL`, which a `FOREIGN KEY` permits unconstrained), so a plain constraint works with no partial/conditional form needed; verified directly (literal rows and valid-target ref rows insert fine, a ref row to a missing entity is rejected). The tradeoff is the same as any new constraint: cheap to add on a fresh database, no migration path for existing ones (KI-048) — so the application-level check is the safer default to ship first regardless, with the `FOREIGN KEY` as a defense-in-depth option for new databases only.
 
 ---
 

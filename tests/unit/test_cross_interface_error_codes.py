@@ -104,6 +104,79 @@ class TestNotFoundErrorCodeParity:
         assert codes == {"rest": "NOT_FOUND", "graphql": "NOT_FOUND", "mcp": "NOT_FOUND"}
 
 
+def _messages_for_missing_subject(
+    kb: Ontology, headers: dict[str, str], token: str | None
+) -> dict[str, str]:
+    """Submit a proposal against the same nonexistent subject through all
+    three interfaces, returning each one's reported error *message* (not
+    just its code) — the regression this guards against (KI-083, KI-085's
+    own precedent for pinning a set/message shape rather than trusting a
+    type check alone) is `NotFoundError` quietly joining the redaction list
+    (`_REDACT_MESSAGE_FOR` in `graphql.py`/`mcp.py`, `_STATUS_BY_ERROR_TYPE`
+    generic-500 path in `rest.py`), which would leave the `code` unchanged
+    while silently discarding the entity id a caller needs to act on."""
+    auth_provider = TokenAuthProvider(kb.backend)
+
+    rest_client = TestClient(create_rest_app(kb, auth_provider))
+    rest_response = rest_client.post(
+        "/proposals",
+        json={
+            "subject": "does-not-exist",
+            "predicate": "Person.name",
+            "value": "Ada",
+            "value_type": "Text",
+        },
+        headers=headers,
+    )
+    rest_message: str = rest_response.json()["message"]
+
+    graphql_client = TestClient(create_graphql_app(kb, auth_provider))
+    graphql_response = graphql_client.post(
+        "/graphql",
+        json={
+            "query": (
+                'mutation { propose(input: {subject: "does-not-exist", '
+                'predicate: "Person.name", value: "Ada", valueType: "Text"}) '
+                "{ decision } }"
+            )
+        },
+        headers=headers,
+    )
+    assert graphql_response.status_code == 200
+    graphql_message: str = graphql_response.json()["errors"][0]["message"]
+
+    mcp = create_mcp_server(kb, auth_provider)
+    mcp_result = mcp._tool_manager.get_tool("ontolith.propose").fn(
+        subject="does-not-exist",
+        predicate="Person.name",
+        value="Ada",
+        value_type="Text",
+        token=token,
+    )
+    mcp_message: str = mcp_result["error"]
+
+    return {"rest": rest_message, "graphql": graphql_message, "mcp": mcp_message}
+
+
+class TestSubjectNotFoundMessageParity:
+    """KI-083: writing against a nonexistent subject must surface the real,
+    entity-id-naming message through every interface, not just the right
+    `code` — `NotFoundError` is deliberately excluded from every
+    interface's message-redaction list (unlike `StorageError`), and that's
+    the entire practical benefit KI-083 shipped. A code-only assertion
+    (`TestNotFoundErrorCodeParity` above) would keep passing even if a
+    future change silently added `NotFoundError` to a redaction list."""
+
+    def test_all_three_interfaces_report_the_entity_id(self, kb: Ontology) -> None:
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        good_headers = {"Authorization": f"Bearer {token}"}
+
+        messages = _messages_for_missing_subject(kb, good_headers, token=token)
+
+        for interface, message in messages.items():
+            assert "does-not-exist" in message, f"{interface} redacted the entity id: {message!r}"
+
+
 _FLAG_CONTRADICTION_MUTATION = """
 mutation($a: String!, $b: String!) {
   flagContradiction(assertionIdA: $a, assertionIdB: $b) {
