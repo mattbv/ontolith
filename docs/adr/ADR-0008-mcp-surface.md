@@ -31,6 +31,8 @@ The MCP (Model Context Protocol) server exposes Ontolith to AI agents as a tool.
    2026-08-31, see Update below, KI-057/ADR-0039)
 9. **`ontolith.list_contradictions`** — Read-only contradiction listing (read; added 2026-09-03,
    see Update below, KI-076)
+10. **`ontolith.create_entity`** — Create a new entity (propose, not a direct write in this ADR's
+    sense; added 2026-09-08, see Update below, KI-082)
 
 **Forbidden Tools:**
 - ❌ `ontolith.write` — No direct write
@@ -137,6 +139,35 @@ is `read`-tier, unlike the other tools added in the two Updates above: it requir
 beyond a resolved principal, the same as `ontolith.schema`/`.query`/`.get`/`.provenance` — `read`
 is the floor of SPEC §8.3's capability order, so it does not widen this ADR's "no direct write"
 boundary any more than those four already-listed read tools do.
+
+## Update (2026-09-08): `ontolith.create_entity` added, KI-082
+
+A 10th tool, **`ontolith.create_entity`** (propose tier), was added alongside REST's `POST
+/entities` and GraphQL's `Mutation.createEntity` (KI-082) — `Ontology.create_entity()` was
+previously exposed on exactly one interface, the CLI, so a REST/GraphQL/MCP-only caller could
+assert facts about entities that already exist but could never introduce a genuinely new one into
+the KB. This is the one tool added to this ADR's list that is not itself a proposal-producing
+operation, so it's worth being explicit about why it doesn't violate the Forbidden list's "❌ Any
+tool that bypasses proposal/policy pipeline": that clause is about *assertion* writes — SPEC §10
+conflict routing and `PolicyStrategy` evaluation apply to facts, which carry a value, a
+confidence, and a temporality for policy to reason about. An `Entity` carries none of that; it's
+an identity anchor a fact is later asserted about, not itself a fact. `Ontology.create_entity()`
+was never routed through the proposal/policy pipeline at the SDK level either — it always wrote
+directly, gated only by a capability floor (rejects `read`-only) — so there was no existing
+pipeline for this tool to bypass, unlike a hypothetical `ontolith.write`/`ontolith.update` that
+would let an agent write an *assertion* directly. `ontolith.create_entity` keeps the identical
+capability floor `Ontology.create_entity()` already enforced (propose-tier, no `kind == "ai"`
+block, unlike `assert_literal`/`assert_ref`'s direct-write path) — no new capability logic was
+added anywhere to accommodate this.
+
+Two gaps surfaced during review, deliberately left unfixed here as pre-existing SDK behavior this
+change makes newly agent-reachable rather than new regressions of its own — tracked separately
+(KI-090, KI-091) rather than expanding this change's scope: `create_entity()` does not pre-validate
+`concept` against the active schema (an agent can create entities under an undeclared concept name,
+where `assert_literal`/`assert_ref` do validate `predicate` this way), and a duplicate
+`(namespace, concept, natural_key)` triggers the DB's `UNIQUE` constraint late, surfacing as a
+redacted, generic `StorageError` (500-class) rather than a caller-actionable `ValidationError`
+naming the conflict.
 
 ## References
 
