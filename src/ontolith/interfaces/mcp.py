@@ -1,12 +1,19 @@
 """MCP server for Ontolith (ADR-0008, ADR-0014).
 
 Exposes read/propose/flag tools to AI agents. No direct write tool is exposed;
-all mutations flow through the proposal/policy pipeline.
+every *assertion* mutation flows through the proposal/policy pipeline.
+``ontolith.create_entity`` (KI-082) is the one exception to "every mutation
+flows through propose": entity creation was never gated behind
+proposal/policy at the SDK level either (an entity carries no fact/
+confidence/temporality for a policy to evaluate — it's an identity anchor,
+not an assertion), so this tool is propose-tier, same capability floor as
+every other tool here, not a "direct write" in ADR-0008's sense.
 
 Tools (ADR-0008, plus resubmit added for KI-027, retract added for KI-057/ADR-0039,
-list_contradictions added for KI-076):
+list_contradictions added for KI-076, create_entity added for KI-082):
   ontolith.schema           — read concept/relation definitions
   ontolith.get              — fetch entity + current assertions
+  ontolith.create_entity    — create a new entity (propose-tier, not a direct write)
   ontolith.query            — symbolic entity retrieval
   ontolith.provenance       — full provenance trail for an assertion
   ontolith.list_contradictions — read-only contradiction listing
@@ -334,6 +341,56 @@ def create_mcp_server(
                 }
                 for a in assertions
             ],
+        }
+
+    # ------------------------------------------------------------------
+    # ontolith.create_entity (KI-082)
+    # ------------------------------------------------------------------
+
+    @mcp.tool(name="ontolith.create_entity")
+    def create_entity_tool(
+        concept: str,
+        natural_key: str | None = None,
+        token: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a new entity. Propose-tier — same capability gate as every
+        other governed write (``Ontology.create_entity`` rejects a
+        ``read``-only principal).
+
+        Args:
+            concept: Concept name (e.g. "Person", "Organization")
+            natural_key: Optional unique key within concept
+            token: Bearer token identifying the calling principal (ADR-0014).
+                Optional: an ``Authorization`` header takes priority when the
+                transport supplies one (KI-067, see module docstring); this
+                argument is the fallback, and the only channel on stdio —
+                unless the server was created with ``require_header_token=True``
+                (KI-073), in which case this argument is never accepted and
+                stdio becomes unusable.
+
+        Returns:
+            Dict with the created entity's fields, or "error" if no token
+            was resolvable, it does not resolve to a valid principal, or
+            the principal lacks propose capability.
+        """
+        from ontolith.core.errors import AuthError
+
+        token, token_error = _bearer_token(token)
+        if token_error is not None:
+            return _error_response(AuthError(token_error))
+        assert token is not None  # _bearer_token: exactly one of (token, error) is set
+        try:
+            author = auth_provider.resolve(token).id
+            entity = kb.create_entity(concept=concept, author=author, natural_key=natural_key)
+        except OntolithError as exc:
+            return _error_response(exc)
+        return {
+            "id": entity.id,
+            "concept": entity.concept,
+            "namespace": entity.namespace,
+            "natural_key": entity.natural_key,
+            "created_at": entity.created_at.isoformat(),
+            "created_by": entity.created_by,
         }
 
     # ------------------------------------------------------------------

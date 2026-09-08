@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- Entity creation on REST, GraphQL, and MCP (closes KI-082, found in the pre-M4 deep + security
+  audit) — previously CLI/SDK-only, so an agent or application talking only to REST/GraphQL/MCP
+  could assert facts about existing entities but never introduce a genuinely new one. `POST
+  /entities` (REST), `Mutation.createEntity` (GraphQL), `ontolith.create_entity` (MCP) — all three
+  thin wrappers over `Ontology.create_entity()`, propose-tier (rejects only `read`-only
+  principals; no AI-kind block, since an entity carries no fact/confidence/temporality for policy
+  to evaluate, unlike `assert_literal`/`assert_ref`'s direct-write path). Each interface's own
+  exact-coverage tests (GraphQL's mutation-field-probe set, MCP's KI-085 tool-count test) required
+  a conscious update, confirming those safety nets work as designed.
 - GraphQL and CLI parity for `Proposal.reviewers`/`assign_reviewers()` (closes KI-079, ADR-0046
   Update — see the KI-078 entry below for the feature this closes the interface gap on):
   `ProposalType` gains `reviewers: list[str]`; new `Mutation.assignReviewers(proposalId,

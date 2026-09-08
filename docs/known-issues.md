@@ -1658,10 +1658,10 @@ Add `.include_flagged()` to `QueryBuilder`, threading through to `entities_where
 
 ---
 
-## KI-082 — No entity-creation capability on REST, GraphQL, or MCP — CLI-only
+## KI-082 — No entity-creation capability on REST, GraphQL, or MCP — CLI-only ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — a real interface-parity/DX gap; note SPEC §14.1's normative SDK surface doesn't itself list `create_entity`, and §14.4's MCP tool table is an enumerated closed default set that excludes it, so this reads as an unaddressed gap rather than an unmet SPEC MUST
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §14.1 (normative SDK surface), §14.3 (REST resource list names `/entities`, but only `/proposals` carries a documented `POST`; GraphQL scoped to "query, propose, and review operations"), §14.4 (MCP default tool table)
 
 ### Description
@@ -1672,7 +1672,13 @@ This means an AI agent or application talking only to REST/GraphQL/MCP can asser
 
 ### Fix
 
-Expose `create_entity` (propose-tier, matching its existing capability gate) on REST (`POST /entities`), GraphQL (`Mutation.createEntity`), and MCP (`ontolith.create_entity`) — or record an ADR if entity creation is meant to stay human/CLI-gated by deliberate design, since today it reads as an oversight rather than a decision.
+Exposed `create_entity` on all three interfaces, each a thin wrapper over `Ontology.create_entity()` with no new capability logic of its own (propose-tier, matching the SDK method's own existing gate — rejects only `read`-only principals, no AI-kind check, since an entity carries no fact/confidence/temporality for policy to evaluate):
+
+- REST: `POST /entities` (`CreateEntityIn` body: `concept`, optional `natural_key`; returns `EntityOut`, `201`)
+- GraphQL: `Mutation.createEntity(input: CreateEntityInput!): EntityType` — module docstring's "query, propose, review" scope description updated to name this as the one exception, with its rationale (entity creation was never proposal/policy-gated at the SDK level either, so this isn't a "direct write" in ADR-0008's sense)
+- MCP: `ontolith.create_entity` — module docstring/tool table updated with the same rationale; `test_all_required_tools_registered` (KI-085's own exact-set test) deliberately updated to 10 tools, not left to silently drift
+
+Each interface's existing "every route/field/tool requires auth" exact-coverage tests (`TestAuthCoversEveryField`'s mutation-field-probe set on GraphQL, the tool-count test on MCP) needed conscious updates too, confirming those safety nets work as designed rather than silently passing around the new surface. New dedicated test classes on all three interfaces cover: creation success, round-trip retrieval (not just a response-shape check), `propose` capability sufficing (including for an AI principal — no AI-blocking check exists on this path), and `read` capability being rejected.
 
 ---
 
