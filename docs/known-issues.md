@@ -1784,10 +1784,10 @@ Consider promoting the docstring's `RequireReviewForAI` sketch to an actual expo
 
 ---
 
-## KI-089 — `assert_ref`/`propose_ref` never validate that a relation's `target` entity exists — a dangling reference silently succeeds
+## KI-089 — `assert_ref`/`propose_ref` never validate that a relation's `target` entity exists — a dangling reference silently succeeds ✓ RESOLVED (Backlog)
 
 **Severity:** Bug — a write silently produces a reference to nothing, more severe than KI-083 (which only closed the equivalent gap for `subject`)
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §16 (error taxonomy — `NotFoundError` for missing entity)
 
 ### Description
@@ -1798,7 +1798,11 @@ Two of KI-083's four call sites (`assert_ref`/`propose_ref` — the two literal-
 
 ### Fix
 
-Add the same `get_entity(target) is None` pre-check KI-083 added for `subject`, in `assert_ref`/`propose_ref` only, raising `NotFoundError` naming the target entity id. A real `FOREIGN KEY(value_ref) REFERENCES entity(id)` is also viable here — unlike a hypothetical constraint on a value shared between literals and refs, `value_ref` is already its own dedicated, nullable column (literal rows leave it `NULL`, which a `FOREIGN KEY` permits unconstrained), so a plain constraint works with no partial/conditional form needed; verified directly (literal rows and valid-target ref rows insert fine, a ref row to a missing entity is rejected). The tradeoff is the same as any new constraint: cheap to add on a fresh database, no migration path for existing ones (KI-048) — so the application-level check is the safer default to ship first regardless, with the `FOREIGN KEY` as a defense-in-depth option for new databases only.
+Added `Ontology._require_existing_target(target)`, mirroring KI-083's `_require_existing_subject` (a separate method rather than a shared parametrized one, since the two ended up in separate KIs and need distinct error context) — called from `assert_ref`/`propose_ref` right after the existing subject check, raising `NotFoundError(f"Entity not found: {target!r}")` when `get_entity(target) is None`. Applied only the application-level check, not the `FOREIGN KEY(value_ref)` alternative the Fix also named — the check alone already closes the gap, and adding a DB constraint too would need its own migration-path decision (KI-048) for existing databases, which isn't necessary just to fix this.
+
+Found and fixed along the way: three existing tests (`test_ontology_validators.py`) exercised `assert_ref`/`propose_ref`'s `Validator` invocation by passing a fictional string as `target`, relying on this exact gap (no target existence check) to get a rejectable value into the write path. Fixed by giving those tests a `FixedIdProvider` that hands out the marker value as a *real* entity's id first, so the target is genuinely valid while the validator's own rejection logic (matching on that value) still exercises the intended code path.
+
+Mutation-tested directly: reverting each of the two call sites individually reproduces the pre-fix silent-success behavior (confirmed via a dedicated `test_..._does_not_persist_a_dangling_reference` test) and is caught by exactly its own new test, no cross-coverage.
 
 ---
 

@@ -469,6 +469,40 @@ class TestSubjectExistenceCheck:
         assert assertion.subject == entity.id
 
 
+class TestTargetExistenceCheck:
+    """KI-089: a ref assertion against a nonexistent target raises
+    NotFoundError up front, instead of silently persisting a dangling
+    reference (assert_ref/propose_ref's target has no FOREIGN KEY on
+    either backend, unlike subject — KI-083's check doesn't cover it)."""
+
+    def test_assert_ref_unknown_target_raises_not_found(self, kb: Ontology) -> None:
+        person = kb.create_entity("Person", author="alice@example.com")
+        with pytest.raises(NotFoundError, match="Entity not found"):
+            kb.assert_ref(person.id, "Person.employer", "nonexistent-id", "alice@example.com")
+
+    def test_propose_ref_unknown_target_raises_not_found(self, kb: Ontology) -> None:
+        person = kb.create_entity("Person", author="alice@example.com")
+        with pytest.raises(NotFoundError, match="Entity not found"):
+            kb.propose_ref(person.id, "Person.employer", "nonexistent-id", "alice@example.com")
+
+    def test_assert_ref_unknown_target_does_not_persist_a_dangling_reference(
+        self, kb: Ontology
+    ) -> None:
+        """The exact regression KI-089 closes: before this fix, this call
+        silently succeeded and left a reference to nothing in the KB."""
+        person = kb.create_entity("Person", author="alice@example.com")
+        with pytest.raises(NotFoundError):
+            kb.assert_ref(person.id, "Person.employer", "nonexistent-id", "alice@example.com")
+        assert kb.assertions(subject=person.id) == []
+
+    def test_assert_ref_existing_target_unaffected(self, kb: Ontology) -> None:
+        """The check doesn't false-positive on a real target entity."""
+        person = kb.create_entity("Person", author="alice@example.com")
+        org = kb.create_entity("Organization", author="alice@example.com")
+        assertion = kb.assert_ref(person.id, "Person.employer", org.id, "alice@example.com")
+        assert assertion.value == org.id
+
+
 class TestModelCapture:
     """model is required for ai-kind authors on the governed proposal path
     (SPEC §7.4/§14.4); optional and never required for human/service authors.

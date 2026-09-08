@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from ontolith import Ontology
-from ontolith.core import Assertion, FixedClock, SequentialIdProvider
+from ontolith.core import Assertion, FixedClock, FixedIdProvider, SequentialIdProvider
 from ontolith.core.errors import ValidationError
 from ontolith.govern import AutoAccept, Decision, RequireReview
 from ontolith.govern.proposal import Proposal
@@ -75,11 +75,11 @@ def _temp_db() -> Path:
         return Path(f.name)
 
 
-def _connect(**kwargs: Any) -> Ontology:
+def _connect(*, id_provider: Any = None, **kwargs: Any) -> Ontology:
     return Ontology.connect(
         _temp_db(),
         clock=FixedClock("2025-01-01T00:00:00Z"),
-        id_provider=SequentialIdProvider(prefix="t"),
+        id_provider=id_provider or SequentialIdProvider(prefix="t"),
         **kwargs,
     )
 
@@ -110,9 +110,18 @@ class TestPerAssertionValidatorsDirectWrites:
         kb.close()
 
     def test_assert_ref_rejected_and_not_persisted(self) -> None:
+        # The rejected target must be a real entity (KI-089: assert_ref now
+        # checks target existence before validators run) — an id_provider
+        # that hands out REJECT_VALUE first lets the org's real id double
+        # as the validator's marker value.
         validator = _RejectMarkerValue()
-        kb = _connect(validators=[validator])
+        kb = _connect(
+            validators=[validator],
+            id_provider=FixedIdProvider([REJECT_VALUE, "person", "assertion"]),
+        )
         kb.create_principal("alice", kind="human", default_capability="write")
+        org = kb.create_entity("Organization", author="alice")
+        assert org.id == REJECT_VALUE
         person = kb.create_entity("Person", author="alice")
 
         with pytest.raises(ValidationError, match="marker value rejected"):
@@ -153,9 +162,17 @@ class TestPerAssertionValidatorsProposeAutoAccept:
         kb.close()
 
     def test_propose_ref_auto_accept_rejected_leaves_nothing_persisted(self) -> None:
+        # See test_assert_ref_rejected_and_not_persisted above: the rejected
+        # target must be a real entity now that propose_ref checks target
+        # existence up front (KI-089).
         validator = _RejectMarkerValue()
-        kb = _connect(validators=[validator])
+        kb = _connect(
+            validators=[validator],
+            id_provider=FixedIdProvider([REJECT_VALUE, "person", "proposal", "assertion"]),
+        )
         kb.create_principal("alice", kind="human", default_capability="write")
+        org = kb.create_entity("Organization", author="alice")
+        assert org.id == REJECT_VALUE
         person = kb.create_entity("Person", author="alice")
 
         with pytest.raises(ValidationError, match="marker value rejected"):
@@ -216,10 +233,21 @@ class TestPerAssertionValidatorsAcceptProposalReplay:
         kb.close()
 
     def test_accept_proposal_replay_runs_validators_on_assert_ref_ops_too(self) -> None:
+        # See test_assert_ref_rejected_and_not_persisted above: the rejected
+        # target must be a real entity now that propose_ref checks target
+        # existence up front (KI-089), before this proposal is even
+        # constructed — the existing gap this test exercises (a validator
+        # rejection surfacing only later, at accept_proposal's replay) is
+        # still reachable once the target itself is real.
         validator = _RejectMarkerValue()
-        kb = _connect(validators=[validator])
+        kb = _connect(
+            validators=[validator],
+            id_provider=FixedIdProvider([REJECT_VALUE, "person", "proposal", "assertion"]),
+        )
         kb.create_principal("bob", kind="human", default_capability="propose")
         kb.create_principal("carol", kind="human", default_capability="review")
+        org = kb.create_entity("Organization", author="bob")
+        assert org.id == REJECT_VALUE
         person = kb.create_entity("Person", author="bob")
 
         proposal, decision = kb.propose_ref(
