@@ -957,7 +957,11 @@ class TestProposeTool:
 
     def test_all_required_tools_registered(self, tmp_path: Path) -> None:
         """ADR-0008 plus resubmit (KI-027), retract (KI-057, ADR-0039), and
-        list_contradictions (KI-076): all 9 required tools must be present."""
+        list_contradictions (KI-076): the registered tool set must be exactly
+        these 9 — no more, no fewer (KI-085). A subset check here would pass
+        even if a future PR added a 10th tool under a name
+        test_no_write_tool_registered's blocklist doesn't happen to cover;
+        adding a tool on purpose means updating this set deliberately."""
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}
@@ -972,7 +976,7 @@ class TestProposeTool:
             "ontolith.resubmit",
             "ontolith.retract",
         }
-        assert required.issubset(tool_names)
+        assert tool_names == required
 
 
 # ---------------------------------------------------------------------------
