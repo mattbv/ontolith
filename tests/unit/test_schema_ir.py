@@ -337,3 +337,22 @@ class TestHasPredicate:
 
     def test_malformed_predicate_is_false(self) -> None:
         assert self._schema().has_predicate("NoDotHere") is False
+
+
+class TestHasConcept:
+    """SchemaIR.has_concept() — write-time unknown-concept validation (KI-090)."""
+
+    def _schema(self) -> SchemaIR:
+        return SchemaIR(
+            namespace="test",
+            version=1,
+            concepts={
+                "Person": ConceptDef(name="Person"),
+            },
+        )
+
+    def test_known_concept_is_true(self) -> None:
+        assert self._schema().has_concept("Person") is True
+
+    def test_unknown_concept_is_false(self) -> None:
+        assert self._schema().has_concept("Vehicle") is False

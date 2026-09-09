@@ -454,6 +454,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- `create_entity()` now raises `ValidationError` naming the concept when `concept` isn't declared
+  in the active schema, instead of silently persisting an entity under an undeclared concept
+  (closes KI-090, found while fixing KI-082) — mirrors `_require_known_predicate`'s identical,
+  long-standing precedent for `predicate` on every assertion write. Pre-existing SDK behavior;
+  KI-082 made it reachable by a `propose`-tier AI agent via REST/GraphQL/MCP for the first time,
+  not just a human CLI operator or the plugin sandbox's `csv_importer` reference plugin (both of
+  which reached this exact gap before KI-082 too). No-op when no schema is registered for the
+  namespace, matching every other schema-declared-thing check in this codebase. New
+  `SchemaIR.has_concept()`; conformance vectors added (`TestUnknownConceptRejected`, both
+  backends).
 - `assert_literal`/`assert_ref`/`propose`/`propose_ref` now raise `NotFoundError` naming the
   entity id when `subject` doesn't exist, instead of relying on the `assertion` table's
   `FOREIGN KEY` constraint to fail late with a generic, redacted `StorageError` ("Assertion

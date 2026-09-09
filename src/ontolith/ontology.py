@@ -369,12 +369,14 @@ class Ontology:
         Raises:
             AuthError: author is not a known principal
             CapabilityError: author's capability is 'read'
+            ValidationError: concept is not declared in the active schema (KI-090)
         """
         principal = self.backend.get_principal(author)
         if principal is None:
             raise AuthError(f"Principal not found: {author}")
         if principal.default_capability == "read":
             raise CapabilityError(f"Principal {author!r} lacks propose capability")
+        self._require_known_concept(concept)
 
         entity = Entity(
             id=self.id_provider.next(),
@@ -622,6 +624,25 @@ class Ontology:
                 f"Predicate {predicate!r} is declared a {actual_kind} in schema "
                 f"{schema.namespace!r} version {schema.version}, but {wrong_call} "
                 f"asserts a {expected_kind}. Use {right_call} instead."
+            )
+
+    def _require_known_concept(self, concept: str) -> None:
+        """Reject an unknown `concept` at entity-creation time (SPEC §4,
+        KI-090), mirroring `_require_known_predicate`'s identical precedent
+        for `predicate` — rather than silently persisting an entity under a
+        concept the active schema never declared.
+
+        No-op when no schema is registered for the namespace yet — same
+        rationale as `_require_known_predicate`: a schema-less namespace has
+        nothing to validate a concept against.
+        """
+        schema = self.backend.get_schema(self.namespace)
+        if schema is None:
+            return
+        if not schema.has_concept(concept):
+            raise ValidationError(
+                f"Unknown concept {concept!r}: not declared in schema "
+                f"{schema.namespace!r} version {schema.version}"
             )
 
     def _require_existing_subject(self, subject: str) -> None:

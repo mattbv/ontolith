@@ -1816,10 +1816,10 @@ Mutation-tested directly: reverting each of the two call sites individually repr
 
 ---
 
-## KI-090 — `create_entity()` never validates `concept` against the active schema — now agent-reachable via REST/GraphQL/MCP (KI-082)
+## KI-090 — `create_entity()` never validates `concept` against the active schema — now agent-reachable via REST/GraphQL/MCP (KI-082) ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — pre-existing SDK behavior, but KI-082 made it reachable by a `propose`-tier AI agent for the first time, not just a human CLI operator
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §4 (concepts are schema-declared); compare `Ontology._require_known_predicate`, which does this exact check for `predicate` on every assertion write
 
 ### Description
@@ -1830,7 +1830,9 @@ This is pre-existing SDK behavior, not introduced by KI-082 — before KI-082, t
 
 ### Fix
 
-Add a `_require_known_concept(concept)` check to `create_entity()` — no schema registered for the namespace yet should stay a no-op (matching `_require_known_predicate`'s own precedent), otherwise raise `ValidationError` naming the unknown concept. One check, one call site (`create_entity` is the only place that constructs a genuinely *new* `Entity` from caller input — both backends also construct `Entity` objects elsewhere, but only to hydrate already-persisted rows on read paths, not to validate one on the way in), so no interface-level changes needed beyond the SDK method itself.
+Added `Ontology._require_known_concept(concept)`, mirroring `_require_known_predicate` exactly (no-op when no schema is registered for the namespace, otherwise `ValidationError` naming the unknown concept), called from `create_entity()` right after the existing capability check. Backed by a new `SchemaIR.has_concept(concept)` method (mirrors `has_predicate`) rather than reaching into `schema.concepts` directly from `Ontology`. One check, one call site — no interface-level changes needed beyond the SDK method itself, so REST/GraphQL/MCP's KI-082 wrappers pick this up automatically.
+
+Added conformance vectors (`conformance/test_conflict.py::TestUnknownConceptRejected`, runs against both backends) mirroring `TestUnknownPredicateRejected`'s exact shape: unknown concept rejected, known concept succeeds, and the schema-less-namespace no-op case. Also added direct `SchemaIR.has_concept()` unit tests (`tests/unit/test_schema_ir.py::TestHasConcept`), mirroring `TestHasPredicate`. Mutation-tested directly: reverting the call site reproduces the pre-fix behavior (both conformance-vector backends) and is caught by exactly the two tests that exercise the unknown-concept case, no cross-coverage with the schema-less/known-concept cases. Full suite confirmed no regressions — no existing test creates an entity under a concept its own schema fixture (where one is applied) doesn't already declare.
 
 ---
 

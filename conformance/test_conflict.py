@@ -599,6 +599,40 @@ class TestUnknownPredicateRejected:
 
 
 # ===========================================================================
+# Unknown concept rejected at entity-creation time (SPEC §4, KI-090)
+# ===========================================================================
+
+
+class TestUnknownConceptRejected:
+    """Mirrors TestUnknownPredicateRejected above, for create_entity()'s
+    concept instead of assert_literal/propose's predicate."""
+
+    def test_create_entity_unknown_concept_raises(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        with pytest.raises(ValidationError, match="Unknown concept"):
+            kb.create_entity("Organization", author=AUTHOR)
+
+    def test_create_entity_known_concept_succeeds(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        assert entity.concept == "Person"
+
+    def test_unknown_concept_permitted_without_a_registered_schema(
+        self, make_kb: KbFactory
+    ) -> None:
+        """No schema in the namespace: nothing to validate a concept
+        against, so any concept is accepted — mirrors
+        TestUnknownPredicateRejected's identical schema-less case."""
+        clock = FixedClock(T0)
+        ids = FixedIdProvider(["p-0", "e-1"])
+        kb = make_kb(clock, ids)
+        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+
+        entity = kb.create_entity("WhateverConcept", author=AUTHOR)
+        assert entity.concept == "WhateverConcept"
+
+
+# ===========================================================================
 # value_type mismatch rejected at write time (SPEC §4, KI-031, ADR-0028)
 # ===========================================================================
 
