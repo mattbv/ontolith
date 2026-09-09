@@ -22,6 +22,7 @@ from ontolith.govern.policy import (
     Decision,
     Reject,
     RequireReview,
+    RequireReviewForAI,
     SourceQuorum,
 )
 from ontolith.govern.proposal import Proposal
@@ -239,30 +240,19 @@ def test_kb_and_acting_as_are_forwarded_to_every_contained_strategy() -> None:
     assert any_spy.received_acting_as is delegate
 
 
-class _RequireReviewForAI:
-    """The minimal AI-review strategy documented as an example in
-    Composite's own docstring - reproduced here (not imported, since it's
-    intentionally not a shipped symbol, ADR-0040) to test the actual
-    KI-061 motivating scenario end-to-end."""
-
-    def evaluate(self, proposal, principal, kb=None, acting_as=None) -> Decision:
-        if principal.kind == "ai":
-            return RequireReview(
-                [principal.owner] if principal.owner else [], "AI proposals require review"
-            )
-        return AutoAccept("non-AI: deferring to the rest of the Composite")
-
-
 def test_composite_closes_the_ki_061_gap(make_kb: KbFactory) -> None:
     """SourceQuorum alone lets an AI-authored proposal auto-accept once
     quorum is reached (ADR-0025 §5, pinned separately in
     test_source_quorum_policy.py::test_ai_authored_proposal_can_auto_accept
-    — unchanged by this test). Composed with an AI-review strategy via
-    Composite, the same scenario now requires review instead."""
+    — unchanged by this test). Composed with RequireReviewForAI (KI-088;
+    ADR-0040 originally sketched this inline rather than shipping it, but
+    that decision was itself reversed once the pattern had been in
+    production use for a while — see ADR-0040's own 2026-09-09 update),
+    the same scenario now requires review instead."""
     kb = make_kb(
         FixedClock(T0),
         FixedIdProvider(["e-1", "a-seed", "prop-1"]),
-        policy=Composite(all=[_RequireReviewForAI(), SourceQuorum(threshold=2)]),
+        policy=Composite(all=[RequireReviewForAI(), SourceQuorum(threshold=2)]),
     )
     author = "alice@example.com"
     kb.create_principal(author, kind="human", auth_method="oidc", default_capability="write")

@@ -594,6 +594,100 @@ class RequireReviewByRole:
         )
 
 
+class RequireReviewForAI:
+    """Routes AI-kind principals to review; AutoAccepts everyone else (SPEC §9.2, KI-088).
+
+    Promotes the composition pattern ``Composite``'s own docstring has
+    sketched inline since ADR-0040 into a real, exported, tested class —
+    ``ThresholdPolicy`` is the only strategy that unconditionally routes
+    AI-kind principals to review; every non-default strategy in this
+    module (``SourceQuorum``, ``ConfidenceThreshold``, ``SourceRequired``)
+    deliberately does not special-case AI authorship on its own (KI-061,
+    ADR-0025), so a
+    deployment wanting both composes a small AI-blocking strategy
+    alongside one — this is that strategy, shippable instead of
+    hand-derived from a comment each time::
+
+        policy = Composite(all=[RequireReviewForAI(), SourceQuorum(2)])
+
+    This *is* a reversal of ADR-0040's own explicit decision to not ship
+    this class — its Alternatives Considered rejected exactly this,
+    preferring a docstring example over "a new public symbol with its own
+    maintenance surface." KI-088 revisits that call explicitly (recorded
+    in ADR-0040's own 2026-09-09 update) rather than letting the pattern
+    silently drift into being shipped without anyone deciding it should
+    be: the tradeoff ADR-0040 weighed hasn't changed (SPEC §9.2 still
+    doesn't name an "AI-review" strategy, the class is still small), but
+    the docstring-sketch pattern's real cost — every deployer re-deriving
+    it from a comment, correctly, each time — outweighed that concern once
+    it had been in production use since KI-061. ``RequireReviewForAI``
+    does only the one thing its name says; using the whole of
+    ``ThresholdPolicy`` in ``Composite`` instead would re-impose *its* own
+    capability/trust-level gate too, defeating the point of choosing a
+    different strategy (like ``SourceQuorum``) in the first place — that
+    part of ADR-0040's original reasoning is unchanged.
+
+    ``evaluate()`` returns ``RequireReview([principal.owner], ...)`` for an
+    AI-kind principal (an empty reviewer list if ``owner`` is falsy — SPEC
+    §8.1 requires AI principals to declare one in practice, but this
+    strategy doesn't assume it), and ``AutoAccept(...)`` for everyone else.
+
+    Rejects principals without at least ``propose`` capability first,
+    matching every sibling strategy's own KI-015 floor enforcement
+    (`docs/known-issues.md`) — checked *before* the AI-kind test, unlike
+    ``ThresholdPolicy``'s ordering (AI-kind first, capability math never
+    reached for an AI author). ``ThresholdPolicy`` can get away with
+    AI-first because it has no other reachable outcome for a read-only AI
+    that would differ; here, checking capability first means a read-only
+    principal of *any* kind is rejected the same way every other strategy
+    in this module already rejects one, rather than a read-only AI
+    reaching ``RequireReview`` (a working, if misleading, outcome) while a
+    read-only human reaches it via a different, uncomposed strategy's own
+    check. Composition doesn't change the practical result either way —
+    ``Composite(all=...)``'s most-restrictive-wins merge treats
+    ``Reject``/``RequireReview`` identically as "the group doesn't
+    auto-accept" — but this class enforces its own floor rather than
+    depending on being composed with a strategy that does, so it behaves
+    correctly standalone too.
+
+    AI-kind is read from ``principal`` (the author) only, never from
+    ``acting_as`` — mirroring ``ThresholdPolicy``'s "AI's own kind is
+    never laundered away by delegating" precedent (comment at this
+    module's ``ThresholdPolicy.evaluate``; SPEC §8.4 defines delegation's
+    effective *capability* as the more conservative of the two principals,
+    but says nothing about laundering *kind*, so this strategy makes the
+    same explicit choice every other kind-sensitive check in this module
+    already makes).
+    """
+
+    def evaluate(
+        self,
+        proposal: Proposal,
+        principal: Principal,
+        kb: KbView | None = None,
+        acting_as: Principal | None = None,
+    ) -> Decision:
+        """Evaluate proposal based on capability floor and the author's kind.
+
+        ``proposal``/``kb`` are accepted for ``PolicyStrategy`` conformance
+        but never read — this strategy's decision depends only on
+        ``principal``/``acting_as``, matching ``ThresholdPolicy``'s/
+        ``RequireReviewByRole``'s own "kb defaults to None, never used" shape.
+        """
+        capability: str = principal.default_capability
+        if acting_as is not None:
+            capability = min_capability(capability, acting_as.default_capability)
+        if capability == "read":
+            return Reject(f"Principal {principal.id} has read-only access and cannot propose")
+
+        if principal.kind == "ai":
+            reviewers = [principal.owner] if principal.owner else []
+            return RequireReview(
+                reviewers, f"AI proposals require review (owner: {principal.owner})"
+            )
+        return AutoAccept(f"Principal {principal.id} is not AI-kind")
+
+
 def _merge_reject(decisions: list[Reject]) -> Reject:
     """Combine multiple Reject decisions into one, concatenating reasons in
     input order (each retains its originating strategy's own wording)."""
@@ -660,70 +754,59 @@ def _least_restrictive(decisions: list[Decision]) -> Decision:
 
 class Composite:
     """Combines PolicyStrategy instances into one decision (SPEC §9.2's
-    ``Composite(all=…, any=…)``).
+        ``Composite(all=…, any=…)``).
 
-    Every strategy in ``all`` must independently return ``AutoAccept`` for
-    the ``all`` group to approve — a single ``Reject``/``RequireReview``
-    anywhere in the group overrides every ``AutoAccept`` the others
-    returned. At least one strategy in ``any`` must return ``AutoAccept``
-    for the ``any`` group to approve. Both groups must approve for
-    ``Composite`` itself to auto-accept (an unset group is excluded from
-    the combination entirely, rather than contributing a placeholder
-    decision — a caller passing only ``all=`` or only ``any=`` gets exactly
-    that group's own semantics, unconstrained by the other).
+        Every strategy in ``all`` must independently return ``AutoAccept`` for
+        the ``all`` group to approve — a single ``Reject``/``RequireReview``
+        anywhere in the group overrides every ``AutoAccept`` the others
+        returned. At least one strategy in ``any`` must return ``AutoAccept``
+        for the ``any`` group to approve. Both groups must approve for
+        ``Composite`` itself to auto-accept (an unset group is excluded from
+        the combination entirely, rather than contributing a placeholder
+        decision — a caller passing only ``all=`` or only ``any=`` gets exactly
+        that group's own semantics, unconstrained by the other).
 
-    This is SPEC §9.2's sanctioned way to layer an unconditional rule (e.g.
-    ThresholdPolicy's "AI principals always require review", ADR-0003) on
-    top of a KB-inspecting strategy like ``SourceQuorum``, which
-    deliberately does not special-case AI authorship on its own (KI-061,
-    ADR-0025 §5). A deployment wanting both writes a small strategy for the
-    unconditional half and composes it — Ontolith does not ship a
-    standalone "AI always requires review" strategy, since ``ThresholdPolicy``
-    bundles that rule with its own capability/trust-level checks (using the
-    whole of ``ThresholdPolicy`` here would re-impose *its* capability gate
-    too, defeating the point of choosing ``SourceQuorum`` in the first
-    place)::
+        This is SPEC §9.2's sanctioned way to layer an unconditional rule (e.g.
+        ThresholdPolicy's "AI principals always require review", ADR-0003) on
+        top of a KB-inspecting strategy like ``SourceQuorum``, which
+        deliberately does not special-case AI authorship on its own (KI-061,
+        ADR-0025 §5). ``RequireReviewForAI`` (KI-088) is exactly that small
+        unconditional-half strategy, shipped rather than hand-derived::
 
-        class RequireReviewForAI:
-            def evaluate(
-                self,
-                proposal: Proposal,
-                principal: Principal,
-                kb: KbView | None = None,
-                acting_as: Principal | None = None,
-            ) -> Decision:
-                if principal.kind == "ai":
-                    return RequireReview([principal.owner] if principal.owner else [],
-                                          "AI proposals require review")
-                return AutoAccept("non-AI: deferring to the rest of the Composite")
+            policy = Composite(all=[RequireReviewForAI(), SourceQuorum(2)])
 
-        policy = Composite(all=[RequireReviewForAI(), SourceQuorum(2)])
+    ``RequireReviewForAI`` is not ``ThresholdPolicy`` under a new name —
+    using the whole of ``ThresholdPolicy`` here would re-impose *its own*
+    trust-level gate too (on top of the KI-015 capability floor
+    ``RequireReviewForAI`` already enforces on its own), defeating the point
+    of choosing ``SourceQuorum`` in the first place. Composed explicitly
+    like this, ``RequireReviewForAI`` does only the AI-review half.
 
-    When multiple strategies in the same group land at the same decision
-    severity (e.g. two ``RequireReview``s), their reviewers are merged as a
-    dedup'd union and their reasons are concatenated — every contributing
-    strategy's rationale is preserved, not just the first one evaluated.
+        When multiple strategies in the same group land at the same decision
+        severity (e.g. two ``RequireReview``s), their reviewers are merged as a
+        dedup'd union and their reasons are concatenated — every contributing
+        strategy's rationale is preserved, not just the first one evaluated.
 
-    Reads via ``kb`` are still permitted (this composes, not replaces, the
-    contained strategies) — purity/determinism holds as long as every
-    contained strategy holds it.
+        Reads via ``kb`` are still permitted (this composes, not replaces, the
+        contained strategies) — purity/determinism holds as long as every
+        contained strategy holds it.
 
-    ``Composite`` does not itself enforce KI-015's read-capability floor
-    (``docs/known-issues.md``: "any future ``PolicyStrategy`` needs to make
-    the same deliberate choice; it is not inherited for free") — it is
-    exactly as permissive or restrictive as its contained strategies, by
-    design, since it is a combinator rather than a leaf strategy. This is
-    safe for ``all=``: any member's own ``Reject`` for a read-capability
-    principal (e.g. ``SourceQuorum``'s) still wins, since ``all`` uses the
-    most-restrictive decision. It is a real sharp edge for ``any=``: if one
-    member in the group doesn't check capability at all and would
-    otherwise ``AutoAccept``, that member's decision can win the group even
-    though a stricter sibling (like ``SourceQuorum``) would have rejected
-    the same principal — the same "OR" semantics that let one strategy's
-    approval cover for another's stricter rule also let it cover for a
-    missing capability check. Every strategy composed into an ``any=``
-    group should enforce the floor itself if that matters for the
-    deployment, the same way ``SourceQuorum`` already does.
+        ``Composite`` does not itself enforce KI-015's read-capability floor
+        (``docs/known-issues.md``: "any future ``PolicyStrategy`` needs to make
+        the same deliberate choice; it is not inherited for free") — it is
+        exactly as permissive or restrictive as its contained strategies, by
+        design, since it is a combinator rather than a leaf strategy. This is
+        safe for ``all=``: any member's own ``Reject`` for a read-capability
+        principal (e.g. ``SourceQuorum``'s) still wins, since ``all`` uses the
+        most-restrictive decision. It is a real sharp edge for ``any=``: if one
+        member in the group doesn't check capability at all and would
+        otherwise ``AutoAccept``, that member's decision can win the group even
+        though a stricter sibling (like ``SourceQuorum``) would have rejected
+        the same principal — the same "OR" semantics that let one strategy's
+        approval cover for another's stricter rule also let it cover for a
+        missing capability check. Every strategy composed into an ``any=``
+        group should enforce the floor itself if that matters for the
+        deployment, the same way ``SourceQuorum`` already does.
     """
 
     def __init__(
@@ -798,5 +881,6 @@ __all__ = [
     "ConfidenceThreshold",
     "SourceRequired",
     "RequireReviewByRole",
+    "RequireReviewForAI",
     "Composite",
 ]

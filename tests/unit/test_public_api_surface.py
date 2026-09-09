@@ -102,6 +102,7 @@ _EXPECTED: dict[str, frozenset[str]] = {
             "ConfidenceThreshold",
             "SourceRequired",
             "RequireReviewByRole",
+            "RequireReviewForAI",
             "Composite",
             "Activate",
             "Supersede",

@@ -1774,10 +1774,10 @@ Left open, deliberately out of scope for this fix: whether KI-062's resolution (
 
 ---
 
-## KI-088 — `RequireReviewForAI` remains a docstring-only sketch, not a shippable class — revisits KI-061/ADR-0040's chosen resolution
+## KI-088 — `RequireReviewForAI` remains a docstring-only sketch, not a shippable class — revisits KI-061/ADR-0040's chosen resolution ✓ RESOLVED (Backlog)
 
 **Severity:** Informational — KI-061/ADR-0040 already reviewed this exact question and consciously chose the documentation-only pattern over shipping a new strategy; this KI only questions whether that choice should be revisited now that `Composite` has real users, not a newly-discovered gap
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §9.2 (`PolicyStrategy`, `Composite`), §8.3 ("Agents MUST default to `propose`...", unaffected by this)
 
 ### Description
@@ -1788,7 +1788,13 @@ This does not violate SPEC: §9.2 doesn't mandate that any particular strategy s
 
 ### Fix
 
-Consider promoting the docstring's `RequireReviewForAI` sketch to an actual exported, tested class, so `Composite(all=[RequireReviewForAI(), SourceQuorum(2)])` becomes copy-pasteable rather than something every deployer re-derives from a comment. This is an incremental improvement on KI-061/ADR-0040's already-settled design, not a reversal of it — if the project judges the docstring pattern sufficient (KI-061 already made that call once), this can stay closed as-is.
+Promoted the docstring's sketch to a real class, `RequireReviewForAI` (`govern/policy.py`), exported from both `ontolith.govern.policy` and `ontolith.govern` (`__all__` updated in both, plus the pinned `tests/unit/test_public_api_surface.py` entry). `Composite(all=[RequireReviewForAI(), SourceQuorum(2)])` is now copy-pasteable exactly as the docstring always showed it — `Composite`'s own docstring was simplified to reference the real class instead of re-sketching it inline, removing the duplication-drift risk that let the sketch's own line-count claim (KI-061's "five-line," actually 14) go unnoticed for as long as it did.
+
+The implementation adds one thing the inline sketch never had: its own KI-015 capability-floor enforcement (`read`-only principals rejected), matching every sibling strategy in this module (`SourceQuorum`, `ConfidenceThreshold`, `SourceRequired`, `RequireReviewByRole`) — the sketch, as written, would `AutoAccept` a read-only *non-AI* principal if used standalone rather than always composed with a floor-enforcing partner. Checked before the AI-kind test (unlike `ThresholdPolicy`'s AI-first ordering), matching the other four strategies' own convention; documented explicitly why this ordering choice doesn't change the practical outcome under `Composite(all=...)`'s most-restrictive-wins merge, only the standalone case. AI-kind is read from `principal` only, never `acting_as` — mirroring `ThresholdPolicy`'s own "never laundered via delegation" precedent (its own `evaluate()` comment, not ADR-0003, per this KI's own Description above), verified with a dedicated test.
+
+This is a genuine reversal of ADR-0040's own explicit decision *not* to ship this class — its Alternatives Considered rejected exactly this as "better shown as a docstring example... than shipped as a new public symbol with its own maintenance surface." Recorded honestly in ADR-0040's own 2026-09-09 update rather than left implicit: the tradeoff ADR-0040 weighed hasn't changed, but the docstring-sketch pattern's real cost (every deployer re-deriving it from a comment, correctly, each time) outweighed the "new public symbol" concern once the pattern had been in production use since KI-061. `docs/adr/README.md`'s own index entry updated to point at the reversal too, so a reader skimming the index isn't misled by the unqualified original claim.
+
+Added a full conformance vector (`conformance/test_require_review_for_ai_policy.py`, mirroring `RequireReviewByRole`'s own conformance file — its closest sibling, no `kb` read, always a fixed outcome for a given principal) covering: AI requires review with owner as sole reviewer, non-AI (human and service) auto-accepts, the KI-015 floor (including a read-capability AI principal, which is rejected outright rather than routed to review), AI-kind never laundered via `acting_as`, determinism/statelessness, and two end-to-end tests through a real `kb.propose()` call proving the documented `Composite(all=[RequireReviewForAI(), SourceQuorum(...)])` pattern actually works both ways (AI still requires review even once the quorum is met; a non-AI author auto-accepts once it is). Mutation-tested directly: disabling the capability-floor check and disabling the AI-kind check independently, each caught by exactly its own dedicated tests.
 
 ---
 
