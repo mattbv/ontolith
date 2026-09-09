@@ -1949,6 +1949,48 @@ class TestConcurrency:
         assert backend._lock.acquire(blocking=False)
         backend._lock.release()
 
+    def test_begin_reports_generic_message_for_non_busy_operational_error(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """KI-084: begin()'s SQLITE_BUSY-family masking must not swallow
+        an unrelated OperationalError (e.g. disk I/O) into the same "safe
+        to retry" message — that would mischaracterize a genuine fault as
+        transient. A real non-BUSY OperationalError is hard to provoke
+        deterministically from Python, so this substitutes the connection
+        with a stand-in raising a synthetic one carrying a non-BUSY
+        extended error code, mirroring the `_FailingCommitConn` pattern
+        used elsewhere in this file for the same reason.
+        """
+
+        class _FailingBeginConn:
+            """Delegates everything to the real connection except execute()."""
+
+            def __init__(self, real_conn: sqlite3.Connection) -> None:
+                self._real = real_conn
+
+            def execute(self, sql: str, *args: object) -> object:
+                if sql == "BEGIN IMMEDIATE":
+                    err = sqlite3.OperationalError("disk I/O error")
+                    err.sqlite_errorcode = sqlite3.SQLITE_IOERR  # not SQLITE_BUSY
+                    raise err
+                return self._real.execute(sql, *args)
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._real, name)
+
+        real_conn = backend.conn
+        backend.conn = _FailingBeginConn(real_conn)  # type: ignore[assignment]
+        try:
+            with pytest.raises(StorageError, match="Failed to begin transaction") as exc_info:
+                backend.begin()
+            assert "safe to retry" not in str(exc_info.value)
+        finally:
+            backend.conn = real_conn
+
+        # The lock must be free — begin()'s non-BUSY branch releases it too.
+        assert backend._lock.acquire(blocking=False)
+        backend._lock.release()
+
     def test_begin_blocks_on_cross_process_writer_then_reports_retryable(
         self, temp_db: Path
     ) -> None:
@@ -2018,9 +2060,21 @@ class TestConcurrency:
         expires, the busy handler's retry succeeds rather than eventually
         failing. Confirms BEGIN IMMEDIATE's contention is genuinely
         transient/retryable, not just distinguishable-but-still-fatal.
+
+        Reviewed and found to have zero mutation-detecting power without
+        the `elapsed` assertion below: with a plain deferred `BEGIN`,
+        `contender.begin()` also returns immediately and also observes
+        `entity-001` (its lazy read snapshot is only taken *after*
+        `releaser.join()` has let the writer commit) — so the two
+        assertions that used to be here alone passed identically whether
+        or not `begin()` actually contended on anything. Asserting a
+        blocking wait, mirroring the sibling test above, is what actually
+        exercises BEGIN IMMEDIATE claiming the lock up front.
         """
         writer = SQLiteBackend(temp_db)
         contender = SQLiteBackend(temp_db)
+        errors: list[BaseException] = []
+        entered = threading.Event()
         try:
             writer.put_principal(
                 Principal(
@@ -2036,32 +2090,44 @@ class TestConcurrency:
             # on the same thread, so the whole hold-then-release sequence
             # is done here rather than split across threads.
             def hold_lock_then_release() -> None:
-                writer.begin()
-                writer.put_entity(
-                    Entity(
-                        id="entity-001",
-                        namespace="test-ns",
-                        concept="Person",
-                        created_at=datetime(2025, 1, 1, tzinfo=UTC),
-                        created_by="alice@test.com",
+                try:
+                    writer.begin()
+                    writer.put_entity(
+                        Entity(
+                            id="entity-001",
+                            namespace="test-ns",
+                            concept="Person",
+                            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                            created_by="alice@test.com",
+                        )
                     )
-                )
-                time.sleep(0.3)
-                writer.commit()
+                    entered.set()
+                    time.sleep(0.3)
+                    writer.commit()
+                except BaseException as e:  # noqa: BLE001 - captured for the assertion below
+                    errors.append(e)
 
             releaser = threading.Thread(target=hold_lock_then_release)
             releaser.start()
-            time.sleep(0.05)  # let the writer's begin() land first
+            assert entered.wait(timeout=5)  # deterministic: writer's begin() has landed
 
             # contender keeps the (default, 5s) busy_timeout — plenty of
             # room for the writer's commit() above to land first; begin()
             # blocks here until the busy handler's retry succeeds.
+            t0 = time.monotonic()
             contender.begin()
+            elapsed = time.monotonic() - t0
             releaser.join(timeout=5)
+            assert not releaser.is_alive()
 
+            assert errors == []
+            # Genuinely blocked on the writer's held lock, not a no-op
+            # deferred BEGIN that never contended on anything.
+            assert elapsed >= 0.2
             assert contender._in_transaction is True
             assert contender.get_entity("entity-001") is not None
         finally:
-            contender.rollback()
+            if contender._in_transaction:
+                contender.rollback()
             writer.close()
             contender.close()

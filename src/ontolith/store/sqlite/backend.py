@@ -107,15 +107,20 @@ class SQLiteBackend:
         # ever actually concurrent. This flag only lifts that same-thread
         # check; it does not by itself serialize concurrent access — that is
         # what self._lock (below) does (KI-023).
-        # timeout=5.0 (KI-084): pins Python's own sqlite3 default explicitly
-        # rather than leaving it implicit — this is what makes SQLITE_BUSY
-        # (and its extended variants) retry for up to 5s before begin()
-        # raises, instead of failing on the first contention it sees. Only
-        # meaningful now that begin() below issues BEGIN IMMEDIATE: a
-        # deferred BEGIN's stale-snapshot-upgrade failure (SQLITE_BUSY_
-        # SNAPSHOT) bypasses the busy handler entirely, so no busy_timeout
-        # value would have helped against the specific failure this KI
-        # closes — see begin()'s own docstring for the full explanation.
+        # timeout=5.0 (KI-084): 5.0 is already Python's own sqlite3 default
+        # when this kwarg is omitted (verified directly), so this line is a
+        # behavioral no-op by itself — pinning it explicitly rather than
+        # inheriting a stdlib default is what makes it a deliberate,
+        # documented value instead of an unexamined implicit one. It only
+        # becomes load-bearing given the change below: begin() now issues
+        # BEGIN IMMEDIATE, so SQLITE_BUSY (and its extended variants) is
+        # reachable at begin() time and genuinely retries against this
+        # timeout for up to 5s before raising — under the old deferred
+        # BEGIN, a stale-snapshot-upgrade failure (SQLITE_BUSY_SNAPSHOT)
+        # bypassed the busy handler entirely, so no busy_timeout value,
+        # explicit or not, would have helped against the specific failure
+        # this KI closes — see begin()'s own docstring for the full
+        # explanation.
         self.conn = sqlite3.connect(
             str(self.path), timeout=5.0, isolation_level=None, check_same_thread=False
         )
@@ -644,6 +649,22 @@ class SQLiteBackend:
         writer is instead serialized behind it — blocked and retried by
         the busy handler, same as any other reachable `SQLITE_BUSY`, for
         up to `busy_timeout` before genuinely failing.
+
+        Trade-off worth knowing (KI-084 review): `self._lock` is acquired
+        *before* the `BEGIN IMMEDIATE` call below, so while this call is
+        parked in SQLite's busy handler waiting out a cross-process writer,
+        every other `@_synchronized` call on this process — reads included
+        — blocks behind it too, for up to the full `busy_timeout`. This
+        can't be avoided by acquiring the lock later: only one Python
+        thread may safely touch the single shared `self.conn` at a time
+        regardless of which statement is running, so narrowing the lock's
+        span here would just reopen KI-023 (two threads issuing statements
+        on one connection concurrently) instead. The WAL claim elsewhere in
+        this file ("readers don't block behind writers") holds at the
+        SQLite level; it does not hold at this process's own read
+        availability once a `begin()` here is genuinely contended by
+        another process. See KI-084's `docs/adr/ADR-0001-storage-default.md`
+        update for the deployment-facing version of this same trade-off.
         """
         self._lock.acquire()
         try:
@@ -655,18 +676,25 @@ class SQLiteBackend:
             # code 5 in their low byte (extended code & 0xFF == primary
             # code) — Python's sqlite3 does surface the extended code on
             # `.sqlite_errorcode` (verified directly: a snapshot-upgrade
-            # failure reports 517, not just 5), so masking is what's
-            # actually needed to catch every busy variant, not just literal
-            # SQLITE_BUSY. Distinguishable from other begin() failures (a
-            # lock this connection's own busy_timeout couldn't clear within
-            # its window) rather than folded into the same generic message
-            # a non-transient failure below would get — still a
-            # StorageError (redacted at every interface boundary, KI-083's
-            # own precedent for why 5xx messages carry real detail only in
-            # server-side logs, never in the response), but a caller
-            # reading logs can now tell "this was contention, safe to retry
-            # the whole operation" from "something is actually broken"
-            # without guessing from the raw sqlite3 message.
+            # failure reports 517, not just 5). `BEGIN IMMEDIATE` above
+            # means `SQLITE_BUSY_SNAPSHOT` specifically can no longer occur
+            # at *this* call site (the write lock is claimed before any
+            # read, so there is no stale snapshot left to upgrade here) —
+            # but the masking itself stays as defense-in-depth: it's still
+            # what's needed to catch `SQLITE_BUSY_RECOVERY`/`_TIMEOUT`
+            # should either become reachable here, and to not silently stop
+            # matching if a future SQLite/Python change alters which
+            # variant this specific contention surfaces as. Distinguishable
+            # from other begin() failures (a lock this connection's own
+            # busy_timeout couldn't clear within its window) rather than
+            # folded into the same generic message a non-transient failure
+            # below would get — still a StorageError (redacted at every
+            # interface boundary, KI-083's own precedent for why 5xx
+            # messages carry real detail only in server-side logs, never in
+            # the response), but a caller reading logs can now tell "this
+            # was contention, safe to retry the whole operation" from
+            # "something is actually broken" without guessing from the raw
+            # sqlite3 message.
             code = getattr(e, "sqlite_errorcode", None)
             if code is not None and code & 0xFF == sqlite3.SQLITE_BUSY:
                 raise StorageError(

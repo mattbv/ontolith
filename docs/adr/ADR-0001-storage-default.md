@@ -99,8 +99,8 @@ regardless of `busy_timeout`. Confirmed directly (two `SQLiteBackend`
 instances on the same file, standing in for two OS processes, since
 `self._lock` is per-instance and does not itself serialize them) before
 this fix landed — see `tests/unit/test_sqlite_backend.py::TestConcurrency::
-test_begin_blocks_on_cross_process_writer_then_reports_retryable` and its
-`_releases` counterpart.
+test_begin_blocks_on_cross_process_writer_then_reports_retryable` and
+`test_begin_retries_and_succeeds_once_cross_process_writer_releases`.
 
 **Fix:** `begin()` now issues `BEGIN IMMEDIATE`, which claims the write
 lock at `begin()` time rather than lazily — so a concurrent writer is
@@ -126,13 +126,51 @@ check — it is a topology recommendation, matching how the reference
 deployment already runs (one REST/GraphQL/MCP process per database file;
 `check_same_thread=False` plus the RLock only cover that one process's own
 worker threads, per ADR-0010). Running two independent server processes
-against the same file is now *safe* (no more instant, unretryable failure)
-but still *serializes*: the second process's writes queue behind the
-first's for up to `busy_timeout` before erroring, which is a throughput
-cliff under real contention, not a correctness one. Scaling writes across
-processes is out of scope for the SQLite default — it is exactly the case
-this ADR's own "pluggable" decision exists for (a server-backed
-`StorageBackend`, tracked separately, not a change to this default).
+against the same file is now *safe* for the four write paths this fix
+actually covers (`assert_literal`, `assert_ref`, `propose`, `propose_ref`
+— every path whose conflict-routing read runs inside a `transaction()`
+block) — no more instant, unretryable failure — but still *serializes*:
+the second process's writes queue behind the first's for up to
+`busy_timeout` before erroring, which is a throughput cliff under real
+contention, not a correctness one. Scaling writes across processes is out
+of scope for the SQLite default and belongs to a server-backed
+`StorageBackend` instead (tracked separately, not a change to this
+default) — this fix does not claim to make that topology performant, only
+safe for the paths it covers.
+
+Not every write is one of those four paths, and this fix does not extend
+to the rest: `Ontology.create_entity()` reads for `natural_key` uniqueness
+(`_require_unique_natural_key`) and then writes, outside any
+`transaction()` block — the same stale-read shape, just not one this KI's
+fix reaches, since it never calls `begin()` at all (autocommit path). In
+practice a race there surfaces as the `entity` table's own
+`UNIQUE(namespace, concept, natural_key)` constraint failing loudly (a
+`StorageError`, not a silent duplicate — KI-091's constraint already
+covers the correctness half), so it's a narrower gap than the one this KI
+closes, not a repeat of it — filed separately as KI-092 rather than folded
+in here, since closing it means deciding whether `create_entity` should
+gain its own `transaction()` wrapper, a scope question distinct from this
+KI's "fix `begin()`'s SQL" mandate.
+
+**A cost this fix introduces, not just documents:** `self._lock` (ADR-0010,
+KI-023) is acquired *before* the `BEGIN IMMEDIATE` call, so while a
+`begin()` here is genuinely contended by another process and parked in
+SQLite's busy handler, every other call on *this* process — reads
+included — blocks behind it for up to the full `busy_timeout`. Measured
+directly: a same-process read blocked ~0.99s behind another thread's
+`begin()` contending against a 1s `busy_timeout`. Before this fix, a
+deferred `BEGIN` returned near-instantly and the eventual
+`SQLITE_BUSY_SNAPSHOT` failure was also instant, so the lock was never
+held this long — this is a genuinely new trade-off, not a pre-existing one
+now merely written down. It cannot be avoided by acquiring the lock after
+the `BEGIN IMMEDIATE` call instead: only one thread may safely issue a
+statement on the single shared `self.conn` at a time regardless of which
+statement it is, so narrowing the lock's span here would reopen KI-023
+(two threads on one connection concurrently) rather than remove the
+stall. In effect, one process's own read availability is now coupled to
+how promptly a *different* process's writer releases the file lock — a
+consideration for the single-writer-process topology recommended above,
+not a reason to abandon it.
 
 ## References
 
