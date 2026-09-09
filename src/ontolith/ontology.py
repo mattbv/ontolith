@@ -659,6 +659,18 @@ class Ontology:
         `UNIQUE` constraint on both backends (any number of entities may
         share `natural_key=None` within a concept), so there's nothing to
         check.
+
+        This is a check-then-write, not a transaction spanning both steps —
+        a concurrent duplicate created between this check and `put_entity`
+        below still lands on the `UNIQUE` constraint and still surfaces as
+        a `StorageError` (unlike `_require_existing_subject`'s permanence
+        argument, uniqueness genuinely can change between the two steps).
+        That's by design, not a gap this check is meant to close: the DB
+        constraint remains the authoritative backstop for the concurrent
+        case (see KI-084 — no cross-process write-safety guarantee for
+        SQLite — for the broader context this caveat sits inside); this
+        check only replaces the *common*, single-writer case's redacted
+        error with a named, caller-actionable one.
         """
         if natural_key is None:
             return

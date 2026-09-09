@@ -16,11 +16,14 @@ subject elsewhere in the same file.
 Known simplification (deliberate, not a defect): natural_keys must be
 unique across the whole file, not just per-concept, since resolution
 uses a single flat map. Ontology.create_entity has no create-or-reuse-
-by-natural-key lookup of its own (confirmed absent from StorageBackend
-and QueryBuilder), so this plugin does its own in-memory deduplication
-within a single import_() call; it does not detect duplicates across
-separate import_() calls (that would require an entity read of the
-whole KB, out of scope for a reference plugin).
+by-natural-key lookup of its own (QueryBuilder doesn't either), so this
+plugin does its own in-memory deduplication within a single import_()
+call; it does not detect duplicates across separate import_() calls
+(that would require an entity read of the whole KB, out of scope for a
+reference plugin) — a second import_() reusing a natural_key raises
+ValidationError naming the conflict (KI-091; StorageBackend does now
+have a get_entity_by_natural_key() lookup, but this plugin doesn't use
+it — the in-memory map is sufficient for its own single-call scope).
 """
 
 from collections.abc import Iterable
