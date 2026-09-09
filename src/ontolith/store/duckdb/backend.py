@@ -1018,6 +1018,29 @@ class DuckDBBackend:
         )
 
     @_synchronized
+    def get_entity_by_natural_key(
+        self, namespace: str, concept: str, natural_key: str
+    ) -> Entity | None:
+        """Retrieve an entity by its unique (namespace, concept, natural_key) triple."""
+        cursor = self.conn.execute(
+            "SELECT * FROM entity WHERE namespace = ? AND concept = ? AND natural_key = ?",
+            [namespace, concept, natural_key],
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        d = self._row_to_dict(cursor, row)
+        return Entity(
+            id=d["id"],
+            namespace=d["namespace"],
+            concept=d["concept"],
+            natural_key=d["natural_key"],
+            created_at=datetime.fromisoformat(d["created_at"]),
+            created_by=d["created_by"],
+        )
+
+    @_synchronized
     def assertions(
         self,
         subject: str | None = None,

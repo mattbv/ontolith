@@ -226,6 +226,25 @@ class StorageBackend(Protocol):
         """
         ...
 
+    def get_entity_by_natural_key(
+        self, namespace: str, concept: str, natural_key: str
+    ) -> Entity | None:
+        """Retrieve an entity by its unique `(namespace, concept, natural_key)`
+        triple (KI-091) — the same uniqueness the `entity` table's own
+        `UNIQUE(namespace, concept, natural_key)` constraint enforces, used
+        to pre-check a conflict before `put_entity` rather than surfacing
+        one late as a redacted `StorageError`.
+
+        Args:
+            namespace: Namespace to search within
+            concept: Concept name
+            natural_key: Natural key to look up
+
+        Returns:
+            Entity if one with this exact triple exists, None otherwise
+        """
+        ...
+
     def get_assertion(self, assertion_id: str) -> Assertion | None:
         """Retrieve a single assertion by ID, regardless of status.
 

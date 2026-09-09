@@ -93,6 +93,40 @@ class TestSQLiteBackend:
         """Getting a nonexistent entity returns None."""
         assert backend.get_entity("nonexistent") is None
 
+    def test_get_entity_by_natural_key(self, backend: SQLiteBackend) -> None:
+        """KI-091: an entity can be looked up by its (namespace, concept,
+        natural_key) triple, independent of its id."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            natural_key="ada",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(entity)
+
+        retrieved = backend.get_entity_by_natural_key("test-ns", "Person", "ada")
+
+        assert retrieved is not None
+        assert retrieved.id == entity.id
+
+    def test_get_entity_by_natural_key_no_match_returns_none(self, backend: SQLiteBackend) -> None:
+        """KI-091: a mismatched namespace, concept, or natural_key is not a match."""
+        entity = Entity(
+            id="entity-001",
+            namespace="test-ns",
+            concept="Person",
+            natural_key="ada",
+            created_at=datetime(2025, 1, 1, tzinfo=UTC),
+            created_by="alice@test.com",
+        )
+        backend.put_entity(entity)
+
+        assert backend.get_entity_by_natural_key("other-ns", "Person", "ada") is None
+        assert backend.get_entity_by_natural_key("test-ns", "Organization", "ada") is None
+        assert backend.get_entity_by_natural_key("test-ns", "Person", "grace") is None
+
     def test_put_assertion(self, backend: SQLiteBackend) -> None:
         """Assertion can be persisted."""
         # First create an entity

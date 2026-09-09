@@ -454,6 +454,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- `create_entity()` now raises `ValidationError` naming the conflict when `natural_key` is already
+  taken within `concept`, instead of relying on the `entity` table's `UNIQUE(namespace, concept,
+  natural_key)` constraint to fail late into a generic, redacted `StorageError` that discarded the
+  backend's own already-clear conflict message (closes KI-091, found while fixing KI-082) — same
+  class of fix as KI-083/KI-089. New `StorageBackend.get_entity_by_natural_key()` port method
+  (implemented on both backends); no-op when `natural_key` is `None` (`NULL` is exempt from the
+  `UNIQUE` constraint on both backends, verified directly, so there's nothing to check).
+  Pre-existing SDK behavior; KI-082 made it reachable by a `propose`-tier AI agent for the first
+  time. Conformance vectors added (`TestDuplicateNaturalKeyRejected`, both backends) plus direct
+  backend-level tests for the new port method.
 - `create_entity()` now raises `ValidationError` naming the concept when `concept` isn't declared
   in the active schema, instead of silently persisting an entity under an undeclared concept
   (closes KI-090, found while fixing KI-082) — mirrors `_require_known_predicate`'s identical,

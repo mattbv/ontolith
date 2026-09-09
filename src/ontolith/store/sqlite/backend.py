@@ -1144,6 +1144,29 @@ class SQLiteBackend:
         )
 
     @_synchronized
+    def get_entity_by_natural_key(
+        self, namespace: str, concept: str, natural_key: str
+    ) -> Entity | None:
+        """Retrieve an entity by its unique (namespace, concept, natural_key) triple."""
+        cursor = self.conn.cursor()
+        cursor.execute(
+            "SELECT * FROM entity WHERE namespace = ? AND concept = ? AND natural_key = ?",
+            (namespace, concept, natural_key),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+
+        return Entity(
+            id=row["id"],
+            namespace=row["namespace"],
+            concept=row["concept"],
+            natural_key=row["natural_key"],
+            created_at=datetime.fromisoformat(row["created_at"]),
+            created_by=row["created_by"],
+        )
+
+    @_synchronized
     def assertions(
         self,
         subject: str | None = None,

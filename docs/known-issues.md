@@ -1836,10 +1836,10 @@ Added conformance vectors (`conformance/test_conflict.py::TestUnknownConceptReje
 
 ---
 
-## KI-091 — Duplicate `(namespace, concept, natural_key)` on entity creation surfaces as a redacted `StorageError`, not a caller-actionable error — now agent-reachable via REST/GraphQL/MCP (KI-082)
+## KI-091 — Duplicate `(namespace, concept, natural_key)` on entity creation surfaces as a redacted `StorageError`, not a caller-actionable error — now agent-reachable via REST/GraphQL/MCP (KI-082) ✓ RESOLVED (Backlog)
 
 **Severity:** Bug — wrong error taxonomy for a caller-input conflict, same class as KI-083/KI-089; pre-existing SDK behavior newly agent-reachable via KI-082
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §16 (error taxonomy — a caller-input conflict should be a named, actionable error, not a generic backend failure)
 
 ### Description
@@ -1850,7 +1850,9 @@ Same root shape as KI-083/KI-089 (a caller-input condition surfacing through the
 
 ### Fix
 
-Add a pre-check in `create_entity()` — when `natural_key` is not `None`, look up whether an entity with the same `(namespace, concept, natural_key)` already exists (needs a `StorageBackend` port method if one doesn't already exist for this exact lookup) and raise a named `ValidationError` or a new `ConflictError`-shaped error (SPEC §16) before ever reaching the backend write, mirroring KI-083's pre-check pattern for `subject`.
+Added a new `StorageBackend` port method, `get_entity_by_natural_key(namespace, concept, natural_key)` (implemented on both backends, mirroring `get_entity`'s exact query shape), and `Ontology._require_unique_natural_key(concept, natural_key)`, called from `create_entity()` right after the existing `_require_known_concept` check — no-op when `natural_key is None` (verified directly on both backends: `NULL` is exempt from the `UNIQUE` constraint, so any number of entities may already share it within a concept), otherwise `ValidationError` naming the conflicting concept/natural_key/existing entity id. Used `ValidationError`, not the existing `ConflictError` — that type's own docstring scopes it specifically to SPEC §10's unresolved-contradiction domain concept, and a duplicate natural key is a caller-input validation failure, not a contradiction between facts.
+
+Added conformance vectors (`conformance/test_conflict.py::TestDuplicateNaturalKeyRejected`, both backends): duplicate raises, unique succeeds, same natural_key under a *different* concept doesn't conflict (uniqueness is scoped per-concept), and `natural_key=None` never conflicts. Added direct `get_entity_by_natural_key()` unit tests on both backends, mirroring `get_entity`'s own existing test pattern. Mutation-tested directly: reverting the call site reproduces the original `StorageError`/`UNIQUE` constraint failure on both conformance backends and is caught by exactly the two tests that exercise the duplicate case, no cross-coverage.
 
 ---
 

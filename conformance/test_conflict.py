@@ -633,6 +633,47 @@ class TestUnknownConceptRejected:
 
 
 # ===========================================================================
+# Duplicate natural_key rejected at entity-creation time (SPEC §16, KI-091)
+# ===========================================================================
+
+
+class TestDuplicateNaturalKeyRejected:
+    def test_create_entity_duplicate_natural_key_raises(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        kb.create_entity("Person", author=AUTHOR, natural_key="ada")
+        with pytest.raises(ValidationError, match="Entity conflict"):
+            kb.create_entity("Person", author=AUTHOR, natural_key="ada")
+
+    def test_create_entity_unique_natural_key_succeeds(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        kb.create_entity("Person", author=AUTHOR, natural_key="ada")
+        entity = kb.create_entity("Person", author=AUTHOR, natural_key="grace")
+        assert entity.natural_key == "grace"
+
+    def test_create_entity_same_natural_key_different_concept_succeeds(
+        self, make_kb: KbFactory
+    ) -> None:
+        """Uniqueness is scoped to (namespace, concept, natural_key) — the
+        same natural_key string under a different concept doesn't conflict."""
+        clock = FixedClock(T0)
+        ids = FixedIdProvider(["p-0", "e-1", "e-2"])
+        kb = make_kb(clock, ids)
+        kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+        kb.create_entity("Person", author=AUTHOR, natural_key="ada")
+
+        entity = kb.create_entity("Organization", author=AUTHOR, natural_key="ada")
+        assert entity.natural_key == "ada"
+
+    def test_create_entity_no_natural_key_never_conflicts(self, make_kb: KbFactory) -> None:
+        """natural_key=None is exempt from the uniqueness check entirely —
+        any number of entities may share it within a concept."""
+        kb = _kb(make_kb)
+        kb.create_entity("Person", author=AUTHOR)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        assert entity.natural_key is None
+
+
+# ===========================================================================
 # value_type mismatch rejected at write time (SPEC §4, KI-031, ADR-0028)
 # ===========================================================================
 
