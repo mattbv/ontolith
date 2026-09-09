@@ -594,6 +594,84 @@ class RequireReviewByRole:
         )
 
 
+class RequireReviewForAI:
+    """Routes AI-kind principals to review; AutoAccepts everyone else (SPEC §9.2, KI-088).
+
+    Promotes the composition pattern ``Composite``'s own docstring has
+    sketched inline since ADR-0040 into a real, exported, tested class —
+    ``ThresholdPolicy`` is the only strategy that unconditionally routes
+    AI-kind principals to review; every KB-inspecting strategy in this
+    module (``SourceQuorum``, ``ConfidenceThreshold``) deliberately does
+    not special-case AI authorship on its own (KI-061, ADR-0025), so a
+    deployment that wants both writes and composes a small AI-blocking
+    strategy — this is that strategy, shippable instead of hand-derived
+    from a comment each time::
+
+        policy = Composite(all=[RequireReviewForAI(), SourceQuorum(2)])
+
+    This is not a reversal of KI-061/ADR-0040's decision to not ship an
+    "AI-always-reviews" strategy bundled with `SourceQuorum`'s own
+    capability/trust checks — using the whole of ``ThresholdPolicy`` here
+    would re-impose *its* capability gate too, defeating the point of
+    choosing a different strategy in the first place. ``RequireReviewForAI``
+    does only the one thing its name says.
+
+    Rejects principals without at least ``propose`` capability first,
+    matching every sibling strategy's own KI-015 floor enforcement
+    (``docs/known-issues.md`) — checked *before* the AI-kind test, unlike
+    ``ThresholdPolicy``'s ordering (AI-kind first, capability math never
+    reached for an AI author). ``ThresholdPolicy`` can get away with
+    AI-first because it has no other reachable outcome for a read-only AI
+    that would differ; here, checking capability first means a read-only
+    principal of *any* kind is rejected the same way every other strategy
+    in this module already rejects one, rather than a read-only AI
+    reaching ``RequireReview`` (a working, if misleading, outcome) while a
+    read-only human reaches it via a different, uncomposed strategy's own
+    check. Composition doesn't change the practical result either way —
+    ``Composite(all=...)``'s most-restrictive-wins merge treats
+    ``Reject``/``RequireReview`` identically as "the group doesn't
+    auto-accept" — but this class enforces its own floor rather than
+    depending on being composed with a strategy that does, so it behaves
+    correctly standalone too.
+
+    AI-kind is read from ``principal`` (the author) only, never from
+    ``acting_as`` — mirroring ``ThresholdPolicy``'s "AI's own kind is
+    never laundered away by delegating" precedent (comment at this
+    module's ``ThresholdPolicy.evaluate``; SPEC §8.4 defines delegation's
+    effective *capability* as the more conservative of the two principals,
+    but says nothing about laundering *kind*, so this strategy makes the
+    same explicit choice every other kind-sensitive check in this module
+    already makes).
+    """
+
+    def evaluate(
+        self,
+        proposal: Proposal,
+        principal: Principal,
+        kb: KbView | None = None,
+        acting_as: Principal | None = None,
+    ) -> Decision:
+        """Evaluate proposal based on capability floor and the author's kind.
+
+        ``proposal``/``kb`` are accepted for ``PolicyStrategy`` conformance
+        but never read — this strategy's decision depends only on
+        ``principal``/``acting_as``, matching ``ThresholdPolicy``'s/
+        ``RequireReviewByRole``'s own "kb defaults to None, never used" shape.
+        """
+        capability: str = principal.default_capability
+        if acting_as is not None:
+            capability = min_capability(capability, acting_as.default_capability)
+        if capability == "read":
+            return Reject(f"Principal {principal.id} has read-only access and cannot propose")
+
+        if principal.kind == "ai":
+            reviewers = [principal.owner] if principal.owner else []
+            return RequireReview(
+                reviewers, f"AI proposals require review (owner: {principal.owner})"
+            )
+        return AutoAccept(f"Principal {principal.id} is not AI-kind")
+
+
 def _merge_reject(decisions: list[Reject]) -> Reject:
     """Combine multiple Reject decisions into one, concatenating reasons in
     input order (each retains its originating strategy's own wording)."""
@@ -676,28 +754,17 @@ class Composite:
     ThresholdPolicy's "AI principals always require review", ADR-0003) on
     top of a KB-inspecting strategy like ``SourceQuorum``, which
     deliberately does not special-case AI authorship on its own (KI-061,
-    ADR-0025 §5). A deployment wanting both writes a small strategy for the
-    unconditional half and composes it — Ontolith does not ship a
-    standalone "AI always requires review" strategy, since ``ThresholdPolicy``
-    bundles that rule with its own capability/trust-level checks (using the
-    whole of ``ThresholdPolicy`` here would re-impose *its* capability gate
-    too, defeating the point of choosing ``SourceQuorum`` in the first
-    place)::
-
-        class RequireReviewForAI:
-            def evaluate(
-                self,
-                proposal: Proposal,
-                principal: Principal,
-                kb: KbView | None = None,
-                acting_as: Principal | None = None,
-            ) -> Decision:
-                if principal.kind == "ai":
-                    return RequireReview([principal.owner] if principal.owner else [],
-                                          "AI proposals require review")
-                return AutoAccept("non-AI: deferring to the rest of the Composite")
+    ADR-0025 §5). ``RequireReviewForAI`` (KI-088) is exactly that small
+    unconditional-half strategy, shipped rather than hand-derived::
 
         policy = Composite(all=[RequireReviewForAI(), SourceQuorum(2)])
+
+    Ontolith does not ship a standalone "AI always requires review"
+    strategy *bundled with a capability-checking one* — using the whole
+    of ``ThresholdPolicy`` here would re-impose *its* capability gate too,
+    defeating the point of choosing ``SourceQuorum`` in the first place —
+    but ``RequireReviewForAI`` alone, composed explicitly like this, is
+    exactly that pattern made real.
 
     When multiple strategies in the same group land at the same decision
     severity (e.g. two ``RequireReview``s), their reviewers are merged as a
@@ -798,5 +865,6 @@ __all__ = [
     "ConfidenceThreshold",
     "SourceRequired",
     "RequireReviewByRole",
+    "RequireReviewForAI",
     "Composite",
 ]

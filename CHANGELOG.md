@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- `RequireReviewForAI` (closes KI-088, found in the pre-M4 deep + security audit) — the
+  `Composite(all=[RequireReviewForAI(), SourceQuorum(2)])` pattern `Composite`'s own docstring has
+  sketched inline since ADR-0040 is now a real, exported, tested `PolicyStrategy`, not something
+  every deployer re-derives from a comment. Routes AI-kind principals to review (owner as sole
+  reviewer, read from `principal` only — never `acting_as`, ADR-0003's "never laundered" precedent)
+  and defers everyone else. Enforces the KI-015 capability floor itself (checked before the
+  AI-kind test, unlike `ThresholdPolicy`'s AI-first ordering), matching every sibling strategy in
+  this module — the inline sketch never had this, so it would previously `AutoAccept` a read-only
+  non-AI principal if used standalone rather than always composed with a floor-enforcing partner.
+  Not a reversal of KI-061/ADR-0040's decision to not ship an "AI-always-reviews" strategy bundled
+  with a KB-inspecting one's own capability checks — this class does only the one thing its name
+  says. `Composite`'s docstring simplified to reference the real class instead of re-sketching it.
 - Entity creation on REST, GraphQL, and MCP (closes KI-082, found in the pre-M4 deep + security
   audit) — previously CLI/SDK-only, so an agent or application talking only to REST/GraphQL/MCP
   could assert facts about existing entities but never introduce a genuinely new one. `POST
