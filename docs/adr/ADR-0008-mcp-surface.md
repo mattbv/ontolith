@@ -166,9 +166,10 @@ change makes newly agent-reachable rather than new regressions of its own — tr
 `concept` against the active schema (an agent could create entities under an undeclared concept
 name, where `assert_literal`/`assert_ref` do validate `predicate` this way) — **KI-090 since
 resolved**, via `_require_known_concept()` mirroring `_require_known_predicate()` exactly — and a
-duplicate `(namespace, concept, natural_key)` triggers the DB's `UNIQUE` constraint late, surfacing
-as a redacted, generic `StorageError` (500-class) rather than a caller-actionable `ValidationError`
-naming the conflict.
+duplicate `(namespace, concept, natural_key)` triggered the DB's `UNIQUE` constraint late,
+surfacing as a redacted, generic `StorageError` (500-class) rather than a caller-actionable
+`ValidationError` naming the conflict — **KI-091 since resolved** too, via
+`_require_unique_natural_key()` and a new `StorageBackend.get_entity_by_natural_key()` port method.
 
 ## References
 

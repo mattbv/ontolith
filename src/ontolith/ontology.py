@@ -369,7 +369,9 @@ class Ontology:
         Raises:
             AuthError: author is not a known principal
             CapabilityError: author's capability is 'read'
-            ValidationError: concept is not declared in the active schema (KI-090)
+            ValidationError: concept is not declared in the active schema
+                (KI-090), or natural_key is already taken within concept
+                (KI-091)
         """
         principal = self.backend.get_principal(author)
         if principal is None:
@@ -377,6 +379,7 @@ class Ontology:
         if principal.default_capability == "read":
             raise CapabilityError(f"Principal {author!r} lacks propose capability")
         self._require_known_concept(concept)
+        self._require_unique_natural_key(concept, natural_key)
 
         entity = Entity(
             id=self.id_provider.next(),
@@ -643,6 +646,39 @@ class Ontology:
             raise ValidationError(
                 f"Unknown concept {concept!r}: not declared in schema "
                 f"{schema.namespace!r} version {schema.version}"
+            )
+
+    def _require_unique_natural_key(self, concept: str, natural_key: str | None) -> None:
+        """Reject a `natural_key` already taken within `concept` before an
+        entity is created (KI-091), rather than relying on the `entity`
+        table's `UNIQUE(namespace, concept, natural_key)` constraint to fail
+        late into a generic, redacted `StorageError` that discards the
+        backend's own already-clear conflict message.
+
+        No-op when `natural_key` is `None` — `NULL` is exempt from the
+        `UNIQUE` constraint on both backends (any number of entities may
+        share `natural_key=None` within a concept), so there's nothing to
+        check.
+
+        This is a check-then-write, not a transaction spanning both steps —
+        a concurrent duplicate created between this check and `put_entity`
+        below still lands on the `UNIQUE` constraint and still surfaces as
+        a `StorageError` (unlike `_require_existing_subject`'s permanence
+        argument, uniqueness genuinely can change between the two steps).
+        That's by design, not a gap this check is meant to close: the DB
+        constraint remains the authoritative backstop for the concurrent
+        case (see KI-084 — no cross-process write-safety guarantee for
+        SQLite — for the broader context this caveat sits inside); this
+        check only replaces the *common*, single-writer case's redacted
+        error with a named, caller-actionable one.
+        """
+        if natural_key is None:
+            return
+        existing = self.backend.get_entity_by_natural_key(self.namespace, concept, natural_key)
+        if existing is not None:
+            raise ValidationError(
+                f"Entity conflict: {concept!r} with natural_key={natural_key!r} "
+                f"already exists in namespace {self.namespace!r} (id={existing.id!r})"
             )
 
     def _require_existing_subject(self, subject: str) -> None:
