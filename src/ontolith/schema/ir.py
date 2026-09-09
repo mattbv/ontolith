@@ -152,6 +152,10 @@ class SchemaIR(BaseModel):
         """Return whether a dotted "Concept.field" predicate is declared in this schema."""
         return self._resolve_field(predicate) is not None
 
+    def has_concept(self, concept: str) -> bool:
+        """Return whether `concept` (e.g. "Person") is declared in this schema (KI-090)."""
+        return concept in self.concepts
+
     def temporality_of(self, predicate: str) -> Literal["static", "time_varying"]:
         """Resolve the declared temporality of a predicate (SPEC §10.1).
 

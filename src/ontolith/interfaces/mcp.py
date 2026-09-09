@@ -370,8 +370,9 @@ def create_mcp_server(
 
         Returns:
             Dict with the created entity's fields, or "error" if no token
-            was resolvable, it does not resolve to a valid principal, or
-            the principal lacks propose capability.
+            was resolvable, it does not resolve to a valid principal, the
+            principal lacks propose capability, or `concept` isn't declared
+            in the active schema (KI-090).
         """
         from ontolith.core.errors import AuthError
 
