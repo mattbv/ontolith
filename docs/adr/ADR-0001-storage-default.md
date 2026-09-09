@@ -99,12 +99,21 @@ so a concurrent writer in a second process could commit between that read
 and this connection's own write. The write then
 hit `SQLITE_BUSY_SNAPSHOT`, a stale-snapshot-upgrade failure SQLite
 deliberately never routes through the busy handler: it failed immediately,
-regardless of `busy_timeout`. Confirmed directly (two `SQLiteBackend`
-instances on the same file, standing in for two OS processes, since
-`self._lock` is per-instance and does not itself serialize them) before
-this fix landed — see `tests/unit/test_sqlite_backend.py::TestConcurrency::
+regardless of `busy_timeout`. Confirmed directly, ad hoc, against the
+pre-fix code before this fix landed (two `SQLiteBackend` instances on the
+same file, standing in for two OS processes, since `self._lock` is
+per-instance and does not itself serialize them) — see KI-084's own
+Description in `docs/known-issues.md` for that reproduction's detail. The
+committed regression suite added alongside this fix — `tests/unit/
+test_sqlite_backend.py::TestConcurrency::
 test_begin_blocks_on_cross_process_writer_then_reports_retryable` and
-`test_begin_retries_and_succeeds_once_cross_process_writer_releases`.
+`test_begin_retries_and_succeeds_once_cross_process_writer_releases` —
+exercises the *post-fix* behavior (contention now blocks and retries
+rather than failing instantly); reverting `BEGIN IMMEDIATE` alone doesn't
+reproduce the original `SQLITE_BUSY_SNAPSHOT` failure either, since no
+write is attempted after a reverted `begin()` returns — it instead surfaces
+as `DID NOT RAISE`, a different, and equally valid, regression signal for
+this fix.
 
 **Fix:** `begin()` now issues `BEGIN IMMEDIATE`, which claims the write
 lock at `begin()` time rather than lazily — so a concurrent writer is
@@ -118,7 +127,8 @@ contention... safe to retry" — by masking the extended sqlite error code
 (`code & 0xFF == sqlite3.SQLITE_BUSY`, needed because Python's `sqlite3`
 surfaces the *extended* code, e.g. 517 for `SQLITE_BUSY_SNAPSHOT`, not just
 the primary 5). Redacted like every other `StorageError` at the REST/
-GraphQL/MCP boundary (ADR-0022, KI-083's precedent), so this
+GraphQL/MCP boundary (each interface's own `_REDACT_MESSAGE_FOR` handling
+— `rest.py`, `graphql.py`, `mcp.py` — KI-083's precedent for why), so this
 is a server-log-only improvement for API callers — the point is an operator
 reading logs can now tell "retry the whole operation" from "something is
 actually broken" without decoding the raw sqlite3 message.
@@ -142,12 +152,16 @@ of scope for the SQLite default and belongs to a server-backed
 default) — this fix does not claim to make that topology performant, only
 safe for the paths it covers.
 
-One write path is not among those fourteen, and this fix does not extend
-to it: `Ontology.create_entity()` reads for `natural_key` uniqueness
-(`_require_unique_natural_key`) and then writes, outside any
-`transaction()` block — the same stale-read shape, just not one this KI's
-fix reaches, since it never calls `begin()` at all (autocommit path). In
-practice a race there surfaces as the `entity` table's own
+A handful of other `Ontology` methods (`create_entity`, `issue_token`,
+`revoke_token`, `reindex`) are not among those fourteen, and this fix does
+not extend to them: each reads, then writes, outside any `transaction()`
+block, since none of them calls `begin()` at all (autocommit path). Only
+`create_entity`'s read guards an invariant the write could violate —
+`natural_key` uniqueness (`_require_unique_natural_key`) — so it's the
+only one of the four with a genuine race; the others' reads are existence
+checks or (for `reindex`) idempotent re-computation, not a condition a
+stale read could let through incorrectly. In practice a race in
+`create_entity` surfaces as the `entity` table's own
 `UNIQUE(namespace, concept, natural_key)` constraint failing loudly (a
 `StorageError`, not a silent duplicate — KI-091's constraint already
 covers the correctness half), so it's a narrower gap than the one this KI
