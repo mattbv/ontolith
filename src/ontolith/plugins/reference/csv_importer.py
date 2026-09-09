@@ -18,12 +18,14 @@ unique across the whole file, not just per-concept, since resolution
 uses a single flat map. Ontology.create_entity has no create-or-reuse-
 by-natural-key lookup of its own (QueryBuilder doesn't either), so this
 plugin does its own in-memory deduplication within a single import_()
-call; it does not detect duplicates across separate import_() calls
-(that would require an entity read of the whole KB, out of scope for a
-reference plugin) — a second import_() reusing a natural_key raises
-ValidationError naming the conflict (KI-091; StorageBackend does now
-have a get_entity_by_natural_key() lookup, but this plugin doesn't use
-it — the in-memory map is sufficient for its own single-call scope).
+call; it does not detect duplicates across separate import_() calls —
+a second import_() reusing a natural_key now raises ValidationError
+naming the conflict (KI-091, via StorageBackend.get_entity_by_natural_key(),
+reached through create_entity()'s own pre-check) rather than staying
+silent, but this plugin still does no cross-call dedup of its own: a
+single mixed row set (one new key, one already-imported key) commits
+the new entity before the duplicate row raises, same partial-commit
+shape as any other row failing mid-pass.
 """
 
 from collections.abc import Iterable
