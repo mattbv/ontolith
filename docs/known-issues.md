@@ -1870,7 +1870,7 @@ Added conformance vectors (`conformance/test_conflict.py::TestDuplicateNaturalKe
 
 ## KI-092 — Several `Ontology` write methods read-then-write outside any `transaction()` block, unreached by KI-084's `BEGIN IMMEDIATE` fix — found while fixing KI-084
 
-**Severity:** Architecture gap — narrower than KI-084 for the one member with a constraint backstop (`create_entity`, via KI-091's `UNIQUE` constraint — a race there surfaces as an error, not a silent duplicate); the other members have no such backstop, so the severity is closer to KI-084's own pre-fix shape for them
+**Severity:** Architecture gap — and only for `create_entity`, the one member whose read actually guards an invariant; a race there surfaces as an error (KI-091's `UNIQUE` constraint), not a silent duplicate, narrower than KI-084's own pre-fix shape. `issue_token`/`revoke_token`/`reindex` are named for completeness of the "outside `transaction()`" audit, not because they share the race — none of their reads guard anything the write could violate
 **Milestone target:** Backlog
 **SPEC reference:** SPEC §10 (conflict routing), SPEC §12.1 (SQLite default backend)
 
