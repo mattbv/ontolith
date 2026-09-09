@@ -603,22 +603,37 @@ class RequireReviewForAI:
     AI-kind principals to review; every KB-inspecting strategy in this
     module (``SourceQuorum``, ``ConfidenceThreshold``) deliberately does
     not special-case AI authorship on its own (KI-061, ADR-0025), so a
-    deployment that wants both writes and composes a small AI-blocking
-    strategy — this is that strategy, shippable instead of hand-derived
-    from a comment each time::
+    deployment wanting both composes a small AI-blocking strategy
+    alongside one — this is that strategy, shippable instead of
+    hand-derived from a comment each time::
 
         policy = Composite(all=[RequireReviewForAI(), SourceQuorum(2)])
 
-    This is not a reversal of KI-061/ADR-0040's decision to not ship an
-    "AI-always-reviews" strategy bundled with `SourceQuorum`'s own
-    capability/trust checks — using the whole of ``ThresholdPolicy`` here
-    would re-impose *its* capability gate too, defeating the point of
-    choosing a different strategy in the first place. ``RequireReviewForAI``
-    does only the one thing its name says.
+    This *is* a reversal of ADR-0040's own explicit decision to not ship
+    this class — its Alternatives Considered rejected exactly this,
+    preferring a docstring example over "a new public symbol with its own
+    maintenance surface." KI-088 revisits that call explicitly (recorded
+    in ADR-0040's own 2026-09-09 update) rather than letting the pattern
+    silently drift into being shipped without anyone deciding it should
+    be: the tradeoff ADR-0040 weighed hasn't changed (SPEC §9.2 still
+    doesn't name an "AI-review" strategy, the class is still small), but
+    the docstring-sketch pattern's real cost — every deployer re-deriving
+    it from a comment, correctly, each time — outweighed that concern once
+    it had been in production use since KI-061. ``RequireReviewForAI``
+    does only the one thing its name says; using the whole of
+    ``ThresholdPolicy`` in ``Composite`` instead would re-impose *its* own
+    capability/trust-level gate too, defeating the point of choosing a
+    different strategy (like ``SourceQuorum``) in the first place — that
+    part of ADR-0040's original reasoning is unchanged.
+
+    ``evaluate()`` returns ``RequireReview([principal.owner], ...)`` for an
+    AI-kind principal (an empty reviewer list if ``owner`` is falsy — SPEC
+    §8.1 requires AI principals to declare one in practice, but this
+    strategy doesn't assume it), and ``AutoAccept(...)`` for everyone else.
 
     Rejects principals without at least ``propose`` capability first,
     matching every sibling strategy's own KI-015 floor enforcement
-    (``docs/known-issues.md`) — checked *before* the AI-kind test, unlike
+    (`docs/known-issues.md`) — checked *before* the AI-kind test, unlike
     ``ThresholdPolicy``'s ordering (AI-kind first, capability math never
     reached for an AI author). ``ThresholdPolicy`` can get away with
     AI-first because it has no other reachable outcome for a read-only AI

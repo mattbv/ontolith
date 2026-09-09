@@ -98,7 +98,9 @@ def test_read_capability_ai_principal_rejected_not_reviewed() -> None:
 def test_ai_kind_never_laundered_via_acting_as() -> None:
     """An AI author delegating to a write-capable, non-AI owner still
     requires review — mirrors ThresholdPolicy's own "AI's own kind is
-    never laundered away by delegating" precedent (ADR-0003)."""
+    never laundered away by delegating" precedent (its own evaluate()
+    comment; ADR-0003 itself is scoped to accountable-owner/model-capture/
+    delegation and doesn't discuss this specifically — see KI-088)."""
     ai = _principal("ai", owner="owner@example.com")
     delegate = Principal(
         id="owner@example.com",

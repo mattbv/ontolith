@@ -14,14 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Composite(all=[RequireReviewForAI(), SourceQuorum(2)])` pattern `Composite`'s own docstring has
   sketched inline since ADR-0040 is now a real, exported, tested `PolicyStrategy`, not something
   every deployer re-derives from a comment. Routes AI-kind principals to review (owner as sole
-  reviewer, read from `principal` only — never `acting_as`, ADR-0003's "never laundered" precedent)
-  and defers everyone else. Enforces the KI-015 capability floor itself (checked before the
-  AI-kind test, unlike `ThresholdPolicy`'s AI-first ordering), matching every sibling strategy in
-  this module — the inline sketch never had this, so it would previously `AutoAccept` a read-only
-  non-AI principal if used standalone rather than always composed with a floor-enforcing partner.
-  Not a reversal of KI-061/ADR-0040's decision to not ship an "AI-always-reviews" strategy bundled
-  with a KB-inspecting one's own capability checks — this class does only the one thing its name
-  says. `Composite`'s docstring simplified to reference the real class instead of re-sketching it.
+  reviewer, read from `principal` only — never `acting_as`, mirroring `ThresholdPolicy`'s own
+  "never laundered via delegation" precedent) and defers everyone else. Enforces the KI-015
+  capability floor itself (checked before the AI-kind test, unlike `ThresholdPolicy`'s AI-first
+  ordering), matching every sibling strategy in this module — the inline sketch never had this, so
+  it would previously `AutoAccept` a read-only non-AI principal if used standalone rather than
+  always composed with a floor-enforcing partner. **This is a genuine reversal** of ADR-0040's own
+  explicit decision not to ship this class (its Alternatives Considered rejected exactly this) —
+  recorded honestly in ADR-0040's own new update rather than left to silently drift, not framed as
+  something narrower than it is. `Composite`'s docstring simplified to reference the real class
+  instead of re-sketching it.
 - Entity creation on REST, GraphQL, and MCP (closes KI-082, found in the pre-M4 deep + security
   audit) — previously CLI/SDK-only, so an agent or application talking only to REST/GraphQL/MCP
   could assert facts about existing entities but never introduce a genuinely new one. `POST
@@ -181,9 +183,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   proposals the way the default `ThresholdPolicy` does (ADR-0025 §5, unchanged by this), so a
   deployment on `SourceQuorum` alone silently drops ADR-0003's "AI principals always require
   review" guarantee — `Composite` is SPEC §9.2's sanctioned way to layer that rule back on top,
-  and until now it couldn't actually be built. No new "AI-always-reviews" strategy ships
-  alongside it (`ThresholdPolicy` can't be reused for this without re-imposing its own capability
-  gate); the five-line pattern is documented as an inline example in `Composite`'s own docstring.
+  and until now it couldn't actually be built. No new "AI-always-reviews" strategy shipped
+  alongside it at the time (`ThresholdPolicy` can't be reused for this without re-imposing its own
+  capability gate); the pattern was documented as an inline example in `Composite`'s own docstring
+  — since promoted to a real, shipped class, `RequireReviewForAI` (KI-088, below).
   MCP's `ontolith.propose`/`ontolith.resubmit` tool docstrings, which previously stated the
   AI-review guarantee unconditionally, now correctly attribute it to the *default*
   `ThresholdPolicy` specifically.
