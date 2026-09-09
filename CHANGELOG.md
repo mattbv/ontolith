@@ -469,6 +469,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- `SQLiteBackend.begin()` now issues `BEGIN IMMEDIATE` instead of a plain deferred `BEGIN` (closes
+  KI-084, found in the pre-M4 deep + security audit) — closes a cross-process write-safety gap:
+  every write path's SPEC §10 conflict-routing read runs inside the transaction `begin()` opens,
+  so a deferred `BEGIN`'s lazily-taken read snapshot let a concurrent writer (a second OS process)
+  commit in between, and the resulting write then hit `SQLITE_BUSY_SNAPSHOT` — a stale-snapshot
+  failure SQLite deliberately never routes through the busy handler, so it failed instantly no
+  matter how long `busy_timeout` allowed. `BEGIN IMMEDIATE` claims the write lock up front instead,
+  so contention is now serialized behind the ordinary busy handler and only fails after genuinely
+  waiting out `busy_timeout` (now pinned explicitly to 5.0s in `SQLiteBackend.__init__`, rather
+  than left as Python's implicit default) — with a `StorageError` message that now distinguishes
+  transient lock contention ("safe to retry") from a genuine storage fault, still redacted at every
+  interface boundary like any other `StorageError` (KI-083's precedent), so this is a server-log-only
+  improvement. `docs/adr/ADR-0001-storage-default.md` gained a dated Update section elaborating its
+  existing one-line "single-writer limitation" consequence into the actual deployment implication.
 - `create_entity()` now raises `ValidationError` naming the conflict when `natural_key` is already
   taken within `concept`, instead of relying on the `entity` table's `UNIQUE(namespace, concept,
   natural_key)` constraint to fail late into a generic, redacted `StorageError` that discarded the

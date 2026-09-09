@@ -1948,3 +1948,120 @@ class TestConcurrency:
         # The lock must be free — acquire(blocking=False) succeeds only if so.
         assert backend._lock.acquire(blocking=False)
         backend._lock.release()
+
+    def test_begin_blocks_on_cross_process_writer_then_reports_retryable(
+        self, temp_db: Path
+    ) -> None:
+        """KI-084: two independent SQLiteBackend instances on the same file
+        stand in for two OS processes — self._lock is per-instance, so
+        unlike every other test in this class, it does NOT serialize these
+        two; only SQLite's own file locking does. This is what makes this
+        the right vehicle to exercise cross-process contention in-process.
+
+        Before the fix, begin() issued a plain (deferred) BEGIN. This
+        connection's later read-then-write inside the transaction would
+        take its snapshot lazily and could hit SQLITE_BUSY_SNAPSHOT on the
+        write — a stale-snapshot-upgrade failure SQLite never routes
+        through the busy handler, so it failed instantly, before
+        busy_timeout got any chance to retry. With BEGIN IMMEDIATE, begin()
+        itself claims the write lock, so a concurrent begin() is queued
+        behind SQLite's ordinary busy handler and only fails after
+        genuinely waiting out busy_timeout - proven here by asserting the
+        elapsed time, not just the exception - with a message that now
+        distinguishes lock contention from a genuine storage failure.
+        """
+        writer = SQLiteBackend(temp_db)
+        contender = SQLiteBackend(temp_db)
+        try:
+            writer.put_principal(
+                Principal(
+                    id="alice@test.com",
+                    kind="human",
+                    auth_method="oidc",
+                    created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                )
+            )
+            # Short busy_timeout on the contender only, so the test doesn't
+            # have to wait out the real 5s default to prove the mechanism.
+            contender.conn.execute("PRAGMA busy_timeout = 200")
+
+            writer.begin()
+            writer.put_entity(
+                Entity(
+                    id="entity-001",
+                    namespace="test-ns",
+                    concept="Person",
+                    created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                    created_by="alice@test.com",
+                )
+            )
+            # writer's transaction is left open, holding the write lock.
+
+            t0 = time.monotonic()
+            with pytest.raises(StorageError, match="lock contention.*safe to retry"):
+                contender.begin()
+            elapsed = time.monotonic() - t0
+
+            # Failed only after genuinely waiting out busy_timeout, not
+            # instantly (the pre-fix SQLITE_BUSY_SNAPSHOT failure mode).
+            assert elapsed >= 0.15
+        finally:
+            writer.rollback()
+            writer.close()
+            contender.close()
+
+    def test_begin_retries_and_succeeds_once_cross_process_writer_releases(
+        self, temp_db: Path
+    ) -> None:
+        """KI-084: the positive counterpart to the test above — if the
+        other process's write lock is released before busy_timeout
+        expires, the busy handler's retry succeeds rather than eventually
+        failing. Confirms BEGIN IMMEDIATE's contention is genuinely
+        transient/retryable, not just distinguishable-but-still-fatal.
+        """
+        writer = SQLiteBackend(temp_db)
+        contender = SQLiteBackend(temp_db)
+        try:
+            writer.put_principal(
+                Principal(
+                    id="alice@test.com",
+                    kind="human",
+                    auth_method="oidc",
+                    created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                )
+            )
+
+            # self._lock (a threading.RLock, KI-023) is owned by whichever
+            # thread acquires it — begin() and the later commit() must run
+            # on the same thread, so the whole hold-then-release sequence
+            # is done here rather than split across threads.
+            def hold_lock_then_release() -> None:
+                writer.begin()
+                writer.put_entity(
+                    Entity(
+                        id="entity-001",
+                        namespace="test-ns",
+                        concept="Person",
+                        created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                        created_by="alice@test.com",
+                    )
+                )
+                time.sleep(0.3)
+                writer.commit()
+
+            releaser = threading.Thread(target=hold_lock_then_release)
+            releaser.start()
+            time.sleep(0.05)  # let the writer's begin() land first
+
+            # contender keeps the (default, 5s) busy_timeout — plenty of
+            # room for the writer's commit() above to land first; begin()
+            # blocks here until the busy handler's retry succeeds.
+            contender.begin()
+            releaser.join(timeout=5)
+
+            assert contender._in_transaction is True
+            assert contender.get_entity("entity-001") is not None
+        finally:
+            contender.rollback()
+            writer.close()
+            contender.close()

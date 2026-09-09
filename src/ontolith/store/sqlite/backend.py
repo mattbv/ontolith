@@ -107,7 +107,18 @@ class SQLiteBackend:
         # ever actually concurrent. This flag only lifts that same-thread
         # check; it does not by itself serialize concurrent access — that is
         # what self._lock (below) does (KI-023).
-        self.conn = sqlite3.connect(str(self.path), isolation_level=None, check_same_thread=False)
+        # timeout=5.0 (KI-084): pins Python's own sqlite3 default explicitly
+        # rather than leaving it implicit — this is what makes SQLITE_BUSY
+        # (and its extended variants) retry for up to 5s before begin()
+        # raises, instead of failing on the first contention it sees. Only
+        # meaningful now that begin() below issues BEGIN IMMEDIATE: a
+        # deferred BEGIN's stale-snapshot-upgrade failure (SQLITE_BUSY_
+        # SNAPSHOT) bypasses the busy handler entirely, so no busy_timeout
+        # value would have helped against the specific failure this KI
+        # closes — see begin()'s own docstring for the full explanation.
+        self.conn = sqlite3.connect(
+            str(self.path), timeout=5.0, isolation_level=None, check_same_thread=False
+        )
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
         # KI-066 review: recursive_triggers defaults OFF, and SQLite only
@@ -608,15 +619,60 @@ class SQLiteBackend:
         self.conn.commit()
 
     def begin(self) -> None:
-        """Begin an explicit transaction (ADR-0010).
+        """Begin an explicit transaction (ADR-0010, KI-084).
 
         Acquires self._lock (KI-023) — held across every subsequent
         @_synchronized call until commit()/rollback() releases it, so no
         other thread's operation can interleave with this transaction.
+        Only serializes *this process*'s own threads — see KI-084's
+        `docs/adr/ADR-0001-storage-default.md` update for the
+        cross-process constraint this alone doesn't cover.
+
+        ``BEGIN IMMEDIATE``, not a plain deferred ``BEGIN`` (KI-084): a
+        deferred transaction takes its read snapshot lazily, on first
+        statement — every write path in this codebase reads existing
+        state for SPEC §10 conflict routing before writing, all inside
+        one `transaction()` block, so a deferred `BEGIN` here let a
+        concurrent writer (a second OS process; `self._lock` above only
+        protects this process's own threads) commit between that read and
+        this connection's own write. The resulting write then hit
+        `SQLITE_BUSY_SNAPSHOT` — a stale-snapshot-upgrade failure SQLite
+        deliberately never routes through the busy handler, so it failed
+        immediately no matter how long `busy_timeout` (set in `__init__`)
+        allowed. `BEGIN IMMEDIATE` claims the write lock right here,
+        before any read this transaction goes on to do, so a concurrent
+        writer is instead serialized behind it — blocked and retried by
+        the busy handler, same as any other reachable `SQLITE_BUSY`, for
+        up to `busy_timeout` before genuinely failing.
         """
         self._lock.acquire()
         try:
-            self.conn.execute("BEGIN")
+            self.conn.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as e:
+            self._lock.release()
+            # SQLITE_BUSY and its extended variants (SQLITE_BUSY_SNAPSHOT,
+            # SQLITE_BUSY_RECOVERY, SQLITE_BUSY_TIMEOUT) all share primary
+            # code 5 in their low byte (extended code & 0xFF == primary
+            # code) — Python's sqlite3 does surface the extended code on
+            # `.sqlite_errorcode` (verified directly: a snapshot-upgrade
+            # failure reports 517, not just 5), so masking is what's
+            # actually needed to catch every busy variant, not just literal
+            # SQLITE_BUSY. Distinguishable from other begin() failures (a
+            # lock this connection's own busy_timeout couldn't clear within
+            # its window) rather than folded into the same generic message
+            # a non-transient failure below would get — still a
+            # StorageError (redacted at every interface boundary, KI-083's
+            # own precedent for why 5xx messages carry real detail only in
+            # server-side logs, never in the response), but a caller
+            # reading logs can now tell "this was contention, safe to retry
+            # the whole operation" from "something is actually broken"
+            # without guessing from the raw sqlite3 message.
+            code = getattr(e, "sqlite_errorcode", None)
+            if code is not None and code & 0xFF == sqlite3.SQLITE_BUSY:
+                raise StorageError(
+                    f"Transaction start failed due to lock contention (safe to retry): {e}"
+                ) from e
+            raise StorageError(f"Failed to begin transaction: {e}") from e
         except sqlite3.Error as e:
             self._lock.release()
             raise StorageError(f"Failed to begin transaction: {e}") from e

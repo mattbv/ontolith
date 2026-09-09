@@ -1704,10 +1704,10 @@ Found and filed separately while implementing this (KI-089, closed the following
 
 ---
 
-## KI-084 — No documented or enforced cross-process write-safety guarantee for the SQLite default backend
+## KI-084 — No documented or enforced cross-process write-safety guarantee for the SQLite default backend ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — a real deployment-safety gap, but the actual failure mode is a hard, opaque error under contention, not silent data corruption
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §12.1 ("single SQLite database file... require no external services")
 
 ### Description
@@ -1718,7 +1718,13 @@ Verified empirically (WAL mode is on — `PRAGMA journal_mode = WAL`, `backend.p
 
 ### Fix
 
-Use `BEGIN IMMEDIATE` for write transactions so a writer claims the write lock before it takes its read snapshot, converting stale-snapshot races into either an early, retryable `SQLITE_BUSY` (which the existing 5s busy timeout already handles) or serialized ordering — this is the fix that actually addresses the observed failure; raising `busy_timeout` further would not, since `SQLITE_BUSY_SNAPSHOT` bypasses it regardless of the value. Distinguish "lock contention, caller should retry" from genuine storage failure in the error taxonomy rather than folding both into a redacted `StorageError`. Document the single-writer-process constraint explicitly as a deployment note (ADR-0001 names it in passing; nowhere describes the operational implication or a recommended topology). Worth resolving before M4's own exit criteria (which include performance budgets under real deployment shapes) are evaluated against a deployment topology this hasn't actually been designed for.
+`SQLiteBackend.begin()` (`store/sqlite/backend.py`) now issues `BEGIN IMMEDIATE` instead of a plain deferred `BEGIN` — every write path's conflict-routing read already runs inside the `transaction()` block `begin()` opens, so this one change closes the stale-snapshot race for `assert_literal`, `assert_ref`, `propose`, and `propose_ref` alike, with no call sites touched individually. A concurrent writer is now serialized behind SQLite's ordinary busy handler instead of hitting the non-retryable `SQLITE_BUSY_SNAPSHOT` path. `sqlite3.connect()` (`SQLiteBackend.__init__`) now passes `timeout=5.0` explicitly, pinning what was previously Python's implicit default — meaningful now that `begin()` actually reaches the busy handler.
+
+`begin()`'s exception handling distinguishes the two failure shapes: an `sqlite3.OperationalError` whose extended error code's low byte is `SQLITE_BUSY` (`code & 0xFF == sqlite3.SQLITE_BUSY` — masking needed because Python's `sqlite3` surfaces the *extended* code, e.g. `517` for `SQLITE_BUSY_SNAPSHOT`, confirmed directly rather than assumed) raises a `StorageError` reading "lock contention... safe to retry"; every other `begin()` failure keeps the prior generic message. Still redacted at every interface boundary like any other `StorageError` (KI-083's precedent), so this is a server-log-only improvement, not a wire-visible one — an operator reading logs can now tell transient contention from a genuine fault.
+
+Added a dated `## Update (2026-09-09, closes KI-084)` section to `docs/adr/ADR-0001-storage-default.md`, elaborating the one-line "single-writer limitation" consequence already on record there into the actual deployment implication: one process should hold the write path per database file; a second process is now safe (no more instant, unretryable failure) but still serializes behind the first, a throughput consideration rather than a correctness one. Scaling writes across processes is out of scope for the SQLite default and belongs to a server-backed `StorageBackend` instead.
+
+Regression-tested directly with two independent `SQLiteBackend` instances on the same file (standing in for two OS processes, since `self._lock`, KI-023's `threading.RLock`, is per-instance and doesn't itself serialize them) — `tests/unit/test_sqlite_backend.py::TestConcurrency::test_begin_blocks_on_cross_process_writer_then_reports_retryable` and `..._releases`. Mutation-tested: reverting `BEGIN IMMEDIATE` to `BEGIN` makes the first test fail (contention no longer even attempted at `begin()` time — `DID NOT RAISE`); reverting just the error-code distinguishing logic makes it fail on the message match alone (`Failed to begin transaction: database is locked`, no longer "safe to retry"). A manual timing check (500 `assert_literal` calls, uncontended, after warm-up) confirmed no regression against SPEC's `propose + policy eval + commit: p95 < 50ms` budget: p95 ≈ 0.2ms — `BEGIN IMMEDIATE` costs nothing extra absent actual contention, matching SQLite's documented behavior.
 
 ---
 
