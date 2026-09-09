@@ -239,7 +239,8 @@ fixed in the same PR:
   docstring's own "unauthenticated, like REST's docs_url" comparison.
 - **Scope boundary (Decision §1) had no test enforcing it.** Added an
   introspection-based test asserting `Mutation`'s field set is exactly the
-  seven named operations (now nine — see the 2026-09-05 Update below) —
+  seven named operations (now ten — see the 2026-09-05 and 2026-09-08
+  Updates below) —
   mirrors `test_mcp_server.py`'s existing `test_no_write_tool_registered`
   precedent — so a future PR that quietly adds a write-shaped mutation
   fails a test instead of silently widening this ADR's stated boundary.
@@ -437,6 +438,32 @@ already stretched "propose/review" to cover conflict-routing and contradiction-r
 operations too, so `assignReviewers` (a review-workflow action, SPEC §9.4) fits the same pattern
 rather than widening it further.
 
+## Update (2026-09-08, KI-082): `createEntity` added — this one genuinely widens §1's boundary
+
+Unlike the 2026-09-05 update above, this addition is not "within this ADR's own §1 scope boundary
+worded differently" — `createEntity` is not a propose or review operation on an existing fact, it's
+entity creation, and §1's own decision text names the mutation set as covering exactly "every
+SDK-level propose/review operation REST already wraps." `createEntity` is the first mutation here
+that doesn't fit that description under any reading, so the honest record is that the boundary
+moved, not just the roster inside it.
+
+The reason it's still the right call: `Ontology.create_entity()` was previously reachable on
+exactly one interface (the CLI), so a GraphQL-only caller could assert facts about entities that
+already exist but could never introduce a genuinely new one into the KB at all — SPEC §14.3's own
+"mirroring the SDK" phrasing this ADR's Context quotes is unmet by omission, not honored by a
+narrower-but-complete slice. Kept at the same `propose`-tier capability floor
+`Ontology.create_entity()` already enforced (no new capability logic added); unlike REST's `POST
+/assertions` (direct write, ADR-0022) it does not bypass SPEC §10 conflict routing or policy
+evaluation, because entity creation was never routed through that pipeline at the SDK level either
+— an entity carries no fact/confidence/temporality for a policy to evaluate. See ADR-0008's own
+2026-09-08 update (`ontolith.create_entity`, KI-082) for the identical reasoning applied to MCP's
+closed tool list, and REST's `POST /entities` (KI-082, same commit) for the third interface.
+
+Two pre-existing SDK-level gaps this change makes agent-reachable for the first time, deliberately
+left unfixed here and tracked separately: `create_entity()` doesn't validate `concept` against the
+active schema (KI-090), and a duplicate `(namespace, concept, natural_key)` surfaces as a redacted
+`StorageError` rather than a caller-actionable validation error (KI-091).
+
 ## References
 
 - SPEC §14.3 (REST + GraphQL), §16 (error model), §8.3 (capabilities), §17
@@ -444,7 +471,10 @@ rather than widening it further.
 - ADR-0021 (REST read + propose slice), ADR-0022 (REST write/review/admin
   slice — names GraphQL as the one remaining M3 gap this ADR closes),
   ADR-0014 (MCP bearer-token authentication), ADR-0008 (MCP tool surface —
-  the same read/propose-first precedent this ADR's scope follows)
+  the same read/propose-first precedent this ADR's scope follows, including
+  its own identical `createEntity` boundary-widening update, KI-082)
 - `docs/known-issues.md` KI-022 (REST's own deferred-scope list, referenced
   for what this ADR deliberately does not add), KI-052 (event-loop-blocking
-  resolvers, resolved by the 2026-08-28 update above)
+  resolvers, resolved by the 2026-08-28 update above), KI-082 (entity
+  creation added to REST/GraphQL/MCP), KI-090/KI-091 (gaps surfaced by
+  KI-082, tracked separately)

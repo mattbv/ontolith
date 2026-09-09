@@ -1,15 +1,19 @@
 """GraphQL interface for Ontolith (SPEC §14.3, ADR-0037).
 
 Exposes the ``Entity``, ``Assertion``, ``Proposal``, ``Contradiction``, and
-``Principal`` types SPEC §14.3 names, with ``query``, ``propose``, and
-``review`` operations "mirroring the SDK" (SPEC's own phrasing) — narrower
-than the REST interface (``interfaces/rest.py``, ADR-0021/0022), which also
-exposes a direct-write route and principal/token admin as REST-specific
-extensions beyond SPEC parity (KI-022). This module deliberately does not
-add GraphQL equivalents of those: no direct-write mutation, no principal
-creation or token issuance/revocation. ``principals`` is exposed as a
-read-only query only, since SPEC explicitly names ``Principal`` as one of
-the five exposed types.
+``Principal`` types SPEC §14.3 names, with ``query``, ``propose``,
+``createEntity``, and ``review`` operations "mirroring the SDK" (SPEC's
+own phrasing) — narrower than the REST interface (``interfaces/rest.py``,
+ADR-0021/0022), which also exposes a direct-write route and
+principal/token admin as REST-specific extensions beyond SPEC parity
+(KI-022). This module deliberately does not add GraphQL equivalents of
+those: no direct-write mutation, no principal creation or token
+issuance/revocation. ``principals`` is exposed as a read-only query only,
+since SPEC explicitly names ``Principal`` as one of the five exposed
+types. ``createEntity`` (KI-082) is propose-tier, matching every other
+governed write here — added because, without it, a GraphQL-only caller
+could never introduce a genuinely new entity into the KB at all, not
+merely reach a narrower surface than REST's.
 
 Authentication (ADR-0014, reused unchanged, same posture as REST/ADR-0021):
 every query and mutation requires an ``Authorization: Bearer <token>``
@@ -405,6 +409,31 @@ class ProposeInput:
     rationale: str | None = None
     acting_as: str | None = None
     model: str | None = None
+
+
+@strawberry.input
+class CreateEntityInput:
+    """Input for ``Mutation.createEntity`` (KI-082)."""
+
+    concept: str
+    natural_key: str | None = None
+
+
+def _do_create_entity(kb: Ontology, author: str, payload: CreateEntityInput) -> EntityType:
+    """Blocking body of Mutation.createEntity."""
+    entity = kb.create_entity(
+        concept=payload.concept,
+        author=author,
+        natural_key=payload.natural_key,
+    )
+    return EntityType(
+        id=entity.id,
+        concept=entity.concept,
+        namespace=entity.namespace,
+        natural_key=entity.natural_key,
+        created_at=entity.created_at.isoformat(),
+        created_by=entity.created_by,
+    )
 
 
 def _proposal_type(proposal: Proposal) -> ProposalType:
@@ -885,7 +914,19 @@ class Query:
 
 @strawberry.type
 class Mutation:
-    """Root Mutation type — propose and review operations (module docstring)."""
+    """Root Mutation type — entity creation, propose, and review operations
+    (module docstring)."""
+
+    @strawberry.mutation
+    async def create_entity(self, info: strawberry.Info, input: CreateEntityInput) -> EntityType:
+        """Create a new entity (KI-082). Propose-tier — same capability
+        gate as every other governed write (``Ontology.create_entity``
+        rejects a ``read``-only principal). The acting principal is
+        resolved from the bearer token (ADR-0014), never taken from the
+        input (mirrors REST's POST /entities)."""
+        principal = _require_principal(info)
+        kb = _kb(info)
+        return await run_in_threadpool(_do_create_entity, kb, principal.id, input)
 
     @strawberry.mutation
     async def propose(self, info: strawberry.Info, input: ProposeInput) -> ProposeResultType:

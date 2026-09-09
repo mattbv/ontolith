@@ -209,6 +209,66 @@ class TestSchemaRoute:
 
 
 # ---------------------------------------------------------------------------
+# POST /entities (KI-082)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateEntityRoute:
+    def test_requires_auth(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        response = client.post("/entities", json={"concept": "Person"})
+        assert response.status_code == 401
+
+    def test_create(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/entities",
+            json={"concept": "Person", "natural_key": "ada"},
+            headers=_auth(token),
+        )
+        assert response.status_code == 201
+        body = response.json()
+        assert body["concept"] == "Person"
+        assert body["natural_key"] == "ada"
+        assert body["created_by"] == HUMAN
+
+    def test_created_entity_is_retrievable(self, tmp_path: Path) -> None:
+        """Round-trips through GET /entities/{id} — not just a shape check
+        on the POST response, but confirms the entity is actually
+        persisted where the rest of the API expects to find it."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        created = client.post("/entities", json={"concept": "Person"}, headers=_auth(token)).json()
+
+        response = client.get(f"/entities/{created['id']}", headers=_auth(token))
+        assert response.status_code == 200
+        assert response.json()["entity"]["id"] == created["id"]
+
+    def test_propose_capability_succeeds(self, tmp_path: Path) -> None:
+        """Propose-tier, not write-tier — AI's own default capability suffices."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(AI, author=ADMIN)
+        response = client.post("/entities", json={"concept": "Person"}, headers=_auth(token))
+        assert response.status_code == 201
+
+    def test_read_capability_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "readonly@example.com", kind="human", auth_method="oidc", default_capability="read"
+        )
+        client, _ = _client(kb)
+        token, _ = kb.issue_token("readonly@example.com", author=ADMIN)
+        response = client.post("/entities", json={"concept": "Person"}, headers=_auth(token))
+        assert response.status_code == 403
+        assert response.json()["code"] == "CAPABILITY_ERROR"
+
+
+# ---------------------------------------------------------------------------
 # GET /entities/{entity_id}
 # ---------------------------------------------------------------------------
 

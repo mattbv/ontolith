@@ -516,6 +516,7 @@ class TestAuthCoversEveryField:
         "principals": "{ principals { id } }",
     }
     _MUTATION_FIELD_PROBES: dict[str, str] = {
+        "createEntity": ('mutation { createEntity(input: {concept: "Person"}) { id } }'),
         "propose": (
             'mutation { propose(input: {subject: "s", predicate: "p", value: "v", '
             'valueType: "Text"}) { decision } }'
@@ -550,8 +551,10 @@ class TestAuthCoversEveryField:
 
     def test_mutation_field_probe_set_matches_schema(self, tmp_path: Path) -> None:
         """Also enforces ADR-0037 §1's scope boundary: this must be exactly
-        the nine query/propose/review/retract operations (retract added for
-        KI-057, ADR-0039; assignReviewers added for KI-079/ADR-0046), no
+        the ten query/propose/review/retract/create-entity operations
+        (retract added for KI-057, ADR-0039; assignReviewers added for
+        KI-079/ADR-0046; createEntity added for KI-082 — propose-tier, not
+        a direct write, see interfaces/graphql.py's module docstring), no
         direct-write or principal-admin mutation (mirrors
         test_mcp_server.py's test_no_write_tool_registered precedent)."""
         kb = _kb(tmp_path)
@@ -658,6 +661,84 @@ class TestSchemaQuery:
 
 
 # ---------------------------------------------------------------------------
+# Mutation.createEntity (KI-082)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateEntityMutation:
+    _MUTATION = """
+    mutation($input: CreateEntityInput!) {
+      createEntity(input: $input) {
+        id
+        concept
+        naturalKey
+        createdBy
+      }
+    }
+    """
+
+    def test_create(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(
+            client,
+            self._MUTATION,
+            variables={"input": {"concept": "Person", "naturalKey": "ada"}},
+            headers=_auth(token),
+        )
+        result = body["data"]["createEntity"]
+        assert result["concept"] == "Person"
+        assert result["naturalKey"] == "ada"
+        assert result["createdBy"] == HUMAN
+
+    def test_created_entity_is_retrievable(self, tmp_path: Path) -> None:
+        """Round-trips through Query.entity — not just a shape check on the
+        mutation response, but confirms the entity is actually persisted
+        where the rest of the schema expects to find it."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        created = _gql(
+            client,
+            self._MUTATION,
+            variables={"input": {"concept": "Person"}},
+            headers=_auth(token),
+        )["data"]["createEntity"]
+
+        body = _gql(client, f'{{ entity(id: "{created["id"]}") {{ id }} }}', headers=_auth(token))
+        assert body["data"]["entity"]["id"] == created["id"]
+
+    def test_propose_capability_succeeds(self, tmp_path: Path) -> None:
+        """Propose-tier, not write-tier — AI's own default capability suffices."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(AI, author=ADMIN)
+        body = _gql(
+            client,
+            self._MUTATION,
+            variables={"input": {"concept": "Person"}},
+            headers=_auth(token),
+        )
+        assert body["data"]["createEntity"]["concept"] == "Person"
+
+    def test_read_capability_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "readonly@example.com", kind="human", auth_method="oidc", default_capability="read"
+        )
+        client, _ = _client(kb)
+        token, _ = kb.issue_token("readonly@example.com", author=ADMIN)
+        body = _gql(
+            client,
+            self._MUTATION,
+            variables={"input": {"concept": "Person"}},
+            headers=_auth(token),
+        )
+        assert _error_codes(body) == ["CAPABILITY_ERROR"]
+
+
+# ---------------------------------------------------------------------------
 # Query.entity
 # ---------------------------------------------------------------------------
 
@@ -706,11 +787,12 @@ class TestEntityQuery:
 
     def test_assertions_field_requires_auth_on_its_own(self, tmp_path: Path) -> None:
         """EntityType.assertions calls _require_principal itself (review
-        finding) rather than relying solely on Query.entity's own gate.
-        Query.entity is the only path that currently reaches EntityType, and
-        it always gates first, so no query-level probe can exercise this
-        resolver unauthenticated - verified directly instead, invoking the
-        strawberry-wrapped (async, KI-052) method with a minimal stub Info."""
+        finding) rather than relying solely on its caller's own gate.
+        Query.entity and Mutation.createEntity (KI-082) are the only two
+        paths that currently reach EntityType, and both always gate first,
+        so no query-level probe can exercise this resolver unauthenticated
+        - verified directly instead, invoking the strawberry-wrapped
+        (async, KI-052) method with a minimal stub Info."""
         import asyncio
 
         from ontolith.core.errors import AuthError

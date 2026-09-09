@@ -1658,10 +1658,10 @@ Add `.include_flagged()` to `QueryBuilder`, threading through to `entities_where
 
 ---
 
-## KI-082 — No entity-creation capability on REST, GraphQL, or MCP — CLI-only
+## KI-082 — No entity-creation capability on REST, GraphQL, or MCP — CLI-only ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — a real interface-parity/DX gap; note SPEC §14.1's normative SDK surface doesn't itself list `create_entity`, and §14.4's MCP tool table is an enumerated closed default set that excludes it, so this reads as an unaddressed gap rather than an unmet SPEC MUST
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §14.1 (normative SDK surface), §14.3 (REST resource list names `/entities`, but only `/proposals` carries a documented `POST`; GraphQL scoped to "query, propose, and review operations"), §14.4 (MCP default tool table)
 
 ### Description
@@ -1672,7 +1672,15 @@ This means an AI agent or application talking only to REST/GraphQL/MCP can asser
 
 ### Fix
 
-Expose `create_entity` (propose-tier, matching its existing capability gate) on REST (`POST /entities`), GraphQL (`Mutation.createEntity`), and MCP (`ontolith.create_entity`) — or record an ADR if entity creation is meant to stay human/CLI-gated by deliberate design, since today it reads as an oversight rather than a decision.
+Exposed `create_entity` on all three interfaces, each a thin wrapper over `Ontology.create_entity()` with no new capability logic of its own (propose-tier, matching the SDK method's own existing gate — rejects only `read`-only principals, no AI-kind check, since an entity carries no fact/confidence/temporality for policy to evaluate):
+
+- REST: `POST /entities` (`CreateEntityIn` body: `concept`, optional `natural_key`; returns `EntityOut`, `201`)
+- GraphQL: `Mutation.createEntity(input: CreateEntityInput!): EntityType` — module docstring's "query, propose, review" scope description updated to name this as the one exception, with its own rationale
+- MCP: `ontolith.create_entity` — module docstring/tool table updated with the analogous rationale (entity creation was never proposal/policy-gated at the SDK level either, so this isn't a "direct write" in ADR-0008's sense); `test_all_required_tools_registered` (KI-085's own exact-set test) deliberately updated to 10 tools, not left to silently drift
+
+**Review found this genuinely moves two documented scope boundaries, not just adds a route within them** — ADR-0008's closed, numbered "Exposed Tools" list and ADR-0037 §1's explicit "query, propose, and review only" GraphQL scope statement (with its own 2026-09-05 update asserting the boundary "hasn't moved, only the roster" for the two additions before this one — true then, not true of `createEntity`). Both ADRs updated with a dated `## Update` section recording the addition and why it's still the right call despite moving the boundary (see each ADR directly). Also filed, not left implicit: two pre-existing SDK-level gaps this change makes agent-reachable for the first time — `concept` isn't validated against the schema (KI-090) and a duplicate `natural_key` surfaces as a redacted `StorageError` (KI-091).
+
+Each interface's existing "every route/field/tool requires auth" exact-coverage tests (`TestAuthCoversEveryField`'s mutation-field-probe set on GraphQL, the tool-count test on MCP) needed conscious updates too, confirming those safety nets work as designed rather than silently passing around the new surface. New dedicated test classes on all three interfaces cover: creation success, round-trip retrieval (not just a response-shape check), `propose` capability sufficing (including for an AI principal — no AI-blocking check exists on this path), and `read` capability being rejected.
 
 ---
 
@@ -1805,6 +1813,42 @@ Added `Ontology._require_existing_target(target)`, mirroring KI-083's `_require_
 Found and fixed along the way: three existing tests (`test_ontology_validators.py`) exercised `assert_ref`/`propose_ref`'s `Validator` invocation by passing a fictional string as `target`, relying on this exact gap (no target existence check) to get a rejectable value into the write path. Fixed by making the test double's rejection marker (`_RejectMarkerValue.reject`) a plain settable attribute, pointed at a real entity's own generated id instead of a fictional string, so the target is genuinely valid while the validator's own rejection logic (matching on that value) still exercises the intended code path.
 
 Mutation-tested directly: reverting each of the two call sites individually reproduces the pre-fix silent-success behavior (confirmed via a dedicated `test_..._does_not_persist_a_dangling_reference` test for both `assert_ref` and `propose_ref`) and is caught only by its own new test(s), no cross-coverage between the two sites.
+
+---
+
+## KI-090 — `create_entity()` never validates `concept` against the active schema — now agent-reachable via REST/GraphQL/MCP (KI-082)
+
+**Severity:** Architecture gap — pre-existing SDK behavior, but KI-082 made it reachable by a `propose`-tier AI agent for the first time, not just a human CLI operator
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §4 (concepts are schema-declared); compare `Ontology._require_known_predicate`, which does this exact check for `predicate` on every assertion write
+
+### Description
+
+`Ontology.create_entity()` (`ontology.py`) writes `concept` as free text with no schema lookup — reproduced directly: `kb.create_entity("TotallyMadeUpConcept", author=...)` succeeds and persists an entity under a concept the active schema never declared. Every assertion write path validates the analogous case for `predicate` (`_require_known_predicate`, hardened specifically by KI-031/KI-040/KI-049 for exactly this class of gap — an unknown/mistyped/wrong-kind predicate), but `create_entity()` was never brought in line with that pattern.
+
+This is pre-existing SDK behavior, not introduced by KI-082 — before KI-082, the reachable callers were the CLI (a human at a terminal, who'd typically notice a typo'd concept name immediately) and the plugin sandbox's `WriteView.create_entity` (`plugins/views.py`, used by the shipped `csv_importer` reference plugin, which passes an unvalidated `row["concept"]` straight through — arguably a stronger pre-existing instance of this exact gap than the CLI). KI-082 exposed `create_entity` on REST/GraphQL/MCP at `propose` tier with no policy evaluation in between (see ADR-0008's 2026-09-08 update for why entity creation has no policy step to catch this at), so an AI agent can now populate the KB with arbitrary undeclared concepts through any of the three governed interfaces directly, not just via a plugin or a human at a terminal.
+
+### Fix
+
+Add a `_require_known_concept(concept)` check to `create_entity()` — no schema registered for the namespace yet should stay a no-op (matching `_require_known_predicate`'s own precedent), otherwise raise `ValidationError` naming the unknown concept. One check, one call site (`create_entity` is the only place that constructs a genuinely *new* `Entity` from caller input — both backends also construct `Entity` objects elsewhere, but only to hydrate already-persisted rows on read paths, not to validate one on the way in), so no interface-level changes needed beyond the SDK method itself.
+
+---
+
+## KI-091 — Duplicate `(namespace, concept, natural_key)` on entity creation surfaces as a redacted `StorageError`, not a caller-actionable error — now agent-reachable via REST/GraphQL/MCP (KI-082)
+
+**Severity:** Bug — wrong error taxonomy for a caller-input conflict, same class as KI-083/KI-089; pre-existing SDK behavior newly agent-reachable via KI-082
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §16 (error taxonomy — a caller-input conflict should be a named, actionable error, not a generic backend failure)
+
+### Description
+
+`create_entity()` does no pre-check against the `UNIQUE(namespace, concept, natural_key)` constraint (`store/sqlite/backend.py`) before writing — reproduced directly: creating two entities with the same `concept`/`natural_key` raises `StorageError: Entity conflict: UNIQUE constraint failed: entity.namespace, entity.concept, entity.natural_key` on the second call. `StorageError` is one of the two error types every interface redacts before returning it to a caller (same mechanism KI-083 closed for `assert_literal`/`assert_ref`'s FK failure) — so a REST/GraphQL/MCP caller who supplies a natural key that's already taken gets a generic, message-redacted 500-class error with no indication of what went wrong, even though the backend's own exception message is already a clear, actionable description of the actual problem.
+
+Same root shape as KI-083/KI-089 (a caller-input condition surfacing through the redacted `StorageError` path instead of a named, unredacted domain error), but pre-existing rather than newly introduced — KI-082 is what made it reachable by a `propose`-tier AI agent rather than only a human CLI operator, who'd see the real message in a terminal traceback.
+
+### Fix
+
+Add a pre-check in `create_entity()` — when `natural_key` is not `None`, look up whether an entity with the same `(namespace, concept, natural_key)` already exists (needs a `StorageBackend` port method if one doesn't already exist for this exact lookup) and raise a named `ValidationError` or a new `ConflictError`-shaped error (SPEC §16) before ever reaching the backend write, mirroring KI-083's pre-check pattern for `subject`.
 
 ---
 

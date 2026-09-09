@@ -156,6 +156,18 @@ class AssertionOut(BaseModel):
     asserted_at: str
 
 
+class CreateEntityIn(BaseModel):
+    """Request body for POST /entities (KI-082).
+
+    No `author` field — the entity's `created_by` provenance is the
+    acting principal, resolved from the bearer token (ADR-0014), never
+    taken from the request body.
+    """
+
+    concept: str
+    natural_key: str | None = None
+
+
 class EntityOut(BaseModel):
     """An entity's own fields, without its assertions."""
 
@@ -588,6 +600,32 @@ def create_rest_app(
             for concept_name, concept_def in ir.concepts.items()
         ]
         return SchemaOut(namespace=namespace, version=ir.version, concepts=concepts)
+
+    # ------------------------------------------------------------------
+    # POST /entities
+    # ------------------------------------------------------------------
+
+    @app.post("/entities", status_code=201)
+    def create_entity_route(
+        body: CreateEntityIn,
+        principal: Principal = Depends(_resolve_principal),
+    ) -> EntityOut:
+        """Create a new entity (KI-082). Propose-tier — same capability
+        gate as every other governed write (`Ontology.create_entity`
+        rejects `read`-only principals)."""
+        entity = kb.create_entity(
+            concept=body.concept,
+            author=principal.id,
+            natural_key=body.natural_key,
+        )
+        return EntityOut(
+            id=entity.id,
+            concept=entity.concept,
+            namespace=entity.namespace,
+            natural_key=entity.natural_key,
+            created_at=entity.created_at.isoformat(),
+            created_by=entity.created_by,
+        )
 
     # ------------------------------------------------------------------
     # GET /entities/{entity_id}

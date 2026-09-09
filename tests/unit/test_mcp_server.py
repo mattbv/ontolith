@@ -243,6 +243,69 @@ class TestSchemaTool:
 
 
 # ---------------------------------------------------------------------------
+# ontolith.create_entity (KI-082)
+# ---------------------------------------------------------------------------
+
+
+class TestCreateEntityTool:
+    def test_create(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.create_entity").fn(
+            concept="Person",
+            natural_key="ada",
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+        )
+        assert result["concept"] == "Person"
+        assert result["natural_key"] == "ada"
+        assert result["created_by"] == HUMAN
+
+    def test_created_entity_is_retrievable(self, tmp_path: Path) -> None:
+        """Round-trips through ontolith.get — not just a shape check on the
+        create response, but confirms the entity is actually persisted
+        where the rest of the server expects to find it."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+        created = mcp._tool_manager.get_tool("ontolith.create_entity").fn(
+            concept="Person", token=token
+        )
+        result = mcp._tool_manager.get_tool("ontolith.get").fn(entity_id=created["id"], token=token)
+        assert result["entity"]["id"] == created["id"]
+
+    def test_propose_capability_succeeds(self, tmp_path: Path) -> None:
+        """Propose-tier, not write-tier — AI's own default capability suffices."""
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.create_entity").fn(
+            concept="Person", token=kb.issue_token(AI, author=ADMIN)[0]
+        )
+        assert result["concept"] == "Person"
+
+    def test_read_capability_forbidden(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        kb.create_principal(
+            "readonly@example.com", kind="human", auth_method="oidc", default_capability="read"
+        )
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.create_entity").fn(
+            concept="Person",
+            token=kb.issue_token("readonly@example.com", author=ADMIN)[0],
+        )
+        assert "error" in result
+        assert result["code"] == "CAPABILITY_ERROR"
+
+    def test_invalid_token_returns_auth_error(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.create_entity").fn(
+            concept="Person", token="not-a-real-token"
+        )
+        assert "error" in result
+        assert result["code"] == "AUTH_ERROR"
+
+
+# ---------------------------------------------------------------------------
 # ontolith.get
 # ---------------------------------------------------------------------------
 
@@ -956,18 +1019,20 @@ class TestProposeTool:
         assert tool_names.isdisjoint(forbidden)
 
     def test_all_required_tools_registered(self, tmp_path: Path) -> None:
-        """ADR-0008 plus resubmit (KI-027), retract (KI-057, ADR-0039), and
-        list_contradictions (KI-076): the registered tool set must be exactly
-        these 9 — no more, no fewer (KI-085). A subset check here would pass
-        even if a future PR added a 10th tool under a name
-        test_no_write_tool_registered's blocklist doesn't happen to cover;
-        adding a tool on purpose means updating this set deliberately."""
+        """ADR-0008 plus resubmit (KI-027), retract (KI-057, ADR-0039),
+        list_contradictions (KI-076), and create_entity (KI-082): the
+        registered tool set must be exactly these 10 — no more, no fewer
+        (KI-085). A subset check here would pass even if a future PR added
+        an 11th tool under a name test_no_write_tool_registered's blocklist
+        doesn't happen to cover; adding a tool on purpose means updating
+        this set deliberately."""
         kb = _kb(tmp_path)
         mcp, _ = _server(kb)
         tool_names = {t.name for t in mcp._tool_manager.list_tools()}
         required = {
             "ontolith.schema",
             "ontolith.get",
+            "ontolith.create_entity",
             "ontolith.query",
             "ontolith.provenance",
             "ontolith.list_contradictions",
