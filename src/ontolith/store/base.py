@@ -56,7 +56,15 @@ class StorageBackend(Protocol):
     """
 
     def begin(self) -> None:
-        """Begin a new transaction."""
+        """Begin a new transaction.
+
+        This port makes no promise about *when* a concurrent writer is
+        serialized against this one (at `begin()` versus at the first
+        conflicting statement) — that's a backend-specific locking detail,
+        not a cross-backend contract. See `SQLiteBackend.begin()`'s own
+        docstring (KI-084) for the default backend's specific choice and
+        why it matters for cross-process write safety.
+        """
         ...
 
     def commit(self) -> None:

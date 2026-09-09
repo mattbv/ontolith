@@ -89,10 +89,14 @@ mid-transaction, or what topology avoids it. Tracked as KI-084.
 
 **The gap, concretely:** `SQLiteBackend.begin()` issued a plain deferred
 `BEGIN`, which takes its read snapshot lazily, on first statement. Every
-write path (`assert_literal`, `assert_ref`, `propose`, `propose_ref`) reads
-existing state for SPEC §10 conflict routing before writing, all inside one
-`transaction()` block — so a concurrent writer in a second process could
-commit between that read and this connection's own write. The write then
+governed write path — all fourteen `with self.backend.transaction():`
+call sites in `ontology.py` (`create_principal`, `assert_literal`,
+`assert_ref`, `propose`, `propose_ref`, `retract`, `accept_proposal`,
+`reject_proposal`, `request_changes`, `assign_reviewers`, `resubmit`,
+`resolve_contradiction`, `flag_contradiction`, `apply_schema`) — reads
+existing state before writing, all inside that one `transaction()` block —
+so a concurrent writer in a second process could commit between that read
+and this connection's own write. The write then
 hit `SQLITE_BUSY_SNAPSHOT`, a stale-snapshot-upgrade failure SQLite
 deliberately never routes through the busy handler: it failed immediately,
 regardless of `busy_timeout`. Confirmed directly (two `SQLiteBackend`
@@ -114,7 +118,7 @@ contention... safe to retry" — by masking the extended sqlite error code
 (`code & 0xFF == sqlite3.SQLITE_BUSY`, needed because Python's `sqlite3`
 surfaces the *extended* code, e.g. 517 for `SQLITE_BUSY_SNAPSHOT`, not just
 the primary 5). Redacted like every other `StorageError` at the REST/
-GraphQL/MCP boundary (ADR-0022 §error mapping, KI-083's precedent), so this
+GraphQL/MCP boundary (ADR-0022, KI-083's precedent), so this
 is a server-log-only improvement for API callers — the point is an operator
 reading logs can now tell "retry the whole operation" from "something is
 actually broken" without decoding the raw sqlite3 message.
@@ -126,10 +130,10 @@ check — it is a topology recommendation, matching how the reference
 deployment already runs (one REST/GraphQL/MCP process per database file;
 `check_same_thread=False` plus the RLock only cover that one process's own
 worker threads, per ADR-0010). Running two independent server processes
-against the same file is now *safe* for the four write paths this fix
-actually covers (`assert_literal`, `assert_ref`, `propose`, `propose_ref`
-— every path whose conflict-routing read runs inside a `transaction()`
-block) — no more instant, unretryable failure — but still *serializes*:
+against the same file is now *safe* for every write path that opens a
+`transaction()` — which is every governed write in `Ontology` (the
+fourteen call sites named above) — no more instant, unretryable failure —
+but still *serializes*:
 the second process's writes queue behind the first's for up to
 `busy_timeout` before erroring, which is a throughput cliff under real
 contention, not a correctness one. Scaling writes across processes is out
@@ -138,8 +142,8 @@ of scope for the SQLite default and belongs to a server-backed
 default) — this fix does not claim to make that topology performant, only
 safe for the paths it covers.
 
-Not every write is one of those four paths, and this fix does not extend
-to the rest: `Ontology.create_entity()` reads for `natural_key` uniqueness
+One write path is not among those fourteen, and this fix does not extend
+to it: `Ontology.create_entity()` reads for `natural_key` uniqueness
 (`_require_unique_natural_key`) and then writes, outside any
 `transaction()` block — the same stale-read shape, just not one this KI's
 fix reaches, since it never calls `begin()` at all (autocommit path). In
@@ -170,7 +174,14 @@ statement it is, so narrowing the lock's span here would reopen KI-023
 stall. In effect, one process's own read availability is now coupled to
 how promptly a *different* process's writer releases the file lock — a
 consideration for the single-writer-process topology recommended above,
-not a reason to abandon it.
+not a reason to abandon it. A short-`busy_timeout` retry loop — retry
+`BEGIN IMMEDIATE` in a bounded number of brief attempts, releasing
+`self._lock` between them so other threads' reads can interleave — was
+considered and rejected as disproportionate to this KI's scope: it adds
+real complexity (retry/backoff logic, a new failure mode if all attempts
+exhaust) to work around a stall that only manifests under genuine
+cross-process write contention, the same condition the single-writer-
+process topology recommendation above already exists to avoid.
 
 ## References
 

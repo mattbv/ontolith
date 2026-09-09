@@ -485,9 +485,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   existing one-line "single-writer limitation" consequence into the actual deployment implication,
   including a genuinely new trade-off this fix introduces (a contended `begin()` now blocks this
   process's own reads for up to `busy_timeout`, not just cross-process writers) rather than only
-  documenting a pre-existing one. Covers the four write paths whose conflict-routing read runs
-  inside a `transaction()` block; `create_entity()`'s own unguarded natural-key check doesn't and
-  is filed separately as KI-092.
+  documenting a pre-existing one. Covers every write path that opens a `transaction()` block (all
+  fourteen in `Ontology`); `create_entity()`'s own unguarded natural-key check doesn't and is filed
+  separately as KI-092.
 - `create_entity()` now raises `ValidationError` naming the conflict when `natural_key` is already
   taken within `concept`, instead of relying on the `entity` table's `UNIQUE(namespace, concept,
   natural_key)` constraint to fail late into a generic, redacted `StorageError` that discarded the

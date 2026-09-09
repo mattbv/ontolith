@@ -1991,6 +1991,47 @@ class TestConcurrency:
         assert backend._lock.acquire(blocking=False)
         backend._lock.release()
 
+    def test_begin_masks_extended_busy_variant_as_retryable(self, backend: SQLiteBackend) -> None:
+        """KI-084 review: the sibling test above alone leaves `code & 0xFF
+        == sqlite3.SQLITE_BUSY` indistinguishable from a plain `code ==
+        sqlite3.SQLITE_BUSY` — at the real cross-process contention site,
+        `BEGIN IMMEDIATE` means only literal `SQLITE_BUSY` (5) is ever
+        actually observed, so a masking regression there wouldn't be
+        caught by exercising that site alone. This injects a synthetic
+        `SQLITE_BUSY_SNAPSHOT` (517 — an extended code sharing primary
+        code 5 in its low byte) via the same connection stand-in, proving
+        the `& 0xFF` masking specifically, not just the BUSY/non-BUSY
+        split: a plain `code == sqlite3.SQLITE_BUSY` equality check would
+        wrongly fall through to the generic message here.
+        """
+
+        class _FailingBeginConn:
+            """Delegates everything to the real connection except execute()."""
+
+            def __init__(self, real_conn: sqlite3.Connection) -> None:
+                self._real = real_conn
+
+            def execute(self, sql: str, *args: object) -> object:
+                if sql == "BEGIN IMMEDIATE":
+                    err = sqlite3.OperationalError("database is locked")
+                    err.sqlite_errorcode = sqlite3.SQLITE_BUSY_SNAPSHOT  # 517, not 5
+                    raise err
+                return self._real.execute(sql, *args)
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._real, name)
+
+        real_conn = backend.conn
+        backend.conn = _FailingBeginConn(real_conn)  # type: ignore[assignment]
+        try:
+            with pytest.raises(StorageError, match="lock contention.*safe to retry"):
+                backend.begin()
+        finally:
+            backend.conn = real_conn
+
+        assert backend._lock.acquire(blocking=False)
+        backend._lock.release()
+
     def test_begin_blocks_on_cross_process_writer_then_reports_retryable(
         self, temp_db: Path
     ) -> None:
@@ -2061,8 +2102,8 @@ class TestConcurrency:
         failing. Confirms BEGIN IMMEDIATE's contention is genuinely
         transient/retryable, not just distinguishable-but-still-fatal.
 
-        Reviewed and found to have zero mutation-detecting power without
-        the `elapsed` assertion below: with a plain deferred `BEGIN`,
+        Without the `elapsed` assertion below, this test has zero
+        mutation-detecting power: with a plain deferred `BEGIN`,
         `contender.begin()` also returns immediately and also observes
         `entity-001` (its lazy read snapshot is only taken *after*
         `releaser.join()` has let the writer commit) — so the two
@@ -2102,7 +2143,7 @@ class TestConcurrency:
                         )
                     )
                     entered.set()
-                    time.sleep(0.3)
+                    time.sleep(0.5)
                     writer.commit()
                 except BaseException as e:  # noqa: BLE001 - captured for the assertion below
                     errors.append(e)
@@ -2122,8 +2163,10 @@ class TestConcurrency:
 
             assert errors == []
             # Genuinely blocked on the writer's held lock, not a no-op
-            # deferred BEGIN that never contended on anything.
-            assert elapsed >= 0.2
+            # deferred BEGIN that never contended on anything. Threshold
+            # kept well below the 0.5s sleep above to absorb scheduling
+            # jitter between entered.wait() returning and t0 being taken.
+            assert elapsed >= 0.3
             assert contender._in_transaction is True
             assert contender.get_entity("entity-001") is not None
         finally:
