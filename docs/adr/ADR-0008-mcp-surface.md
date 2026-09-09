@@ -162,11 +162,12 @@ added anywhere to accommodate this.
 
 Two gaps surfaced during review, deliberately left unfixed here as pre-existing SDK behavior this
 change makes newly agent-reachable rather than new regressions of its own — tracked separately
-(KI-090, KI-091) rather than expanding this change's scope: `create_entity()` does not pre-validate
-`concept` against the active schema (an agent can create entities under an undeclared concept name,
-where `assert_literal`/`assert_ref` do validate `predicate` this way), and a duplicate
-`(namespace, concept, natural_key)` triggers the DB's `UNIQUE` constraint late, surfacing as a
-redacted, generic `StorageError` (500-class) rather than a caller-actionable `ValidationError`
+(KI-090, KI-091) rather than expanding this change's scope: `create_entity()` did not pre-validate
+`concept` against the active schema (an agent could create entities under an undeclared concept
+name, where `assert_literal`/`assert_ref` do validate `predicate` this way) — **KI-090 since
+resolved**, via `_require_known_concept()` mirroring `_require_known_predicate()` exactly — and a
+duplicate `(namespace, concept, natural_key)` triggers the DB's `UNIQUE` constraint late, surfacing
+as a redacted, generic `StorageError` (500-class) rather than a caller-actionable `ValidationError`
 naming the conflict.
 
 ## References

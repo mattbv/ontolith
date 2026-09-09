@@ -460,9 +460,10 @@ evaluation, because entity creation was never routed through that pipeline at th
 closed tool list, and REST's `POST /entities` (KI-082, same commit) for the third interface.
 
 Two pre-existing SDK-level gaps this change makes agent-reachable for the first time, deliberately
-left unfixed here and tracked separately: `create_entity()` doesn't validate `concept` against the
-active schema (KI-090), and a duplicate `(namespace, concept, natural_key)` surfaces as a redacted
-`StorageError` rather than a caller-actionable validation error (KI-091).
+left unfixed here and tracked separately: `create_entity()` didn't validate `concept` against the
+active schema (**KI-090 since resolved**, via `_require_known_concept()`), and a duplicate
+`(namespace, concept, natural_key)` surfaces as a redacted `StorageError` rather than a
+caller-actionable validation error (KI-091, still open).
 
 ## References
 
@@ -476,5 +477,5 @@ active schema (KI-090), and a duplicate `(namespace, concept, natural_key)` surf
 - `docs/known-issues.md` KI-022 (REST's own deferred-scope list, referenced
   for what this ADR deliberately does not add), KI-052 (event-loop-blocking
   resolvers, resolved by the 2026-08-28 update above), KI-082 (entity
-  creation added to REST/GraphQL/MCP), KI-090/KI-091 (gaps surfaced by
-  KI-082, tracked separately)
+  creation added to REST/GraphQL/MCP), KI-090 (gap surfaced by KI-082,
+  since resolved), KI-091 (gap surfaced by KI-082, tracked separately)
