@@ -372,6 +372,14 @@ class Ontology:
             ValidationError: concept is not declared in the active schema
                 (KI-090), or natural_key is already taken within concept
                 (KI-091)
+
+        Note:
+            Opens its own `self.backend.transaction()` (KI-092 — to keep
+            the natural-key uniqueness check and the write it guards in one
+            transaction, so `begin()`'s `BEGIN IMMEDIATE` serializes a
+            concurrent writer between them) — cannot be called from inside
+            an already-open transaction, same constraint every other
+            transaction-wrapped `Ontology` write method already has.
         """
         principal = self.backend.get_principal(author)
         if principal is None:
@@ -380,27 +388,28 @@ class Ontology:
             raise CapabilityError(f"Principal {author!r} lacks propose capability")
         self._require_known_concept(concept)
 
-        entity = Entity(
-            id=self.id_provider.next(),
-            namespace=self.namespace,
-            concept=concept,
-            natural_key=natural_key,
-            created_at=self.clock.now(),
-            created_by=author,
-        )
-
         # KI-092: the natural-key uniqueness check and the write it guards
         # must share one transaction, so `begin()`'s `BEGIN IMMEDIATE`
         # (KI-084) serializes a concurrent writer between them — otherwise
-        # two processes could both pass the check and both reach
+        # two writers could both pass the check and both reach
         # `put_entity`, and the loser hits the `UNIQUE` constraint as a
         # redacted `StorageError` (the exact error KI-091 was filed to
         # eliminate for the non-concurrent case). `_require_known_concept`
         # above stays outside as an optimistic fast-fail, matching
         # `assert_literal`'s own precedent for schema validation — a
-        # concurrent schema change is a different, out-of-scope race.
+        # concurrent schema change is a different, out-of-scope race. The
+        # entity (and its `id_provider`/`clock` draws) is built inside the
+        # block so a rejected duplicate consumes neither.
         with self.backend.transaction():
             self._require_unique_natural_key(concept, natural_key)
+            entity = Entity(
+                id=self.id_provider.next(),
+                namespace=self.namespace,
+                concept=concept,
+                natural_key=natural_key,
+                created_at=self.clock.now(),
+                created_by=author,
+            )
             self.backend.put_entity(entity)
         return entity
 
@@ -672,11 +681,12 @@ class Ontology:
         check.
 
         `create_entity` calls this *inside* its `with
-        self.backend.transaction():` block (KI-092), so on SQLite
-        `begin()`'s `BEGIN IMMEDIATE` (KI-084) has already claimed the
-        write lock by the time this read runs — a concurrent writer is
-        serialized behind it rather than able to commit a duplicate between
-        this check and the `put_entity` that follows. The DB's `UNIQUE`
+        self.backend.transaction():` block (KI-092), so a concurrent writer
+        is serialized behind it rather than able to commit a duplicate
+        between this check and the `put_entity` that follows: the RLock
+        (KI-023) is held across the whole block on either backend, and on
+        SQLite `begin()`'s `BEGIN IMMEDIATE` (KI-084) additionally claims
+        the write lock against a second OS process. The DB's `UNIQUE`
         constraint is still there as a backstop, but the transaction means
         a caller now reliably gets this named `ValidationError`, not the
         redacted `StorageError` the bare constraint failure produces.

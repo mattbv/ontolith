@@ -470,13 +470,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Fixed
 - `Ontology.create_entity()` now wraps its natural-key uniqueness check and the `put_entity` it
-  guards in one `transaction()` block (closes KI-092, filed while fixing KI-084) — so on SQLite
-  `begin()`'s `BEGIN IMMEDIATE` (KI-084) serializes a concurrent writer between the check and the
-  write, closing the last read-then-write path that could hit the raw `UNIQUE` constraint (a
-  redacted `StorageError`, the exact error KI-091 was filed to eliminate for the non-concurrent
-  case) instead of the friendly `ValidationError`. Chosen over merely remapping the constraint
-  error so `create_entity` is genuinely consistent with every other governed write path;
-  `BEGIN IMMEDIATE` costs nothing extra uncontended, so no perf downside. `issue_token`,
+  guards in one `transaction()` block (closes KI-092, filed while fixing KI-084) — closing the last
+  read-then-write path that could hit the raw `UNIQUE` constraint (a redacted `StorageError`, the
+  exact error KI-091 was filed to eliminate for the non-concurrent case) instead of the friendly
+  `ValidationError`, both under a multi-threaded ASGI server (the RLock is held across the block, on
+  either backend) and cross-process (SQLite's `BEGIN IMMEDIATE`). `create_entity()` **can no longer
+  be called from inside a caller's own open `backend.transaction()`** — same constraint
+  `create_principal`/`apply_schema` already carry; no in-repo caller nests. Chosen over merely
+  remapping the constraint error so `create_entity` is consistent with every other governed write
+  path; `BEGIN IMMEDIATE` costs nothing extra uncontended, so no perf downside. `issue_token`,
   `revoke_token`, and `reindex` (also named in KI-092) were left as-is — their reads don't guard an
   invariant a stale read could let a write violate.
 - `SQLiteBackend.begin()` now issues `BEGIN IMMEDIATE` instead of a plain deferred `BEGIN` (closes

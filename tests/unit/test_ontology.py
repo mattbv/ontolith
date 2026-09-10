@@ -525,19 +525,29 @@ class TestCreateEntityNaturalKeyTransaction:
     the raw `UNIQUE` constraint (a redacted `StorageError`, the exact
     error KI-091 was filed to eliminate for the non-concurrent case)."""
 
-    def test_uniqueness_check_runs_inside_the_write_transaction(self, kb: Ontology) -> None:
-        """Primary mutation guard: without the `with self.backend.transaction():`
-        wrapper, the check runs in autocommit and `_in_transaction` is False."""
-        seen: list[bool] = []
-        real = kb._require_unique_natural_key
+    def test_uniqueness_check_and_write_share_one_transaction(self, kb: Ontology) -> None:
+        """Primary mutation guard, backend-agnostic: `begin()` must run
+        before the uniqueness check and `commit()` after `put_entity`.
+        Reverting the `with self.backend.transaction():` wrapper drops
+        `begin`/`commit` from the sequence entirely."""
+        calls: list[str] = []
 
-        def spy(concept: str, natural_key: str | None) -> None:
-            seen.append(kb.backend._in_transaction)  # type: ignore[attr-defined]
-            real(concept, natural_key)
+        def rec(name: str, fn: object) -> object:
+            def wrapper(*args: object, **kwargs: object) -> object:
+                calls.append(name)
+                return fn(*args, **kwargs)  # type: ignore[operator]
 
-        kb._require_unique_natural_key = spy  # type: ignore[method-assign]
+            return wrapper
+
+        kb.backend.begin = rec("begin", kb.backend.begin)  # type: ignore[method-assign]
+        kb.backend.commit = rec("commit", kb.backend.commit)  # type: ignore[method-assign]
+        kb.backend.put_entity = rec("put_entity", kb.backend.put_entity)  # type: ignore[method-assign]
+        kb._require_unique_natural_key = rec(  # type: ignore[method-assign]
+            "check", kb._require_unique_natural_key
+        )
+
         kb.create_entity("Person", author="alice@example.com", natural_key="ada")
-        assert seen == [True]
+        assert calls == ["begin", "check", "put_entity", "commit"]
 
     def test_concurrent_duplicate_is_rejected_as_validation_error_not_storage_error(
         self, temp_db: Path
@@ -592,6 +602,12 @@ class TestCreateEntityNaturalKeyTransaction:
             t2 = threading.Thread(target=create_second)
             t2.start()
             time.sleep(0.2)  # let second's begin() start blocking on the write lock
+            # The contention this test exists to exercise: `second` must be
+            # parked in its own `begin()` right now, behind `first`'s held
+            # write lock. Without it, `second` runs entirely after `first`
+            # commits, sees the row, and raises ValidationError anyway —
+            # passing identically even with the wrapper reverted.
+            assert t2.is_alive(), "second did not block on begin() — no contention exercised"
             release.set()
             t.join(timeout=5)
             t2.join(timeout=5)
