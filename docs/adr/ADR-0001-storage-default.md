@@ -88,15 +88,13 @@ serializes this process's own threads) tries to write while one is still
 mid-transaction, or what topology avoids it. Tracked as KI-084.
 
 **The gap, concretely:** `SQLiteBackend.begin()` issued a plain deferred
-`BEGIN`, which takes its read snapshot lazily, on first statement. Every
-governed write path — all fourteen `with self.backend.transaction():`
-call sites in `ontology.py` (`create_principal`, `assert_literal`,
-`assert_ref`, `propose`, `propose_ref`, `retract`, `accept_proposal`,
-`reject_proposal`, `request_changes`, `assign_reviewers`, `resubmit`,
-`resolve_contradiction`, `flag_contradiction`, `apply_schema`) — reads
-existing state before writing, all inside that one `transaction()` block —
-so a concurrent writer in a second process could commit between that read
-and this connection's own write. The write then
+`BEGIN`, which takes its read snapshot lazily, on first statement.
+`assert_literal`/`assert_ref` (SPEC §10 conflict routing), `propose`/
+`propose_ref`'s auto-accept branch, `accept_proposal`, and `resubmit`'s
+auto-accept branch (via `_replay_proposal_operations`) all do their
+conflict-routing read *inside* the `with self.backend.transaction():`
+block they open — so a concurrent writer in a second process could commit
+between that read and this connection's own write. The write then
 hit `SQLITE_BUSY_SNAPSHOT`, a stale-snapshot-upgrade failure SQLite
 deliberately never routes through the busy handler: it failed immediately,
 regardless of `busy_timeout`. Confirmed directly, ad hoc, against the
@@ -127,8 +125,9 @@ contention... safe to retry" — by masking the extended sqlite error code
 (`code & 0xFF == sqlite3.SQLITE_BUSY`, needed because Python's `sqlite3`
 surfaces the *extended* code, e.g. 517 for `SQLITE_BUSY_SNAPSHOT`, not just
 the primary 5). Redacted like every other `StorageError` at the REST/
-GraphQL/MCP boundary (each interface's own `_REDACT_MESSAGE_FOR` handling
-— `rest.py`, `graphql.py`, `mcp.py` — KI-083's precedent for why), so this
+GraphQL/MCP boundary — GraphQL and MCP via their own `_REDACT_MESSAGE_FOR`
+tuple, REST via its `_STATUS_BY_ERROR_TYPE`-derived `status >= 500` check
+(KI-083's precedent for why all three redact) — so this
 is a server-log-only improvement for API callers — the point is an operator
 reading logs can now tell "retry the whole operation" from "something is
 actually broken" without decoding the raw sqlite3 message.
@@ -140,35 +139,41 @@ check — it is a topology recommendation, matching how the reference
 deployment already runs (one REST/GraphQL/MCP process per database file;
 `check_same_thread=False` plus the RLock only cover that one process's own
 worker threads, per ADR-0010). Running two independent server processes
-against the same file is now *safe* for every write path that opens a
-`transaction()` — which is every governed write in `Ontology` (the
-fourteen call sites named above) — no more instant, unretryable failure —
-but still *serializes*:
+against the same file no longer risks the instant, unretryable
+`SQLITE_BUSY_SNAPSHOT` failure for the write paths named above — but this
+is not a claim that every `Ontology` write is now cross-process-safe, and
+two known, narrower gaps remain deliberately unfixed here (below). Even
+where it does apply, safety still means *serializes*, not *parallelizes*:
 the second process's writes queue behind the first's for up to
 `busy_timeout` before erroring, which is a throughput cliff under real
 contention, not a correctness one. Scaling writes across processes is out
 of scope for the SQLite default and belongs to a server-backed
 `StorageBackend` instead (tracked separately, not a change to this
-default) — this fix does not claim to make that topology performant, only
-safe for the paths it covers.
+default).
 
-A handful of other `Ontology` methods (`create_entity`, `issue_token`,
-`revoke_token`, `reindex`) are not among those fourteen, and this fix does
-not extend to them: each reads, then writes, outside any `transaction()`
-block, since none of them calls `begin()` at all (autocommit path). Only
-`create_entity`'s read guards an invariant the write could violate —
-`natural_key` uniqueness (`_require_unique_natural_key`) — so it's the
-only one of the four with a genuine race; the others' reads are existence
-checks or (for `reindex`) idempotent re-computation, not a condition a
-stale read could let through incorrectly. In practice a race in
-`create_entity` surfaces as the `entity` table's own
-`UNIQUE(namespace, concept, natural_key)` constraint failing loudly (a
-`StorageError`, not a silent duplicate — KI-091's constraint already
-covers the correctness half), so it's a narrower gap than the one this KI
-closes, not a repeat of it — filed separately as KI-092 rather than folded
-in here, since closing it means deciding whether `create_entity` should
-gain its own `transaction()` wrapper, a scope question distinct from this
-KI's "fix `begin()`'s SQL" mandate.
+Two write shapes this fix does not reach, cross-referenced rather than
+re-litigated:
+
+- `create_entity`, `issue_token`, `revoke_token`, and `reindex` each read,
+  then write, without ever calling `begin()` at all (autocommit) — `BEGIN
+  IMMEDIATE` has nothing to change there. Of these, only `create_entity`'s
+  read guards an invariant the write could violate (`natural_key`
+  uniqueness); a race there still surfaces as a loud `StorageError` (KI-091's
+  `UNIQUE` constraint), not a silent duplicate. Filed as KI-092, which also
+  covers `propose`/`propose_ref`/`retract`'s reject/require-review outcome
+  (below) as a related instance of the same "writes outside `transaction()`"
+  shape.
+- `propose`, `propose_ref`, and `retract` evaluate policy against a
+  `kb_view` read taken *before* `begin()` is ever called, and persist a
+  `Reject`/`RequireReview` decision (`_finalize_non_accepted_decision`) via
+  that same pre-transaction, autocommit path when the outcome isn't
+  auto-accept — this fix does not move that read or that write inside a
+  transaction. This is not new: it is a pre-existing, deliberately accepted
+  tradeoff recorded when KI-035 closed ("policy evaluation itself can
+  likely stay outside the transaction... a pre-existing, deliberate
+  tradeoff shared by `propose`/`propose_ref`/`retract`, not something newly
+  closed here" — `resubmit`'s own KI-035 fix carries the identical caveat).
+  KI-084 doesn't reopen that decision.
 
 **A cost this fix introduces, not just documents:** `self._lock` (ADR-0010,
 KI-023) is acquired *before* the `BEGIN IMMEDIATE` call, so while a

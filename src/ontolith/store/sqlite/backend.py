@@ -635,20 +635,29 @@ class SQLiteBackend:
 
         ``BEGIN IMMEDIATE``, not a plain deferred ``BEGIN`` (KI-084): a
         deferred transaction takes its read snapshot lazily, on first
-        statement — every write path in this codebase reads existing
-        state for SPEC §10 conflict routing before writing, all inside
-        one `transaction()` block, so a deferred `BEGIN` here let a
-        concurrent writer (a second OS process; `self._lock` above only
-        protects this process's own threads) commit between that read and
-        this connection's own write. The resulting write then hit
-        `SQLITE_BUSY_SNAPSHOT` — a stale-snapshot-upgrade failure SQLite
-        deliberately never routes through the busy handler, so it failed
-        immediately no matter how long `busy_timeout` (set in `__init__`)
-        allowed. `BEGIN IMMEDIATE` claims the write lock right here,
-        before any read this transaction goes on to do, so a concurrent
-        writer is instead serialized behind it — blocked and retried by
-        the busy handler, same as any other reachable `SQLITE_BUSY`, for
-        up to `busy_timeout` before genuinely failing.
+        statement. `assert_literal`/`assert_ref`'s own conflict-routing
+        read (SPEC §10) and `propose`/`propose_ref`'s auto-accept branch,
+        `accept_proposal`, and `resubmit`'s auto-accept branch (via
+        `_replay_proposal_operations`) all do that read *inside* the
+        `transaction()` block this method opens — so a deferred `BEGIN`
+        let a concurrent writer (a second OS process; `self._lock` above
+        only protects this process's own threads) commit between that read
+        and this connection's own later write. The resulting write then
+        hit `SQLITE_BUSY_SNAPSHOT` — a stale-snapshot-upgrade failure
+        SQLite deliberately never routes through the busy handler, so it
+        failed immediately no matter how long `busy_timeout` (set in
+        `__init__`) allowed. `BEGIN IMMEDIATE` claims the write lock right
+        here, before any read this transaction goes on to do, so a
+        concurrent writer is instead serialized behind it — blocked and
+        retried by the busy handler, same as any other reachable
+        `SQLITE_BUSY`, for up to `busy_timeout` before genuinely failing.
+
+        This is not a blanket claim that every `Ontology` write is now
+        cross-process-safe — see KI-084's `docs/known-issues.md` entry and
+        its own KI-092 follow-up for exactly which write paths this does
+        and doesn't reach (several either write outside any `transaction()`
+        block at all, or, per the already-resolved KI-035, evaluate policy
+        against a read taken before the transaction opens).
 
         Trade-off worth knowing (KI-084 review): `self._lock` is acquired
         *before* the `BEGIN IMMEDIATE` call below, so while this call is
