@@ -21,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sketch-vs-shipped drifts KI-086 named: `Entity` stays a pure value object (no `Entity.history()`
   etc. — the equivalents are `Ontology.assertions(status=None)` / `provenance()` /
   `contradictions()`), and the `create_principal()`/`get_principal()` split is intentional (no
-  `kb.principal(...)` alias). SPEC §14.1 gained a non-normative note pointing at ADR-0047.
+  `kb.principal(...)` alias). SPEC §14.1 gained a note flagging these as ADR-recorded deviations from its stated shape.
 - `RequireReviewForAI` (closes KI-088, found in the pre-M4 deep + security audit) — the
   `Composite(all=[RequireReviewForAI(), SourceQuorum(2)])` pattern `Composite`'s own docstring has
   sketched inline since ADR-0040 is now a real, exported, tested `PolicyStrategy`, not something

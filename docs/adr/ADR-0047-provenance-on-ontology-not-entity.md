@@ -37,11 +37,18 @@ KI-086 also flagged two related drifts between SPEC §14.1's Python-SDK sketch a
    `create_principal()` and `get_principal()` as two separate methods; `kb.principal(...)` raises
    `AttributeError`.
 
-SPEC §14.1 is explicitly labelled a *sketch* of the "primary surface" and has diverged from the
-implementation in at least half a dozen ways already unrelated to KI-086 (`Ontology.connect`'s
+Under SPEC §1's Conventions ("Code and DDL are *normative for shape*"), the §14.1 code block is
+normative for shape — so `Entity.history()` etc. not existing, and `principal(...)` being two
+methods, are **deviations from the spec's stated shape**, not just informal drift. §14.1 is headed
+"(primary surface)", not "(normative shape)" like §6.2/§11.1/§12.2, but §1 is the governing
+statement and it makes no such carve-out. This ADR is the record of those deviations and the
+reasoning for them — the standard way this project documents a deliberate departure from SPEC
+(cf. ADR-0041 for DuckDB trigger support, ADR-0013's KI-068 update). §14.1 has in fact diverged
+from the implementation in ~half a dozen other places too, unrelated to KI-086 (`Ontology.connect`'s
 signature, `KnowledgeBase` vs `Ontology`, `get(Concept, **natural_key)` vs `get_entity(id)`, the
-`Principal.propose`/`can` methods, …). It predates the decision to make `Entity` a pure value
-object (SPEC §5.2, `core/entity.py`).
+`Principal.propose`/`can` methods) — this ADR scopes itself to the two KI-086 named and leaves the
+rest to the SDK's own docstrings. The §14.1 sketch also predates the decision to make `Entity` a
+pure value object (SPEC §5.2, `core/entity.py`).
 
 ## Decision
 
@@ -77,9 +84,11 @@ not), and in return contract (`create_principal` raises on conflict; `get_princi
 `None`). No `kb.principal(...)` alias is added — a single overloaded factory would blur those
 boundaries.
 
-**4. SPEC §14.1 is annotated, not rewritten.** A short non-normative note points at this ADR as
-the authoritative record of the SDK surface, rather than editing the sketch line-by-line for the
-two drifts KI-086 named while leaving the others.
+**4. SPEC §14.1 is annotated, not rewritten.** A short note under the block points at this ADR as
+the authoritative record where the shipped surface deviates, rather than editing the block
+line-by-line for the two deviations KI-086 named while leaving the others. The note does not
+relabel §14.1 as non-normative — §1's Conventions still govern; it flags the deviations as
+ADR-recorded.
 
 ## Rationale
 

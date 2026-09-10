@@ -160,17 +160,19 @@ def test_bench_single_entity_get(benchmark, seeded_backend: SQLiteBackend) -> No
 
 
 @pytest.mark.benchmark
-def test_bench_single_entity_provenance(benchmark, seeded_backend: SQLiteBackend) -> None:
-    """p95 target: < 10 ms — Entity retrieval + all assertions (provenance)."""
+def test_bench_single_entity_provenance(benchmark, seeded_kb: Ontology) -> None:
+    """p95 target: < 10 ms — SPEC §5.4's one-call provenance view.
 
-    def get_with_provenance() -> tuple:
-        entity = seeded_backend.get_entity("entity-000500")
-        assertions = seeded_backend.assertions(subject="entity-000500")
-        return entity, assertions
-
-    entity, assertions = benchmark(get_with_provenance)
-    assert entity is not None
-    assert len(assertions) == 100
+    `Ontology.provenance()` (KI-086/ADR-0047) does three backend
+    round-trips: `get_assertion` + `get_proposal_events` +
+    `get_assertion_events_by_successor`. A seeded assertion is a direct
+    write with no proposal and no supersession, so the latter two return
+    empty — the common case this budget targets.
+    """
+    result = benchmark(seeded_kb.provenance, "assertion-000500-050")
+    assert result.assertion.id == "assertion-000500-050"
+    assert result.review_events == ()
+    assert result.superseded_ids == ()
 
 
 @pytest.mark.benchmark
