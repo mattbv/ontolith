@@ -297,6 +297,10 @@ class QueryBuilder:
         snapshot unless excluded — the `as_of` path has honored this flag
         since before KI-081).
 
+        Does not yet compose with `.min_confidence()` / `.trust_at_least()`:
+        those still consider only `active` assertions, so chaining one after
+        an `.include_*()` re-narrows the result to active (KI-093).
+
         Returns:
             Self for chaining
         """
@@ -319,7 +323,8 @@ class QueryBuilder:
         timeline attached. No effect on a query with no `.where()` filter,
         or one scoped by `.as_of()` (a bitemporal snapshot already matches
         whatever assertion was valid at that instant, regardless of its
-        status now).
+        status now). Does not yet compose with `.min_confidence()` /
+        `.trust_at_least()` (KI-093 — those still consider `active` only).
 
         Returns:
             Self for chaining
@@ -394,6 +399,13 @@ class QueryBuilder:
         stood at `as_of_time` — a structural limitation of the vector
         index having no temporal dimension, not something this method can
         patch around.
+
+        A related ceiling for `.semantic().where(...).include_flagged()` /
+        `.include_history()` (KI-081): `Ontology.reindex()` embeds only
+        *active* Text values and skips an entity with none, so an entity
+        whose entire matching content is flagged/superseded/retracted is
+        absent from the vector index and unreachable this way even though
+        the pure-symbolic path (`_base_candidates`) would return it.
         """
         if self._embedder is None:
             raise ValidationError(

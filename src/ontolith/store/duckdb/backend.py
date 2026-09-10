@@ -1893,7 +1893,7 @@ class DuckDBBackend:
                 match_params.append("flagged")
             if include_history:
                 match_params += ["superseded", "retracted"]
-            match_clause = f" AND status IN ({', '.join('?' * len(match_params))})"  # nosec B608
+            match_clause = f" AND status IN ({', '.join(['?'] * len(match_params))})"
 
         # predicate/value are always bound via `?` below, never
         # interpolated; the two interpolated pieces are match_clause (built

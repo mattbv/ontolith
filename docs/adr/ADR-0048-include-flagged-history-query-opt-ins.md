@@ -56,11 +56,18 @@ its name implies.
 nothing to widen. (`_base_candidates()` calls `entities()`, not `entities_where()`, when there are
 no filters.)
 
-**No effect under `.as_of(t)`.** A bitemporal snapshot matches whatever assertion's validity window
-covered `t`, regardless of that assertion's status *now*, so `superseded`/`retracted` history is
-already visible there by construction — `.include_history()` is a no-op on the `as_of` path.
+**`.include_history()` is a no-op under `.as_of(t)`.** A bitemporal snapshot matches whatever
+assertion's validity window covered `t`, regardless of that assertion's status *now* — so a
+`superseded` value is visible there whenever `t` predates its supersession, without any opt-in.
 `.include_flagged()` *does* still apply under `.as_of()` (a flagged assertion has an open window),
 and the `as_of` path has honored `entities_where(include_flagged=...)` since before this ADR.
+
+This leaves one `as_of` gap this ADR does **not** fix: a `retract()` does not always narrow an
+already-open validity window (`_retraction_valid_to`), so a retracted assertion with a future
+`valid_to` still matches an `.as_of(t)` snapshot for `t` after the retraction, with no way to
+exclude it — SPEC §11.2's "retracted excluded by default" is unmet on that path. Pre-existing (the
+`as_of` branch has always been window-based, not status-based); filed as KI-095, not addressed
+here.
 
 **Implementation.** `entities_where()` gains an `include_history: bool = False` parameter on the
 `StorageBackend` port and both adapters. The current-state branch replaces its hard-coded
@@ -88,8 +95,8 @@ methods, and threads both through to `entities_where()` from `_base_candidates()
 
 **Positive:**
 - SPEC §10.3's opt-in half is now reachable through the primary `kb.query(Concept)` API.
-- No public return-type change; `.include_*()` compose with `.where()` / `.semantic()` /
-  `.min_confidence()` / `.limit()` like any other builder method.
+- No public return-type change; `.include_*()` compose with `.where()`, `.semantic()`, and
+  `.limit()` like any other builder method.
 - The `as_of` path's pre-existing `include_flagged` handling is unified with the current-state path
   under one parameter set.
 
@@ -101,6 +108,10 @@ methods, and threads both through to `entities_where()` from `_base_candidates()
 - `.include_flagged()` / `.include_history()` silently do nothing on a filter-less or `as_of`
   query. Documented on each method; not surfaced as a warning (consistent with the builder's other
   no-op combinations, e.g. `.limit()` larger than the result set).
+- The wideners do **not** yet compose with `.min_confidence()` / `.trust_at_least()`:
+  `entities_meeting_confidence` / `entities_meeting_trust` still consider only `active` assertions
+  on the current-state path, so `.include_history().min_confidence(x)` re-narrows to active and can
+  empty the result. Documented on both builder methods; the full composition is filed as KI-093.
 
 ## Alternatives Considered
 

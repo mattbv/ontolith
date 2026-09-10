@@ -1,6 +1,7 @@
 """Unit tests for query builder."""
 
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -881,3 +882,84 @@ class TestIncludeFlaggedAndHistory:
         assert kb.query("Person").where(name="Ada").first() is None
         first = kb.query("Person").where(name="Ada").include_flagged().first()
         assert first is not None and first.id == pid
+
+    def test_active_value_is_still_returned_under_each_widener(self, kb: Ontology) -> None:
+        """The widener invariant (ADR-0048): the opt-ins *add* statuses to
+        the match set, they never remove `active`. Pins against a mutation
+        that turns `.include_*()` into a narrower."""
+        alice_id = self._prep(kb)
+        person = kb.create_entity("Person", author=alice_id)
+        kb.assert_literal(person.id, "Person.name", "Ada", "Text", alice_id)  # stays active
+        assert kb.assertions(subject=person.id, predicate="Person.name", status="active")
+
+        assert [r.id for r in kb.query("Person").where(name="Ada").all()] == [person.id]
+        assert [r.id for r in kb.query("Person").where(name="Ada").include_flagged().all()] == [
+            person.id
+        ]
+        assert [r.id for r in kb.query("Person").where(name="Ada").include_history().all()] == [
+            person.id
+        ]
+        assert [
+            r.id
+            for r in kb.query("Person").where(name="Ada").include_flagged().include_history().all()
+        ] == [person.id]
+
+    def test_widener_composes_with_a_second_where_filter(self, kb: Ontology) -> None:
+        """Two `.where()` filters + a widener: both still AND, and the
+        widened status set applies to each sub-select (exercises the
+        per-filter `match_params` splicing with len > 1)."""
+        alice_id = self._prep(kb)
+        person = kb.create_entity("Person", author=alice_id)
+        kb.assert_literal(person.id, "Person.name", "Ada", "Text", alice_id)
+        kb.assert_literal(person.id, "Person.name", "Ava", "Text", alice_id)  # name -> flagged
+        kb.assert_literal(person.id, "Person.role", "Engineer", "Text", alice_id)  # active
+
+        other = kb.create_entity("Person", author=alice_id)
+        kb.assert_literal(other.id, "Person.name", "Ada", "Text", alice_id)
+        kb.assert_literal(other.id, "Person.name", "Ava", "Text", alice_id)  # flagged, but no role
+
+        q = kb.query("Person").where(name="Ada").where(role="Engineer").include_flagged()
+        assert [r.id for r in q.all()] == [person.id]  # `other` fails the role filter
+
+    def test_as_of_query_default_excludes_flagged_opt_in_includes(self, kb: Ontology) -> None:
+        """`.as_of()` + `.include_flagged()` is newly reachable through the
+        fluent API (QueryBuilder never threaded `include_flagged` before
+        KI-081). The `as_of` path has always excluded flagged by default;
+        the opt-in now works there too."""
+        alice_id = self._prep(kb)
+        person = self._flagged_person(kb, alice_id)
+        # The `kb` fixture uses a wall-clock; pick an instant safely after
+        # every assertion's asserted_at/valid_from (and before any valid_to,
+        # which are all NULL here).
+        t = datetime(2099, 1, 1, tzinfo=UTC)
+
+        assert kb.as_of(t).query("Person").where(name="Ada").all() == []
+        assert [
+            r.id for r in kb.as_of(t).query("Person").where(name="Ada").include_flagged().all()
+        ] == [person]
+
+    def test_semantic_where_honors_include_flagged(self, tmp_path: Path) -> None:
+        """The `.semantic()` path intersects vector hits with a symbolic
+        `entities_where()` call — the widener must thread through there too."""
+        # After name -> flagged, the only active Text value is bio, so
+        # `_entity_text` embeds just "bio text" — map that.
+        embedder = LookupEmbedder({"bio text": [1.0, 0.0, 0.0], "query": [1.0, 0.0, 0.0]}, dim=3)
+        kb = Ontology.connect(tmp_path / "sem.db", embedder=embedder)
+        try:
+            alice = kb.create_principal(
+                "alice@example.com", kind="human", default_capability="write"
+            )
+            person = kb.create_entity("Person", author=alice.id)
+            kb.assert_literal(person.id, "Person.name", "Ada", "Text", alice.id)
+            # An extra active assertion so reindex() still embeds the entity
+            # after the name goes flagged (reindex embeds active Text only).
+            kb.assert_literal(person.id, "Person.bio", "bio text", "Text", alice.id)
+            kb.assert_literal(person.id, "Person.name", "Ava", "Text", alice.id)  # -> flagged
+            assert kb.assertions(subject=person.id, predicate="Person.name", status="flagged")
+            kb.reindex()
+
+            assert kb.query("Person").semantic("query").where(name="Ada").all() == []
+            hit = kb.query("Person").semantic("query").where(name="Ada").include_flagged().all()
+            assert [r.id for r in hit] == [person.id]
+        finally:
+            kb.close()

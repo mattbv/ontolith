@@ -372,7 +372,7 @@ lookup-operator suffixes against literal properties only — `__contains` (subst
 amendment).
 
 ### 11.2 Symbolic semantics
-- Filters compile to predicate lookups over `active` assertions (or the `as_of` snapshot).
+- Filters compile to predicate lookups over `active` assertions by default (or the `as_of` snapshot); see the opt-ins below.
 - Relation traversal (`employer__name`) joins across subject→ref→subject.
 - Flagged/superseded/retracted assertions are **excluded by default**; `.include_flagged()` (adds `flagged`) / `.include_history()` (adds `superseded`/`retracted`) opt in. Both widen which assertion statuses a `.where()` filter matches against; the result stays `list[Entity]` (ADR-0048).
 
