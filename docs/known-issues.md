@@ -1640,10 +1640,10 @@ Thread `cardinality` into `_route_time_varying`. This needs a real design decisi
 
 ---
 
-## KI-081 — `QueryBuilder` never exposes SPEC §11.2's `.include_flagged()`/`.include_history()` opt-ins
+## KI-081 — `QueryBuilder` never exposes SPEC §11.2's `.include_flagged()`/`.include_history()` opt-ins ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — a SPEC MUST-adjacent requirement unmet at the primary query API
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §11.2 ("Flagged/superseded/retracted assertions are excluded by default; `.include_flagged()` / `.include_history()` opt in"), SPEC §10.3 ("A flagged assertion... MUST be excluded from default (unflagged) retrieval unless explicitly requested")
 
 ### Description
@@ -1654,7 +1654,11 @@ SPEC §10.3's MUST ("A flagged assertion is retained and queryable but MUST be e
 
 ### Fix
 
-Add `.include_flagged()` to `QueryBuilder`, threading through to `entities_where()`'s existing backend parameter — note both SQLite and DuckDB backends currently only consult `include_flagged` inside their `as_of_time` branch, so giving `.include_flagged()` an effect on current-state (non-`as_of`) queries needs backend changes too, not just a `QueryBuilder` passthrough. Separately, decide what `.include_history()` should mean — full assertion history per matched entity is a bigger surface than a single boolean. If either is deliberately deferred rather than built now, record that as an ADR (matching ADR-0027's precedent for the multi-hop-traversal deferral) and correct SPEC §11.2's own wording plus any doc that currently implies this already works.
+Both opt-ins built, as **match-set wideners** — they change only which assertion statuses a `.where()` filter may match against; `.all()`/`.first()`/`.count()` keep returning `Entity`/`Entity | None`/`int` (**ADR-0048** records this over the "return per-entity timelines" alternative). Default match set is `active`; `.include_flagged()` adds `flagged`; `.include_history()` adds `superseded` + `retracted`; the two are independent (neither implies the other). No effect on a filter-less query (nothing to match) or an `.as_of()` query (a bitemporal snapshot already matches whatever was valid at that instant regardless of status now — `.include_flagged()` still applies there, as it has since before this KI; `.include_history()` is a no-op on that path).
+
+`QueryBuilder` gained `.include_flagged()` / `.include_history()` chainable methods + `_include_flagged`/`_include_history` fields, threaded through to `entities_where()` from both `_base_candidates()` and `_semantic_candidates()`. `StorageBackend.entities_where()` (port + both adapters) gained `include_history: bool = False`; each adapter's current-state branch replaced its hard-coded `" AND status = 'active'"` with a parameter-bound `" AND status IN (?, …)"` built from the widened status list (the `as_of` branch's `include_flagged` handling was already correct and is unchanged). SPEC §11.2's wording tightened to name which statuses each opt-in adds.
+
+New `tests/unit/test_query.py::TestIncludeFlaggedAndHistory` (11 cases: each status excluded by default and matched on the right opt-in; the two flags' independence; both-together; filter-less no-op; chainable; `.count()`/`.first()` honor it), mutation-tested (reverting the SQLite `else` branch fails the 5 match-expecting cases). New `tests/unit/test_sqlite_backend.py::test_entities_where_status_widening_flags` at the port level. New `conformance/test_include_flagged_history.py` (6 cases × both backends = 12) since `Ontology.connect()` only ever builds SQLite and the widening lives in each adapter.
 
 ---
 

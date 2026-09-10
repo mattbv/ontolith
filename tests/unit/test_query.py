@@ -747,3 +747,137 @@ class TestLimit:
         results = kb.query("Person").limit(10).all()
 
         assert {r.id for r in results} == {p1.id, p2.id}
+
+
+class TestIncludeFlaggedAndHistory:
+    """KI-081 / SPEC §11.2: `.where()` matches only `active` assertions by
+    default; `.include_flagged()` and `.include_history()` widen the match
+    set. Both are match-set wideners, not result-shape changes — `.all()`
+    still returns `list[Entity]`."""
+
+    def _prep(self, kb: Ontology) -> str:
+        """Admin + write principal + a schema with a time_varying
+        `Person.role`. Returns the write principal's id."""
+        admin = kb.create_principal(
+            "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
+        )
+        alice = kb.create_principal(
+            "alice@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+        kb.apply_schema(
+            SchemaIR(
+                namespace="default",
+                version=1,
+                concepts={
+                    "Person": ConceptDef(
+                        name="Person",
+                        properties={
+                            "name": PropertyDef(name="name", value_type="Text"),
+                            "role": PropertyDef(
+                                name="role", value_type="Text", temporality="time_varying"
+                            ),
+                        },
+                    ),
+                },
+            ),
+            author=admin.id,
+        )
+        return alice.id
+
+    def _flagged_person(self, kb: Ontology, alice_id: str) -> str:
+        """Entity whose `Person.name` has two contradicting (flagged)
+        assertions and nothing active. Returns the entity id."""
+        person = kb.create_entity("Person", author=alice_id)
+        kb.assert_literal(person.id, "Person.name", "Ada", "Text", alice_id)
+        kb.assert_literal(person.id, "Person.name", "Ava", "Text", alice_id)
+        assert kb.assertions(subject=person.id, predicate="Person.name", status="flagged")
+        assert not kb.assertions(subject=person.id, predicate="Person.name", status="active")
+        return person.id
+
+    def _superseded_person(self, kb: Ontology, alice_id: str) -> str:
+        """Entity whose earlier `Person.role` value ('Engineer') was
+        superseded by a later one ('Manager'). Returns the entity id."""
+        person = kb.create_entity("Person", author=alice_id)
+        kb.assert_literal(person.id, "Person.role", "Engineer", "Text", alice_id)
+        kb.assert_literal(person.id, "Person.role", "Manager", "Text", alice_id)
+        assert kb.assertions(subject=person.id, predicate="Person.role", status="superseded")
+        return person.id
+
+    def _retracted_person(self, kb: Ontology, alice_id: str) -> str:
+        """Entity whose only `Person.name` assertion was retracted."""
+        person = kb.create_entity("Person", author=alice_id)
+        a = kb.assert_literal(person.id, "Person.name", "Ada", "Text", alice_id)
+        kb.retract(a.id, alice_id)
+        assert kb.assertions(subject=person.id, predicate="Person.name", status="retracted")
+        return person.id
+
+    def test_flagged_assertion_is_excluded_by_default(self, kb: Ontology) -> None:
+        self._flagged_person(kb, self._prep(kb))
+        assert kb.query("Person").where(name="Ada").all() == []
+
+    def test_include_flagged_matches_a_flagged_assertion(self, kb: Ontology) -> None:
+        pid = self._flagged_person(kb, self._prep(kb))
+        results = kb.query("Person").where(name="Ada").include_flagged().all()
+        assert [r.id for r in results] == [pid]
+
+    def test_superseded_assertion_is_excluded_by_default(self, kb: Ontology) -> None:
+        self._superseded_person(kb, self._prep(kb))
+        assert kb.query("Person").where(role="Engineer").all() == []
+
+    def test_include_history_matches_a_superseded_assertion(self, kb: Ontology) -> None:
+        pid = self._superseded_person(kb, self._prep(kb))
+        results = kb.query("Person").where(role="Engineer").include_history().all()
+        assert [r.id for r in results] == [pid]
+
+    def test_include_history_matches_a_retracted_assertion(self, kb: Ontology) -> None:
+        pid = self._retracted_person(kb, self._prep(kb))
+        results = kb.query("Person").where(name="Ada").include_history().all()
+        assert [r.id for r in results] == [pid]
+
+    def test_include_flagged_alone_does_not_match_superseded(self, kb: Ontology) -> None:
+        """The two flags are independent: `.include_flagged()` widens to
+        `flagged` only, not `superseded`/`retracted`."""
+        self._superseded_person(kb, self._prep(kb))
+        assert kb.query("Person").where(role="Engineer").include_flagged().all() == []
+
+    def test_include_history_alone_does_not_match_flagged(self, kb: Ontology) -> None:
+        self._flagged_person(kb, self._prep(kb))
+        assert kb.query("Person").where(name="Ada").include_history().all() == []
+
+    def test_both_flags_widen_to_every_status(self, kb: Ontology) -> None:
+        alice_id = self._prep(kb)
+        flagged_pid = self._flagged_person(kb, alice_id)
+        superseded_pid = self._superseded_person(kb, alice_id)
+        assert [
+            r.id
+            for r in kb.query("Person").where(name="Ada").include_flagged().include_history().all()
+        ] == [flagged_pid]
+        assert [
+            r.id
+            for r in kb.query("Person")
+            .where(role="Engineer")
+            .include_flagged()
+            .include_history()
+            .all()
+        ] == [superseded_pid]
+
+    def test_flags_are_a_noop_without_a_where_filter(self, kb: Ontology) -> None:
+        """No `.where()` -> nothing to match against -> the flags change
+        nothing (the query still returns every entity of the concept)."""
+        alice_id = self._prep(kb)
+        p1 = kb.create_entity("Person", author=alice_id)
+        p2 = kb.create_entity("Person", author=alice_id)
+        results = kb.query("Person").include_flagged().include_history().all()
+        assert {r.id for r in results} == {p1.id, p2.id}
+
+    def test_include_methods_are_chainable(self, kb: Ontology) -> None:
+        q = kb.query("Person").include_flagged().include_history()
+        assert isinstance(q, QueryBuilder)
+
+    def test_count_and_first_honor_include_flagged(self, kb: Ontology) -> None:
+        pid = self._flagged_person(kb, self._prep(kb))
+        assert kb.query("Person").where(name="Ada").count() == 0
+        assert kb.query("Person").where(name="Ada").include_flagged().count() == 1
+        assert kb.query("Person").where(name="Ada").first() is None
+        first = kb.query("Person").where(name="Ada").include_flagged().first()
+        assert first is not None and first.id == pid

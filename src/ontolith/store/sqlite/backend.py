@@ -1968,6 +1968,7 @@ class SQLiteBackend:
         predicate_filters: list[tuple[str, str, Any]],
         as_of_time: datetime | None = None,
         include_flagged: bool = False,
+        include_history: bool = False,
     ) -> list[Entity]:
         """Query entities matching all predicate filters in one SQL query.
 
@@ -1994,9 +1995,13 @@ class SQLiteBackend:
                 triples (AND semantics) — see the port method's docstring
                 for the operator set
             as_of_time: If set, applies bitemporal filter on assertions and entity creation
-            include_flagged: When as_of_time is set, whether to include
-                'flagged' assertions in the predicate match (excluded by
-                default — see assertions())
+            include_flagged: Also match 'flagged' assertions — honored on
+                both the current-state and as_of_time paths (KI-081;
+                excluded by default on both, see assertions()).
+            include_history: Also match 'superseded'/'retracted' assertions
+                (KI-081). Current-state path only — no-op under as_of_time,
+                which is window-based and already matches whatever was
+                valid at that instant regardless of status now.
 
         Returns:
             List of entities where all filters match at the given time
@@ -2021,8 +2026,17 @@ class SQLiteBackend:
             )
             match_params = [t_iso, t_iso, t_iso]
         else:
-            match_clause = " AND status = 'active'"
-            match_params = []
+            # Current-state: 'active' only by default;
+            # .include_flagged()/.include_history() widen the set (KI-081).
+            # `status IN (?, …)` is fully parameter-bound — the interpolated
+            # piece is only the placeholder string (`?, ?`), built from
+            # `len(match_params)`, never caller input.
+            match_params = ["active"]
+            if include_flagged:
+                match_params.append("flagged")
+            if include_history:
+                match_params += ["superseded", "retracted"]
+            match_clause = f" AND status IN ({', '.join('?' * len(match_params))})"  # nosec B608
 
         # predicate/value are always bound via `?` below, never
         # interpolated; the two interpolated pieces are match_clause (built

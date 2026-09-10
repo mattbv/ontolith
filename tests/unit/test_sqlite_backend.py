@@ -1487,6 +1487,54 @@ class TestSQLiteBackend:
         )
         assert no_match == []
 
+    def test_entities_where_status_widening_flags(self, backend: SQLiteBackend) -> None:
+        """KI-081: current-state entities_where() matches 'active' only by
+        default; include_flagged / include_history widen it, independently."""
+        backend.put_entity(
+            Entity(
+                id="p1",
+                namespace="test-ns",
+                concept="Person",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                created_by="alice@test.com",
+            )
+        )
+        for aid, status in (
+            ("a-flagged", "flagged"),
+            ("a-super", "superseded"),
+            ("a-retr", "retracted"),
+        ):
+            backend.put_assertion(
+                Assertion(
+                    id=aid,
+                    namespace="test-ns",
+                    subject="p1",
+                    predicate="Person.tag",
+                    value_kind="literal",
+                    value_type="Text",
+                    value=aid,
+                    author="alice@test.com",
+                    asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+                    status=status,
+                )
+            )
+
+        def match(value: str, **kw: bool) -> list[str]:
+            return [
+                e.id
+                for e in backend.entities_where(
+                    "test-ns", "Person", [("Person.tag", "eq", value)], **kw
+                )
+            ]
+
+        assert match("a-flagged") == []  # excluded by default
+        assert match("a-flagged", include_flagged=True) == ["p1"]
+        assert match("a-flagged", include_history=True) == []  # history != flagged
+        assert match("a-super", include_history=True) == ["p1"]
+        assert match("a-retr", include_history=True) == ["p1"]
+        assert match("a-super", include_flagged=True) == []  # flagged != history
+        assert match("a-super", include_flagged=True, include_history=True) == ["p1"]
+
     def test_contradictions_filter_by_state(self, backend: SQLiteBackend) -> None:
         backend.put_contradiction(
             Contradiction(

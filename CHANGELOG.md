@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- `QueryBuilder.include_flagged()` / `.include_history()` (closes KI-081, ADR-0048) — SPEC §11.2's
+  two opt-ins, now on the fluent API. They widen which assertion statuses a `.where()` filter
+  matches against: default `active`; `.include_flagged()` adds `flagged`; `.include_history()` adds
+  `superseded` + `retracted`; the two are independent. Match-set wideners only — `.all()` still
+  returns `list[Entity]`, no per-entity timeline (that stays `kb.assertions(status=None)` /
+  `kb.provenance()`). No effect on a filter-less or `.as_of()` query. `StorageBackend.entities_where()`
+  gains `include_history: bool`; each adapter's current-state branch's hard-coded `status = 'active'`
+  becomes a parameter-bound `status IN (…)`.
 - `Ontology.provenance(assertion_id) -> Provenance` (closes KI-086, ADR-0047) — the single
   domain-layer implementation of SPEC §5.4's one-call provenance view. REST (`GET
   /provenance/{id}`), GraphQL (`Query.provenance`), and MCP (`ontolith.provenance`) each stopped

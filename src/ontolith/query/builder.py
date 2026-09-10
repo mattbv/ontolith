@@ -85,6 +85,8 @@ class QueryBuilder:
         self._min_confidence: float | None = None
         self._trust_at_least: int | None = None
         self._limit: int | None = None
+        self._include_flagged: bool = False
+        self._include_history: bool = False
 
     def where(self, **kwargs: Any) -> "QueryBuilder":
         """Add filters to the query.
@@ -279,6 +281,52 @@ class QueryBuilder:
         self._limit = n
         return self
 
+    def include_flagged(self) -> "QueryBuilder":
+        """Also match `.where()` filters against `flagged` assertions
+        (SPEC §11.2, §10.3, KI-081).
+
+        By default a `.where()` filter matches only `active` assertions, so
+        an entity whose only matching value sits on a flagged (contradicted)
+        assertion is not returned. This opt-in widens the match set to
+        `active` + `flagged`. It is a *match-set* widener, not a result-shape
+        change — `.all()` still returns `list[Entity]`.
+
+        No effect on a query with no `.where()` filter (nothing to match
+        against) or one already scoped by `.as_of()` (a flagged assertion's
+        open validity window already makes it visible in a bitemporal
+        snapshot unless excluded — the `as_of` path has honored this flag
+        since before KI-081).
+
+        Returns:
+            Self for chaining
+        """
+        self._include_flagged = True
+        return self
+
+    def include_history(self) -> "QueryBuilder":
+        """Also match `.where()` filters against `superseded` and
+        `retracted` assertions (SPEC §11.2, KI-081).
+
+        By default a `.where()` filter matches only `active` assertions.
+        This opt-in widens the current-state match set to also include
+        assertions a later write superseded or a `retract()` withdrew — so
+        `kb.query(Person).where(name="Ada").include_history()` returns a
+        person whose name *was* "Ada" even if it isn't now. Combine with
+        `.include_flagged()` to widen to every status.
+
+        Like `.include_flagged()`, a match-set widener, not a result-shape
+        change: `.all()` returns `list[Entity]`, with no per-entity
+        timeline attached. No effect on a query with no `.where()` filter,
+        or one scoped by `.as_of()` (a bitemporal snapshot already matches
+        whatever assertion was valid at that instant, regardless of its
+        status now).
+
+        Returns:
+            Self for chaining
+        """
+        self._include_history = True
+        return self
+
     def all(self) -> list[Entity]:
         """Execute query and return all matching entities.
 
@@ -306,6 +354,8 @@ class QueryBuilder:
             concept=self._concept,
             predicate_filters=self._qualified_filters(),
             as_of_time=self._as_of_time,
+            include_flagged=self._include_flagged,
+            include_history=self._include_history,
         )
 
     def _qualified_filters(self) -> list[tuple[str, str, Any]]:
@@ -365,6 +415,8 @@ class QueryBuilder:
                     concept=self._concept,
                     predicate_filters=self._qualified_filters(),
                     as_of_time=self._as_of_time,
+                    include_flagged=self._include_flagged,
+                    include_history=self._include_history,
                 )
             }
             ranked_ids = [entity_id for entity_id in ranked_ids if entity_id in symbolic_ids]
