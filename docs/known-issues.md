@@ -1640,10 +1640,10 @@ Thread `cardinality` into `_route_time_varying`. This needs a real design decisi
 
 ---
 
-## KI-081 — `QueryBuilder` never exposes SPEC §11.2's `.include_flagged()`/`.include_history()` opt-ins
+## KI-081 — `QueryBuilder` never exposes SPEC §11.2's `.include_flagged()`/`.include_history()` opt-ins ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — a SPEC MUST-adjacent requirement unmet at the primary query API
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §11.2 ("Flagged/superseded/retracted assertions are excluded by default; `.include_flagged()` / `.include_history()` opt in"), SPEC §10.3 ("A flagged assertion... MUST be excluded from default (unflagged) retrieval unless explicitly requested")
 
 ### Description
@@ -1654,7 +1654,13 @@ SPEC §10.3's MUST ("A flagged assertion is retained and queryable but MUST be e
 
 ### Fix
 
-Add `.include_flagged()` to `QueryBuilder`, threading through to `entities_where()`'s existing backend parameter — note both SQLite and DuckDB backends currently only consult `include_flagged` inside their `as_of_time` branch, so giving `.include_flagged()` an effect on current-state (non-`as_of`) queries needs backend changes too, not just a `QueryBuilder` passthrough. Separately, decide what `.include_history()` should mean — full assertion history per matched entity is a bigger surface than a single boolean. If either is deliberately deferred rather than built now, record that as an ADR (matching ADR-0027's precedent for the multi-hop-traversal deferral) and correct SPEC §11.2's own wording plus any doc that currently implies this already works.
+Both opt-ins built, as **match-set wideners** — they change only which assertion statuses a `.where()` filter may match against; `.all()`/`.first()`/`.count()` keep returning `Entity`/`Entity | None`/`int` (**ADR-0048** records this over the "return per-entity timelines" alternative). Default match set is `active`; `.include_flagged()` adds `flagged`; `.include_history()` adds `superseded` + `retracted`; the two are independent (neither implies the other). No effect on a filter-less query (nothing to match) or an `.as_of()` query (a bitemporal snapshot already matches whatever was valid at that instant regardless of status now — `.include_flagged()` still applies there, as it has since before this KI; `.include_history()` is a no-op on that path).
+
+`QueryBuilder` gained `.include_flagged()` / `.include_history()` chainable methods + `_include_flagged`/`_include_history` fields, threaded through to `entities_where()` from both `_base_candidates()` and `_semantic_candidates()`. `StorageBackend.entities_where()` (port + both adapters) gained `include_history: bool = False`; each adapter's current-state branch replaced its hard-coded `" AND status = 'active'"` with a parameter-bound `" AND status IN (?, …)"` built from the widened status list (the `as_of` branch's `include_flagged` handling was already correct and is unchanged). SPEC §11.2's wording tightened to name which statuses each opt-in adds.
+
+New `tests/unit/test_query.py::TestIncludeFlaggedAndHistory` (15 cases: each status excluded by default and matched on the right opt-in; the two flags' independence; both-together; the widener invariant — an *active* value is still returned under each opt-in, so a mutation that drops `active` from the status set is caught, not just a whole-branch revert; filter-less no-op; chainable; `.count()`/`.first()` parity; `.as_of()` + `.include_flagged()`; a two-`.where()`-filter case; a `.semantic().where().include_flagged()` case exercising the `_semantic_candidates()` threading). Mutation-tested: dropping `active` under either flag fails the invariant case; removing the `_semantic_candidates()` threading fails the semantic case; reverting the whole SQLite `else` branch fails the 5 match-expecting cases. New `tests/unit/test_sqlite_backend.py::test_entities_where_status_widening_flags` at the port level. New `conformance/test_include_flagged_history.py` (6 cases × both backends = 12) since `Ontology.connect()` only ever builds SQLite and the widening lives in each adapter.
+
+Found reviewing this KI, filed as follow-ups: `.include_*()` don't compose with `.min_confidence()`/`.trust_at_least()` (those still filter to `active` only — KI-093); the three interface `query` surfaces don't forward the new opt-ins (KI-094); and a retracted assertion with a future `valid_to` stays visible in `.as_of()` queries with no opt-out (pre-existing bitemporal gap — KI-095). ADR-0048's Consequences and the two builder-method docstrings note the KI-093 limitation; ADR-0048 also notes the KI-095 `as_of` gap rather than claiming the `as_of` branch is fully correct.
 
 ---
 
@@ -1907,6 +1913,60 @@ Chosen over the cheaper alternative (leave the race, just remap the `UNIQUE`-con
 Two new tests (`tests/unit/test_ontology.py::TestCreateEntityNaturalKeyTransaction`): a backend-agnostic spy recording the `begin` → check → `put_entity` → `commit` call order (primary mutation guard — reverting the wrapper drops `begin`/`commit` from the sequence), and a two-`Ontology`-instances-on-one-file test that interleaves a paused check in one "process" against a concurrent `create_entity` for the same key in another — with an explicit `assert t2.is_alive()` so the test fails if the contention it exists to exercise never happens — asserting the loser gets `ValidationError` ("Entity conflict"), not `StorageError`, and that exactly one row lands. Both confirmed to fail with the wrapper reverted (the concurrent test reproduces the exact pre-fix `StorageError: UNIQUE constraint failed`, and now also trips the `is_alive()` assertion since nothing blocks).
 
 `issue_token`/`revoke_token`/`reindex` were left as-is — their reads are existence checks or (for `reindex`) idempotent re-computation, not an invariant a stale read could let a write violate, so there's nothing for a `transaction()` wrapper to protect there. `propose`/`propose_ref`/`retract`'s reject/require-review path was out of scope entirely — it's KI-035's already-recorded, deliberately-accepted tradeoff, not this KI's to revisit.
+
+---
+
+## KI-093 — `.include_flagged()`/`.include_history()` don't compose with `.min_confidence()`/`.trust_at_least()` — found reviewing KI-081
+
+**Severity:** Architecture gap — a chained no-op filter (`.min_confidence(0.0)` / `.trust_at_least(0)`) silently empties an otherwise-populated result
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §11.2 (`.include_flagged()` / `.include_history()` opt-ins), SPEC §11.3 (`confidence`/`trust` retrieval signals)
+
+### Description
+
+KI-081 (ADR-0048) added `QueryBuilder.include_flagged()`/`.include_history()` as match-set wideners: they widen `_base_candidates()`'s `entities_where()` call to also match `flagged`/`superseded`/`retracted` assertions. But `QueryBuilder._apply_confidence_trust_filters()` runs *after* `_base_candidates()` and calls `StorageBackend.entities_meeting_confidence()` / `entities_meeting_trust()`, whose current-state (non-`as_of`) branches still hard-code `AND a.status = 'active'` (`store/sqlite/backend.py`, `store/duckdb/backend.py`). So `kb.query(Person).where(name="Ada").include_history().min_confidence(0.0)` widens the candidate set to include an entity matched via a retracted assertion, then immediately re-narrows to active-only and drops it — a `min_confidence(0.0)` / `trust_at_least(0)` floor that should be a no-op empties the result.
+
+Verified: an entity whose only `Person.name` assertion was retracted — `include_history()` alone returns it; `include_history().min_confidence(0.0)` and `include_history().trust_at_least(0)` both return `[]`.
+
+### Fix
+
+Thread `include_flagged`/`include_history` into `entities_meeting_confidence()` / `entities_meeting_trust()` (port + both adapters), widening their current-state `status = 'active'` clause the same way `entities_where()` now does — and decide the semantics deliberately (does "an entity that *historically* had a ≥X-confidence assertion" match `.include_history().min_confidence(X)`? almost certainly yes, for consistency, but it's worth stating). Or, if the composition is judged out of scope, make `.include_*()` + `.min_confidence()`/`.trust_at_least()` raise rather than silently mis-filter. ADR-0048 documents the current limitation and points here.
+
+---
+
+## KI-094 — MCP/REST/GraphQL `query` surfaces don't expose `.include_flagged()`/`.include_history()` — found reviewing KI-081
+
+**Severity:** Architecture gap — SPEC §10.3's "unless explicitly requested" opt-in is now reachable from the Python SDK only, not from the interface agents actually use
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §10.3 ("MUST be excluded from default retrieval unless explicitly requested"), SPEC §11.2, SPEC §14.3/§14.4 (REST/GraphQL/MCP query surfaces)
+
+### Description
+
+KI-081 added `.include_flagged()`/`.include_history()` to `QueryBuilder`, but the three interface `query` surfaces (`interfaces/mcp.py`'s `ontolith.query`, `interfaces/rest.py`'s `/query`, `interfaces/graphql.py`'s `Query.query`) — which already forward `as_of`, `semantic`, `min_confidence`, `trust_at_least`, `limit` — do not forward the two new opt-ins. So a REST/GraphQL/MCP caller can't opt in to flagged/history visibility through the primary query API, only a direct Python SDK caller can. This matters most for MCP, where the flagged-exclusion rule is a safety property for agents (SPEC §14.4).
+
+### Fix
+
+Add `include_flagged`/`include_history` boolean parameters to all three interfaces' `query` operations, forwarding to the builder — mechanical, matching how the other five modifiers are already forwarded. Same pattern as KI-079 (GraphQL/CLI parity for `assign_reviewers` after REST shipped first). Consider whether the CLI's `ontolith query` wants them too.
+
+---
+
+## KI-095 — A retracted assertion with a future `valid_to` stays visible in `.as_of()` queries with no way to exclude it — found reviewing KI-081
+
+**Severity:** Bug — SPEC §11.2's "retracted assertions are excluded by default" is unmet on the `as_of` path
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §11.2 ("Flagged/superseded/retracted assertions are excluded by default"), SPEC §11.4 (`as_of` semantics), SPEC §10 (retraction)
+
+### Description
+
+`Ontology._retraction_valid_to()` (`ontology.py`) deliberately does not narrow an already-open validity window when an assertion is retracted (it only refuses to *widen* a closed one). So an assertion asserted with an explicit far-future `valid_to` and then retracted keeps `status='retracted'` but `valid_to` unchanged. The `as_of` branch of `entities_where()` (and the other bitemporal query paths) matches purely on the validity window plus `asserted_at <= t` — it has no assertion-time dimension for the *retraction event* — so `kb.as_of(t).query(Person).where(name="Ada")` for `t` after the retraction still returns the entity, and KI-081's `.include_history()` being a deliberate no-op on the `as_of` path means there is no opt-out either.
+
+Verified: assertion with `valid_to=2030`, retracted at `2025` → current-state query excludes it (correct), `as_of(2026)` query includes it (wrong), `as_of(2026).include_history()` also includes it (no opt-out).
+
+Pre-existing — the `as_of` branch has always been window-based, not status-based; surfaced by KI-081's review because ADR-0048 initially claimed the `as_of` branch was "already correct" for history (corrected).
+
+### Fix
+
+Two candidate directions, needs a design decision (likely an ADR touching bitemporal semantics): (a) have `retract()` close the validity window at the retraction instant (`valid_to = now`) so the window itself stops covering later `t` — simplest, but changes what "valid_to" means for a retracted assertion; or (b) give the bitemporal query paths a retraction-aware exclusion (track the retraction event's own asserted_at and exclude when `t >= retraction_asserted_at`) — more faithful to bitemporality but a bigger change. Until then, `.as_of()` results can include retracted values.
 
 ---
 

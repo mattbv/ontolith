@@ -428,6 +428,7 @@ class StorageBackend(Protocol):
         predicate_filters: list[tuple[str, str, Any]],
         as_of_time: datetime | None = None,
         include_flagged: bool = False,
+        include_history: bool = False,
     ) -> list[Entity]:
         """Query entities matching all predicate filters in one SQL query.
 
@@ -469,8 +470,14 @@ class StorageBackend(Protocol):
             predicate_filters: List of `(full_predicate, operator, value)`
                 triples (KI-039)
             as_of_time: If set, applies bitemporal filter on assertions and entity creation
-            include_flagged: When as_of_time is set, whether to include
-                'flagged' assertions in the predicate match (excluded by default)
+            include_flagged: Whether to also match 'flagged' assertions
+                (KI-081). Honored on both the current-state and the
+                as_of_time path (excluded by default on both).
+            include_history: Whether to also match 'superseded' and
+                'retracted' assertions (KI-081). Current-state path only —
+                an as_of_time snapshot already matches whatever assertion
+                was valid at that instant regardless of its status now, so
+                this parameter is a no-op when as_of_time is set.
 
         Returns:
             List of entities where all filters match at the given time
