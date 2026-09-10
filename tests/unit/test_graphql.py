@@ -15,7 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from ontolith import Ontology
-from ontolith.core import FixedClock, FixedIdProvider
+from ontolith.core import Assertion, FixedClock, FixedIdProvider
 from ontolith.core.errors import StorageError
 from ontolith.identity.token_auth import TokenAuthProvider
 from ontolith.interfaces.graphql import create_graphql_app
@@ -965,24 +965,130 @@ class TestProvenanceQuery:
         body = _gql(client, '{ provenance(assertionId: "nope") { id } }', headers=_auth(token))
         assert _error_codes(body) == ["NOT_FOUND"]
 
-    def test_known_assertion(self, tmp_path: Path) -> None:
+    _ALL_FIELDS = (
+        "id subject predicate value valueType status author confidence source rationale model "
+        "assertedAt validFrom validTo proposalId supersedes supersededIds "
+        "reviewEvents { actor type detail at }"
+    )
+
+    def test_known_assertion_all_fields(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
-        proposal, _decision = kb.propose(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        proposal, _decision = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", HUMAN, source="Wikipedia", confidence=0.9
+        )
         [assertion] = kb.backend.assertions(subject=entity.id, status="active")
 
         client, _ = _client(kb)
         token, _ = kb.issue_token(HUMAN, author=ADMIN)
-        query = (
-            f'{{ provenance(assertionId: "{assertion.id}") '
-            "{ id subject predicate value proposalId } }"
+        body = _gql(
+            client,
+            f'{{ provenance(assertionId: "{assertion.id}") {{ {self._ALL_FIELDS} }} }}',
+            headers=_auth(token),
         )
-        body = _gql(client, query, headers=_auth(token))
         result = body["data"]["provenance"]
         assert result["id"] == assertion.id
         assert result["subject"] == entity.id
         assert result["value"] == "Ada"
         assert result["proposalId"] == proposal.id
+        assert result["source"] == "Wikipedia"
+        assert result["confidence"] == 0.9
+        assert result["status"] == "active"
+        assert result["supersededIds"] == []
+        assert result["reviewEvents"] == []
+
+    def test_surfaces_review_events_after_accept(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", AI, model="claude-sonnet-4"
+        )
+        kb.accept_proposal(proposal.id, REVIEWER)
+        [assertion] = kb.backend.assertions(
+            subject=entity.id, predicate="Person.name", status="active"
+        )
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(
+            client,
+            f'{{ provenance(assertionId: "{assertion.id}") {{ {self._ALL_FIELDS} }} }}',
+            headers=_auth(token),
+        )
+        events = body["data"]["provenance"]["reviewEvents"]
+        assert [e["type"] for e in events] == ["accept"]
+        assert events[0]["actor"] == REVIEWER
+
+    def test_review_events_empty_for_direct_write(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(
+            client,
+            f'{{ provenance(assertionId: "{assertion.id}") {{ proposalId reviewEvents {{ type }} }} }}',
+            headers=_auth(token),
+        )
+        result = body["data"]["provenance"]
+        assert result["proposalId"] is None
+        assert result["reviewEvents"] == []
+
+    def test_superseded_ids_recover_the_full_predecessor_set(self, tmp_path: Path) -> None:
+        """KI-008: one write superseding several concurrently-overlapping
+        predecessors — `supersedes` records only the first, `supersededIds`
+        recovers all. Mirrors the REST suite's equivalent case."""
+        kb = _kb(tmp_path)
+        kb.backend.put_schema(
+            SchemaIR(
+                namespace="default",
+                version=1,
+                concepts={
+                    "Person": ConceptDef(
+                        name="Person",
+                        properties={
+                            "role": PropertyDef(
+                                name="role", value_type="Text", temporality="time_varying"
+                            ),
+                        },
+                    ),
+                },
+            )
+        )
+        entity = kb.create_entity("Person", author=HUMAN)
+        pred_ids = []
+        for value in ("Engineer", "Manager"):
+            pred = Assertion(
+                id=kb.id_provider.next(),
+                namespace="default",
+                subject=entity.id,
+                predicate="Person.role",
+                value_kind="literal",
+                value_type="Text",
+                value=value,
+                author=HUMAN,
+                asserted_at=T0,
+                valid_from=T0,
+            )
+            kb.backend.put_assertion(pred)
+            pred_ids.append(pred.id)
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=90)
+        winner = kb.assert_literal(entity.id, "Person.role", "Director", "Text", HUMAN)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(
+            client,
+            f'{{ provenance(assertionId: "{winner.id}") {{ supersedes supersededIds }} }}',
+            headers=_auth(token),
+        )
+        result = body["data"]["provenance"]
+        assert set(result["supersededIds"]) == set(pred_ids)
+        assert result["supersedes"] in set(pred_ids)
 
 
 # ---------------------------------------------------------------------------

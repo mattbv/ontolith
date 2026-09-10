@@ -25,10 +25,12 @@ from ontolith.govern.policy import (
     ThresholdPolicy,
 )
 from ontolith.govern.proposal import Proposal, ProposalEvent
+from ontolith.govern.provenance import Provenance
 
 __all__ = [
     "Proposal",
     "ProposalEvent",
+    "Provenance",
     "Contradiction",
     "Decision",
     "AutoAccept",

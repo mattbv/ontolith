@@ -565,6 +565,17 @@ Entity:
     history() ; provenance(predicate) ; contradictions()
 ```
 
+> **Implementation deviations, recorded in ADR-0047.** The block above shows the primary surface
+> at design time; the shipped SDK deliberately deviates in a few places and **ADR-0047 is the
+> authoritative record where they differ**. Notably: provenance is
+> `Ontology.provenance(assertion_id) -> Provenance` (SPEC §5.4's one-call view, per assertion);
+> `Entity` is a pure value object per §5.2 with no methods — its sketched `history()` /
+> `provenance()` / `contradictions()` are `Ontology.assertions(status=None)` /
+> `Ontology.provenance()` / `Ontology.contradictions()`; and principal creation vs look-up are
+> separate `create_principal()` / `get_principal()` methods, not one `principal(...)` factory.
+> (Unrelated to ADR-0047, `Ontology.connect(...)`'s signature and several `Principal`/`Proposal`
+> members also differ from this block — the SDK's own docstrings are current there.)
+
 ### 14.2 CLI
 `ontolith init` · `ontolith schema {show|migrate}` · `ontolith import|export` · `ontolith principal {add|list}` · `ontolith proposal {list|review}` · `ontolith history <entity>` · `ontolith query`.
 

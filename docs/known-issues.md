@@ -1744,11 +1744,11 @@ Changed `test_all_required_tools_registered`'s assertion from `required.issubset
 
 ---
 
-## KI-086 — Provenance assembly is hand-duplicated across REST, GraphQL, and MCP instead of living once in the domain layer
+## KI-086 — Provenance assembly is hand-duplicated across REST, GraphQL, and MCP instead of living once in the domain layer ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — a recurring source of the exact parity-gap class this session's KI history keeps finding
-**Milestone target:** Backlog
-**SPEC reference:** SPEC §5.4 ("Provenance is a derived view... MUST be able to return it for any assertion in one call"), SPEC §14.1 (normative `Entity` shape: `history()`, `provenance(predicate)`, `contradictions()`)
+**Milestone target:** Backlog — resolved without a milestone change
+**SPEC reference:** SPEC §5.4 ("Provenance is a derived view... MUST be able to return it for any assertion in one call"), SPEC §14.1 (Python SDK sketch: `Entity.history()`, `provenance(predicate)`, `contradictions()` — non-normative, see ADR-0047)
 
 ### Description
 
@@ -1758,7 +1758,11 @@ This project's own KI history (KI-058/059/075/076/077/079, among others) shows t
 
 ### Fix
 
-Extract the shared assembly into one `Ontology.provenance(assertion_id)` method (or a small `core/provenance.py` helper), and have all three interfaces call it instead of reimplementing it. Consider also adding the SPEC §14.1 SDK-level convenience methods (`Entity.history()` etc.) if they're meant to exist — or record an ADR if dropping them from the SDK surface in favor of interface-level-only access was a deliberate (if undocumented) choice. While reconciling §14.1 against the actual SDK surface, note a second, unrelated drift in the same section worth folding into that pass: §14.1 names a single `kb.principal(id, *, kind, ...)` factory method, but the SDK actually splits this into separate `create_principal()`/`get_principal()` methods (`ontology.py:259`, `:342`) — `kb.principal(...)` doesn't exist and raises `AttributeError`. Either update SPEC §14.1's signature to match the shipped two-method API, or add a `principal()` alias if the single-method shape is still the intended contract.
+Added `Ontology.provenance(assertion_id: str) -> Provenance` (`ontology.py`, next to `assertions()`) — the single domain-layer implementation of SPEC §5.4's one-call view. Returns a new frozen `Provenance` value object (`govern/provenance.py`, exported from `ontolith.govern`, added to `test_public_api_surface.py`'s pinned surface) carrying `assertion: Assertion`, `review_events: tuple[ProposalEvent, ...]`, and `superseded_ids: tuple[str, ...]`. REST's `provenance_route`, GraphQL's `_build_provenance`, and MCP's `provenance_tool` each dropped their copy of the `get_assertion` + None-check + `get_proposal_events` + `get_assertion_events_by_successor` assembly and now call `kb.provenance()`, shaping its result into their own `ProvenanceOut` / `ProvenanceType` / dict (that field-copying is genuinely per-interface — Pydantic vs Strawberry vs JSON — not duplicated *logic*). `NotFoundError` for an unknown id is now raised once by `provenance()`; each interface's existing error mapping handles it unchanged, so the wire behavior (`404` / GraphQL error / MCP `_error_response`) is identical.
+
+The two SPEC §14.1 sketch-vs-shipped drifts KI-086 also named are settled in **ADR-0047** rather than by changing code: `Entity` deliberately stays a pure value object with no backend handle, so `Entity.history()`/`provenance()`/`contradictions()` are **not** added — their equivalents are `Ontology.assertions(status=None)` / `Ontology.provenance()` / `Ontology.contradictions()`; and the `create_principal()`/`get_principal()` split is intentional (mint vs look-up differ in capability gating and error contract), so no `kb.principal(...)` alias. SPEC §14.1 gained a note flagging these as ADR-recorded deviations from its stated shape (§1's Conventions still govern — the section isn't relabelled non-normative), rather than a piecemeal rewrite of a block that diverges in ~6 other places too.
+
+New `tests/unit/test_ontology.py::TestProvenance` (4 cases): unknown id → `NotFoundError`; direct write → empty `review_events`/`superseded_ids`; AI-proposed + accepted → the `accept` event in order; KI-008 multi-predecessor supersession → full `superseded_ids` set. Mutation-tested (stubbing `get_proposal_events` to `()` fails exactly the reviewed-assertion case). REST's and MCP's pre-existing provenance suites (review-events-after-accept, empty-for-direct-write, 404, retracted-reachable, KI-008 superseded set) all still pass unchanged, now exercising the shared path; GraphQL's `TestProvenanceQuery` only selected `{ id subject predicate value proposalId }` on the known-assertion case, so `reviewEvents`/`supersededIds` shaping was untested there — this review round added a full-field selection plus review-events-after-accept, empty-for-direct-write, and KI-008 cases, mutation-tested (hardwiring both fields empty in `_build_provenance` now fails two of them).
 
 ---
 

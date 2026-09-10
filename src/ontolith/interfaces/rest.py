@@ -716,42 +716,30 @@ def create_rest_app(
         when one incoming assertion supersedes several concurrently-
         overlapping ones (KI-008).
         """
-        match = kb.backend.get_assertion(assertion_id)
-        if match is None:
-            raise NotFoundError(f"Assertion {assertion_id!r} not found")
-
-        review_events = (
-            [
-                ReviewEventOut(actor=e.actor, type=e.type, detail=e.detail, at=e.at.isoformat())
-                for e in kb.backend.get_proposal_events(match.proposal_id)
-            ]
-            if match.proposal_id
-            else []
-        )
-
-        superseded_ids = [
-            e.assertion_id for e in kb.backend.get_assertion_events_by_successor(match.id)
-        ]
-
+        prov = kb.provenance(assertion_id)  # raises NotFoundError -> 404 via the error handler
+        a = prov.assertion
         return ProvenanceOut(
-            id=match.id,
-            subject=match.subject,
-            predicate=match.predicate,
-            value=match.value,
-            value_type=match.value_type,
-            status=match.status,
-            author=match.author,
-            confidence=match.confidence,
-            source=match.source,
-            rationale=match.rationale,
-            model=match.model,
-            asserted_at=match.asserted_at.isoformat(),
-            valid_from=match.valid_from.isoformat() if match.valid_from else None,
-            valid_to=match.valid_to.isoformat() if match.valid_to else None,
-            proposal_id=match.proposal_id,
-            supersedes=match.supersedes,
-            superseded_ids=superseded_ids,
-            review_events=review_events,
+            id=a.id,
+            subject=a.subject,
+            predicate=a.predicate,
+            value=a.value,
+            value_type=a.value_type,
+            status=a.status,
+            author=a.author,
+            confidence=a.confidence,
+            source=a.source,
+            rationale=a.rationale,
+            model=a.model,
+            asserted_at=a.asserted_at.isoformat(),
+            valid_from=a.valid_from.isoformat() if a.valid_from else None,
+            valid_to=a.valid_to.isoformat() if a.valid_to else None,
+            proposal_id=a.proposal_id,
+            supersedes=a.supersedes,
+            superseded_ids=list(prov.superseded_ids),
+            review_events=[
+                ReviewEventOut(actor=e.actor, type=e.type, detail=e.detail, at=e.at.isoformat())
+                for e in prov.review_events
+            ],
         )
 
     # ------------------------------------------------------------------
