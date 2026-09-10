@@ -1,6 +1,8 @@
 """Unit tests for Ontology entry point."""
 
 import tempfile
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -13,6 +15,7 @@ from ontolith.core.errors import (
     CapabilityError,
     NotFoundError,
     SchemaError,
+    StorageError,
     ValidationError,
 )
 from ontolith.govern.proposal import Proposal
@@ -512,6 +515,115 @@ class TestTargetExistenceCheck:
         org = kb.create_entity("Organization", author="alice@example.com")
         assertion = kb.assert_ref(person.id, "Person.employer", org.id, "alice@example.com")
         assert assertion.value == org.id
+
+
+class TestCreateEntityNaturalKeyTransaction:
+    """KI-092: `create_entity`'s natural-key uniqueness check and the
+    `put_entity` it guards run inside one `transaction()` block, so on
+    SQLite `begin()`'s `BEGIN IMMEDIATE` (KI-084) serializes a concurrent
+    writer between them rather than letting a duplicate slip in and hit
+    the raw `UNIQUE` constraint (a redacted `StorageError`, the exact
+    error KI-091 was filed to eliminate for the non-concurrent case)."""
+
+    def test_uniqueness_check_and_write_share_one_transaction(self, kb: Ontology) -> None:
+        """Primary mutation guard, backend-agnostic: `begin()` must run
+        before the uniqueness check and `commit()` after `put_entity`.
+        Reverting the `with self.backend.transaction():` wrapper drops
+        `begin`/`commit` from the sequence entirely."""
+        calls: list[str] = []
+
+        def rec(name: str, fn: object) -> object:
+            def wrapper(*args: object, **kwargs: object) -> object:
+                calls.append(name)
+                return fn(*args, **kwargs)  # type: ignore[operator]
+
+            return wrapper
+
+        kb.backend.begin = rec("begin", kb.backend.begin)  # type: ignore[method-assign]
+        kb.backend.commit = rec("commit", kb.backend.commit)  # type: ignore[method-assign]
+        kb.backend.put_entity = rec("put_entity", kb.backend.put_entity)  # type: ignore[method-assign]
+        kb._require_unique_natural_key = rec(  # type: ignore[method-assign]
+            "check", kb._require_unique_natural_key
+        )
+
+        kb.create_entity("Person", author="alice@example.com", natural_key="ada")
+        assert calls == ["begin", "check", "put_entity", "commit"]
+
+    def test_concurrent_duplicate_is_rejected_as_validation_error_not_storage_error(
+        self, temp_db: Path
+    ) -> None:
+        """Two `Ontology` instances on the same file (two OS processes).
+        `first` opens its transaction and pauses mid-check while holding
+        `BEGIN IMMEDIATE`'s write lock; `second`'s `create_entity` for the
+        same key blocks on its own `begin()` until `first` commits, then
+        its own in-transaction check sees the row and raises
+        `ValidationError` — nobody reaches the raw `UNIQUE` constraint."""
+        clock = FixedClock("2025-01-01T00:00:00Z")
+        first = Ontology.connect(temp_db, clock=clock, id_provider=SequentialIdProvider(prefix="a"))
+        second = Ontology.connect(
+            temp_db, clock=clock, id_provider=SequentialIdProvider(prefix="b")
+        )
+        try:
+            first.create_principal("alice@example.com", kind="human", default_capability="write")
+            # Short busy_timeout on `second` so the test doesn't wait out the
+            # real 5s if the fix regresses and the lock is never contended.
+            second.backend.conn.execute("PRAGMA busy_timeout = 2000")  # type: ignore[attr-defined]
+
+            checked = threading.Event()
+            release = threading.Event()
+            errors: list[BaseException] = []
+            real_check = first._require_unique_natural_key
+
+            def paused_check(concept: str, natural_key: str | None) -> None:
+                real_check(concept, natural_key)
+                checked.set()
+                release.wait(timeout=5)
+
+            first._require_unique_natural_key = paused_check  # type: ignore[method-assign]
+
+            def create_first() -> None:
+                try:
+                    first.create_entity("Person", author="alice@example.com", natural_key="ada")
+                except BaseException as e:  # noqa: BLE001 - surfaced via the assertion below
+                    errors.append(e)
+
+            t = threading.Thread(target=create_first)
+            t.start()
+            assert checked.wait(timeout=5)  # first has begun + checked, holds the write lock
+
+            second_error: list[BaseException] = []
+
+            def create_second() -> None:
+                try:
+                    second.create_entity("Person", author="alice@example.com", natural_key="ada")
+                except BaseException as e:  # noqa: BLE001
+                    second_error.append(e)
+
+            t2 = threading.Thread(target=create_second)
+            t2.start()
+            time.sleep(0.2)  # let second's begin() start blocking on the write lock
+            # The contention this test exists to exercise: `second` must be
+            # parked in its own `begin()` right now, behind `first`'s held
+            # write lock. Without it, `second` runs entirely after `first`
+            # commits, sees the row, and raises ValidationError anyway —
+            # passing identically even with the wrapper reverted.
+            assert t2.is_alive(), "second did not block on begin() — no contention exercised"
+            release.set()
+            t.join(timeout=5)
+            t2.join(timeout=5)
+            assert not t.is_alive() and not t2.is_alive()
+
+            assert errors == []  # first succeeded
+            assert len(second_error) == 1
+            assert isinstance(second_error[0], ValidationError)
+            assert not isinstance(second_error[0], StorageError)
+            assert "Entity conflict" in str(second_error[0])
+            # Exactly one "ada" Person landed.
+            people = first.backend.entities(namespace=first.namespace, concept="Person")
+            assert [e.natural_key for e in people] == ["ada"]
+        finally:
+            first.close()
+            second.close()
 
 
 class TestModelCapture:
