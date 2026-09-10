@@ -159,10 +159,14 @@ re-litigated:
   IMMEDIATE` has nothing to change there. Of these, only `create_entity`'s
   read guards an invariant the write could violate (`natural_key`
   uniqueness); a race there still surfaces as a loud `StorageError` (KI-091's
-  `UNIQUE` constraint), not a silent duplicate. Filed as KI-092, which also
-  covers `propose`/`propose_ref`/`retract`'s reject/require-review outcome
-  (below) as a related instance of the same "writes outside `transaction()`"
-  shape.
+  `UNIQUE` constraint), not a silent duplicate. Filed as KI-092 — **since
+  resolved:** `create_entity` was given its own `with
+  self.backend.transaction():` wrapper (so `BEGIN IMMEDIATE` now serializes
+  that race too), while `issue_token`/`revoke_token`/`reindex` were left as
+  deliberate non-races (their reads don't guard an invariant a write could
+  violate). KI-092 also notes `propose`/`propose_ref`/`retract`'s
+  reject/require-review outcome (below) as a related instance of the same
+  "writes outside `transaction()`" shape, left for KI-035 to revisit.
 - `propose`, `propose_ref`, and `retract` evaluate policy against a
   `kb_view` read taken *before* `begin()` is ever called, and persist a
   `Reject`/`RequireReview` decision (`_finalize_non_accepted_decision`) via

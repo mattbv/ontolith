@@ -469,6 +469,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- `Ontology.create_entity()` now wraps its natural-key uniqueness check and the `put_entity` it
+  guards in one `transaction()` block (closes KI-092, filed while fixing KI-084) — so on SQLite
+  `begin()`'s `BEGIN IMMEDIATE` (KI-084) serializes a concurrent writer between the check and the
+  write, closing the last read-then-write path that could hit the raw `UNIQUE` constraint (a
+  redacted `StorageError`, the exact error KI-091 was filed to eliminate for the non-concurrent
+  case) instead of the friendly `ValidationError`. Chosen over merely remapping the constraint
+  error so `create_entity` is genuinely consistent with every other governed write path;
+  `BEGIN IMMEDIATE` costs nothing extra uncontended, so no perf downside. `issue_token`,
+  `revoke_token`, and `reindex` (also named in KI-092) were left as-is — their reads don't guard an
+  invariant a stale read could let a write violate.
 - `SQLiteBackend.begin()` now issues `BEGIN IMMEDIATE` instead of a plain deferred `BEGIN` (closes
   KI-084, found in the pre-M4 deep + security audit) — closes a cross-process write-safety gap:
   every write path's SPEC §10 conflict-routing read runs inside the transaction `begin()` opens,
@@ -486,9 +496,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including a genuinely new trade-off this fix introduces (a contended `begin()` now blocks this
   process's own reads for up to `busy_timeout`, not just cross-process writers) rather than only
   documenting a pre-existing one. Not a blanket fix for every `Ontology` write: `create_entity`,
-  `issue_token`, `revoke_token`, and `reindex` never open a `transaction()` at all (filed separately
-  as KI-092), and `propose`/`propose_ref`/`retract`'s reject/require-review outcome persists outside
-  one too — the latter a pre-existing, already-accepted tradeoff from KI-035, not reopened here.
+  `issue_token`, `revoke_token`, and `reindex` did not open a `transaction()` at all (filed
+  separately as KI-092; `create_entity` since given one — see below), and
+  `propose`/`propose_ref`/`retract`'s reject/require-review outcome persists outside one too — the
+  latter a pre-existing, already-accepted tradeoff from KI-035, not reopened here.
 - `create_entity()` now raises `ValidationError` naming the conflict when `natural_key` is already
   taken within `concept`, instead of relying on the `entity` table's `UNIQUE(namespace, concept,
   natural_key)` constraint to fail late into a generic, redacted `StorageError` that discarded the

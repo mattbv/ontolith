@@ -379,7 +379,6 @@ class Ontology:
         if principal.default_capability == "read":
             raise CapabilityError(f"Principal {author!r} lacks propose capability")
         self._require_known_concept(concept)
-        self._require_unique_natural_key(concept, natural_key)
 
         entity = Entity(
             id=self.id_provider.next(),
@@ -390,7 +389,19 @@ class Ontology:
             created_by=author,
         )
 
-        self.backend.put_entity(entity)
+        # KI-092: the natural-key uniqueness check and the write it guards
+        # must share one transaction, so `begin()`'s `BEGIN IMMEDIATE`
+        # (KI-084) serializes a concurrent writer between them — otherwise
+        # two processes could both pass the check and both reach
+        # `put_entity`, and the loser hits the `UNIQUE` constraint as a
+        # redacted `StorageError` (the exact error KI-091 was filed to
+        # eliminate for the non-concurrent case). `_require_known_concept`
+        # above stays outside as an optimistic fast-fail, matching
+        # `assert_literal`'s own precedent for schema validation — a
+        # concurrent schema change is a different, out-of-scope race.
+        with self.backend.transaction():
+            self._require_unique_natural_key(concept, natural_key)
+            self.backend.put_entity(entity)
         return entity
 
     def _get_principal_or_raise(self, principal_id: str) -> Principal:
@@ -660,17 +671,15 @@ class Ontology:
         share `natural_key=None` within a concept), so there's nothing to
         check.
 
-        This is a check-then-write, not a transaction spanning both steps —
-        a concurrent duplicate created between this check and `put_entity`
-        below still lands on the `UNIQUE` constraint and still surfaces as
-        a `StorageError` (unlike `_require_existing_subject`'s permanence
-        argument, uniqueness genuinely can change between the two steps).
-        That's by design, not a gap this check is meant to close: the DB
-        constraint remains the authoritative backstop for the concurrent
-        case (see KI-084 — no cross-process write-safety guarantee for
-        SQLite — for the broader context this caveat sits inside); this
-        check only replaces the *common*, single-writer case's redacted
-        error with a named, caller-actionable one.
+        `create_entity` calls this *inside* its `with
+        self.backend.transaction():` block (KI-092), so on SQLite
+        `begin()`'s `BEGIN IMMEDIATE` (KI-084) has already claimed the
+        write lock by the time this read runs — a concurrent writer is
+        serialized behind it rather than able to commit a duplicate between
+        this check and the `put_entity` that follows. The DB's `UNIQUE`
+        constraint is still there as a backstop, but the transaction means
+        a caller now reliably gets this named `ValidationError`, not the
+        redacted `StorageError` the bare constraint failure produces.
         """
         if natural_key is None:
             return
