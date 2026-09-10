@@ -10,6 +10,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- `Ontology.provenance(assertion_id) -> Provenance` (closes KI-086, ADR-0047) — the single
+  domain-layer implementation of SPEC §5.4's one-call provenance view. REST (`GET
+  /provenance/{id}`), GraphQL (`Query.provenance`), and MCP (`ontolith.provenance`) each stopped
+  re-deriving the `get_assertion` + `get_proposal_events` + `get_assertion_events_by_successor`
+  assembly (three copies of one concept — the parity-gap pattern KI-058/059/075/076/077/079 kept
+  re-finding) and now shape one `kb.provenance()` result into their own response DTO; wire
+  behavior is unchanged. New frozen `Provenance` value object (`ontolith.govern`) carrying
+  `assertion` / `review_events` / `superseded_ids`. ADR-0047 also settles two SPEC §14.1
+  sketch-vs-shipped drifts KI-086 named: `Entity` stays a pure value object (no `Entity.history()`
+  etc. — the equivalents are `Ontology.assertions(status=None)` / `provenance()` /
+  `contradictions()`), and the `create_principal()`/`get_principal()` split is intentional (no
+  `kb.principal(...)` alias). SPEC §14.1 gained a non-normative note pointing at ADR-0047.
 - `RequireReviewForAI` (closes KI-088, found in the pre-M4 deep + security audit) — the
   `Composite(all=[RequireReviewForAI(), SourceQuorum(2)])` pattern `Composite`'s own docstring has
   sketched inline since ADR-0040 is now a real, exported, tested `PolicyStrategy`, not something

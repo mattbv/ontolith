@@ -35,6 +35,7 @@ from ontolith.govern.conflict import ConflictResult, Contradict, Supersede, rout
 from ontolith.govern.contradiction import Contradiction, safe_rationale_history
 from ontolith.govern.policy import Decision, PolicyStrategy, Reject, RequireReview
 from ontolith.govern.proposal import Proposal, ProposalEvent
+from ontolith.govern.provenance import Provenance
 from ontolith.identity import AdminEvent, Principal, PrincipalCredential, min_capability
 from ontolith.identity.admin_event import AdminAction
 from ontolith.query import QueryBuilder
@@ -1141,6 +1142,40 @@ class Ontology:
             List of matching assertions
         """
         return self.backend.assertions(subject=subject, predicate=predicate, status=status)
+
+    def provenance(self, assertion_id: str) -> Provenance:
+        """The full provenance record for a single assertion (SPEC §5.4).
+
+        SPEC §5.4 mandates provenance be retrievable "for any assertion in
+        one call" — this is that call. Returns the assertion together with
+        every review action on its originating proposal and the full
+        predecessor set it superseded (KI-008). REST
+        (`GET /provenance/{id}`), GraphQL (`Query.provenance`), and MCP
+        (`ontolith.provenance`) all shape this one result into their own
+        response type rather than re-deriving the assembly (KI-086, ADR-0047).
+
+        Args:
+            assertion_id: Assertion ID to inspect.
+
+        Returns:
+            A `Provenance` value object (`assertion`, `review_events`,
+            `superseded_ids`).
+
+        Raises:
+            NotFoundError: no assertion with that id exists.
+        """
+        match = self.backend.get_assertion(assertion_id)
+        if match is None:
+            raise NotFoundError(f"Assertion {assertion_id!r} not found")
+        review_events = (
+            tuple(self.backend.get_proposal_events(match.proposal_id)) if match.proposal_id else ()
+        )
+        superseded_ids = tuple(
+            e.assertion_id for e in self.backend.get_assertion_events_by_successor(match.id)
+        )
+        return Provenance(
+            assertion=match, review_events=review_events, superseded_ids=superseded_ids
+        )
 
     def query(self, concept: str) -> QueryBuilder:
         """Create a query builder for a concept.

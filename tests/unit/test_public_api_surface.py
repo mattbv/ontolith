@@ -90,6 +90,7 @@ _EXPECTED: dict[str, frozenset[str]] = {
         {
             "Proposal",
             "ProposalEvent",
+            "Provenance",
             "Contradiction",
             "Decision",
             "AutoAccept",

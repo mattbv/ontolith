@@ -565,6 +565,14 @@ Entity:
     history() ; provenance(predicate) ; contradictions()
 ```
 
+> **Non-normative.** The block above is an early sketch of the primary surface and has diverged
+> from the shipped SDK in several places. **ADR-0047** is the authoritative record of the current
+> surface. Notably: provenance is `Ontology.provenance(assertion_id) -> Provenance` (SPEC §5.4's
+> one-call view, per assertion); `Entity` is a pure value object with no methods — its sketched
+> `history()` / `provenance()` / `contradictions()` are `Ontology.assertions(status=None)` /
+> `Ontology.provenance()` / `Ontology.contradictions()`; and principal creation vs look-up are
+> separate `create_principal()` / `get_principal()` methods, not one `principal(...)` factory.
+
 ### 14.2 CLI
 `ontolith init` · `ontolith schema {show|migrate}` · `ontolith import|export` · `ontolith principal {add|list}` · `ontolith proposal {list|review}` · `ontolith history <entity>` · `ontolith query`.
 

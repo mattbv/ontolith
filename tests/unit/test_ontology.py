@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from ontolith import Ontology
-from ontolith.core import FixedClock, SequentialIdProvider
+from ontolith.core import Assertion, FixedClock, SequentialIdProvider
 from ontolith.core.errors import (
     AuthError,
     CapabilityError,
@@ -18,6 +18,7 @@ from ontolith.core.errors import (
     StorageError,
     ValidationError,
 )
+from ontolith.govern import Provenance
 from ontolith.govern.proposal import Proposal
 from ontolith.schema import ConceptDef, PropertyDef, RelationDef, SchemaIR
 
@@ -624,6 +625,97 @@ class TestCreateEntityNaturalKeyTransaction:
         finally:
             first.close()
             second.close()
+
+
+class TestProvenance:
+    """KI-086 / ADR-0047: `Ontology.provenance(assertion_id)` is the single
+    domain-layer implementation of SPEC §5.4's one-call provenance view;
+    REST/GraphQL/MCP now shape its result rather than re-deriving it."""
+
+    def test_unknown_assertion_raises_not_found(self, kb: Ontology) -> None:
+        with pytest.raises(NotFoundError, match="Assertion 'nope' not found"):
+            kb.provenance("nope")
+
+    def test_direct_write_has_no_review_events_and_no_superseded(self, kb: Ontology) -> None:
+        entity = kb.create_entity("Person", author="alice@example.com")
+        a = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", "alice@example.com")
+
+        prov = kb.provenance(a.id)
+        assert isinstance(prov, Provenance)
+        assert prov.assertion.id == a.id
+        assert prov.assertion.proposal_id is None
+        assert prov.review_events == ()
+        assert prov.superseded_ids == ()
+
+    def test_reviewed_assertion_carries_its_proposal_events_in_order(self, kb: Ontology) -> None:
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        kb.create_principal(
+            "bot@example.com", kind="ai", owner="alice@example.com", default_capability="propose"
+        )
+        entity = kb.create_entity("Person", author="alice@example.com")
+        proposal, _ = kb.propose(
+            entity.id, "Person.name", "Ada", "Text", "bot@example.com", model="test-model-v1"
+        )
+        kb.accept_proposal(proposal.id, "carol@example.com")
+        active = kb.assertions(subject=entity.id, predicate="Person.name", status="active")
+
+        prov = kb.provenance(active[0].id)
+        assert prov.assertion.proposal_id == proposal.id
+        assert [e.type for e in prov.review_events] == ["accept"]
+        assert prov.review_events[0].actor == "carol@example.com"
+
+    def test_superseded_ids_recover_the_full_predecessor_set(self, kb: Ontology) -> None:
+        """KI-008: `assertion.supersedes` records only the first predecessor
+        when one write supersedes several concurrently-overlapping ones —
+        `superseded_ids` recovers all of them. Mirrors the REST test's setup:
+        two overlapping predecessors written straight through the backend
+        (bypassing conflict routing so both stay active), then a governed
+        write that supersedes both."""
+        kb.backend.put_schema(
+            SchemaIR(
+                namespace="default",
+                version=1,
+                concepts={
+                    "Person": ConceptDef(
+                        name="Person",
+                        properties={
+                            "role": PropertyDef(
+                                name="role", value_type="Text", temporality="time_varying"
+                            ),
+                        },
+                    ),
+                },
+            )
+        )
+        entity = kb.create_entity("Person", author="alice@example.com")
+        t0 = datetime(2025, 1, 1, tzinfo=UTC)
+        pred_ids = []
+        for value in ("Engineer", "Manager"):
+            pred = Assertion(
+                id=kb.id_provider.next(),
+                namespace="default",
+                subject=entity.id,
+                predicate="Person.role",
+                value_kind="literal",
+                value_type="Text",
+                value=value,
+                author="alice@example.com",
+                asserted_at=t0,
+                valid_from=t0,
+            )
+            kb.backend.put_assertion(pred)
+            pred_ids.append(pred.id)
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=90)
+        winner = kb.assert_literal(
+            entity.id, "Person.role", "Director", "Text", "alice@example.com"
+        )
+
+        prov = kb.provenance(winner.id)
+        assert set(prov.superseded_ids) == set(pred_ids)
+        assert prov.assertion.supersedes in set(pred_ids)
 
 
 class TestModelCapture:
