@@ -503,6 +503,13 @@ class TestQueryRoute:
 
         client, _ = _client(kb)
         token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        default = client.post(
+            "/query",
+            json={"concept": "Person", "filters": {"name": "Ada"}},
+            headers=_auth(token),
+        )
+        assert default.json()["count"] == 0
+
         response = client.post(
             "/query",
             json={"concept": "Person", "filters": {"name": "Ada"}, "include_history": True},

@@ -986,6 +986,13 @@ class TestQueryField:
 
         client, _ = _client(kb)
         token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        default = _gql(
+            client,
+            '{ query(concept: "Person", filters: [{key: "name", value: "Ada"}]) { count } }',
+            headers=_auth(token),
+        )
+        assert default["data"]["query"]["count"] == 0
+
         body = _gql(
             client,
             '{ query(concept: "Person", filters: [{key: "name", value: "Ada"}], '

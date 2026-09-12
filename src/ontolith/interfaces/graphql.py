@@ -856,12 +856,12 @@ class Query:
             kb,
             concept,
             filters,
-            semantic,
-            min_confidence,
-            trust_at_least,
-            limit,
-            include_flagged,
-            include_history,
+            semantic=semantic,
+            min_confidence=min_confidence,
+            trust_at_least=trust_at_least,
+            limit=limit,
+            include_flagged=include_flagged,
+            include_history=include_history,
         )
 
     @strawberry.field

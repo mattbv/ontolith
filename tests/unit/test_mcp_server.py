@@ -675,11 +675,46 @@ class TestQueryTool:
         kb.retract(assertion.id, HUMAN)
 
         mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+        default = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person", token=token, filters={"name": "Ada"}
+        )
+        assert default["count"] == 0
+
         result = mcp._tool_manager.get_tool("ontolith.query").fn(
             concept="Person",
-            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            token=token,
             filters={"name": "Ada"},
             include_history=True,
+        )
+        assert result["count"] == 1
+        assert result["entities"][0]["id"] == entity.id
+
+    def test_query_as_of_include_flagged_opts_into_a_flagged_assertion(
+        self, tmp_path: Path
+    ) -> None:
+        """KI-094: `include_flagged` is forwarded on the `as_of` branch too,
+        not only current-state — distinct code path from the other two new
+        tests above, which never set `as_of`."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", HUMAN)  # -> flagged
+        assert kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+        default = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person", token=token, filters={"name": "Ada"}, as_of=T0.isoformat()
+        )
+        assert default["count"] == 0
+
+        result = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person",
+            token=token,
+            filters={"name": "Ada"},
+            as_of=T0.isoformat(),
+            include_flagged=True,
         )
         assert result["count"] == 1
         assert result["entities"][0]["id"] == entity.id
