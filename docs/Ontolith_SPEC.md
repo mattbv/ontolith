@@ -590,13 +590,22 @@ Default tool set — **read and propose only**, no direct write (PRD §16, decis
 | Tool | Input (JSON Schema, abbreviated) | Effect |
 |---|---|---|
 | `ontolith.schema` | `{namespace}` | Return concepts/relations/temporality. |
-| `ontolith.query` | `{concept, where?, semantic?, as_of?, min_confidence?, trust_at_least?, limit?, include_flagged?, include_history?}` | Symbolic + semantic retrieval. |
+| `ontolith.query` | `{concept, filters?, semantic?, as_of?, min_confidence?, trust_at_least?, limit?, include_flagged?, include_history?}` | Symbolic + semantic retrieval. |
 | `ontolith.get` | `{namespace, concept, natural_key}` | Fetch an entity + current assertions. |
 | `ontolith.provenance` | `{assertion_id}` | Return the provenance projection (§5.4). |
 | `ontolith.propose` | `{namespace, ops[], source, confidence?, rationale?}` | Create a proposal (policy decides). |
 | `ontolith.flag_contradiction` | `{namespace, subject, predicate, note?}` | Open/extend a contradiction. |
 
 The server **MUST NOT** expose a direct-write tool. `ontolith.propose` **MUST** stamp the calling agent as `author`, capture `model`, and record `acting_as` when delegation is present.
+
+> **Implementation deviations.** The table above is abbreviated and has drifted from the shipped
+> tool set in places not yet reconciled row-by-row; `interfaces/mcp.py`'s own tool docstrings are
+> current. Notably: every tool also takes `token` (ADR-0014, omitted above for brevity); the
+> shipped set additionally includes `ontolith.create_entity` (KI-082), `ontolith.retract`
+> (KI-057), `ontolith.list_contradictions` (KI-076), and `ontolith.resubmit` (KI-027), none listed
+> here; and `namespace` was removed from every tool's inputs (ADR-0043 — `Ontology` hardcodes one
+> namespace, so there was never anything to forward). The `ontolith.query` row above is current
+> as of KI-094; other rows have not been re-verified to the same depth.
 
 ---
 

@@ -60,11 +60,12 @@ is narrower than "no effect without `.where()`": since KI-093, `.min_confidence(
 `.where()` was called, so `kb.query(Person).min_confidence(0.5).include_history()` *does* differ
 from `kb.query(Person).min_confidence(0.5)` even with no `.where()` in sight.
 
-**`.include_history()` is a no-op under `.as_of(t)`.** A bitemporal snapshot matches whatever
-assertion's validity window covered `t`, regardless of that assertion's status *now* — so a
-`superseded` value is visible there whenever `t` predates its supersession, without any opt-in.
-`.include_flagged()` *does* still apply under `.as_of()` (a flagged assertion has an open window),
-and the `as_of` path has honored `entities_where(include_flagged=...)` since before this ADR.
+**`.include_history()` is a no-op under `.as_of(t)`.** The `as_of` branch never restricts matches
+to `active` in the first place — it excludes only `flagged` (gated behind `.include_flagged()`,
+which *does* still apply under `.as_of()` — a flagged assertion has an open window, and the
+`as_of` path has honored `entities_where(include_flagged=...)` since before this ADR) — so a
+`superseded` value is already visible there whenever `t` predates its supersession, with no
+opt-in needed.
 
 This leaves one `as_of` gap this ADR does **not** fix: a `retract()` does not always narrow an
 already-open validity window (`_retraction_valid_to`), so a retracted assertion with a future
@@ -198,10 +199,25 @@ all mutation-tested by reverting each interface's `if include_flagged: ... if in
 A review round found GraphQL's `run_in_threadpool(_execute_query, ...)` call site passed all
 nine arguments positionally, including two adjacent `bool` and two adjacent `int | None`
 parameters mypy's ParamSpec check can't catch a silent reorder of — switched to keyword
-arguments (REST and MCP already pass by name). The same round corrected this ADR's own and
-KI-094's filed claim that REST/GraphQL "already forward `as_of`": only MCP does; REST and
-GraphQL's `query` surfaces have no `as_of` parameter at all. It also found the new MCP
-docstring's `include_history`+`as_of` no-op explanation ("a bitemporal snapshot already matches
-whatever was valid at that instant regardless of its status now") repeated exactly the
-window-vs-status conflation KI-095 exists to fix — reworded to point at KI-095 instead of
-implying the `as_of` branch's status-blindness is a feature.
+arguments (`run_in_threadpool` has no other call site in this codebase; REST and MCP avoid the
+hazard structurally instead, since neither uses a threadpool call here — REST reads `body.<field>`
+attributes directly in a sync route, MCP chains `QueryBuilder` methods inline). The same round
+corrected this ADR's own and KI-094's filed claim that REST/GraphQL "already forward `as_of`":
+only MCP does; REST and GraphQL's `query` surfaces have no `as_of` parameter at all.
+
+It also found the new MCP docstring's `include_history`+`as_of` no-op explanation repeated a
+pre-existing inaccuracy this ADR's own Decision section (above) and every other copy of the same
+note (`QueryBuilder.include_history()`, `StorageBackend.entities_where()`/
+`entities_meeting_confidence()`, both adapters, KI-081's own known-issues.md entry) shared: "a
+bitemporal snapshot already matches whatever was valid at that instant regardless of status now"
+is not quite true — the `as_of` branch does consult status for one case (`flagged` is excluded
+unless `include_flagged` is set, per `entities_meeting_confidence()`'s own "One caveat" paragraph
+two sections up). A first attempted reword landed on the MCP copy alone and, in trying to avoid
+that inaccuracy, introduced a different wrong claim ("matches purely on the validity window, not
+on current `status`") that a second review round caught by cross-checking it against the adapters'
+own SQL (`flagged_clause`) and the sibling `include_flagged` no-op-under-`as_of` claim six lines
+above it in the same docstring. Corrected everywhere with the same precise framing: the `as_of`
+branch never restricts matches to `active` — it excludes only `flagged` — so `superseded`/
+`retracted` assertions whose window covers the queried instant already match without
+`include_history`; the KI-095 pointer (a *different* gap — no way to exclude a stale-window
+retraction from `as_of`) was already correct in the first reword and is kept.
