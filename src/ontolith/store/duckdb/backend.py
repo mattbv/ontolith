@@ -1857,8 +1857,10 @@ class DuckDBBackend:
                 excluded by default on both, see assertions()).
             include_history: Also match 'superseded'/'retracted' assertions
                 (KI-081). Current-state path only — no-op under as_of_time,
-                which is window-based and already matches whatever was
-                valid at that instant regardless of status now.
+                which never restricts matches to 'active' in the first
+                place (it excludes only 'flagged', itself gated behind
+                include_flagged), so a 'superseded'/'retracted' assertion
+                whose window covers as_of_time already matches there.
 
         Returns:
             List of entities where all filters match at the given time

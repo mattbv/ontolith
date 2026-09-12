@@ -1654,7 +1654,7 @@ SPEC §10.3's MUST ("A flagged assertion is retained and queryable but MUST be e
 
 ### Fix
 
-Both opt-ins built, as **match-set wideners** — they change only which assertion statuses a `.where()` filter may match against; `.all()`/`.first()`/`.count()` keep returning `Entity`/`Entity | None`/`int` (**ADR-0048** records this over the "return per-entity timelines" alternative). Default match set is `active`; `.include_flagged()` adds `flagged`; `.include_history()` adds `superseded` + `retracted`; the two are independent (neither implies the other). No effect on a query with no `.where()` filter and (since KI-093) no `.min_confidence()`/`.trust_at_least()` floor either — nothing to widen. `.include_flagged()` still applies under `.as_of()`, as it has since before this KI (a flagged assertion's open validity window already makes it visible unless excluded); `.include_history()` is genuinely a no-op there (a bitemporal snapshot already matches whatever was valid at that instant regardless of status now).
+Both opt-ins built, as **match-set wideners** — they change only which assertion statuses a `.where()` filter may match against; `.all()`/`.first()`/`.count()` keep returning `Entity`/`Entity | None`/`int` (**ADR-0048** records this over the "return per-entity timelines" alternative). Default match set is `active`; `.include_flagged()` adds `flagged`; `.include_history()` adds `superseded` + `retracted`; the two are independent (neither implies the other). No effect on a query with no `.where()` filter and (since KI-093) no `.min_confidence()`/`.trust_at_least()` floor either — nothing to widen. `.include_flagged()` still applies under `.as_of()`, as it has since before this KI (a flagged assertion's open validity window already makes it visible unless excluded); `.include_history()` is genuinely a no-op there — the `as_of` branch never restricts matches to `active` in the first place (it excludes only `flagged`, itself gated behind `.include_flagged()`), so a superseded/retracted assertion whose window covers the queried instant already matches without this opt-in.
 
 `QueryBuilder` gained `.include_flagged()` / `.include_history()` chainable methods + `_include_flagged`/`_include_history` fields, threaded through to `entities_where()` from both `_base_candidates()` and `_semantic_candidates()`. `StorageBackend.entities_where()` (port + both adapters) gained `include_history: bool = False`; each adapter's current-state branch replaced its hard-coded `" AND status = 'active'"` with a parameter-bound `" AND status IN (?, …)"` built from the widened status list (the `as_of` branch's `include_flagged` handling was already correct and is unchanged). SPEC §11.2's wording tightened to name which statuses each opt-in adds.
 
@@ -1938,19 +1938,25 @@ A second review round found: the pre-existing (KI-081) `.semantic()` path's `inc
 
 ---
 
-## KI-094 — MCP/REST/GraphQL `query` surfaces don't expose `.include_flagged()`/`.include_history()` — found reviewing KI-081
+## KI-094 — MCP/REST/GraphQL `query` surfaces don't expose `.include_flagged()`/`.include_history()` — found reviewing KI-081 ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — SPEC §10.3's "unless explicitly requested" opt-in is now reachable from the Python SDK only, not from the interface agents actually use
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §10.3 ("MUST be excluded from default retrieval unless explicitly requested"), SPEC §11.2, SPEC §14.3/§14.4 (REST/GraphQL/MCP query surfaces)
 
 ### Description
 
-KI-081 added `.include_flagged()`/`.include_history()` to `QueryBuilder`, but the three interface `query` surfaces (`interfaces/mcp.py`'s `ontolith.query`, `interfaces/rest.py`'s `/query`, `interfaces/graphql.py`'s `Query.query`) — which already forward `as_of`, `semantic`, `min_confidence`, `trust_at_least`, `limit` — do not forward the two new opt-ins. So a REST/GraphQL/MCP caller can't opt in to flagged/history visibility through the primary query API, only a direct Python SDK caller can. This matters most for MCP, where the flagged-exclusion rule is a safety property for agents (SPEC §14.4).
+KI-081 added `.include_flagged()`/`.include_history()` to `QueryBuilder`, but the three interface `query` surfaces (`interfaces/mcp.py`'s `ontolith.query`, `interfaces/rest.py`'s `/query`, `interfaces/graphql.py`'s `Query.query`) — which already forward `semantic`, `min_confidence`, `trust_at_least`, `limit` — do not forward the two new opt-ins. So a REST/GraphQL/MCP caller can't opt in to flagged/history visibility through the primary query API, only a direct Python SDK caller can. This matters most for MCP, where the flagged-exclusion rule is a safety property for agents (SPEC §14.4).
+
+Correction found while resolving: the claim above that these surfaces "already forward `as_of`" does not hold for REST or GraphQL — only `interfaces/mcp.py`'s `ontolith.query` accepts `as_of` at all. Not an undiscovered gap, though: per KI-058's own Fix (ADR-0043), `as_of` was deliberately added to MCP alone, "per SPEC §14.4's own normative tool table naming it for this tool specifically" — REST/GraphQL were never intended to gain it as part of that work. Unrelated to `include_flagged`/`include_history` either way, and out of scope here.
 
 ### Fix
 
-Add `include_flagged`/`include_history` boolean parameters to all three interfaces' `query` operations, forwarding to the builder — mechanical, matching how the other five modifiers are already forwarded. Same pattern as KI-079 (GraphQL/CLI parity for `assign_reviewers` after REST shipped first). Consider whether the CLI's `ontolith query` wants them too.
+Added `include_flagged`/`include_history` boolean parameters (default `False`) to all three interfaces' `query` operations, forwarding to the builder exactly as `min_confidence`/`trust_at_least`/`limit` already are: `interfaces/rest.py`'s `QueryIn` gained the two fields, wired in `query_route`; `interfaces/graphql.py`'s `_execute_query` and `Query.query` gained the two parameters (strawberry auto-camelCases them to `includeFlagged`/`includeHistory` on the wire), wired the same way (its `run_in_threadpool` call site passes all arguments by keyword, not position, since two adjacent `bool` and two adjacent `int | None` parameters are otherwise swappable with no mypy error); `interfaces/mcp.py`'s `ontolith.query` tool gained the two parameters with docstring coverage, including the pre-existing `include_history`+`as_of` no-op explanation, corrected in the same pass (see ADR-0048's Update). Same pattern as KI-079 (GraphQL/CLI parity for `assign_reviewers` after REST shipped first).
+
+The CLI's `ontolith query` command was deliberately left out of scope: unlike REST and GraphQL, it doesn't forward `semantic`, `min_confidence`, `trust_at_least`, or `limit` either — a materially larger, pre-existing gap that predates KI-081, filed separately as KI-096. `as_of` is a separate case per the correction above: only MCP has it today, so adding it to the CLI is not a parity question with REST/GraphQL either way.
+
+New tests: `tests/unit/test_rest.py`/`test_graphql.py`, two each (`include_flagged` matching a flagged assertion, `include_history` matching a retracted one, each with a false-default baseline); `tests/unit/test_mcp_server.py` additionally gets a third, combining `include_flagged` with `as_of` — the one branch genuinely distinct from the other two, since MCP alone builds from `kb.as_of(...)`. Mutation-tested: reverting each interface's `if include_flagged: ... if include_history: ...` wiring back out fails exactly its own new tests on that interface, restored after confirming.
 
 ---
 
@@ -1971,6 +1977,22 @@ Pre-existing — the `as_of` branch has always been window-based, not status-bas
 ### Fix
 
 Two candidate directions, needs a design decision (likely an ADR touching bitemporal semantics): (a) have `retract()` close the validity window at the retraction instant (`valid_to = now`) so the window itself stops covering later `t` — simplest, but changes what "valid_to" means for a retracted assertion; or (b) give the bitemporal query paths a retraction-aware exclusion (track the retraction event's own asserted_at and exclude when `t >= retraction_asserted_at`) — more faithful to bitemporality but a bigger change. Until then, `.as_of()` results can include retracted values.
+
+---
+
+## KI-096 — CLI's `ontolith query` command doesn't support `semantic`, `min_confidence`, `trust_at_least`, `limit`, or `as_of` — found resolving KI-094
+
+**Severity:** Architecture gap — the CLI query surface is far behind REST/GraphQL/MCP, not just missing KI-081's two opt-ins
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §11.2/§11.3 (confidence/trust retrieval signals), SPEC §11.4 (`as_of`), SPEC §14 (interface parity)
+
+### Description
+
+While resolving KI-094 (adding `include_flagged`/`include_history` to REST/GraphQL/MCP's `query` operations), found that `interfaces/cli.py`'s `ontolith query` command only supports `concept` and `--where` filters. Unlike REST and GraphQL's `query` surfaces, it has never forwarded `semantic`, `min_confidence`, `trust_at_least`, or `limit` — a materially larger, pre-existing gap that predates KI-081 and is unrelated to the flagged/history opt-ins, so it was kept out of KI-094's scope rather than folded in. `as_of` is a separate case: per KI-094's own correction, only MCP supports bitemporal time-travel on `query` today, so adding `--as-of` to the CLI would make it the *second* interface to gain this, not bring it to parity with REST/GraphQL.
+
+### Fix
+
+Bring `ontolith query` up to parity with REST/GraphQL's `semantic`/`min_confidence`/`trust_at_least`/`limit`, and (while at it) `--include-flagged`/`--include-history`, forwarding to `QueryBuilder` the same way those interfaces do. Whether to also add `--as-of` (matching MCP, ahead of REST/GraphQL) is a separate call, not required for parity with the other two. One PR, mechanical once the flag surface is designed; needs a decision on flag naming/shape (e.g. how `--where key=value` pairs coexist with a `--semantic` free-text flag) but no new architecture.
 
 ---
 

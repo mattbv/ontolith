@@ -470,6 +470,56 @@ class TestQueryRoute:
         assert body["count"] == 1
         assert body["entities"][0]["id"] == trusted_entity.id
 
+    def test_include_flagged_matches_a_flagged_assertion(self, tmp_path: Path) -> None:
+        """KI-094: the opt-in is forwarded to QueryBuilder, not silently dropped."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", HUMAN)  # -> flagged
+        assert kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        default = client.post(
+            "/query", json={"concept": "Person", "filters": {"name": "Ada"}}, headers=_auth(token)
+        )
+        assert default.json()["count"] == 0
+
+        response = client.post(
+            "/query",
+            json={"concept": "Person", "filters": {"name": "Ada"}, "include_flagged": True},
+            headers=_auth(token),
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["count"] == 1
+        assert body["entities"][0]["id"] == entity.id
+
+    def test_include_history_matches_a_retracted_assertion(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        kb.retract(assertion.id, HUMAN)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        default = client.post(
+            "/query",
+            json={"concept": "Person", "filters": {"name": "Ada"}},
+            headers=_auth(token),
+        )
+        assert default.json()["count"] == 0
+
+        response = client.post(
+            "/query",
+            json={"concept": "Person", "filters": {"name": "Ada"}, "include_history": True},
+            headers=_auth(token),
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["count"] == 1
+        assert body["entities"][0]["id"] == entity.id
+
 
 # ---------------------------------------------------------------------------
 # GET /provenance/{assertion_id}

@@ -594,6 +594,8 @@ def _execute_query(
     min_confidence: float | None,
     trust_at_least: int | None,
     limit: int | None,
+    include_flagged: bool,
+    include_history: bool,
 ) -> QueryResultType:
     """Blocking body of Query.query."""
     builder = kb.query(concept)
@@ -609,6 +611,10 @@ def _execute_query(
         builder = builder.min_confidence(min_confidence)
     if trust_at_least is not None:
         builder = builder.trust_at_least(trust_at_least)
+    if include_flagged:
+        builder = builder.include_flagged()
+    if include_history:
+        builder = builder.include_history()
     if limit is not None:
         builder = builder.limit(limit)
     entities = builder.all()
@@ -836,13 +842,26 @@ class Query:
         min_confidence: float | None = None,
         trust_at_least: int | None = None,
         limit: int | None = None,
+        include_flagged: bool = False,
+        include_history: bool = False,
     ) -> QueryResultType:
         """Query entities of a concept, optionally filtered/ranked (mirrors
-        REST's POST /query)."""
+        REST's POST /query). `include_flagged`/`include_history` (KI-094)
+        widen which assertion statuses `filters`/`min_confidence`/
+        `trust_at_least` may match against — SPEC §11.2/§10.3, ADR-0048."""
         _require_principal(info)
         kb = _kb(info)
         return await run_in_threadpool(
-            _execute_query, kb, concept, filters, semantic, min_confidence, trust_at_least, limit
+            _execute_query,
+            kb,
+            concept,
+            filters,
+            semantic=semantic,
+            min_confidence=min_confidence,
+            trust_at_least=trust_at_least,
+            limit=limit,
+            include_flagged=include_flagged,
+            include_history=include_history,
         )
 
     @strawberry.field
