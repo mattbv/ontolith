@@ -9,7 +9,7 @@
 **Related**: SPEC §11.2 (symbolic query semantics — names both opt-ins), SPEC §10.3 (a flagged
 assertion MUST be excluded from default retrieval unless explicitly requested), ADR-0027 (prior
 `QueryBuilder` scope decision — deferred multi-hop traversal), `docs/known-issues.md` KI-081
-(closed by this ADR)
+(closed by this ADR), KI-093 (confidence/trust composition, closed by this ADR's own Update)
 
 ---
 
@@ -95,8 +95,9 @@ methods, and threads both through to `entities_where()` from `_base_candidates()
 
 **Positive:**
 - SPEC §10.3's opt-in half is now reachable through the primary `kb.query(Concept)` API.
-- No public return-type change; `.include_*()` compose with `.where()`, `.semantic()`, and
-  `.limit()` like any other builder method.
+- No public return-type change; `.include_*()` compose with `.where()`, `.semantic()`,
+  `.min_confidence()`, `.trust_at_least()`, and `.limit()` like any other builder method (the
+  confidence/trust composition shipped in KI-093, see Update below).
 - The `as_of` path's pre-existing `include_flagged` handling is unified with the current-state path
   under one parameter set.
 
@@ -108,10 +109,6 @@ methods, and threads both through to `entities_where()` from `_base_candidates()
 - `.include_flagged()` / `.include_history()` silently do nothing on a filter-less or `as_of`
   query. Documented on each method; not surfaced as a warning (consistent with the builder's other
   no-op combinations, e.g. `.limit()` larger than the result set).
-- The wideners do **not** yet compose with `.min_confidence()` / `.trust_at_least()`:
-  `entities_meeting_confidence` / `entities_meeting_trust` still consider only `active` assertions
-  on the current-state path, so `.include_history().min_confidence(x)` re-narrows to active and can
-  empty the result. Documented on both builder methods; the full composition is filed as KI-093.
 
 ## Alternatives Considered
 
@@ -126,3 +123,32 @@ passage of time) a caller will often want to make.
 **Defer `.include_history()` with an ADR (mirroring ADR-0027's multi-hop deferral), ship only
 `.include_flagged()`.** Rejected — the widener form makes `.include_history()` nearly free (two
 extra status strings in the same `IN` clause), so there is no implementation cost worth deferring.
+
+## Update (2026-09-11, closes KI-093): the wideners now compose with `.min_confidence()`/`.trust_at_least()`
+
+Filed while reviewing this ADR's own first implementation: `.include_flagged()`/`.include_history()`
+widened `_base_candidates()`'s `entities_where()` call, but `_apply_confidence_trust_filters()` —
+run afterward for `.min_confidence()`/`.trust_at_least()` — called `entities_meeting_confidence()`/
+`entities_meeting_trust()`, whose current-state branches still hard-coded `a.status = 'active'`. So
+a supposedly-no-op floor (`min_confidence(0.0)`, `trust_at_least(0)`) chained after
+`.include_history()` re-narrowed the result back to active-only and could empty it — the
+composition claim this ADR made at first was false.
+
+**Fix:** `entities_meeting_confidence()`/`entities_meeting_trust()` (port + both adapters) gained
+the identical `include_flagged`/`include_history` parameters `entities_where()` already has, and
+their current-state branch was widened the same way: `a.status = 'active'` became a parameter-bound
+`a.status IN (?, …)` built from the same status list. Their `as_of` branches gained the identical
+`flagged_clause` treatment `entities_where()`'s `as_of` branch already had (`include_flagged`
+applies, `include_history` is a no-op — same reasoning). `QueryBuilder._apply_confidence_trust_filters`
+threads `self._include_flagged`/`self._include_history` into both calls. No semantics question to
+resolve beyond "match the existing widener": an entity that *historically* had a
+≥threshold-confidence (or ≥threshold-trust) assertion now qualifies under `.include_history()`,
+consistent with `.where()`'s own widened matching.
+
+New tests: `test_query.py::TestIncludeFlaggedHistoryComposesWithConfidenceAndTrust` (a genuine
+no-op floor doesn't re-narrow; a genuinely-failing floor still excludes, even widened);
+`test_sqlite_backend.py`/`test_duckdb_backend.py::test_entities_meeting_{confidence,trust}_status_widening_flags`
+at the port level; `conformance/test_include_flagged_history.py::TestComposesWithConfidenceAndTrust`
+(both backends). Mutation-tested: reverting either backend's widened `IN` clause back to
+`status = 'active'` fails the no-op-floor cases on both `entities_meeting_confidence` and
+`entities_meeting_trust`.

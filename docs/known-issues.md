@@ -1916,10 +1916,10 @@ Two new tests (`tests/unit/test_ontology.py::TestCreateEntityNaturalKeyTransacti
 
 ---
 
-## KI-093 — `.include_flagged()`/`.include_history()` don't compose with `.min_confidence()`/`.trust_at_least()` — found reviewing KI-081
+## KI-093 — `.include_flagged()`/`.include_history()` don't compose with `.min_confidence()`/`.trust_at_least()` — found reviewing KI-081 ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — a chained no-op filter (`.min_confidence(0.0)` / `.trust_at_least(0)`) silently empties an otherwise-populated result
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §11.2 (`.include_flagged()` / `.include_history()` opt-ins), SPEC §11.3 (`confidence`/`trust` retrieval signals)
 
 ### Description
@@ -1930,7 +1930,9 @@ Verified: an entity whose only `Person.name` assertion was retracted — `includ
 
 ### Fix
 
-Thread `include_flagged`/`include_history` into `entities_meeting_confidence()` / `entities_meeting_trust()` (port + both adapters), widening their current-state `status = 'active'` clause the same way `entities_where()` now does — and decide the semantics deliberately (does "an entity that *historically* had a ≥X-confidence assertion" match `.include_history().min_confidence(X)`? almost certainly yes, for consistency, but it's worth stating). Or, if the composition is judged out of scope, make `.include_*()` + `.min_confidence()`/`.trust_at_least()` raise rather than silently mis-filter. ADR-0048 documents the current limitation and points here.
+`entities_meeting_confidence()` / `entities_meeting_trust()` (port + both adapters, `store/base.py`/`store/sqlite/backend.py`/`store/duckdb/backend.py`) gained the identical `include_flagged`/`include_history` parameters `entities_where()` already had. Their current-state branch was widened the same way: `a.status = 'active'` became a parameter-bound `a.status IN (?, …)` built from the same status list; their `as_of` branch gained the identical `flagged_clause` treatment (`include_flagged` applies, `include_history` is a documented no-op — a bitemporal snapshot already matches whatever was valid then regardless of status now). `QueryBuilder._apply_confidence_trust_filters()` threads `self._include_flagged`/`self._include_history` into both calls. Semantics decided per the KI's own framing: "an entity that *historically* had a ≥X-confidence (or ≥X-trust) assertion" now qualifies under `.include_history()`, consistent with `.where()`'s own widened matching — not made to raise.
+
+New tests: `tests/unit/test_query.py::TestIncludeFlaggedHistoryComposesWithConfidenceAndTrust` (a genuine no-op floor no longer re-narrows; a genuinely-failing floor still excludes even when widened — the widening isn't a bypass); `tests/unit/test_sqlite_backend.py`/`test_duckdb_backend.py::test_entities_meeting_{confidence,trust}_status_widening_flags` at the port level, on both backends; `conformance/test_include_flagged_history.py::TestComposesWithConfidenceAndTrust` (both backends). Mutation-tested: reverting either backend's widened `IN` clause back to `status = 'active'` fails the no-op-floor cases on both methods, on both backends. `QueryBuilder.include_flagged()`/`.include_history()`'s docstrings and ADR-0048 updated to state the composition now holds instead of documenting the gap.
 
 ---
 

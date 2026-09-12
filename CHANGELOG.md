@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- `entities_meeting_confidence()` / `entities_meeting_trust()` now honor `.include_flagged()` /
+  `.include_history()` too (closes KI-093, ADR-0048 Update — found reviewing KI-081) — previously
+  their current-state branch stayed hard-coded to `status = 'active'`, so a genuinely no-op floor
+  (`.min_confidence(0.0)`, `.trust_at_least(0)`) chained after `.include_history()` silently
+  re-narrowed the result back to active-only and could empty it. Both port methods (+ both
+  adapters) gained the identical `include_flagged`/`include_history` parameters
+  `entities_where()` already had, widened the same way; `QueryBuilder` threads both flags through.
 - `QueryBuilder.include_flagged()` / `.include_history()` (closes KI-081, ADR-0048) — SPEC §11.2's
   two opt-ins, now on the fluent API. They widen which assertion statuses a `.where()` filter
   matches against: default `active`; `.include_flagged()` adds `flagged`; `.include_history()` adds

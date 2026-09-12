@@ -2107,12 +2107,16 @@ class SQLiteBackend:
         threshold: float,
         as_of_time: datetime | None = None,
         candidate_ids: frozenset[str] | None = None,
+        include_flagged: bool = False,
+        include_history: bool = False,
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion at or
         above `threshold` confidence, active at `as_of_time` (KI-036) or
         currently active if `as_of_time` is None. `candidate_ids`, if given,
         narrows the scan below `(namespace, concept)` (KI-037) via a single
-        JSON-encoded bound parameter rather than one placeholder per id."""
+        JSON-encoded bound parameter rather than one placeholder per id.
+        `include_flagged`/`include_history` widen "active" the same way
+        `entities_where()` does (KI-093) — see its docstring."""
         if candidate_ids is not None and not candidate_ids:
             return set()
 
@@ -2125,15 +2129,26 @@ class SQLiteBackend:
 
         if as_of_time is not None:
             t_iso = as_of_time.isoformat()
+            # flagged_clause is always one of exactly two hardcoded literals
+            # (never caller-controlled) - not a SQL injection vector despite
+            # bandit's B608 heuristic flagging any keyword-string + variable
+            # concatenation regardless of the variable's actual provenance.
+            flagged_clause = "" if include_flagged else " AND a.status != 'flagged'"
             query += (
-                " AND a.status != 'flagged'"
                 " AND a.asserted_at <= ?"
                 " AND (a.valid_from IS NULL OR a.valid_from <= ?)"
                 " AND (a.valid_to IS NULL OR a.valid_to > ?)"
+                f"{flagged_clause}"  # nosec B608
             )
             params.extend([t_iso, t_iso, t_iso])
         else:
-            query += " AND a.status = 'active'"
+            status_params = ["active"]
+            if include_flagged:
+                status_params.append("flagged")
+            if include_history:
+                status_params += ["superseded", "retracted"]
+            query += f" AND a.status IN ({', '.join(['?'] * len(status_params))})"
+            params.extend(status_params)
 
         if candidate_ids is not None:
             query += " AND e.id IN (SELECT value FROM json_each(?))"
@@ -2151,6 +2166,8 @@ class SQLiteBackend:
         min_trust: int,
         as_of_time: datetime | None = None,
         candidate_ids: frozenset[str] | None = None,
+        include_flagged: bool = False,
+        include_history: bool = False,
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion,
         active at `as_of_time` (KI-036) or currently active if `as_of_time`
@@ -2162,7 +2179,9 @@ class SQLiteBackend:
         `acting_as` (no resolvable delegate) falls back to `author.trust_level`
         via `coalesce` — see `StorageBackend.entities_meeting_trust`'s
         docstring for why. `candidate_ids` narrows the scan the same way as
-        `entities_meeting_confidence` (KI-037) — see its docstring."""
+        `entities_meeting_confidence` (KI-037) — see its docstring.
+        `include_flagged`/`include_history` widen "active" the same way
+        `entities_where()` does (KI-093) — see its docstring."""
         if candidate_ids is not None and not candidate_ids:
             return set()
 
@@ -2178,15 +2197,26 @@ class SQLiteBackend:
 
         if as_of_time is not None:
             t_iso = as_of_time.isoformat()
+            # flagged_clause is always one of exactly two hardcoded literals
+            # (never caller-controlled) - not a SQL injection vector despite
+            # bandit's B608 heuristic flagging any keyword-string + variable
+            # concatenation regardless of the variable's actual provenance.
+            flagged_clause = "" if include_flagged else " AND a.status != 'flagged'"
             query += (
-                " AND a.status != 'flagged'"
                 " AND a.asserted_at <= ?"
                 " AND (a.valid_from IS NULL OR a.valid_from <= ?)"
                 " AND (a.valid_to IS NULL OR a.valid_to > ?)"
+                f"{flagged_clause}"  # nosec B608
             )
             params.extend([t_iso, t_iso, t_iso])
         else:
-            query += " AND a.status = 'active'"
+            status_params = ["active"]
+            if include_flagged:
+                status_params.append("flagged")
+            if include_history:
+                status_params += ["superseded", "retracted"]
+            query += f" AND a.status IN ({', '.join(['?'] * len(status_params))})"
+            params.extend(status_params)
 
         if candidate_ids is not None:
             query += " AND e.id IN (SELECT value FROM json_each(?))"

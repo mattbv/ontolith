@@ -963,3 +963,86 @@ class TestIncludeFlaggedAndHistory:
             assert [r.id for r in hit] == [person.id]
         finally:
             kb.close()
+
+
+class TestIncludeFlaggedHistoryComposesWithConfidenceAndTrust:
+    """KI-093: `.include_flagged()`/`.include_history()` must also widen
+    `.min_confidence()`/`.trust_at_least()`'s own "active" filtering
+    (`entities_meeting_confidence`/`entities_meeting_trust`), not just
+    `.where()`'s — otherwise a no-op floor (`min_confidence(0.0)`,
+    `trust_at_least(0)`) silently re-narrows an `.include_history()`/
+    `.include_flagged()` result back to `active` only."""
+
+    def _prep(self, kb: Ontology) -> str:
+        admin = kb.create_principal(
+            "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
+        )
+        kb.create_principal(
+            "alice@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+        kb.apply_schema(
+            SchemaIR(
+                namespace="default",
+                version=1,
+                concepts={
+                    "Person": ConceptDef(
+                        name="Person",
+                        properties={"name": PropertyDef(name="name", value_type="Text")},
+                    )
+                },
+            ),
+            author=admin.id,
+        )
+        return "alice@example.com"
+
+    def _retracted_person_with_confidence(
+        self, kb: Ontology, alice_id: str, confidence: float
+    ) -> str:
+        person = kb.create_entity("Person", author=alice_id)
+        a = kb.assert_literal(
+            person.id, "Person.name", "Ada", "Text", alice_id, confidence=confidence
+        )
+        kb.retract(a.id, alice_id)
+        assert kb.assertions(subject=person.id, predicate="Person.name", status="retracted")
+        return person.id
+
+    def test_include_history_min_confidence_zero_is_a_true_noop(self, kb: Ontology) -> None:
+        alice_id = self._prep(kb)
+        pid = self._retracted_person_with_confidence(kb, alice_id, confidence=0.9)
+
+        without_floor = kb.query("Person").where(name="Ada").include_history().all()
+        with_noop_floor = (
+            kb.query("Person").where(name="Ada").include_history().min_confidence(0.0).all()
+        )
+        assert [e.id for e in without_floor] == [pid]
+        assert [e.id for e in with_noop_floor] == [pid]
+
+    def test_include_history_trust_at_least_zero_is_a_true_noop(self, kb: Ontology) -> None:
+        alice_id = self._prep(kb)
+        pid = self._retracted_person_with_confidence(kb, alice_id, confidence=0.9)
+
+        with_noop_floor = (
+            kb.query("Person").where(name="Ada").include_history().trust_at_least(0).all()
+        )
+        assert [e.id for e in with_noop_floor] == [pid]
+
+    def test_include_history_min_confidence_still_filters_below_threshold(
+        self, kb: Ontology
+    ) -> None:
+        """The widening isn't a bypass: a genuinely-failing confidence floor
+        still excludes, even under `.include_history()`."""
+        alice_id = self._prep(kb)
+        self._retracted_person_with_confidence(kb, alice_id, confidence=0.2)
+
+        result = kb.query("Person").where(name="Ada").include_history().min_confidence(0.9).all()
+        assert result == []
+
+    def test_include_flagged_min_confidence_zero_is_a_true_noop(self, kb: Ontology) -> None:
+        alice_id = self._prep(kb)
+        person = kb.create_entity("Person", author=alice_id)
+        kb.assert_literal(person.id, "Person.name", "Ada", "Text", alice_id, confidence=0.9)
+        kb.assert_literal(person.id, "Person.name", "Ava", "Text", alice_id, confidence=0.9)
+        assert kb.assertions(subject=person.id, predicate="Person.name", status="flagged")
+
+        result = kb.query("Person").where(name="Ada").include_flagged().min_confidence(0.0).all()
+        assert [e.id for e in result] == [person.id]

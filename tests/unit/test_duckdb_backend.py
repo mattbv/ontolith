@@ -1861,6 +1861,67 @@ class TestCandidateIdsNarrowing:
             == set()
         )
 
+    def _seed_with_status(self, backend: DuckDBBackend, entity_id: str, status: str) -> None:
+        backend.put_entity(
+            Entity(
+                id=entity_id,
+                namespace="test-ns",
+                concept="Person",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                created_by="alice@test.com",
+            )
+        )
+        backend.put_assertion(
+            Assertion(
+                id=f"a-{entity_id}",
+                namespace="test-ns",
+                subject=entity_id,
+                predicate="Person.name",
+                value_kind="literal",
+                value_type="Text",
+                value="Ada",
+                author="alice@test.com",
+                confidence=0.9,
+                asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+                status=status,
+            )
+        )
+
+    def test_entities_meeting_confidence_status_widening_flags(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """KI-093: entities_meeting_confidence()'s current-state path must
+        widen the same way entities_where() does, independently per flag."""
+        self._seed_with_status(backend, "e-flagged", "flagged")
+        self._seed_with_status(backend, "e-super", "superseded")
+        self._seed_with_status(backend, "e-retr", "retracted")
+
+        def qualifying(**kw: bool) -> set[str]:
+            return backend.entities_meeting_confidence("test-ns", "Person", 0.5, **kw)
+
+        assert qualifying() == set()
+        assert qualifying(include_flagged=True) == {"e-flagged"}
+        assert qualifying(include_history=True) == {"e-super", "e-retr"}
+        assert qualifying(include_flagged=True, include_history=True) == {
+            "e-flagged",
+            "e-super",
+            "e-retr",
+        }
+
+    def test_entities_meeting_trust_status_widening_flags(self, backend: DuckDBBackend) -> None:
+        """KI-093: entities_meeting_trust()'s current-state path must widen
+        the same way entities_where() does, independently per flag."""
+        self._seed_with_status(backend, "e-flagged", "flagged")
+        self._seed_with_status(backend, "e-super", "superseded")
+
+        def qualifying(**kw: bool) -> set[str]:
+            return backend.entities_meeting_trust("test-ns", "Person", 0, **kw)
+
+        assert qualifying() == set()
+        assert qualifying(include_flagged=True) == {"e-flagged"}
+        assert qualifying(include_history=True) == {"e-super"}
+        assert qualifying(include_flagged=True, include_history=True) == {"e-flagged", "e-super"}
+
 
 class TestConcurrency:
     """KI-046: the shared connection must survive genuinely concurrent access
