@@ -1837,6 +1837,60 @@ class TestCandidateIdsNarrowing:
         assert qualifying(include_history=True) == {"e-super"}
         assert qualifying(include_flagged=True, include_history=True) == {"e-flagged", "e-super"}
 
+    def _seed_flagged_with_window(self, backend: SQLiteBackend, entity_id: str) -> None:
+        """A flagged assertion whose validity window covers T0 (2025-01-01),
+        for `as_of_time`-scoped widening tests."""
+        backend.put_entity(
+            Entity(
+                id=entity_id,
+                namespace="test-ns",
+                concept="Person",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                created_by="alice@test.com",
+            )
+        )
+        backend.put_assertion(
+            Assertion(
+                id=f"a-{entity_id}",
+                namespace="test-ns",
+                subject=entity_id,
+                predicate="Person.name",
+                value_kind="literal",
+                value_type="Text",
+                value="Ada",
+                author="alice@test.com",
+                confidence=0.9,
+                asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+                valid_from=datetime(2025, 1, 1, tzinfo=UTC),
+                status="flagged",
+            )
+        )
+
+    def test_entities_meeting_confidence_as_of_include_flagged(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """KI-093: the as_of branch's flagged_clause must be genuinely
+        conditional on include_flagged, not left unconditionally excluding
+        flagged the way it did before this KI - a mutation reverting that
+        one line survived the whole suite until this test was added."""
+        self._seed_flagged_with_window(backend, "e-flagged")
+        t = datetime(2025, 6, 1, tzinfo=UTC)
+
+        assert backend.entities_meeting_confidence("test-ns", "Person", 0.5, as_of_time=t) == set()
+        assert backend.entities_meeting_confidence(
+            "test-ns", "Person", 0.5, as_of_time=t, include_flagged=True
+        ) == {"e-flagged"}
+
+    def test_entities_meeting_trust_as_of_include_flagged(self, backend: SQLiteBackend) -> None:
+        """KI-093: same as the confidence test above, for entities_meeting_trust()."""
+        self._seed_flagged_with_window(backend, "e-flagged")
+        t = datetime(2025, 6, 1, tzinfo=UTC)
+
+        assert backend.entities_meeting_trust("test-ns", "Person", 0, as_of_time=t) == set()
+        assert backend.entities_meeting_trust(
+            "test-ns", "Person", 0, as_of_time=t, include_flagged=True
+        ) == {"e-flagged"}
+
 
 class TestConcurrency:
     """KI-023: the shared connection must survive genuinely concurrent access

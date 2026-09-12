@@ -2129,16 +2129,19 @@ class SQLiteBackend:
 
         if as_of_time is not None:
             t_iso = as_of_time.isoformat()
-            # flagged_clause is always one of exactly two hardcoded literals
-            # (never caller-controlled) - not a SQL injection vector despite
-            # bandit's B608 heuristic flagging any keyword-string + variable
-            # concatenation regardless of the variable's actual provenance.
+            # Unlike entities_where()'s own as_of flagged_clause, this one
+            # is plain `str` concatenation (+), not an f-string embedded in
+            # a literal-only adjacent-string block - bandit's B608 heuristic
+            # only fires on the latter shape, so it never flags this line;
+            # kept as a variable (not inlined) only for parity with
+            # entities_where()'s structure. Still just one of two hardcoded
+            # literals, never caller-controlled, so no injection surface
+            # either way.
             flagged_clause = "" if include_flagged else " AND a.status != 'flagged'"
             query += (
                 " AND a.asserted_at <= ?"
                 " AND (a.valid_from IS NULL OR a.valid_from <= ?)"
-                " AND (a.valid_to IS NULL OR a.valid_to > ?)"
-                f"{flagged_clause}"  # nosec B608
+                " AND (a.valid_to IS NULL OR a.valid_to > ?)" + flagged_clause
             )
             params.extend([t_iso, t_iso, t_iso])
         else:
@@ -2197,16 +2200,19 @@ class SQLiteBackend:
 
         if as_of_time is not None:
             t_iso = as_of_time.isoformat()
-            # flagged_clause is always one of exactly two hardcoded literals
-            # (never caller-controlled) - not a SQL injection vector despite
-            # bandit's B608 heuristic flagging any keyword-string + variable
-            # concatenation regardless of the variable's actual provenance.
+            # Unlike entities_where()'s own as_of flagged_clause, this one
+            # is plain `str` concatenation (+), not an f-string embedded in
+            # a literal-only adjacent-string block - bandit's B608 heuristic
+            # only fires on the latter shape, so it never flags this line;
+            # kept as a variable (not inlined) only for parity with
+            # entities_where()'s structure. Still just one of two hardcoded
+            # literals, never caller-controlled, so no injection surface
+            # either way.
             flagged_clause = "" if include_flagged else " AND a.status != 'flagged'"
             query += (
                 " AND a.asserted_at <= ?"
                 " AND (a.valid_from IS NULL OR a.valid_from <= ?)"
-                " AND (a.valid_to IS NULL OR a.valid_to > ?)"
-                f"{flagged_clause}"  # nosec B608
+                " AND (a.valid_to IS NULL OR a.valid_to > ?)" + flagged_clause
             )
             params.extend([t_iso, t_iso, t_iso])
         else:

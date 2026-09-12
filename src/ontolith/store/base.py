@@ -571,7 +571,9 @@ class StorageBackend(Protocol):
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion,
         active at `as_of_time` (or currently active, if `as_of_time` is
-        None), whose *effective* trust_level >= `min_trust`.
+        None) — widened by `include_flagged`/`include_history` exactly as
+        `entities_meeting_confidence()`'s identical parameters are (KI-093)
+        — whose *effective* trust_level >= `min_trust`.
 
         "Effective" (KI-047): when the qualifying assertion was made under
         delegation (`acting_as` set), the comparison is

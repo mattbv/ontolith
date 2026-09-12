@@ -1046,3 +1046,16 @@ class TestIncludeFlaggedHistoryComposesWithConfidenceAndTrust:
 
         result = kb.query("Person").where(name="Ada").include_flagged().min_confidence(0.0).all()
         assert [e.id for e in result] == [person.id]
+
+    def test_include_flagged_trust_at_least_zero_is_a_true_noop(self, kb: Ontology) -> None:
+        """The 2x2 matrix's last untested cell: include_flagged x trust_at_least
+        (the other three combinations - include_history x{confidence,trust}
+        and include_flagged x confidence - are covered by the tests above)."""
+        alice_id = self._prep(kb)
+        person = kb.create_entity("Person", author=alice_id)
+        kb.assert_literal(person.id, "Person.name", "Ada", "Text", alice_id)
+        kb.assert_literal(person.id, "Person.name", "Ava", "Text", alice_id)
+        assert kb.assertions(subject=person.id, predicate="Person.name", status="flagged")
+
+        result = kb.query("Person").where(name="Ada").include_flagged().trust_at_least(0).all()
+        assert [e.id for e in result] == [person.id]

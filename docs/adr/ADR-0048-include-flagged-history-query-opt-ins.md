@@ -51,10 +51,14 @@ attached, no new return type is introduced.
 and `.include_history()` does not pull in `flagged` — each opt-in is scoped to exactly the statuses
 its name implies.
 
-**No effect without a `.where()` filter.** `kb.query(Person).include_flagged().all()` returns every
-`Person` entity, same as `kb.query(Person).all()` — there is no predicate to match, so there is
-nothing to widen. (`_base_candidates()` calls `entities()`, not `entities_where()`, when there are
-no filters.)
+**No effect with neither a `.where()` filter nor a confidence/trust floor.**
+`kb.query(Person).include_flagged().all()` returns every `Person` entity, same as
+`kb.query(Person).all()` — there is no predicate to match, so there is nothing to widen
+(`_base_candidates()` calls `entities()`, not `entities_where()`, when there are no filters). This
+is narrower than "no effect without `.where()`": since KI-093, `.min_confidence()`/
+`.trust_at_least()` are evaluated by `_apply_confidence_trust_filters()` regardless of whether
+`.where()` was called, so `kb.query(Person).min_confidence(0.5).include_history()` *does* differ
+from `kb.query(Person).min_confidence(0.5)` even with no `.where()` in sight.
 
 **`.include_history()` is a no-op under `.as_of(t)`.** A bitemporal snapshot matches whatever
 assertion's validity window covered `t`, regardless of that assertion's status *now* — so a
@@ -106,9 +110,10 @@ methods, and threads both through to `entities_where()` from `_base_candidates()
   status=None)` or `kb.provenance()` (ADR-0047) — `.include_history()` deliberately does not
   provide it. If a timeline-returning query is wanted later, it is a separate method and a separate
   decision.
-- `.include_flagged()` / `.include_history()` silently do nothing on a filter-less or `as_of`
-  query. Documented on each method; not surfaced as a warning (consistent with the builder's other
-  no-op combinations, e.g. `.limit()` larger than the result set).
+- `.include_flagged()` / `.include_history()` silently do nothing on a query with neither a
+  `.where()` filter nor a confidence/trust floor, and `.include_history()` specifically is also a
+  no-op under `.as_of()`. Documented on each method; not surfaced as a warning (consistent with the
+  builder's other no-op combinations, e.g. `.limit()` larger than the result set).
 
 ## Alternatives Considered
 
@@ -145,10 +150,20 @@ resolve beyond "match the existing widener": an entity that *historically* had a
 ≥threshold-confidence (or ≥threshold-trust) assertion now qualifies under `.include_history()`,
 consistent with `.where()`'s own widened matching.
 
-New tests: `test_query.py::TestIncludeFlaggedHistoryComposesWithConfidenceAndTrust` (a genuine
+New tests: `test_query.py::TestIncludeFlaggedHistoryComposesWithConfidenceAndTrust` (all four
+`{include_flagged, include_history} x {min_confidence, trust_at_least}` combinations — a genuine
 no-op floor doesn't re-narrow; a genuinely-failing floor still excludes, even widened);
 `test_sqlite_backend.py`/`test_duckdb_backend.py::test_entities_meeting_{confidence,trust}_status_widening_flags`
 at the port level; `conformance/test_include_flagged_history.py::TestComposesWithConfidenceAndTrust`
-(both backends). Mutation-tested: reverting either backend's widened `IN` clause back to
-`status = 'active'` fails the no-op-floor cases on both `entities_meeting_confidence` and
-`entities_meeting_trust`.
+(both backends). A review round found the `as_of` branch's `include_flagged` handling was
+untested on both new methods (a mutation reverting `flagged_clause` to unconditional exclusion
+survived the whole suite) — closed with `test_entities_meeting_{confidence,trust}_as_of_include_flagged`
+at the port level and `conformance/test_confidence_trust_filters.py`'s
+`test_{trust_at_least,min_confidence}_as_of_include_flagged_opts_back_in`, both backends, all
+mutation-tested. The same round also caught that this ADR's own "No effect without a `.where()`
+filter" claim (Decision section, above) had quietly become false: `.min_confidence()`/
+`.trust_at_least()` are evaluated regardless of whether `.where()` was called, so
+`kb.query(Person).min_confidence(0.5).include_history()` now differs from
+`kb.query(Person).min_confidence(0.5)` with no `.where()` in sight — corrected there, in
+`QueryBuilder.include_flagged()`/`.include_history()`'s docstrings, in `docs/adr/README.md`'s
+index entry, and in SPEC §11.2.

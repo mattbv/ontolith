@@ -658,6 +658,48 @@ class TestAsOfConfidenceTrust:
 
         assert kb.as_of(t).query("Person").trust_at_least(5).all() == []
 
+    def test_trust_at_least_as_of_include_flagged_opts_back_in(self, make_kb: KbFactory) -> None:
+        """KI-093: `.include_flagged()` composes with `.trust_at_least()`
+        under `.as_of()` too, not just the current-state path — the exact
+        counterpart to `test_trust_at_least_as_of_excludes_flagged_assertion`
+        immediately above, opted back in."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        first = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED)
+        t = clock.now()
+
+        clock.advance(days=1)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", TRUSTED)
+
+        reloaded = kb.backend.get_assertion(first.id)
+        assert reloaded is not None
+        assert reloaded.status == "flagged"
+
+        results = kb.as_of(t).query("Person").trust_at_least(5).include_flagged().all()
+        assert {r.id for r in results} == {entity.id}
+
+    def test_min_confidence_as_of_include_flagged_opts_back_in(self, make_kb: KbFactory) -> None:
+        """KI-093: same as the trust_at_least case above, for `.min_confidence()`."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        first = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.9)
+        t = clock.now()
+
+        clock.advance(days=1)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", TRUSTED, confidence=0.9)
+
+        reloaded = kb.backend.get_assertion(first.id)
+        assert reloaded is not None
+        assert reloaded.status == "flagged"
+
+        assert kb.as_of(t).query("Person").min_confidence(0.5).all() == []
+        results = kb.as_of(t).query("Person").min_confidence(0.5).include_flagged().all()
+        assert {r.id for r in results} == {entity.id}
+
     def test_as_of_min_confidence_combined_with_where(self, make_kb: KbFactory) -> None:
         """The exact regression shape this KI describes: an entity passes
         `.where()` both at t and now, but only qualifies on confidence at t
