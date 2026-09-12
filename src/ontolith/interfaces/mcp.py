@@ -470,12 +470,14 @@ def create_mcp_server(
                 assertions — excluded by default (SPEC §10.3, KI-081/093).
             include_history: Also match against ``superseded``/
                 ``retracted`` assertions — excluded by default (KI-081/093).
-                A documented no-op combined with ``as_of``: the ``as_of``
-                branch matches purely on the validity window, not on
-                current ``status``, so it never needed this opt-in to
-                surface superseded/retracted values — and, per KI-095, has
-                no way to *exclude* a retracted assertion whose validity
-                window still covers the queried instant either way.
+                A documented no-op combined with ``as_of``: that branch
+                never restricts matches to ``active`` in the first place —
+                it excludes only ``flagged`` (itself gated behind
+                ``include_flagged``) — so a superseded/retracted assertion
+                whose validity window covers the queried instant already
+                matches without this opt-in. Per KI-095, this also means
+                there is currently no way to *exclude* a retracted
+                assertion whose window still covers that instant, either.
 
         Returns:
             Dict with "entities" list and "count", or "error" if no token

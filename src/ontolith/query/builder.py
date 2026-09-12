@@ -329,11 +329,14 @@ class QueryBuilder:
         *not* a no-op just because `.where()` wasn't called.
 
         Genuinely no effect under `.as_of(t)`, unlike `.include_flagged()`:
-        a bitemporal snapshot already matches whatever assertion was valid
-        at that instant regardless of its status now, so there is nothing
-        left for "also match superseded/retracted" to add there — true for
-        both the `.where()` path and, since KI-093, the confidence/trust
-        floors.
+        the `as_of` branch never restricts matches to `active` in the first
+        place — it excludes only `flagged` (itself gated behind
+        `.include_flagged()`) — so a `superseded`/`retracted` assertion
+        whose validity window covers `t` already matches there, with
+        nothing left for this opt-in to add. True for both the `.where()`
+        path and, since KI-093, the confidence/trust floors. (This is also
+        why an unwanted `as_of` match can't currently be excluded either —
+        see KI-095.)
 
         Returns:
             Self for chaining

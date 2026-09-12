@@ -475,9 +475,12 @@ class StorageBackend(Protocol):
                 as_of_time path (excluded by default on both).
             include_history: Whether to also match 'superseded' and
                 'retracted' assertions (KI-081). Current-state path only —
-                an as_of_time snapshot already matches whatever assertion
-                was valid at that instant regardless of its status now, so
-                this parameter is a no-op when as_of_time is set.
+                the as_of_time branch never restricts matches to 'active'
+                in the first place (it excludes only 'flagged', itself
+                gated behind include_flagged), so a 'superseded'/
+                'retracted' assertion whose window covers as_of_time
+                already matches there; this parameter is a no-op when
+                as_of_time is set.
 
         Returns:
             List of entities where all filters match at the given time
@@ -515,8 +518,10 @@ class StorageBackend(Protocol):
         SPEC §10.3) is excluded even at a `t` before it was flagged, unless
         `include_flagged` is set — matching `entities_where()`'s identical
         `as_of` handling. `include_history` is a no-op under `as_of_time`,
-        also matching `entities_where()`: a bitemporal snapshot already
-        matches whatever was valid at that instant regardless of status now.
+        also matching `entities_where()`: that branch never restricts to
+        `active` in the first place, only conditionally excludes `flagged`,
+        so a `superseded`/`retracted` assertion whose window covers `t`
+        already qualifies without this flag.
 
         Always scoped by `(namespace, concept)` — this is what keeps the
         query's parameter count constant regardless of how many entities
