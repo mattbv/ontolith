@@ -17,9 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   safety property for agents (SPEC §14.4). `interfaces/rest.py`'s `QueryIn`, `interfaces/graphql.py`'s
   `Query.query` (camelCased to `includeFlagged`/`includeHistory` on the wire), and
   `interfaces/mcp.py`'s `ontolith.query` each forward the two booleans (default `False`) to the
-  builder exactly as `min_confidence`/`trust_at_least`/`limit` already are. The CLI's `ontolith
-  query` command was left out — it doesn't forward `semantic`, `min_confidence`, `trust_at_least`,
-  `limit`, or `as_of` either, a materially larger pre-existing gap filed separately as KI-096.
+  builder exactly as `min_confidence`/`trust_at_least`/`limit` already are. Only MCP's `query`
+  supports `as_of` at all (REST/GraphQL never have) — corrected in KI-094's own entry, which
+  previously claimed otherwise. The CLI's `ontolith query` command was left out — it doesn't
+  forward `semantic`, `min_confidence`, `trust_at_least`, or `limit` either, a materially larger
+  pre-existing gap filed separately as KI-096.
 - **Breaking:** `entities_meeting_confidence()` / `entities_meeting_trust()` now honor
   `.include_flagged()` / `.include_history()` too (closes KI-093, ADR-0048 Update — found reviewing
   KI-081) — previously their current-state branch stayed hard-coded to `status = 'active'`, so a

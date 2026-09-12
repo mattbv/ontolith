@@ -590,7 +590,7 @@ Default tool set — **read and propose only**, no direct write (PRD §16, decis
 | Tool | Input (JSON Schema, abbreviated) | Effect |
 |---|---|---|
 | `ontolith.schema` | `{namespace}` | Return concepts/relations/temporality. |
-| `ontolith.query` | `{namespace, concept, where?, semantic?, as_of?, min_confidence?, limit?}` | Symbolic + semantic retrieval. |
+| `ontolith.query` | `{concept, where?, semantic?, as_of?, min_confidence?, trust_at_least?, limit?, include_flagged?, include_history?}` | Symbolic + semantic retrieval. |
 | `ontolith.get` | `{namespace, concept, natural_key}` | Fetch an entity + current assertions. |
 | `ontolith.provenance` | `{assertion_id}` | Return the provenance projection (§5.4). |
 | `ontolith.propose` | `{namespace, ops[], source, confidence?, rationale?}` | Create a proposal (policy decides). |

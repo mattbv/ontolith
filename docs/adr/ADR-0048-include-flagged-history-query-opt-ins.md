@@ -177,3 +177,31 @@ test for `include_history`'s documented `as_of` no-op, and found that a `# nosec
 `entities_where()`'s own `as_of` `flagged_clause` line was equally dead (removing it doesn't
 change bandit's finding count) — all such dead markers, old and new, removed; verified
 bandit-clean throughout.
+
+## Update (2026-09-12, closes KI-094): the two opt-ins now reach REST, GraphQL, and MCP
+
+This ADR's opt-ins were reachable only from the Python SDK — the three interface `query`
+surfaces (`interfaces/rest.py`'s `/query`, `interfaces/graphql.py`'s `Query.query`,
+`interfaces/mcp.py`'s `ontolith.query`) forwarded `semantic`/`min_confidence`/`trust_at_least`/
+`limit` but not `include_flagged`/`include_history`. Closed mechanically: each interface gained
+the two booleans (default `False`, matching the SDK default), forwarded to the builder the same
+way the existing four are. GraphQL's `strawberry` layer camelCases them to `includeFlagged`/
+`includeHistory` on the wire. No semantics changed — this is wiring, not a new decision.
+
+New tests, two per interface (`include_flagged` against a flagged assertion, `include_history`
+against a retracted one, each with a false-default baseline) plus one MCP-specific test
+combining `include_flagged` with `as_of` (the one branch where the interface-level wiring is
+genuinely distinct, since MCP alone builds from `kb.as_of(...)` rather than `kb.query(...)`),
+all mutation-tested by reverting each interface's `if include_flagged: ... if include_history:
+...` wiring in turn.
+
+A review round found GraphQL's `run_in_threadpool(_execute_query, ...)` call site passed all
+nine arguments positionally, including two adjacent `bool` and two adjacent `int | None`
+parameters mypy's ParamSpec check can't catch a silent reorder of — switched to keyword
+arguments (REST and MCP already pass by name). The same round corrected this ADR's own and
+KI-094's filed claim that REST/GraphQL "already forward `as_of`": only MCP does; REST and
+GraphQL's `query` surfaces have no `as_of` parameter at all. It also found the new MCP
+docstring's `include_history`+`as_of` no-op explanation ("a bitemporal snapshot already matches
+whatever was valid at that instant regardless of its status now") repeated exactly the
+window-vs-status conflation KI-095 exists to fix — reworded to point at KI-095 instead of
+implying the `as_of` branch's status-blindness is a feature.

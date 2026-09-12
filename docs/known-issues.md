@@ -1988,11 +1988,11 @@ Two candidate directions, needs a design decision (likely an ADR touching bitemp
 
 ### Description
 
-While resolving KI-094 (adding `include_flagged`/`include_history` to REST/GraphQL/MCP's `query` operations), found that `interfaces/cli.py`'s `ontolith query` command only supports `concept` and `--where` filters. Unlike the other three interfaces, it has never forwarded `semantic`, `min_confidence`, `trust_at_least`, `limit`, or `as_of` — a materially larger, pre-existing gap that predates KI-081 and is unrelated to the flagged/history opt-ins, so it was kept out of KI-094's scope rather than folded in.
+While resolving KI-094 (adding `include_flagged`/`include_history` to REST/GraphQL/MCP's `query` operations), found that `interfaces/cli.py`'s `ontolith query` command only supports `concept` and `--where` filters. Unlike REST and GraphQL's `query` surfaces, it has never forwarded `semantic`, `min_confidence`, `trust_at_least`, or `limit` — a materially larger, pre-existing gap that predates KI-081 and is unrelated to the flagged/history opt-ins, so it was kept out of KI-094's scope rather than folded in. `as_of` is a separate case: per KI-094's own correction, only MCP supports bitemporal time-travel on `query` today, so adding `--as-of` to the CLI would make it the *second* interface to gain this, not bring it to parity with REST/GraphQL.
 
 ### Fix
 
-Bring `ontolith query` up to parity with REST/GraphQL/MCP: add `--semantic`, `--min-confidence`, `--trust-at-least`, `--limit`, `--as-of`, and (while at it) `--include-flagged`/`--include-history` flags, forwarding to `QueryBuilder` the same way the other interfaces do. One PR, mechanical once the flag surface is designed; needs a decision on flag naming/shape (e.g. how `--where key=value` pairs coexist with a `--semantic` free-text flag) but no new architecture.
+Bring `ontolith query` up to parity with REST/GraphQL's `semantic`/`min_confidence`/`trust_at_least`/`limit`, and (while at it) `--include-flagged`/`--include-history`, forwarding to `QueryBuilder` the same way those interfaces do. Whether to also add `--as-of` (matching MCP, ahead of REST/GraphQL) is a separate call, not required for parity with the other two. One PR, mechanical once the flag surface is designed; needs a decision on flag naming/shape (e.g. how `--where key=value` pairs coexist with a `--semantic` free-text flag) but no new architecture.
 
 ---
 
