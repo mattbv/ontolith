@@ -1938,19 +1938,25 @@ A second review round found: the pre-existing (KI-081) `.semantic()` path's `inc
 
 ---
 
-## KI-094 — MCP/REST/GraphQL `query` surfaces don't expose `.include_flagged()`/`.include_history()` — found reviewing KI-081
+## KI-094 — MCP/REST/GraphQL `query` surfaces don't expose `.include_flagged()`/`.include_history()` — found reviewing KI-081 ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — SPEC §10.3's "unless explicitly requested" opt-in is now reachable from the Python SDK only, not from the interface agents actually use
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §10.3 ("MUST be excluded from default retrieval unless explicitly requested"), SPEC §11.2, SPEC §14.3/§14.4 (REST/GraphQL/MCP query surfaces)
 
 ### Description
 
-KI-081 added `.include_flagged()`/`.include_history()` to `QueryBuilder`, but the three interface `query` surfaces (`interfaces/mcp.py`'s `ontolith.query`, `interfaces/rest.py`'s `/query`, `interfaces/graphql.py`'s `Query.query`) — which already forward `as_of`, `semantic`, `min_confidence`, `trust_at_least`, `limit` — do not forward the two new opt-ins. So a REST/GraphQL/MCP caller can't opt in to flagged/history visibility through the primary query API, only a direct Python SDK caller can. This matters most for MCP, where the flagged-exclusion rule is a safety property for agents (SPEC §14.4).
+KI-081 added `.include_flagged()`/`.include_history()` to `QueryBuilder`, but the three interface `query` surfaces (`interfaces/mcp.py`'s `ontolith.query`, `interfaces/rest.py`'s `/query`, `interfaces/graphql.py`'s `Query.query`) — which already forward `semantic`, `min_confidence`, `trust_at_least`, `limit` — do not forward the two new opt-ins. So a REST/GraphQL/MCP caller can't opt in to flagged/history visibility through the primary query API, only a direct Python SDK caller can. This matters most for MCP, where the flagged-exclusion rule is a safety property for agents (SPEC §14.4).
+
+Correction found while resolving: the claim above that these surfaces "already forward `as_of`" does not hold for REST or GraphQL — only `interfaces/mcp.py`'s `ontolith.query` accepts `as_of` at all (SPEC §11.4 time-travel is MCP-only so far, per that tool's own docstring); REST's `/query` and GraphQL's `Query.query` have no `as_of` parameter. That gap is unrelated to `include_flagged`/`include_history` and is out of scope here.
 
 ### Fix
 
-Add `include_flagged`/`include_history` boolean parameters to all three interfaces' `query` operations, forwarding to the builder — mechanical, matching how the other five modifiers are already forwarded. Same pattern as KI-079 (GraphQL/CLI parity for `assign_reviewers` after REST shipped first). Consider whether the CLI's `ontolith query` wants them too.
+Added `include_flagged`/`include_history` boolean parameters (default `False`) to all three interfaces' `query` operations, forwarding to the builder exactly as `min_confidence`/`trust_at_least`/`limit` already are: `interfaces/rest.py`'s `QueryIn` gained the two fields, wired in `query_route`; `interfaces/graphql.py`'s `_execute_query` and `Query.query` gained the two parameters (strawberry auto-camelCases them to `includeFlagged`/`includeHistory` on the wire), wired the same way; `interfaces/mcp.py`'s `ontolith.query` tool gained the two parameters with docstring coverage (noting `include_history` is a documented no-op combined with `as_of`, per KI-093's `as_of` semantics). Same pattern as KI-079 (GraphQL/CLI parity for `assign_reviewers` after REST shipped first).
+
+The CLI's `ontolith query` command was deliberately left out of scope: unlike the other three, it doesn't forward `semantic`, `min_confidence`, `trust_at_least`, `limit`, or `as_of` either — a materially larger, pre-existing gap that predates KI-081. Filed separately as KI-096 rather than folded in here.
+
+New tests: `tests/unit/test_rest.py`/`test_graphql.py`/`test_mcp_server.py`, two each (`include_flagged` matching a flagged assertion, `include_history` matching a retracted one), mirroring the existing `min_confidence`/`trust_at_least` tests for each interface. Mutation-tested: reverting each interface's `if include_flagged: ... if include_history: ...` wiring back out fails exactly its own two new tests on that interface, restored after confirming.
 
 ---
 
@@ -1971,6 +1977,22 @@ Pre-existing — the `as_of` branch has always been window-based, not status-bas
 ### Fix
 
 Two candidate directions, needs a design decision (likely an ADR touching bitemporal semantics): (a) have `retract()` close the validity window at the retraction instant (`valid_to = now`) so the window itself stops covering later `t` — simplest, but changes what "valid_to" means for a retracted assertion; or (b) give the bitemporal query paths a retraction-aware exclusion (track the retraction event's own asserted_at and exclude when `t >= retraction_asserted_at`) — more faithful to bitemporality but a bigger change. Until then, `.as_of()` results can include retracted values.
+
+---
+
+## KI-096 — CLI's `ontolith query` command doesn't support `semantic`, `min_confidence`, `trust_at_least`, `limit`, or `as_of` — found resolving KI-094
+
+**Severity:** Architecture gap — the CLI query surface is far behind REST/GraphQL/MCP, not just missing KI-081's two opt-ins
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §11.2/§11.3 (confidence/trust retrieval signals), SPEC §11.4 (`as_of`), SPEC §14 (interface parity)
+
+### Description
+
+While resolving KI-094 (adding `include_flagged`/`include_history` to REST/GraphQL/MCP's `query` operations), found that `interfaces/cli.py`'s `ontolith query` command only supports `concept` and `--where` filters. Unlike the other three interfaces, it has never forwarded `semantic`, `min_confidence`, `trust_at_least`, `limit`, or `as_of` — a materially larger, pre-existing gap that predates KI-081 and is unrelated to the flagged/history opt-ins, so it was kept out of KI-094's scope rather than folded in.
+
+### Fix
+
+Bring `ontolith query` up to parity with REST/GraphQL/MCP: add `--semantic`, `--min-confidence`, `--trust-at-least`, `--limit`, `--as-of`, and (while at it) `--include-flagged`/`--include-history` flags, forwarding to `QueryBuilder` the same way the other interfaces do. One PR, mechanical once the flag surface is designed; needs a decision on flag naming/shape (e.g. how `--where key=value` pairs coexist with a `--semantic` free-text flag) but no new architecture.
 
 ---
 

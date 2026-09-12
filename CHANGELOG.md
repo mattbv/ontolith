@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- REST, GraphQL, and MCP `query` operations gain `include_flagged`/`include_history` parameters
+  (closes KI-094, found reviewing KI-081) — the two `QueryBuilder` opt-ins KI-081 shipped were
+  reachable only from the Python SDK; a REST/GraphQL/MCP caller had no way to opt in to
+  flagged/history visibility, which matters most for MCP where the flagged-exclusion default is a
+  safety property for agents (SPEC §14.4). `interfaces/rest.py`'s `QueryIn`, `interfaces/graphql.py`'s
+  `Query.query` (camelCased to `includeFlagged`/`includeHistory` on the wire), and
+  `interfaces/mcp.py`'s `ontolith.query` each forward the two booleans (default `False`) to the
+  builder exactly as `min_confidence`/`trust_at_least`/`limit` already are. The CLI's `ontolith
+  query` command was left out — it doesn't forward `semantic`, `min_confidence`, `trust_at_least`,
+  `limit`, or `as_of` either, a materially larger pre-existing gap filed separately as KI-096.
 - **Breaking:** `entities_meeting_confidence()` / `entities_meeting_trust()` now honor
   `.include_flagged()` / `.include_history()` too (closes KI-093, ADR-0048 Update — found reviewing
   KI-081) — previously their current-state branch stayed hard-coded to `status = 'active'`, so a
