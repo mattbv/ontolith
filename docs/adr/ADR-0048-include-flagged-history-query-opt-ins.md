@@ -167,3 +167,13 @@ filter" claim (Decision section, above) had quietly become false: `.min_confiden
 `kb.query(Person).min_confidence(0.5)` with no `.where()` in sight — corrected there, in
 `QueryBuilder.include_flagged()`/`.include_history()`'s docstrings, in `docs/adr/README.md`'s
 index entry, and in SPEC §11.2.
+
+A second review round found one more instance of the exact same class of gap, in code this KI
+didn't touch: `_semantic_candidates()` (KI-081) also threads `include_history` into its own
+`entities_where()` call, and that threading was equally untested (hardcoding it to `False`
+survived the whole suite too) — closed with `test_semantic_where_honors_include_history`,
+mirroring the `include_flagged` case KI-081 already had, mutation-tested. Also added a pinning
+test for `include_history`'s documented `as_of` no-op, and found that a `# nosec B608` on
+`entities_where()`'s own `as_of` `flagged_clause` line was equally dead (removing it doesn't
+change bandit's finding count) — all such dead markers, old and new, removed; verified
+bandit-clean throughout.

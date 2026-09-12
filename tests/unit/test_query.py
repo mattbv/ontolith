@@ -964,6 +964,57 @@ class TestIncludeFlaggedAndHistory:
         finally:
             kb.close()
 
+    def test_semantic_where_honors_include_history(self, tmp_path: Path) -> None:
+        """Same as `test_semantic_where_honors_include_flagged` above, for
+        `.include_history()` — `_semantic_candidates()`'s `entities_where()`
+        call threads both flags, not just `include_flagged`."""
+        # _entity_text() sorts by predicate then asserted_at: "Person.bio" <
+        # "Person.role" alphabetically, and "Manager" (the still-active
+        # role) is included too, so the embedded text is "{bio} {role}".
+        embedder = LookupEmbedder(
+            {"bio text Manager": [1.0, 0.0, 0.0], "query": [1.0, 0.0, 0.0]}, dim=3
+        )
+        kb = Ontology.connect(tmp_path / "sem2.db", embedder=embedder)
+        try:
+            admin = kb.create_principal(
+                "admin@example.com", kind="human", default_capability="admin"
+            )
+            alice = kb.create_principal(
+                "alice@example.com", kind="human", default_capability="write"
+            )
+            kb.apply_schema(
+                SchemaIR(
+                    namespace="default",
+                    version=1,
+                    concepts={
+                        "Person": ConceptDef(
+                            name="Person",
+                            properties={
+                                "role": PropertyDef(
+                                    name="role", value_type="Text", temporality="time_varying"
+                                ),
+                                "bio": PropertyDef(name="bio", value_type="Text"),
+                            },
+                        ),
+                    },
+                ),
+                author=admin.id,
+            )
+            person = kb.create_entity("Person", author=alice.id)
+            kb.assert_literal(person.id, "Person.role", "Engineer", "Text", alice.id)
+            kb.assert_literal(person.id, "Person.bio", "bio text", "Text", alice.id)
+            kb.assert_literal(person.id, "Person.role", "Manager", "Text", alice.id)  # supersedes
+            assert kb.assertions(subject=person.id, predicate="Person.role", status="superseded")
+            kb.reindex()
+
+            assert kb.query("Person").semantic("query").where(role="Engineer").all() == []
+            hit = (
+                kb.query("Person").semantic("query").where(role="Engineer").include_history().all()
+            )
+            assert [r.id for r in hit] == [person.id]
+        finally:
+            kb.close()
+
 
 class TestIncludeFlaggedHistoryComposesWithConfidenceAndTrust:
     """KI-093: `.include_flagged()`/`.include_history()` must also widen

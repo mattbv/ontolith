@@ -112,9 +112,10 @@ class TestMinConfidence:
 
     def test_superseded_confidence_does_not_qualify(self, make_kb: KbFactory) -> None:
         """A high-confidence assertion that has since been retracted must
-        not count - entities_meeting_confidence only considers
-        status='active' assertions, matching the pre-KI-028 assertions()
-        call's own default."""
+        not count - entities_meeting_confidence only considers status='active' assertions
+        by default (KI-093 added an opt-in to widen this - see
+        TestComposesWithConfidenceAndTrust in test_include_flagged_history.py), matching
+        the pre-KI-028 assertions() call's own default."""
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=TRUSTED)
         high = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.9)
@@ -160,8 +161,8 @@ class TestTrustAtLeast:
 
     def test_superseded_trust_does_not_qualify(self, make_kb: KbFactory) -> None:
         """A trusted author's assertion that has since been retracted must
-        not count - entities_meeting_trust only considers status='active'
-        assertions."""
+        not count - entities_meeting_trust only considers status='active' assertions
+        by default (KI-093 added an opt-in to widen this)."""
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=TRUSTED)
         assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED)

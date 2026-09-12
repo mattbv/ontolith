@@ -1975,6 +1975,23 @@ class TestCandidateIdsNarrowing:
             "test-ns", "Person", 0, as_of_time=t, include_flagged=True
         ) == {"e-flagged"}
 
+    def test_entities_meeting_confidence_as_of_include_history_is_a_documented_noop(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """KI-093: unlike include_flagged, include_history is a documented
+        no-op under as_of_time — a superseded assertion's window already
+        makes it visible at a t predating the supersession, regardless of
+        the flag. Pins the contract stated in entities_meeting_confidence()'s
+        own docstring."""
+        self._seed_with_status(backend, "e-super", "superseded")
+        t = datetime(2025, 6, 1, tzinfo=UTC)
+
+        without_flag = backend.entities_meeting_confidence("test-ns", "Person", 0.5, as_of_time=t)
+        with_flag = backend.entities_meeting_confidence(
+            "test-ns", "Person", 0.5, as_of_time=t, include_history=True
+        )
+        assert without_flag == with_flag == {"e-super"}
+
 
 class TestConcurrency:
     """KI-046: the shared connection must survive genuinely concurrent access
