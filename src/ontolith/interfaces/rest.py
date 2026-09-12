@@ -216,6 +216,11 @@ class QueryIn(BaseModel):
     min_confidence: float | None = None
     trust_at_least: int | None = None
     limit: int | None = None
+    # KI-094: match-set wideners (SPEC §11.2/§10.3, ADR-0048) — widen which
+    # assertion statuses `filters`/`min_confidence`/`trust_at_least` may
+    # match against. False by default, same as QueryBuilder itself.
+    include_flagged: bool = False
+    include_history: bool = False
 
 
 class QueryOut(BaseModel):
@@ -683,6 +688,10 @@ def create_rest_app(
             builder = builder.min_confidence(body.min_confidence)
         if body.trust_at_least is not None:
             builder = builder.trust_at_least(body.trust_at_least)
+        if body.include_flagged:
+            builder = builder.include_flagged()
+        if body.include_history:
+            builder = builder.include_history()
         if body.limit is not None:
             builder = builder.limit(body.limit)
         entities = builder.all()

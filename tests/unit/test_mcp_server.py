@@ -647,6 +647,43 @@ class TestQueryTool:
         assert "error" in result
         assert result["code"] == "VALIDATION_ERROR"
 
+    def test_query_include_flagged_matches_a_flagged_assertion(self, tmp_path: Path) -> None:
+        """KI-094: the opt-in is forwarded to QueryBuilder, not silently dropped."""
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", HUMAN)  # -> flagged
+        assert kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+
+        mcp, _ = _server(kb)
+        token = kb.issue_token(HUMAN, author=ADMIN)[0]
+        default = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person", token=token, filters={"name": "Ada"}
+        )
+        assert default["count"] == 0
+
+        result = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person", token=token, filters={"name": "Ada"}, include_flagged=True
+        )
+        assert result["count"] == 1
+        assert result["entities"][0]["id"] == entity.id
+
+    def test_query_include_history_matches_a_retracted_assertion(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        kb.retract(assertion.id, HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.query").fn(
+            concept="Person",
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            filters={"name": "Ada"},
+            include_history=True,
+        )
+        assert result["count"] == 1
+        assert result["entities"][0]["id"] == entity.id
+
 
 # ---------------------------------------------------------------------------
 # ontolith.provenance

@@ -409,6 +409,8 @@ def create_mcp_server(
         min_confidence: float | None = None,
         trust_at_least: int | None = None,
         limit: int | None = None,
+        include_flagged: bool = False,
+        include_history: bool = False,
     ) -> dict[str, Any]:
         """Query entities of a concept, optionally filtered/ranked/pinned in time.
 
@@ -463,6 +465,14 @@ def create_mcp_server(
                 delegation, KI-047) — independent of ``min_confidence``;
                 the qualifying assertion need not be the same for both.
             limit: Optional cap on the number of entities returned.
+            include_flagged: Also match ``filters``/``min_confidence``/
+                ``trust_at_least`` against ``flagged`` (contradicted)
+                assertions — excluded by default (SPEC §10.3, KI-081/093).
+            include_history: Also match against ``superseded``/
+                ``retracted`` assertions — excluded by default (KI-081/093).
+                No effect combined with ``as_of``: a bitemporal snapshot
+                already matches whatever was valid at that instant
+                regardless of its status now.
 
         Returns:
             Dict with "entities" list and "count", or "error" if no token
@@ -493,6 +503,10 @@ def create_mcp_server(
                 builder = builder.min_confidence(min_confidence)
             if trust_at_least is not None:
                 builder = builder.trust_at_least(trust_at_least)
+            if include_flagged:
+                builder = builder.include_flagged()
+            if include_history:
+                builder = builder.include_history()
             if limit is not None:
                 builder = builder.limit(limit)
             entities = builder.all()
