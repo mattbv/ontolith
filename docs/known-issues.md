@@ -1980,10 +1980,10 @@ Two candidate directions, needs a design decision (likely an ADR touching bitemp
 
 ---
 
-## KI-096 — CLI's `ontolith query` command doesn't support `semantic`, `min_confidence`, `trust_at_least`, `limit`, or `as_of` — found resolving KI-094
+## KI-096 — CLI's `ontolith query` command doesn't support `semantic`, `min_confidence`, `trust_at_least`, `limit`, or `as_of` — found resolving KI-094 ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — the CLI query surface is far behind REST/GraphQL/MCP, not just missing KI-081's two opt-ins
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §11.2/§11.3 (confidence/trust retrieval signals), SPEC §11.4 (`as_of`), SPEC §14 (interface parity)
 
 ### Description
@@ -1992,7 +1992,9 @@ While resolving KI-094 (adding `include_flagged`/`include_history` to REST/Graph
 
 ### Fix
 
-Bring `ontolith query` up to parity with REST/GraphQL's `semantic`/`min_confidence`/`trust_at_least`/`limit`, and (while at it) `--include-flagged`/`--include-history`, forwarding to `QueryBuilder` the same way those interfaces do. Whether to also add `--as-of` (matching MCP, ahead of REST/GraphQL) is a separate call, not required for parity with the other two. One PR, mechanical once the flag surface is designed; needs a decision on flag naming/shape (e.g. how `--where key=value` pairs coexist with a `--semantic` free-text flag) but no new architecture.
+`ontolith query` gained `--semantic`, `--min-confidence`, `--trust-at-least`, `--limit`, `--include-flagged`, and `--include-history`, each forwarding to `QueryBuilder` exactly as REST/GraphQL/MCP already do (same order: `--where` → `--semantic` → `--min-confidence` → `--trust-at-least` → `--include-flagged` → `--include-history` → `--limit`). `--as-of` deliberately not added: it would make the CLI the *second* interface with bitemporal time-travel, not parity with REST/GraphQL (which have none), and wasn't part of what this KI was scoped to fix. Flag naming decided directly (no ADR needed, precedent-implied by the three sibling interfaces' existing parameter names, kebab-cased the same way `--min-confidence`'s CLI sibling params already are) rather than via a design conversation: `--where KEY=VALUE` (existing, repeatable) coexists with `--semantic TEXT` as an independent, orthogonal option, matching how REST's `filters`/`semantic` JSON fields and MCP's `filters`/`semantic` tool arguments already coexist — no new interaction to design.
+
+New tests in `tests/unit/test_cli.py::TestQuery` (one per flag): `min_confidence`/`trust_at_least` each assert a floor that should exclude and one that shouldn't; `limit` counts output lines with and without the flag; `include_flagged`/`include_history` mirror the existing REST/GraphQL/MCP tests for the same two opt-ins (KI-094); `semantic` uses two entities with the matching one created *second* plus `--limit 1`, so a missing `--semantic` wiring would fall back to insertion order and return the wrong entity — a single-entity variant wouldn't have caught this, since `.all()` returns everything unfiltered either way. All six mutation-tested by reverting each `if <param>: q = q.<method>(...)` line in turn and confirming exactly its own test(s) fail (the `--limit` mutation also fails the `--semantic` test, since that test's own assertion depends on `--limit 1` too — expected, not a false signal, verified independently above).
 
 ---
 
