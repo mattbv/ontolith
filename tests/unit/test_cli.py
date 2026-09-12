@@ -715,6 +715,47 @@ class TestQuery:
         assert high.exit_code == 0
         assert entity_id in high.output
 
+    def test_min_confidence_zero_is_still_applied(self, seeded_db: tuple[Path, str, str]) -> None:
+        """KI-096 review: `--min-confidence 0.0` is falsy, so a wiring guard written as
+        `if min_confidence:` (instead of `is not None`) would silently skip the floor
+        entirely — the exact KI-093 bug class. A confidence-less assertion (ADR-0004:
+        `None` never satisfies a numeric threshold, even 0.0) is the discriminator:
+        the guard being applied still excludes it; the guard being skipped wouldn't."""
+        db, author, entity_id = seeded_db
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ada",
+                "--type",
+                "Text",
+                "--author",
+                author,
+            ],
+        )  # no --confidence -> confidence=None
+        result = runner.invoke(
+            app,
+            ["--db", str(db), "query", "Person", "--where", "name=Ada", "--min-confidence", "0.0"],
+        )
+        assert result.exit_code == 0
+        assert "No entities found." in result.output
+
+    def test_limit_zero_is_still_applied(self, temp_db: Path) -> None:
+        """KI-096 review: `--limit 0` is falsy, so `if limit:` (instead of `is not
+        None`) would silently skip the cap and return every entity."""
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.create_entity("Person", author=alice.id)
+        kb.close()
+
+        result = runner.invoke(app, ["--db", str(temp_db), "query", "Person", "--limit", "0"])
+        assert result.exit_code == 0
+        assert "No entities found." in result.output
+
     def test_trust_at_least_filters_entities(self, temp_db: Path) -> None:
         """KI-096: --trust-at-least forwards to QueryBuilder.trust_at_least()."""
         kb = Ontology.connect(temp_db)
@@ -828,6 +869,13 @@ class TestQuery:
         reindexed = runner.invoke(app, ["--db", str(db), "reindex"])
         assert reindexed.exit_code == 0
 
+        # Baseline, making the discriminator explicit rather than relying on the
+        # docstring's claim: --limit alone, with no --semantic, falls back to
+        # insertion order and returns the *other* (first-created) entity.
+        baseline = runner.invoke(app, ["--db", str(db), "query", "Person", "--limit", "1"])
+        assert entity_id in baseline.output
+        assert match.id not in baseline.output
+
         result = runner.invoke(
             app,
             ["--db", str(db), "query", "Person", "--semantic", "Ada Lovelace", "--limit", "1"],
@@ -911,6 +959,52 @@ class TestQuery:
         result = runner.invoke(
             app,
             ["--db", str(db), "query", "Person", "--where", "name=Ada", "--include-history"],
+        )
+        assert result.exit_code == 0
+        assert entity_id in result.output
+
+    def test_include_history_composes_with_a_no_op_confidence_floor(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        """KI-096 review: CLI-level pin for KI-093's composition fix — a genuine
+        no-op floor (--min-confidence 0.0, on an assertion that has a confidence
+        recorded) must not re-narrow a --include-history match back to
+        active-only. Confirms the CLI threads both flags to the same
+        QueryBuilder chain, not just each in isolation."""
+        db, author, entity_id = seeded_db
+        asserted = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ada",
+                "--type",
+                "Text",
+                "--author",
+                author,
+                "--confidence",
+                "0.5",
+            ],
+        )
+        assertion_id = asserted.output.split()[1]
+        runner.invoke(app, ["--db", str(db), "retract", assertion_id, "--author", author])
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "query",
+                "Person",
+                "--where",
+                "name=Ada",
+                "--include-history",
+                "--min-confidence",
+                "0.0",
+            ],
         )
         assert result.exit_code == 0
         assert entity_id in result.output

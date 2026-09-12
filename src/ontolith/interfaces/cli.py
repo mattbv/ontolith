@@ -393,16 +393,20 @@ def query_entities(
         typer.Option(
             "--semantic",
             help="Rank results by vector similarity to this text (SPEC §11.3) instead "
-            "of/in addition to --where. Requires the KnowledgeBase's Embedder to be "
-            "configured.",
+            "of/in addition to --where. Only sees content indexed by the most recent "
+            "'ontolith reindex' — an entity asserted since then won't match until "
+            "reindexed again.",
         ),
     ] = None,
     min_confidence: Annotated[
         float | None,
         typer.Option(
             "--min-confidence",
-            help="Keep only entities with at least one qualifying active assertion at "
-            "or above this confidence (0.0-1.0).",
+            help="Keep only entities with at least one qualifying assertion (also "
+            "'flagged'/'superseded'/'retracted' if --include-flagged/--include-history "
+            "is set) at or above this confidence (0.0-1.0). An assertion with no "
+            "confidence recorded never satisfies this, even --min-confidence 0.0 "
+            "(ADR-0004).",
         ),
     ] = None,
     trust_at_least: Annotated[
@@ -435,9 +439,13 @@ def query_entities(
         ),
     ] = False,
 ) -> None:
-    """Query entities by concept, optionally filtered/ranked (KI-094/096 parity with
-    REST/GraphQL/MCP's query surfaces — this command previously supported only
-    --where). No --as-of: only MCP exposes bitemporal time-travel today (KI-058)."""
+    """Query entities by concept, optionally filtered by --where and/or ranked by
+    --semantic, with --min-confidence/--trust-at-least floors, --include-flagged/
+    --include-history opt-ins (KI-081/094/096), and a --limit cap.
+
+    No --as-of: of the four shipped interfaces, only MCP exposes bitemporal
+    time-travel on query today (KI-058) — the SDK's own `kb.as_of(t)` has it too.
+    """
     kb = _kb()
     try:
         q = kb.query(concept)
