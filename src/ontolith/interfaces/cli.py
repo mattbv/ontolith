@@ -388,8 +388,56 @@ def query_entities(
             "e.g. --where age__gte=18.",
         ),
     ] = None,
+    semantic: Annotated[
+        str | None,
+        typer.Option(
+            "--semantic",
+            help="Rank results by vector similarity to this text (SPEC §11.3) instead "
+            "of/in addition to --where. Requires the KnowledgeBase's Embedder to be "
+            "configured.",
+        ),
+    ] = None,
+    min_confidence: Annotated[
+        float | None,
+        typer.Option(
+            "--min-confidence",
+            help="Keep only entities with at least one qualifying active assertion at "
+            "or above this confidence (0.0-1.0).",
+        ),
+    ] = None,
+    trust_at_least: Annotated[
+        int | None,
+        typer.Option(
+            "--trust-at-least",
+            help="Keep only entities with at least one qualifying assertion whose "
+            "effective trust_level is at or above this floor (KI-047).",
+        ),
+    ] = None,
+    limit: Annotated[
+        int | None,
+        typer.Option("--limit", help="Cap the number of entities returned."),
+    ] = None,
+    include_flagged: Annotated[
+        bool,
+        typer.Option(
+            "--include-flagged",
+            help="Also match --where/--min-confidence/--trust-at-least against "
+            "flagged (contradicted) assertions — excluded by default (SPEC §10.3, "
+            "KI-081/093/094).",
+        ),
+    ] = False,
+    include_history: Annotated[
+        bool,
+        typer.Option(
+            "--include-history",
+            help="Also match against superseded/retracted assertions — excluded by "
+            "default (KI-081/093/094).",
+        ),
+    ] = False,
 ) -> None:
-    """Query entities by concept and optional property filters."""
+    """Query entities by concept, optionally filtered/ranked (KI-094/096 parity with
+    REST/GraphQL/MCP's query surfaces — this command previously supported only
+    --where). No --as-of: only MCP exposes bitemporal time-travel today (KI-058)."""
     kb = _kb()
     try:
         q = kb.query(concept)
@@ -402,6 +450,18 @@ def query_entities(
                 k, _, v = item.partition("=")
                 filters[k.strip()] = v.strip()
             q = q.where(**filters)
+        if semantic is not None:
+            q = q.semantic(semantic)
+        if min_confidence is not None:
+            q = q.min_confidence(min_confidence)
+        if trust_at_least is not None:
+            q = q.trust_at_least(trust_at_least)
+        if include_flagged:
+            q = q.include_flagged()
+        if include_history:
+            q = q.include_history()
+        if limit is not None:
+            q = q.limit(limit)
         results = q.all()
         if not results:
             typer.echo("No entities found.")

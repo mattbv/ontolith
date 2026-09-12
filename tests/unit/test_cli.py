@@ -680,6 +680,241 @@ class TestQuery:
         result = runner.invoke(app, ["--db", str(temp_db), "query", "Person", "--where", "invalid"])
         assert result.exit_code == 1
 
+    def test_min_confidence_filters_entities(self, seeded_db: tuple[Path, str, str]) -> None:
+        """KI-096: --min-confidence forwards to QueryBuilder.min_confidence(), matching
+        REST/GraphQL/MCP's existing wiring."""
+        db, author, entity_id = seeded_db
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ada",
+                "--type",
+                "Text",
+                "--author",
+                author,
+                "--confidence",
+                "0.9",
+            ],
+        )
+        low = runner.invoke(
+            app,
+            ["--db", str(db), "query", "Person", "--where", "name=Ada", "--min-confidence", "0.95"],
+        )
+        assert low.exit_code == 0
+        assert "No entities found." in low.output
+
+        high = runner.invoke(
+            app,
+            ["--db", str(db), "query", "Person", "--where", "name=Ada", "--min-confidence", "0.5"],
+        )
+        assert high.exit_code == 0
+        assert entity_id in high.output
+
+    def test_trust_at_least_filters_entities(self, temp_db: Path) -> None:
+        """KI-096: --trust-at-least forwards to QueryBuilder.trust_at_least()."""
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal(
+            "alice@example.com", kind="human", default_capability="write", trust_level=8
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        kb.close()
+
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "assert",
+                entity.id,
+                "Person.name",
+                "Ada",
+                "--type",
+                "Text",
+                "--author",
+                alice.id,
+            ],
+        )
+        low = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "query",
+                "Person",
+                "--where",
+                "name=Ada",
+                "--trust-at-least",
+                "9",
+            ],
+        )
+        assert "No entities found." in low.output
+
+        high = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "query",
+                "Person",
+                "--where",
+                "name=Ada",
+                "--trust-at-least",
+                "5",
+            ],
+        )
+        assert entity.id in high.output
+
+    def test_limit_caps_result_count(self, temp_db: Path) -> None:
+        """KI-096: --limit forwards to QueryBuilder.limit()."""
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.create_entity("Person", author=alice.id)
+        kb.create_entity("Person", author=alice.id)
+        kb.close()
+
+        unlimited = runner.invoke(app, ["--db", str(temp_db), "query", "Person"])
+        assert unlimited.output.count("concept=Person") == 2
+
+        limited = runner.invoke(app, ["--db", str(temp_db), "query", "Person", "--limit", "1"])
+        assert limited.exit_code == 0
+        assert limited.output.count("concept=Person") == 1
+
+    def test_semantic_ranks_by_similarity(self, seeded_db: tuple[Path, str, str]) -> None:
+        """KI-096: --semantic forwards to QueryBuilder.semantic(). Two entities,
+        with the matching one created *second* and --limit 1: if --semantic were
+        silently dropped, --limit 1 alone would fall back to insertion order and
+        return the wrong (first-created) entity — this is what actually catches a
+        missing wiring, unlike a single-entity variant that would pass either way."""
+        db, author, entity_id = seeded_db  # created first, unrelated content
+        kb = Ontology.connect(db)
+        match = kb.create_entity("Person", author=author)
+        kb.close()
+
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Zebra Zephyr",
+                "--type",
+                "Text",
+                "--author",
+                author,
+            ],
+        )
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                match.id,
+                "Person.name",
+                "Ada Lovelace",
+                "--type",
+                "Text",
+                "--author",
+                author,
+            ],
+        )
+        reindexed = runner.invoke(app, ["--db", str(db), "reindex"])
+        assert reindexed.exit_code == 0
+
+        result = runner.invoke(
+            app,
+            ["--db", str(db), "query", "Person", "--semantic", "Ada Lovelace", "--limit", "1"],
+        )
+        assert result.exit_code == 0
+        assert match.id in result.output
+        assert entity_id not in result.output
+
+    def test_include_flagged_matches_a_flagged_assertion(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        """KI-096: --include-flagged forwards to QueryBuilder.include_flagged() (KI-081/094)."""
+        db, author, entity_id = seeded_db
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ada",
+                "--type",
+                "Text",
+                "--author",
+                author,
+            ],
+        )
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ava",
+                "--type",
+                "Text",
+                "--author",
+                author,
+            ],
+        )  # -> flagged (static contradiction)
+
+        default = runner.invoke(app, ["--db", str(db), "query", "Person", "--where", "name=Ada"])
+        assert "No entities found." in default.output
+
+        result = runner.invoke(
+            app,
+            ["--db", str(db), "query", "Person", "--where", "name=Ada", "--include-flagged"],
+        )
+        assert result.exit_code == 0
+        assert entity_id in result.output
+
+    def test_include_history_matches_a_retracted_assertion(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        """KI-096: --include-history forwards to QueryBuilder.include_history() (KI-081/094)."""
+        db, author, entity_id = seeded_db
+        asserted = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ada",
+                "--type",
+                "Text",
+                "--author",
+                author,
+            ],
+        )
+        assertion_id = asserted.output.split()[1]
+        runner.invoke(app, ["--db", str(db), "retract", assertion_id, "--author", author])
+
+        default = runner.invoke(app, ["--db", str(db), "query", "Person", "--where", "name=Ada"])
+        assert "No entities found." in default.output
+
+        result = runner.invoke(
+            app,
+            ["--db", str(db), "query", "Person", "--where", "name=Ada", "--include-history"],
+        )
+        assert result.exit_code == 0
+        assert entity_id in result.output
+
 
 class TestReindex:
     def test_reindexes_text_assertions(self, seeded_db: tuple[Path, str, str]) -> None:
