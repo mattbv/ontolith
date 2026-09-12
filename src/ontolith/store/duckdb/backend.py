@@ -1870,16 +1870,20 @@ class DuckDBBackend:
             t_iso = as_of_time.isoformat()
             query += " AND created_at <= ?"
             params.append(t_iso)
-            # flagged_clause is always one of exactly two hardcoded literals
-            # (never caller-controlled) - not a SQL injection vector despite
-            # bandit's B608 heuristic flagging any keyword-string + variable
-            # concatenation regardless of the variable's actual provenance.
+            # flagged_clause is always one of exactly two hardcoded literals,
+            # never caller-controlled. No # nosec needed here (unlike the
+            # match_clause consumers below, e.g. `AND id IN (...SELECT...`):
+            # bandit's B608 heuristic only fires where a SQL keyword
+            # (SELECT/WHERE/...) sits in the same interpolated string as a
+            # variable, and this fragment has none - confirmed directly, not
+            # assumed (a #nosec placed here was previously dead: removing it
+            # left bandit's finding count unchanged).
             flagged_clause = "" if include_flagged else " AND status != 'flagged'"
             match_clause = (
                 " AND asserted_at <= ?"
                 " AND (valid_from IS NULL OR valid_from <= ?)"
                 " AND (valid_to IS NULL OR valid_to > ?)"
-                f"{flagged_clause}"  # nosec B608
+                f"{flagged_clause}"
             )
             match_params = [t_iso, t_iso, t_iso]
         else:
@@ -1964,6 +1968,8 @@ class DuckDBBackend:
         threshold: float,
         as_of_time: datetime | None = None,
         candidate_ids: frozenset[str] | None = None,
+        include_flagged: bool = False,
+        include_history: bool = False,
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion at or
         above `threshold` confidence, active at `as_of_time` (KI-036) or
@@ -1976,7 +1982,9 @@ class DuckDBBackend:
         candidate sets (~1k entities, where everything is already fast) and
         large ones (thousands of candidates against a 10k-entity concept,
         >100x slower) — bounding the hint's size, not avoiding `unnest()`
-        altogether, is what makes it a reliable win."""
+        altogether, is what makes it a reliable win. `include_flagged`/
+        `include_history` widen "active" the same way `entities_where()`
+        does (KI-093) — see its docstring."""
         if candidate_ids is not None and not candidate_ids:
             return set()
 
@@ -1989,15 +1997,25 @@ class DuckDBBackend:
 
         if as_of_time is not None:
             t_iso = as_of_time.isoformat()
+            # One of exactly two hardcoded literals, never caller-controlled
+            # - no injection surface, and no #nosec needed (see
+            # entities_where()'s identical comment for why bandit's B608
+            # heuristic doesn't fire on this shape at all).
+            flagged_clause = "" if include_flagged else " AND a.status != 'flagged'"
             query += (
-                " AND a.status != 'flagged'"
                 " AND a.asserted_at <= ?"
                 " AND (a.valid_from IS NULL OR a.valid_from <= ?)"
-                " AND (a.valid_to IS NULL OR a.valid_to > ?)"
+                " AND (a.valid_to IS NULL OR a.valid_to > ?)" + flagged_clause
             )
             params.extend([t_iso, t_iso, t_iso])
         else:
-            query += " AND a.status = 'active'"
+            status_params = ["active"]
+            if include_flagged:
+                status_params.append("flagged")
+            if include_history:
+                status_params += ["superseded", "retracted"]
+            query += f" AND a.status IN ({', '.join(['?'] * len(status_params))})"
+            params.extend(status_params)
 
         if candidate_ids is not None:
             query += " AND e.id IN (SELECT unnest(?))"
@@ -2014,6 +2032,8 @@ class DuckDBBackend:
         min_trust: int,
         as_of_time: datetime | None = None,
         candidate_ids: frozenset[str] | None = None,
+        include_flagged: bool = False,
+        include_history: bool = False,
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion,
         active at `as_of_time` (KI-036) or currently active if `as_of_time`
@@ -2025,7 +2045,9 @@ class DuckDBBackend:
         `acting_as` (no resolvable delegate) falls back to `author.trust_level`
         via `coalesce` — see `StorageBackend.entities_meeting_trust`'s
         docstring for why. `candidate_ids` narrows the scan the same way as
-        `entities_meeting_confidence` (KI-037) — see its docstring."""
+        `entities_meeting_confidence` (KI-037) — see its docstring.
+        `include_flagged`/`include_history` widen "active" the same way
+        `entities_where()` does (KI-093) — see its docstring."""
         if candidate_ids is not None and not candidate_ids:
             return set()
 
@@ -2053,15 +2075,25 @@ class DuckDBBackend:
 
         if as_of_time is not None:
             t_iso = as_of_time.isoformat()
+            # One of exactly two hardcoded literals, never caller-controlled
+            # - no injection surface, and no #nosec needed (see
+            # entities_where()'s identical comment for why bandit's B608
+            # heuristic doesn't fire on this shape at all).
+            flagged_clause = "" if include_flagged else " AND a.status != 'flagged'"
             query += (
-                " AND a.status != 'flagged'"
                 " AND a.asserted_at <= ?"
                 " AND (a.valid_from IS NULL OR a.valid_from <= ?)"
-                " AND (a.valid_to IS NULL OR a.valid_to > ?)"
+                " AND (a.valid_to IS NULL OR a.valid_to > ?)" + flagged_clause
             )
             params.extend([t_iso, t_iso, t_iso])
         else:
-            query += " AND a.status = 'active'"
+            status_params = ["active"]
+            if include_flagged:
+                status_params.append("flagged")
+            if include_history:
+                status_params += ["superseded", "retracted"]
+            query += f" AND a.status IN ({', '.join(['?'] * len(status_params))})"
+            params.extend(status_params)
 
         if candidate_ids is not None:
             query += " AND e.id IN (SELECT unnest(?))"

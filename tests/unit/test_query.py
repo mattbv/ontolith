@@ -963,3 +963,150 @@ class TestIncludeFlaggedAndHistory:
             assert [r.id for r in hit] == [person.id]
         finally:
             kb.close()
+
+    def test_semantic_where_honors_include_history(self, tmp_path: Path) -> None:
+        """Same as `test_semantic_where_honors_include_flagged` above, for
+        `.include_history()` — `_semantic_candidates()`'s `entities_where()`
+        call threads both flags, not just `include_flagged`."""
+        # _entity_text() sorts by predicate then asserted_at: "Person.bio" <
+        # "Person.role" alphabetically, and "Manager" (the still-active
+        # role) is included too, so the embedded text is "{bio} {role}".
+        embedder = LookupEmbedder(
+            {"bio text Manager": [1.0, 0.0, 0.0], "query": [1.0, 0.0, 0.0]}, dim=3
+        )
+        kb = Ontology.connect(tmp_path / "sem2.db", embedder=embedder)
+        try:
+            admin = kb.create_principal(
+                "admin@example.com", kind="human", default_capability="admin"
+            )
+            alice = kb.create_principal(
+                "alice@example.com", kind="human", default_capability="write"
+            )
+            kb.apply_schema(
+                SchemaIR(
+                    namespace="default",
+                    version=1,
+                    concepts={
+                        "Person": ConceptDef(
+                            name="Person",
+                            properties={
+                                "role": PropertyDef(
+                                    name="role", value_type="Text", temporality="time_varying"
+                                ),
+                                "bio": PropertyDef(name="bio", value_type="Text"),
+                            },
+                        ),
+                    },
+                ),
+                author=admin.id,
+            )
+            person = kb.create_entity("Person", author=alice.id)
+            kb.assert_literal(person.id, "Person.role", "Engineer", "Text", alice.id)
+            kb.assert_literal(person.id, "Person.bio", "bio text", "Text", alice.id)
+            kb.assert_literal(person.id, "Person.role", "Manager", "Text", alice.id)  # supersedes
+            assert kb.assertions(subject=person.id, predicate="Person.role", status="superseded")
+            kb.reindex()
+
+            assert kb.query("Person").semantic("query").where(role="Engineer").all() == []
+            hit = (
+                kb.query("Person").semantic("query").where(role="Engineer").include_history().all()
+            )
+            assert [r.id for r in hit] == [person.id]
+        finally:
+            kb.close()
+
+
+class TestIncludeFlaggedHistoryComposesWithConfidenceAndTrust:
+    """KI-093: `.include_flagged()`/`.include_history()` must also widen
+    `.min_confidence()`/`.trust_at_least()`'s own "active" filtering
+    (`entities_meeting_confidence`/`entities_meeting_trust`), not just
+    `.where()`'s — otherwise a no-op floor (`min_confidence(0.0)`,
+    `trust_at_least(0)`) silently re-narrows an `.include_history()`/
+    `.include_flagged()` result back to `active` only."""
+
+    def _prep(self, kb: Ontology) -> str:
+        admin = kb.create_principal(
+            "admin@example.com", kind="human", auth_method="oidc", default_capability="admin"
+        )
+        kb.create_principal(
+            "alice@example.com", kind="human", auth_method="oidc", default_capability="write"
+        )
+        kb.apply_schema(
+            SchemaIR(
+                namespace="default",
+                version=1,
+                concepts={
+                    "Person": ConceptDef(
+                        name="Person",
+                        properties={"name": PropertyDef(name="name", value_type="Text")},
+                    )
+                },
+            ),
+            author=admin.id,
+        )
+        return "alice@example.com"
+
+    def _retracted_person_with_confidence(
+        self, kb: Ontology, alice_id: str, confidence: float
+    ) -> str:
+        person = kb.create_entity("Person", author=alice_id)
+        a = kb.assert_literal(
+            person.id, "Person.name", "Ada", "Text", alice_id, confidence=confidence
+        )
+        kb.retract(a.id, alice_id)
+        assert kb.assertions(subject=person.id, predicate="Person.name", status="retracted")
+        return person.id
+
+    def test_include_history_min_confidence_zero_is_a_true_noop(self, kb: Ontology) -> None:
+        alice_id = self._prep(kb)
+        pid = self._retracted_person_with_confidence(kb, alice_id, confidence=0.9)
+
+        without_floor = kb.query("Person").where(name="Ada").include_history().all()
+        with_noop_floor = (
+            kb.query("Person").where(name="Ada").include_history().min_confidence(0.0).all()
+        )
+        assert [e.id for e in without_floor] == [pid]
+        assert [e.id for e in with_noop_floor] == [pid]
+
+    def test_include_history_trust_at_least_zero_is_a_true_noop(self, kb: Ontology) -> None:
+        alice_id = self._prep(kb)
+        pid = self._retracted_person_with_confidence(kb, alice_id, confidence=0.9)
+
+        with_noop_floor = (
+            kb.query("Person").where(name="Ada").include_history().trust_at_least(0).all()
+        )
+        assert [e.id for e in with_noop_floor] == [pid]
+
+    def test_include_history_min_confidence_still_filters_below_threshold(
+        self, kb: Ontology
+    ) -> None:
+        """The widening isn't a bypass: a genuinely-failing confidence floor
+        still excludes, even under `.include_history()`."""
+        alice_id = self._prep(kb)
+        self._retracted_person_with_confidence(kb, alice_id, confidence=0.2)
+
+        result = kb.query("Person").where(name="Ada").include_history().min_confidence(0.9).all()
+        assert result == []
+
+    def test_include_flagged_min_confidence_zero_is_a_true_noop(self, kb: Ontology) -> None:
+        alice_id = self._prep(kb)
+        person = kb.create_entity("Person", author=alice_id)
+        kb.assert_literal(person.id, "Person.name", "Ada", "Text", alice_id, confidence=0.9)
+        kb.assert_literal(person.id, "Person.name", "Ava", "Text", alice_id, confidence=0.9)
+        assert kb.assertions(subject=person.id, predicate="Person.name", status="flagged")
+
+        result = kb.query("Person").where(name="Ada").include_flagged().min_confidence(0.0).all()
+        assert [e.id for e in result] == [person.id]
+
+    def test_include_flagged_trust_at_least_zero_is_a_true_noop(self, kb: Ontology) -> None:
+        """The 2x2 matrix's last untested cell: include_flagged x trust_at_least
+        (the other three combinations - include_history x{confidence,trust}
+        and include_flagged x confidence - are covered by the tests above)."""
+        alice_id = self._prep(kb)
+        person = kb.create_entity("Person", author=alice_id)
+        kb.assert_literal(person.id, "Person.name", "Ada", "Text", alice_id)
+        kb.assert_literal(person.id, "Person.name", "Ava", "Text", alice_id)
+        assert kb.assertions(subject=person.id, predicate="Person.name", status="flagged")
+
+        result = kb.query("Person").where(name="Ada").include_flagged().trust_at_least(0).all()
+        assert [e.id for e in result] == [person.id]

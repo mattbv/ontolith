@@ -8,10 +8,16 @@ to also include `flagged`; `.include_history()` also includes `superseded`
 and `retracted`. Both are match-set wideners — `.all()` still returns
 `list[Entity]`. The two are independent (one does not imply the other).
 
+`TestComposesWithConfidenceAndTrust` covers the KI-093 follow-up: the same
+widening must also apply to `.min_confidence()`/`.trust_at_least()`
+(`entities_meeting_confidence`/`entities_meeting_trust`), not just
+`.where()` — otherwise a no-op floor silently re-narrows the result back
+to `active` only.
+
 `tests/unit/test_query.py` only exercises SQLite (`Ontology.connect()`
 always builds a `SQLiteBackend`); this file pins the same behavior on
 DuckDB too, since the widening lives in each backend's own
-`entities_where()`.
+`entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()`.
 """
 
 from __future__ import annotations
@@ -137,3 +143,56 @@ class TestBothFlags:
             .include_history()
             .all()
         } == {superseded.id}
+
+
+class TestComposesWithConfidenceAndTrust:
+    """KI-093: `.include_flagged()`/`.include_history()` widen
+    `.min_confidence()`/`.trust_at_least()` the same way they widen
+    `.where()` — a no-op floor (`min_confidence(0.0)`, `trust_at_least(0)`)
+    must not silently re-narrow an `.include_history()`/`.include_flagged()`
+    result back to `active` only."""
+
+    def test_include_history_min_confidence_zero_is_a_true_noop(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        person = kb.create_entity("Person", author=AUTHOR)
+        a = kb.assert_literal(person.id, "Person.name", "Ada", "Text", AUTHOR, confidence=0.9)
+        kb.retract(a.id, AUTHOR)
+        assert kb.assertions(subject=person.id, predicate="Person.name", status="retracted")
+
+        without_floor = {r.id for r in kb.query("Person").where(name="Ada").include_history().all()}
+        with_noop_floor = {
+            r.id
+            for r in kb.query("Person")
+            .where(name="Ada")
+            .include_history()
+            .min_confidence(0.0)
+            .all()
+        }
+        assert without_floor == {person.id}
+        assert with_noop_floor == {person.id}
+
+    def test_include_history_trust_at_least_zero_is_a_true_noop(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        person = kb.create_entity("Person", author=AUTHOR)
+        a = kb.assert_literal(person.id, "Person.name", "Ada", "Text", AUTHOR)
+        kb.retract(a.id, AUTHOR)
+
+        with_noop_floor = {
+            r.id
+            for r in kb.query("Person").where(name="Ada").include_history().trust_at_least(0).all()
+        }
+        assert with_noop_floor == {person.id}
+
+    def test_include_flagged_min_confidence_still_filters_below_threshold(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The widening isn't a bypass: a genuinely-failing confidence floor
+        still excludes, even under `.include_flagged()`."""
+        kb = _kb(make_kb)
+        person = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(person.id, "Person.name", "Ada", "Text", AUTHOR, confidence=0.2)
+        kb.assert_literal(person.id, "Person.name", "Ava", "Text", AUTHOR, confidence=0.2)
+        assert kb.assertions(subject=person.id, predicate="Person.name", status="flagged")
+
+        result = kb.query("Person").where(name="Ada").include_flagged().min_confidence(0.9).all()
+        assert result == []

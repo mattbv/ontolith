@@ -291,15 +291,18 @@ class QueryBuilder:
         `active` + `flagged`. It is a *match-set* widener, not a result-shape
         change — `.all()` still returns `list[Entity]`.
 
-        No effect on a query with no `.where()` filter (nothing to match
-        against) or one already scoped by `.as_of()` (a flagged assertion's
-        open validity window already makes it visible in a bitemporal
-        snapshot unless excluded — the `as_of` path has honored this flag
-        since before KI-081).
+        No effect on a query with neither a `.where()` filter nor a
+        `.min_confidence()`/`.trust_at_least()` floor — nothing to widen
+        (KI-093: those floors are evaluated even when `.where()` is absent,
+        so this flag is *not* a no-op just because `.where()` wasn't
+        called — only when nothing downstream inspects assertion status at
+        all).
 
-        Does not yet compose with `.min_confidence()` / `.trust_at_least()`:
-        those still consider only `active` assertions, so chaining one after
-        an `.include_*()` re-narrows the result to active (KI-093).
+        Does apply under `.as_of(t)`: a flagged assertion's open validity
+        window already makes it visible in a bitemporal snapshot unless
+        excluded, and the `as_of` path has honored this flag (for both
+        `.where()` and, since KI-093, `.min_confidence()`/
+        `.trust_at_least()`) since before KI-081 introduced this method.
 
         Returns:
             Self for chaining
@@ -320,11 +323,17 @@ class QueryBuilder:
 
         Like `.include_flagged()`, a match-set widener, not a result-shape
         change: `.all()` returns `list[Entity]`, with no per-entity
-        timeline attached. No effect on a query with no `.where()` filter,
-        or one scoped by `.as_of()` (a bitemporal snapshot already matches
-        whatever assertion was valid at that instant, regardless of its
-        status now). Does not yet compose with `.min_confidence()` /
-        `.trust_at_least()` (KI-093 — those still consider `active` only).
+        timeline attached. Also widens `.min_confidence()`/
+        `.trust_at_least()` (KI-093) the same way it widens `.where()` —
+        see `.include_flagged()`'s docstring for why this means it is
+        *not* a no-op just because `.where()` wasn't called.
+
+        Genuinely no effect under `.as_of(t)`, unlike `.include_flagged()`:
+        a bitemporal snapshot already matches whatever assertion was valid
+        at that instant regardless of its status now, so there is nothing
+        left for "also match superseded/retracted" to add there — true for
+        both the `.where()` path and, since KI-093, the confidence/trust
+        floors.
 
         Returns:
             Self for chaining
@@ -499,6 +508,8 @@ class QueryBuilder:
                 self._min_confidence,
                 as_of_time=self._as_of_time,
                 candidate_ids=candidate_ids,
+                include_flagged=self._include_flagged,
+                include_history=self._include_history,
             )
 
         if self._trust_at_least is not None:
@@ -508,6 +519,8 @@ class QueryBuilder:
                 self._trust_at_least,
                 as_of_time=self._as_of_time,
                 candidate_ids=candidate_ids,
+                include_flagged=self._include_flagged,
+                include_history=self._include_history,
             )
             qualifying_ids = trust_ids if qualifying_ids is None else qualifying_ids & trust_ids
 

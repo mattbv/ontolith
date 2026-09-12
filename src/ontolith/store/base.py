@@ -491,6 +491,8 @@ class StorageBackend(Protocol):
         threshold: float,
         as_of_time: datetime | None = None,
         candidate_ids: frozenset[str] | None = None,
+        include_flagged: bool = False,
+        include_history: bool = False,
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion at or
         above `threshold` confidence, active at `as_of_time` (or currently
@@ -500,7 +502,9 @@ class StorageBackend(Protocol):
         entity (QueryBuilder.min_confidence(), KI-028) — one SQL round trip
         regardless of concept size. `None` confidence never qualifies
         (ADR-0004). When `as_of_time` is None, "active" means
-        `status = 'active'`; when set, it means the same bitemporal window
+        `status = 'active'`, widened by `include_flagged`/`include_history`
+        exactly as `entities_where()`'s current-state path is (KI-093); when
+        `as_of_time` is set, it means the same bitemporal window
         `entities_where()` uses (`asserted_at <= as_of_time`, `valid_from`/
         `valid_to` bracketing `as_of_time`) — KI-036, so
         `kb.as_of(t).query(...).min_confidence(...)` evaluates against a
@@ -508,10 +512,11 @@ class StorageBackend(Protocol):
         current-active assertions regardless of `t`. One caveat: `status`
         itself is not bitemporally versioned, only current status is ever
         stored, so a `status = 'flagged'` assertion (a static contradiction,
-        SPEC §10.3) is excluded even at a `t` before it was flagged —
-        matching `entities_where()`'s own default (`include_flagged=False`),
-        which is the only mode reachable from `QueryBuilder` and thus the
-        only one implemented here.
+        SPEC §10.3) is excluded even at a `t` before it was flagged, unless
+        `include_flagged` is set — matching `entities_where()`'s identical
+        `as_of` handling. `include_history` is a no-op under `as_of_time`,
+        also matching `entities_where()`: a bitemporal snapshot already
+        matches whatever was valid at that instant regardless of status now.
 
         Always scoped by `(namespace, concept)` — this is what keeps the
         query's parameter count constant regardless of how many entities
@@ -541,6 +546,12 @@ class StorageBackend(Protocol):
             candidate_ids: Optional narrowing hint (KI-037) — a backend may
                 use this to scope the scan below `(namespace, concept)`,
                 but is not required to
+            include_flagged: Also count 'flagged' assertions (KI-093).
+                Honored on both the current-state and as_of_time paths,
+                matching entities_where().
+            include_history: Also count 'superseded'/'retracted' assertions
+                (KI-093). Current-state path only — no-op under
+                as_of_time, matching entities_where().
 
         Returns:
             IDs of qualifying entities (may be a superset of any candidate
@@ -555,10 +566,14 @@ class StorageBackend(Protocol):
         min_trust: int,
         as_of_time: datetime | None = None,
         candidate_ids: frozenset[str] | None = None,
+        include_flagged: bool = False,
+        include_history: bool = False,
     ) -> set[str]:
         """IDs of entities in `(namespace, concept)` with >=1 assertion,
         active at `as_of_time` (or currently active, if `as_of_time` is
-        None), whose *effective* trust_level >= `min_trust`.
+        None) — widened by `include_flagged`/`include_history` exactly as
+        `entities_meeting_confidence()`'s identical parameters are (KI-093)
+        — whose *effective* trust_level >= `min_trust`.
 
         "Effective" (KI-047): when the qualifying assertion was made under
         delegation (`acting_as` set), the comparison is
@@ -620,6 +635,10 @@ class StorageBackend(Protocol):
                 point in time instead of current state (KI-036)
             candidate_ids: Optional narrowing hint (KI-037) — see
                 `entities_meeting_confidence`'s docstring
+            include_flagged: Also count 'flagged' assertions (KI-093) — see
+                `entities_meeting_confidence`'s docstring
+            include_history: Also count 'superseded'/'retracted' assertions
+                (KI-093) — see `entities_meeting_confidence`'s docstring
 
         Returns:
             IDs of qualifying entities (may be a superset of any candidate

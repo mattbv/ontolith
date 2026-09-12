@@ -1861,6 +1861,137 @@ class TestCandidateIdsNarrowing:
             == set()
         )
 
+    def _seed_with_status(self, backend: DuckDBBackend, entity_id: str, status: str) -> None:
+        backend.put_entity(
+            Entity(
+                id=entity_id,
+                namespace="test-ns",
+                concept="Person",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                created_by="alice@test.com",
+            )
+        )
+        backend.put_assertion(
+            Assertion(
+                id=f"a-{entity_id}",
+                namespace="test-ns",
+                subject=entity_id,
+                predicate="Person.name",
+                value_kind="literal",
+                value_type="Text",
+                value="Ada",
+                author="alice@test.com",
+                confidence=0.9,
+                asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+                status=status,
+            )
+        )
+
+    def test_entities_meeting_confidence_status_widening_flags(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """KI-093: entities_meeting_confidence()'s current-state path must
+        widen the same way entities_where() does, independently per flag."""
+        self._seed_with_status(backend, "e-flagged", "flagged")
+        self._seed_with_status(backend, "e-super", "superseded")
+        self._seed_with_status(backend, "e-retr", "retracted")
+
+        def qualifying(**kw: bool) -> set[str]:
+            return backend.entities_meeting_confidence("test-ns", "Person", 0.5, **kw)
+
+        assert qualifying() == set()
+        assert qualifying(include_flagged=True) == {"e-flagged"}
+        assert qualifying(include_history=True) == {"e-super", "e-retr"}
+        assert qualifying(include_flagged=True, include_history=True) == {
+            "e-flagged",
+            "e-super",
+            "e-retr",
+        }
+
+    def test_entities_meeting_trust_status_widening_flags(self, backend: DuckDBBackend) -> None:
+        """KI-093: entities_meeting_trust()'s current-state path must widen
+        the same way entities_where() does, independently per flag."""
+        self._seed_with_status(backend, "e-flagged", "flagged")
+        self._seed_with_status(backend, "e-super", "superseded")
+
+        def qualifying(**kw: bool) -> set[str]:
+            return backend.entities_meeting_trust("test-ns", "Person", 0, **kw)
+
+        assert qualifying() == set()
+        assert qualifying(include_flagged=True) == {"e-flagged"}
+        assert qualifying(include_history=True) == {"e-super"}
+        assert qualifying(include_flagged=True, include_history=True) == {"e-flagged", "e-super"}
+
+    def _seed_flagged_with_window(self, backend: DuckDBBackend, entity_id: str) -> None:
+        """A flagged assertion whose validity window covers T0 (2025-01-01),
+        for `as_of_time`-scoped widening tests."""
+        backend.put_entity(
+            Entity(
+                id=entity_id,
+                namespace="test-ns",
+                concept="Person",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                created_by="alice@test.com",
+            )
+        )
+        backend.put_assertion(
+            Assertion(
+                id=f"a-{entity_id}",
+                namespace="test-ns",
+                subject=entity_id,
+                predicate="Person.name",
+                value_kind="literal",
+                value_type="Text",
+                value="Ada",
+                author="alice@test.com",
+                confidence=0.9,
+                asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+                valid_from=datetime(2025, 1, 1, tzinfo=UTC),
+                status="flagged",
+            )
+        )
+
+    def test_entities_meeting_confidence_as_of_include_flagged(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """KI-093: the as_of branch's flagged_clause must be genuinely
+        conditional on include_flagged, not left unconditionally excluding
+        flagged the way it did before this KI."""
+        self._seed_flagged_with_window(backend, "e-flagged")
+        t = datetime(2025, 6, 1, tzinfo=UTC)
+
+        assert backend.entities_meeting_confidence("test-ns", "Person", 0.5, as_of_time=t) == set()
+        assert backend.entities_meeting_confidence(
+            "test-ns", "Person", 0.5, as_of_time=t, include_flagged=True
+        ) == {"e-flagged"}
+
+    def test_entities_meeting_trust_as_of_include_flagged(self, backend: DuckDBBackend) -> None:
+        """KI-093: same as the confidence test above, for entities_meeting_trust()."""
+        self._seed_flagged_with_window(backend, "e-flagged")
+        t = datetime(2025, 6, 1, tzinfo=UTC)
+
+        assert backend.entities_meeting_trust("test-ns", "Person", 0, as_of_time=t) == set()
+        assert backend.entities_meeting_trust(
+            "test-ns", "Person", 0, as_of_time=t, include_flagged=True
+        ) == {"e-flagged"}
+
+    def test_entities_meeting_confidence_as_of_include_history_is_a_documented_noop(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """KI-093: unlike include_flagged, include_history is a documented
+        no-op under as_of_time — a superseded assertion's window already
+        makes it visible at a t predating the supersession, regardless of
+        the flag. Pins the contract stated in entities_meeting_confidence()'s
+        own docstring."""
+        self._seed_with_status(backend, "e-super", "superseded")
+        t = datetime(2025, 6, 1, tzinfo=UTC)
+
+        without_flag = backend.entities_meeting_confidence("test-ns", "Person", 0.5, as_of_time=t)
+        with_flag = backend.entities_meeting_confidence(
+            "test-ns", "Person", 0.5, as_of_time=t, include_history=True
+        )
+        assert without_flag == with_flag == {"e-super"}
+
 
 class TestConcurrency:
     """KI-046: the shared connection must survive genuinely concurrent access
