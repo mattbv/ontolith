@@ -439,12 +439,14 @@ def query_entities(
         ),
     ] = False,
 ) -> None:
-    """Query entities by concept, optionally filtered by --where and/or ranked by
-    --semantic, with --min-confidence/--trust-at-least floors, --include-flagged/
-    --include-history opt-ins (KI-081/094/096), and a --limit cap.
+    """Query entities by concept, optionally filtered by --where and/or ranked
+    by --semantic, with --min-confidence/--trust-at-least floors,
+    --include-flagged/--include-history opt-ins (KI-081/094/096), and a
+    --limit cap.
 
-    No --as-of: of the four shipped interfaces, only MCP exposes bitemporal
-    time-travel on query today (KI-058) — the SDK's own `kb.as_of(t)` has it too.
+    No --as-of: MCP is the only one of the four shipped interfaces that
+    exposes bitemporal time-travel on `query` today (KI-058). The Python
+    SDK's `kb.as_of(t)` has it too, ahead of this command.
     """
     kb = _kb()
     try:

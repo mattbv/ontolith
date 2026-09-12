@@ -220,8 +220,10 @@ class QueryBuilder:
         return self
 
     def min_confidence(self, threshold: float) -> "QueryBuilder":
-        """Keep only entities with at least one active assertion at or above
-        `threshold` confidence.
+        """Keep only entities with at least one qualifying assertion at or
+        above `threshold` confidence — `active` by default, also `flagged`/
+        `superseded`/`retracted` when `.include_flagged()`/
+        `.include_history()` is set (KI-093).
 
         An entity with only `confidence=None` assertions does not pass —
         None never satisfies a numeric threshold (ADR-0004). Independent of
@@ -240,8 +242,10 @@ class QueryBuilder:
         return self
 
     def trust_at_least(self, level: int) -> "QueryBuilder":
-        """Keep only entities with at least one active assertion whose
-        *effective* trust_level >= `level`.
+        """Keep only entities with at least one qualifying assertion whose
+        *effective* trust_level >= `level` — `active` by default, also
+        `flagged`/`superseded`/`retracted` when `.include_flagged()`/
+        `.include_history()` is set (KI-093).
 
         "Effective" (KI-047): for an assertion made under delegation
         (`acting_as` set), this is `min(author.trust_level,
