@@ -220,15 +220,24 @@ class QueryBuilder:
         return self
 
     def min_confidence(self, threshold: float) -> "QueryBuilder":
-        """Keep only entities with at least one active assertion at or above
-        `threshold` confidence.
+        """Keep only entities with at least one qualifying assertion at or
+        above `threshold` confidence.
+
+        Current-state (no `.as_of()`): `active` by default, also `flagged`
+        when `.include_flagged()` is set and/or `superseded`/`retracted`
+        when `.include_history()` is set (KI-093). Under `.as_of(t)`, the
+        qualifying set is never restricted to `active` in the first place —
+        it already includes whatever was valid at `t` regardless of status
+        now — so `.include_history()` has nothing to add there;
+        `.include_flagged()` still applies (excludes `flagged` unless set),
+        same as `.where()`'s own `as_of` handling.
 
         An entity with only `confidence=None` assertions does not pass —
         None never satisfies a numeric threshold (ADR-0004). Independent of
         `.trust_at_least()`: the qualifying assertion need not be the same
         one for both filters. Respects `.as_of()` (KI-036): if this query
-        is pinned to a point in time, the qualifying assertion must be
-        active at that time, not merely currently active.
+        is pinned to a point in time, the qualifying assertion must have
+        been valid at that time, not merely currently active.
 
         Args:
             threshold: Minimum confidence, 0.0-1.0.
@@ -240,8 +249,16 @@ class QueryBuilder:
         return self
 
     def trust_at_least(self, level: int) -> "QueryBuilder":
-        """Keep only entities with at least one active assertion whose
+        """Keep only entities with at least one qualifying assertion whose
         *effective* trust_level >= `level`.
+
+        Current-state (no `.as_of()`): `active` by default, also `flagged`
+        when `.include_flagged()` is set and/or `superseded`/`retracted`
+        when `.include_history()` is set (KI-093). Under `.as_of(t)`, the
+        qualifying set is never restricted to `active` in the first place —
+        `.include_history()` has nothing to add there; `.include_flagged()`
+        still applies, same as `.min_confidence()`'s identical carve-out
+        above.
 
         "Effective" (KI-047): for an assertion made under delegation
         (`acting_as` set), this is `min(author.trust_level,

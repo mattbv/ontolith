@@ -457,9 +457,15 @@ def create_mcp_server(
                 last reindex, not a historical version. Results are always
                 ranked by an entity's *current* embedded content.
             min_confidence: Optional 0.0-1.0 floor — keep only entities
-                with at least one qualifying active assertion at or above
-                this confidence (ADR-0004: an assertion with
-                confidence=None never satisfies a numeric threshold).
+                with at least one qualifying assertion at or above this
+                confidence (ADR-0004: an assertion with confidence=None
+                never satisfies a numeric threshold). Without ``as_of``:
+                ``active`` by default, also ``flagged`` when
+                ``include_flagged`` is set and/or ``superseded``/
+                ``retracted`` when ``include_history`` is set (KI-093).
+                With ``as_of``: the qualifying set is never restricted to
+                ``active`` in the first place, so ``include_history`` has
+                nothing to add there; ``include_flagged`` still applies.
             trust_at_least: Optional floor on a qualifying assertion's
                 *effective* trust_level (min(author, acting_as) under
                 delegation, KI-047) — independent of ``min_confidence``;

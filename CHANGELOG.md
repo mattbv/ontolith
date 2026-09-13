@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- CLI's `ontolith query` command gains `--semantic`, `--min-confidence`, `--trust-at-least`,
+  `--limit`, `--include-flagged`, and `--include-history` (closes KI-096, found resolving KI-094)
+  — previously supported only `--where`, a materially larger gap than the REST/GraphQL/MCP
+  parity issue KI-094 closed. Each forwards to `QueryBuilder` exactly as the other three
+  interfaces already do. `--as-of` deliberately not added: only MCP has bitemporal time-travel on
+  `query` today, so adding it to the CLI would make it the *second* interface with time-travel,
+  not parity with REST/GraphQL — out of this KI's scope.
 - REST, GraphQL, and MCP `query` operations gain `include_flagged`/`include_history` parameters
   (closes KI-094, found reviewing KI-081) — the two `QueryBuilder` opt-ins KI-081 shipped were
   reachable only from the Python SDK; a REST/GraphQL/MCP caller had no way to opt in to

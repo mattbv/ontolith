@@ -680,6 +680,393 @@ class TestQuery:
         result = runner.invoke(app, ["--db", str(temp_db), "query", "Person", "--where", "invalid"])
         assert result.exit_code == 1
 
+    def test_min_confidence_filters_entities(self, seeded_db: tuple[Path, str, str]) -> None:
+        """KI-096: --min-confidence forwards to QueryBuilder.min_confidence(), matching
+        REST/GraphQL/MCP's existing wiring."""
+        db, author, entity_id = seeded_db
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ada",
+                "--type",
+                "Text",
+                "--author",
+                author,
+                "--confidence",
+                "0.9",
+            ],
+        )
+        low = runner.invoke(
+            app,
+            ["--db", str(db), "query", "Person", "--where", "name=Ada", "--min-confidence", "0.95"],
+        )
+        assert low.exit_code == 0
+        assert "No entities found." in low.output
+
+        high = runner.invoke(
+            app,
+            ["--db", str(db), "query", "Person", "--where", "name=Ada", "--min-confidence", "0.5"],
+        )
+        assert high.exit_code == 0
+        assert entity_id in high.output
+
+    def test_min_confidence_zero_is_still_applied(self, seeded_db: tuple[Path, str, str]) -> None:
+        """KI-096 review: `--min-confidence 0.0` is falsy, so a wiring guard written as
+        `if min_confidence:` (instead of `is not None`) would silently skip the floor
+        entirely — the exact KI-093 bug class. A confidence-less assertion (ADR-0004:
+        `None` never satisfies a numeric threshold, even 0.0) is the discriminator:
+        the guard being applied still excludes it; the guard being skipped wouldn't."""
+        db, author, entity_id = seeded_db
+        seeded = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ada",
+                "--type",
+                "Text",
+                "--author",
+                author,
+            ],
+        )  # no --confidence -> confidence=None
+        assert seeded.exit_code == 0
+
+        # Positive control: the assertion landed and matches --where on its own —
+        # proves a later "No entities found." is caused by the confidence floor,
+        # not by a missing/mismatched seed assertion.
+        control = runner.invoke(app, ["--db", str(db), "query", "Person", "--where", "name=Ada"])
+        assert entity_id in control.output
+
+        result = runner.invoke(
+            app,
+            ["--db", str(db), "query", "Person", "--where", "name=Ada", "--min-confidence", "0.0"],
+        )
+        assert result.exit_code == 0
+        assert "No entities found." in result.output
+
+    def test_limit_zero_is_still_applied(self, temp_db: Path) -> None:
+        """KI-096 review: `--limit 0` is falsy, so `if limit:` (instead of `is not
+        None`) would silently skip the cap and return every entity."""
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.create_entity("Person", author=alice.id)
+        kb.close()
+
+        result = runner.invoke(app, ["--db", str(temp_db), "query", "Person", "--limit", "0"])
+        assert result.exit_code == 0
+        assert "No entities found." in result.output
+
+    def test_trust_at_least_filters_entities(self, temp_db: Path) -> None:
+        """KI-096: --trust-at-least forwards to QueryBuilder.trust_at_least()."""
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal(
+            "alice@example.com", kind="human", default_capability="write", trust_level=8
+        )
+        entity = kb.create_entity("Person", author=alice.id)
+        kb.close()
+
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "assert",
+                entity.id,
+                "Person.name",
+                "Ada",
+                "--type",
+                "Text",
+                "--author",
+                alice.id,
+            ],
+        )
+        low = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "query",
+                "Person",
+                "--where",
+                "name=Ada",
+                "--trust-at-least",
+                "9",
+            ],
+        )
+        assert "No entities found." in low.output
+
+        high = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "query",
+                "Person",
+                "--where",
+                "name=Ada",
+                "--trust-at-least",
+                "5",
+            ],
+        )
+        assert entity.id in high.output
+
+    def test_trust_at_least_zero_is_still_applied(self, temp_db: Path) -> None:
+        """KI-096 review: `--trust-at-least 0` is falsy, so `if trust_at_least:`
+        (instead of `is not None`) would silently skip the floor entirely — the
+        same KI-093 bug class as --min-confidence/--limit. `trust_level` being
+        `NOT NULL` only makes the mutation unobservable for an entity that *has*
+        a qualifying assertion (any such assertion trivially satisfies floor 0);
+        an entity with no assertions at all is still excluded when the floor is
+        genuinely evaluated (nothing qualifies), and included if it's skipped
+        (the query falls back to unfiltered `entities()`)."""
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.create_entity("Person", author=alice.id)  # no assertions at all
+        kb.close()
+
+        result = runner.invoke(
+            app, ["--db", str(temp_db), "query", "Person", "--trust-at-least", "0"]
+        )
+        assert result.exit_code == 0
+        assert "No entities found." in result.output
+
+    def test_limit_caps_result_count(self, temp_db: Path) -> None:
+        """KI-096: --limit forwards to QueryBuilder.limit()."""
+        kb = Ontology.connect(temp_db)
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        kb.create_entity("Person", author=alice.id)
+        kb.create_entity("Person", author=alice.id)
+        kb.close()
+
+        unlimited = runner.invoke(app, ["--db", str(temp_db), "query", "Person"])
+        assert unlimited.output.count("concept=Person") == 2
+
+        limited = runner.invoke(app, ["--db", str(temp_db), "query", "Person", "--limit", "1"])
+        assert limited.exit_code == 0
+        assert limited.output.count("concept=Person") == 1
+
+    def test_semantic_ranks_by_similarity(self, seeded_db: tuple[Path, str, str]) -> None:
+        """KI-096: --semantic forwards to QueryBuilder.semantic(). Two entities with
+        distinct content, --limit 1: querying for one's exact text must return that
+        entity, not the other. Order-independent by design — asserting both
+        directions means the result can't come from unspecified row order (e.g.
+        SQLite's lack of an explicit ORDER BY) rather than from --semantic actually
+        being applied, unlike a single-direction insertion-order discriminator."""
+        db, author, entity_id = seeded_db  # unrelated content
+        kb = Ontology.connect(db)
+        match = kb.create_entity("Person", author=author)
+        kb.close()
+
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Zebra Zephyr",
+                "--type",
+                "Text",
+                "--author",
+                author,
+            ],
+        )
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                match.id,
+                "Person.name",
+                "Ada Lovelace",
+                "--type",
+                "Text",
+                "--author",
+                author,
+            ],
+        )
+        reindexed = runner.invoke(app, ["--db", str(db), "reindex"])
+        assert reindexed.exit_code == 0
+
+        for text, expected, other in (
+            ("Ada Lovelace", match.id, entity_id),
+            ("Zebra Zephyr", entity_id, match.id),
+        ):
+            result = runner.invoke(
+                app,
+                ["--db", str(db), "query", "Person", "--semantic", text, "--limit", "1"],
+            )
+            assert result.exit_code == 0
+            assert expected in result.output
+            assert other not in result.output
+
+    def test_include_flagged_matches_a_flagged_assertion(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        """KI-096: --include-flagged forwards to QueryBuilder.include_flagged() (KI-081/094)."""
+        db, author, entity_id = seeded_db
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ada",
+                "--type",
+                "Text",
+                "--author",
+                author,
+            ],
+        )
+        runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ava",
+                "--type",
+                "Text",
+                "--author",
+                author,
+            ],
+        )  # -> flagged (static contradiction)
+
+        default = runner.invoke(app, ["--db", str(db), "query", "Person", "--where", "name=Ada"])
+        assert "No entities found." in default.output
+
+        result = runner.invoke(
+            app,
+            ["--db", str(db), "query", "Person", "--where", "name=Ada", "--include-flagged"],
+        )
+        assert result.exit_code == 0
+        assert entity_id in result.output
+
+    def test_include_history_matches_a_retracted_assertion(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        """KI-096: --include-history forwards to QueryBuilder.include_history() (KI-081/094)."""
+        db, author, entity_id = seeded_db
+        asserted = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ada",
+                "--type",
+                "Text",
+                "--author",
+                author,
+            ],
+        )
+        assertion_id = asserted.output.split()[1]
+        runner.invoke(app, ["--db", str(db), "retract", assertion_id, "--author", author])
+
+        default = runner.invoke(app, ["--db", str(db), "query", "Person", "--where", "name=Ada"])
+        assert "No entities found." in default.output
+
+        result = runner.invoke(
+            app,
+            ["--db", str(db), "query", "Person", "--where", "name=Ada", "--include-history"],
+        )
+        assert result.exit_code == 0
+        assert entity_id in result.output
+
+    def test_include_history_composes_with_a_no_op_confidence_floor(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        """KI-096 review: CLI-level pin for KI-093's composition fix — a genuine
+        no-op floor (--min-confidence 0.0, on an assertion that has a confidence
+        recorded) must not re-narrow a --include-history match back to
+        active-only. Confirms the CLI threads both flags to the same
+        QueryBuilder chain, not just each in isolation."""
+        db, author, entity_id = seeded_db
+        asserted = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ada",
+                "--type",
+                "Text",
+                "--author",
+                author,
+                "--confidence",
+                "0.5",
+            ],
+        )
+        assert asserted.exit_code == 0
+        assertion_id = asserted.output.split()[1]
+        retracted = runner.invoke(
+            app, ["--db", str(db), "retract", assertion_id, "--author", author]
+        )
+        assert retracted.exit_code == 0
+
+        # Confirms the retraction actually landed, before either flag is tested —
+        # without this, a no-op retract (e.g. a bad assertion_id) would leave the
+        # assertion active and every assertion below would pass for the wrong reason.
+        default = runner.invoke(app, ["--db", str(db), "query", "Person", "--where", "name=Ada"])
+        assert "No entities found." in default.output
+
+        # A genuinely-failing floor still excludes even with --include-history —
+        # proves --min-confidence is actually being evaluated, not bypassed by the
+        # widened status set.
+        failing_floor = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "query",
+                "Person",
+                "--where",
+                "name=Ada",
+                "--include-history",
+                "--min-confidence",
+                "0.9",
+            ],
+        )
+        assert "No entities found." in failing_floor.output
+
+        # A genuine no-op floor (0.0, on an assertion that has a real confidence
+        # recorded) doesn't re-narrow the --include-history match back to
+        # active-only — the KI-093 bug this pins.
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "query",
+                "Person",
+                "--where",
+                "name=Ada",
+                "--include-history",
+                "--min-confidence",
+                "0.0",
+            ],
+        )
+        assert result.exit_code == 0
+        assert entity_id in result.output
+
 
 class TestReindex:
     def test_reindexes_text_assertions(self, seeded_db: tuple[Path, str, str]) -> None:
