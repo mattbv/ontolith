@@ -403,10 +403,10 @@ def query_entities(
         typer.Option(
             "--min-confidence",
             help="Keep only entities with at least one qualifying assertion (also "
-            "'flagged'/'superseded'/'retracted' if --include-flagged/--include-history "
-            "is set) at or above this confidence (0.0-1.0). An assertion with no "
-            "confidence recorded never satisfies this, even --min-confidence 0.0 "
-            "(ADR-0004).",
+            "'flagged' if --include-flagged is set, and/or 'superseded'/'retracted' "
+            "if --include-history is set) at or above this confidence (0.0-1.0). An "
+            "assertion with no confidence recorded never satisfies this, even "
+            "--min-confidence 0.0 (ADR-0004).",
         ),
     ] = None,
     trust_at_least: Annotated[
