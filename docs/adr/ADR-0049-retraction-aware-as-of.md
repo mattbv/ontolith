@@ -56,15 +56,6 @@ Concretely, `entities_where()`'s (and `entities_meeting_confidence()`/`entities_
 — KI-093 established these three move together) `as_of_time` branch gains, alongside the existing
 `flagged_clause`:
 
-`StorageBackend.assertions()` — a distinct, lower-level bitemporal query path this ADR's own KI
-text named alongside `entities_where()` ("and the other bitemporal query paths") — gets the
-identical clause, unconditionally (it has no `include_history`-shaped opt-out today, unlike the
-`QueryBuilder`-facing trio, since its `status` parameter is already ignored entirely once
-`as_of_time` is set). This matters beyond direct callers: `govern/policy.py`'s `SourceQuorum`
-evaluates `kb_view.assertions(...)` on an `AsOfView`, so an un-narrowed retracted assertion could
-silently contribute a distinct `source` to quorum counting during policy evaluation — a governance
-correctness issue, not just a read-path one.
-
 ```sql
 AND (status != 'retracted' OR EXISTS (
     SELECT 1 FROM assertion_event ae
@@ -73,6 +64,15 @@ AND (status != 'retracted' OR EXISTS (
       AND ae.at > ?   -- bound to as_of_time
 ))
 ```
+
+`StorageBackend.assertions()` — a distinct, lower-level bitemporal query path this ADR's own KI
+text named alongside `entities_where()` ("and the other bitemporal query paths") — gets the
+identical clause, unconditionally (it has no `include_history`-shaped opt-out today, unlike the
+`QueryBuilder`-facing trio, since its `status` parameter is already ignored entirely once
+`as_of_time` is set). This matters beyond direct callers: `govern/policy.py`'s `SourceQuorum`
+evaluates `kb_view.assertions(...)` on an `AsOfView`, so an un-narrowed retracted assertion could
+silently contribute a distinct `source` to quorum counting during policy evaluation — a governance
+correctness issue, not just a read-path one.
 
 **`.include_history()` becomes the opt-out**, exactly mirroring its existing current-state meaning
 ("also match `retracted`/`superseded` assertions"): when set, this new clause is skipped entirely
@@ -154,7 +154,7 @@ only.
   mentioned it.
 - **"Latest retraction wins" is untested territory the code doesn't need to handle**: KI-051
   guarantees at most one `retracted` event per assertion (retraction is a one-way terminal
-  transition — verified against all four call sites that set `status = 'retracted'`), so the
+  transition — verified against all three call sites that set `status = 'retracted'`), so the
   `EXISTS (... AND ae.at > ?)` clause never has more than one candidate row to find. If that
   invariant were ever relaxed, this clause's semantics would become "excluded once *any* retraction
   event is known" regardless of ordering — worth a comment at the invariant's own definition site if
