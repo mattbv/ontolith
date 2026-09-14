@@ -812,6 +812,25 @@ class TestIncludeFlaggedAndHistory:
         assert kb.assertions(subject=person.id, predicate="Person.name", status="retracted")
         return person.id
 
+    def _retracted_person_with_future_valid_to(self, kb: Ontology, alice_id: str) -> str:
+        """Entity whose only `Person.name` assertion has an explicit,
+        far-future `valid_to` and was then retracted — the ADR-0049
+        (KI-095) scenario: `_retraction_valid_to()` only narrows an
+        open-ended window, so this one's window is left un-narrowed and
+        still covers any `t` before 2100 despite the retraction."""
+        person = kb.create_entity("Person", author=alice_id)
+        a = kb.assert_literal(
+            person.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            alice_id,
+            valid_to=datetime(2100, 1, 1, tzinfo=UTC),
+        )
+        kb.retract(a.id, alice_id)
+        assert kb.assertions(subject=person.id, predicate="Person.name", status="retracted")
+        return person.id
+
     def test_flagged_assertion_is_excluded_by_default(self, kb: Ontology) -> None:
         self._flagged_person(kb, self._prep(kb))
         assert kb.query("Person").where(name="Ada").all() == []
@@ -936,6 +955,28 @@ class TestIncludeFlaggedAndHistory:
         assert kb.as_of(t).query("Person").where(name="Ada").all() == []
         assert [
             r.id for r in kb.as_of(t).query("Person").where(name="Ada").include_flagged().all()
+        ] == [person]
+
+    def test_as_of_query_excludes_retracted_once_known_include_history_opts_back_in(
+        self, kb: Ontology
+    ) -> None:
+        """ADR-0049 (KI-095): `.as_of(t)` additionally excludes a retracted
+        assertion once its own retraction event's assertion-time has
+        passed, on top of the existing window check — a retracted
+        assertion's window is not reliably narrowed at retraction time (an
+        explicit, later `valid_to` is left untouched), so without this it
+        kept matching indefinitely. `.include_history()` opts back out,
+        the first thing it has ever done on the `as_of` path (previously a
+        documented no-op there)."""
+        alice_id = self._prep(kb)
+        person = self._retracted_person_with_future_valid_to(kb, alice_id)
+        # Safely after the (wall-clock) retraction, safely before the
+        # explicit valid_to=2100 the window would otherwise still cover.
+        t = datetime(2099, 1, 1, tzinfo=UTC)
+
+        assert kb.as_of(t).query("Person").where(name="Ada").all() == []
+        assert [
+            r.id for r in kb.as_of(t).query("Person").where(name="Ada").include_history().all()
         ] == [person]
 
     def test_semantic_where_honors_include_flagged(self, tmp_path: Path) -> None:

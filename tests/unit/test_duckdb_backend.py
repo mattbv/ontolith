@@ -11,7 +11,7 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from ontolith.core import Assertion, Entity, FixedClock
+from ontolith.core import Assertion, AssertionEvent, Entity, FixedClock
 from ontolith.core.errors import StorageError
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import AdminEvent, Principal, PrincipalCredential
@@ -1975,14 +1975,14 @@ class TestCandidateIdsNarrowing:
             "test-ns", "Person", 0, as_of_time=t, include_flagged=True
         ) == {"e-flagged"}
 
-    def test_entities_meeting_confidence_as_of_include_history_is_a_documented_noop(
+    def test_entities_meeting_confidence_as_of_include_history_is_a_noop_for_superseded(
         self, backend: DuckDBBackend
     ) -> None:
-        """KI-093: unlike include_flagged, include_history is a documented
-        no-op under as_of_time — a superseded assertion's window already
-        makes it visible at a t predating the supersession, regardless of
-        the flag. Pins the contract stated in entities_meeting_confidence()'s
-        own docstring."""
+        """KI-093: unlike include_flagged, include_history is a no-op under
+        as_of_time for a superseded assertion — its window already makes it
+        visible at a t predating the supersession, regardless of the flag.
+        (Not true for retracted — see ADR-0049/KI-095 below.) Pins the
+        contract stated in entities_meeting_confidence()'s own docstring."""
         self._seed_with_status(backend, "e-super", "superseded")
         t = datetime(2025, 6, 1, tzinfo=UTC)
 
@@ -1991,6 +1991,116 @@ class TestCandidateIdsNarrowing:
             "test-ns", "Person", 0.5, as_of_time=t, include_history=True
         )
         assert without_flag == with_flag == {"e-super"}
+
+    def _seed_retracted_with_window(
+        self, backend: DuckDBBackend, entity_id: str, retracted_at: datetime
+    ) -> None:
+        """A retracted assertion whose window (no explicit valid_to)
+        still covers a t well past `retracted_at` — the ADR-0049 (KI-095)
+        scenario: as_of_time alone can't tell this apart from an
+        assertion that's simply still active, only the assertion_event
+        log can."""
+        backend.put_entity(
+            Entity(
+                id=entity_id,
+                namespace="test-ns",
+                concept="Person",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                created_by="alice@test.com",
+            )
+        )
+        assertion_id = f"a-{entity_id}"
+        backend.put_assertion(
+            Assertion(
+                id=assertion_id,
+                namespace="test-ns",
+                subject=entity_id,
+                predicate="Person.name",
+                value_kind="literal",
+                value_type="Text",
+                value="Ada",
+                author="alice@test.com",
+                confidence=0.9,
+                asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+                valid_from=datetime(2025, 1, 1, tzinfo=UTC),
+                status="retracted",
+            )
+        )
+        backend.put_assertion_event(
+            AssertionEvent(
+                id=f"ev-{entity_id}",
+                assertion_id=assertion_id,
+                actor="alice@test.com",
+                action="retracted",
+                at=retracted_at,
+            )
+        )
+
+    def test_entities_meeting_confidence_as_of_excludes_retracted_once_known(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """ADR-0049 (KI-095): a retracted assertion's own window doesn't
+        reliably narrow, so as_of_time must additionally consult the
+        assertion_event log — a mutation reverting the EXISTS clause to
+        unconditionally include (matching the pre-fix behavior) survived
+        the whole suite until this test was added."""
+        self._seed_retracted_with_window(
+            backend, "e-retr", retracted_at=datetime(2025, 3, 1, tzinfo=UTC)
+        )
+        t = datetime(2025, 6, 1, tzinfo=UTC)  # after the retraction
+
+        assert backend.entities_meeting_confidence("test-ns", "Person", 0.5, as_of_time=t) == set()
+
+    def test_entities_meeting_confidence_as_of_still_visible_before_retraction(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """The exclusion is assertion-time-scoped, not blanket: a t before
+        the retraction event's own timestamp must still qualify."""
+        self._seed_retracted_with_window(
+            backend, "e-retr", retracted_at=datetime(2025, 3, 1, tzinfo=UTC)
+        )
+        t = datetime(2025, 2, 1, tzinfo=UTC)  # before the retraction
+
+        assert backend.entities_meeting_confidence("test-ns", "Person", 0.5, as_of_time=t) == {
+            "e-retr"
+        }
+
+    def test_entities_meeting_confidence_as_of_include_history_opts_into_retracted(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """include_history opts back out of the ADR-0049 exclusion — the
+        first thing it has ever done on the as_of path."""
+        self._seed_retracted_with_window(
+            backend, "e-retr", retracted_at=datetime(2025, 3, 1, tzinfo=UTC)
+        )
+        t = datetime(2025, 6, 1, tzinfo=UTC)
+
+        assert backend.entities_meeting_confidence(
+            "test-ns", "Person", 0.5, as_of_time=t, include_history=True
+        ) == {"e-retr"}
+
+    def test_entities_meeting_trust_as_of_excludes_retracted_once_known(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """Same shape as the confidence version above, for entities_meeting_trust()."""
+        self._seed_retracted_with_window(
+            backend, "e-retr", retracted_at=datetime(2025, 3, 1, tzinfo=UTC)
+        )
+        t = datetime(2025, 6, 1, tzinfo=UTC)
+
+        assert backend.entities_meeting_trust("test-ns", "Person", 0, as_of_time=t) == set()
+
+    def test_entities_meeting_trust_as_of_include_history_opts_into_retracted(
+        self, backend: DuckDBBackend
+    ) -> None:
+        self._seed_retracted_with_window(
+            backend, "e-retr", retracted_at=datetime(2025, 3, 1, tzinfo=UTC)
+        )
+        t = datetime(2025, 6, 1, tzinfo=UTC)
+
+        assert backend.entities_meeting_trust(
+            "test-ns", "Person", 0, as_of_time=t, include_history=True
+        ) == {"e-retr"}
 
 
 class TestConcurrency:

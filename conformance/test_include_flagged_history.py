@@ -22,7 +22,7 @@ DuckDB too, since the widening lives in each backend's own
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from conformance.conftest import KbFactory
 from ontolith import Ontology
@@ -121,6 +121,87 @@ class TestIncludeHistory:
         assert kb.assertions(subject=person.id, predicate="Person.name", status="flagged")
 
         assert kb.query("Person").where(name="Ada").include_history().all() == []
+
+
+class TestAsOfRetraction:
+    """ADR-0049 (KI-095): `.as_of(t)` additionally excludes a `retracted`
+    assertion once its own retraction event's assertion-time has passed,
+    on top of the existing valid-time window check — a retracted
+    assertion's window is not reliably narrowed at retraction time (an
+    explicit, later `valid_to` is left untouched), so without this it kept
+    matching `.as_of(t)` for any `t` its stale window still covered.
+    `.include_history()` opts back out, the first thing it has ever done
+    on the `as_of` path (previously a documented no-op there)."""
+
+    def test_retracted_value_excluded_once_retraction_known(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        person = kb.create_entity("Person", author=AUTHOR)
+        # An explicit, far-future valid_to is the case that actually
+        # exposes the bug — _retraction_valid_to() only narrows an
+        # open-ended window, never one already set explicitly.
+        a = kb.assert_literal(
+            person.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            AUTHOR,
+            valid_to=T0 + timedelta(days=3650),
+        )
+        clock.advance(days=10)
+        kb.retract(a.id, AUTHOR)
+
+        assert kb.as_of(T0 + timedelta(days=365)).query("Person").where(name="Ada").all() == []
+
+    def test_retracted_value_still_visible_before_its_own_retraction_time(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The exclusion is assertion-time-scoped, not blanket: a `t`
+        before the retraction ever happened must still see the value —
+        we didn't know to exclude it yet, as of that `t`."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        person = kb.create_entity("Person", author=AUTHOR)
+        a = kb.assert_literal(
+            person.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            AUTHOR,
+            valid_to=T0 + timedelta(days=3650),
+        )
+        before_retraction = clock.now()
+
+        clock.advance(days=10)
+        kb.retract(a.id, AUTHOR)
+
+        results = kb.as_of(before_retraction).query("Person").where(name="Ada").all()
+        assert {r.id for r in results} == {person.id}
+
+    def test_include_history_opts_back_into_a_retracted_value_under_as_of(
+        self, make_kb: KbFactory
+    ) -> None:
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        person = kb.create_entity("Person", author=AUTHOR)
+        a = kb.assert_literal(
+            person.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            AUTHOR,
+            valid_to=T0 + timedelta(days=3650),
+        )
+        clock.advance(days=10)
+        kb.retract(a.id, AUTHOR)
+
+        t = T0 + timedelta(days=365)
+        assert kb.as_of(t).query("Person").where(name="Ada").all() == []
+        results = kb.as_of(t).query("Person").where(name="Ada").include_history().all()
+        assert {r.id for r in results} == {person.id}
 
 
 class TestBothFlags:

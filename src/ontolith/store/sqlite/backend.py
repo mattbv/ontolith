@@ -1999,11 +1999,15 @@ class SQLiteBackend:
                 both the current-state and as_of_time paths (KI-081;
                 excluded by default on both, see assertions()).
             include_history: Also match 'superseded'/'retracted' assertions
-                (KI-081). Current-state path only — no-op under as_of_time,
-                which never restricts matches to 'active' in the first
-                place (it excludes only 'flagged', itself gated behind
-                include_flagged), so a 'superseded'/'retracted' assertion
-                whose window covers as_of_time already matches there.
+                (KI-081). On the current-state path this widens the status
+                set beyond 'active'. On the as_of_time path, 'superseded' is
+                unaffected either way (its window already never restricts to
+                'active') — but 'retracted' does something under this flag
+                now (ADR-0049, KI-095): as_of_time excludes a retracted
+                assertion once its own retraction event's `at` is <=
+                as_of_time (a stale, un-narrowed window otherwise keeps
+                matching indefinitely); include_history opts back out of
+                that exclusion.
 
         Returns:
             List of entities where all filters match at the given time
@@ -2024,13 +2028,35 @@ class SQLiteBackend:
             # assumed (a #nosec placed here was previously dead: removing it
             # left bandit's finding count unchanged).
             flagged_clause = "" if include_flagged else " AND status != 'flagged'"
+            # retracted_clause: same two-hardcoded-literals shape as
+            # flagged_clause above, same reasoning for why no #nosec is
+            # needed. ADR-0049 (KI-095): a `retracted` assertion's window is
+            # not reliably narrowed at retraction time, so `as_of(t)` also
+            # excludes it once its own retraction event's `at` is <= t —
+            # KI-051 guarantees at most one such event per assertion.
+            # `.include_history()` opts back out of this check, the first
+            # thing it has ever done on the `as_of` path.
+            retracted_clause = (
+                ""
+                if include_history
+                else (
+                    " AND (status != 'retracted' OR EXISTS ("
+                    "SELECT 1 FROM assertion_event ae"
+                    " WHERE ae.assertion_id = assertion.id"
+                    " AND ae.action = 'retracted' AND ae.at > ?"
+                    "))"
+                )
+            )
             match_clause = (
                 " AND asserted_at <= ?"
                 " AND (valid_from IS NULL OR valid_from <= ?)"
                 " AND (valid_to IS NULL OR valid_to > ?)"
                 f"{flagged_clause}"
+                f"{retracted_clause}"
             )
             match_params = [t_iso, t_iso, t_iso]
+            if not include_history:
+                match_params.append(t_iso)
         else:
             # Current-state: 'active' only by default;
             # .include_flagged()/.include_history() widen the set (KI-081).
@@ -2140,12 +2166,28 @@ class SQLiteBackend:
             # entities_where()'s identical comment for why bandit's B608
             # heuristic doesn't fire on this shape at all).
             flagged_clause = "" if include_flagged else " AND a.status != 'flagged'"
+            # ADR-0049 (KI-095): same retraction-aware exclusion
+            # entities_where() has — see its comment for the full
+            # reasoning. Two-hardcoded-literals shape, no #nosec needed.
+            retracted_clause = (
+                ""
+                if include_history
+                else (
+                    " AND (a.status != 'retracted' OR EXISTS ("
+                    "SELECT 1 FROM assertion_event ae"
+                    " WHERE ae.assertion_id = a.id"
+                    " AND ae.action = 'retracted' AND ae.at > ?"
+                    "))"
+                )
+            )
             query += (
                 " AND a.asserted_at <= ?"
                 " AND (a.valid_from IS NULL OR a.valid_from <= ?)"
-                " AND (a.valid_to IS NULL OR a.valid_to > ?)" + flagged_clause
+                " AND (a.valid_to IS NULL OR a.valid_to > ?)" + flagged_clause + retracted_clause
             )
             params.extend([t_iso, t_iso, t_iso])
+            if not include_history:
+                params.append(t_iso)
         else:
             status_params = ["active"]
             if include_flagged:
@@ -2207,12 +2249,28 @@ class SQLiteBackend:
             # entities_where()'s identical comment for why bandit's B608
             # heuristic doesn't fire on this shape at all).
             flagged_clause = "" if include_flagged else " AND a.status != 'flagged'"
+            # ADR-0049 (KI-095): same retraction-aware exclusion
+            # entities_where() has — see its comment for the full
+            # reasoning. Two-hardcoded-literals shape, no #nosec needed.
+            retracted_clause = (
+                ""
+                if include_history
+                else (
+                    " AND (a.status != 'retracted' OR EXISTS ("
+                    "SELECT 1 FROM assertion_event ae"
+                    " WHERE ae.assertion_id = a.id"
+                    " AND ae.action = 'retracted' AND ae.at > ?"
+                    "))"
+                )
+            )
             query += (
                 " AND a.asserted_at <= ?"
                 " AND (a.valid_from IS NULL OR a.valid_from <= ?)"
-                " AND (a.valid_to IS NULL OR a.valid_to > ?)" + flagged_clause
+                " AND (a.valid_to IS NULL OR a.valid_to > ?)" + flagged_clause + retracted_clause
             )
             params.extend([t_iso, t_iso, t_iso])
+            if not include_history:
+                params.append(t_iso)
         else:
             status_params = ["active"]
             if include_flagged:
