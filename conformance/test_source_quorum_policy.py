@@ -268,10 +268,18 @@ def test_retracted_assertion_with_explicit_valid_to_does_not_corroborate(
     open-ended window in the test above), so only `assertions()`'s own
     retraction-event-aware exclusion — not the validity window — keeps it
     from corroborating a later proposal. Verified by hand before writing
-    this test: reverting that exclusion flips the decision below from
-    RequireReview to AutoAccept, i.e. a retracted assertion would silently
-    count toward quorum."""
-    kb = make_kb(FixedClock(T0), FixedIdProvider(["e-1", "a-seed", "retract-prop", "prop-1"]))
+    this test: reverting that exclusion changes what the second proposal
+    below auto-accepts into, a retracted assertion silently counting
+    toward quorum — the mutation manifests as a `StorageError` (a spare id
+    the fixed provider held for a non-existent case) rather than a clean
+    decision-type mismatch, since the auto-accept path this opens draws an
+    id the `RequireReview` path never needed; asserted on the decision
+    itself below, not on the exception, since a future unrelated change
+    to id consumption on the accept path shouldn't make this test's
+    failure mode this specific."""
+    kb = make_kb(
+        FixedClock(T0), FixedIdProvider(["e-1", "a-seed", "retract-prop", "prop-1", "spare-1"])
+    )
     kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
     entity = kb.create_entity("Person", author=AUTHOR)
     seed = kb.assert_literal(

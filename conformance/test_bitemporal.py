@@ -7,8 +7,19 @@ Two time dimensions:
 An assertion is visible at time t iff:
   valid_from <= t < (valid_to or ∞)  AND  asserted_at <= t
 
+This is the full rule for an assertion that has never changed status. Two
+statuses add a further exclusion on top of it (ADR-0049, KI-095's own
+Update to this file's own retraction claims): `flagged` (reconstructed
+point-in-time from the event log, `include_flagged` opts back in) and, for
+`retracted` specifically, once its own retraction event's assertion-time
+has passed (`include_history`/no opt-out, depending on the query path —
+see `TestAsOfRetractionAndFlagging` below). `superseded` needs no such
+exclusion: its `valid_to` closure already encodes the real-world end point,
+so the plain window check above already handles it correctly.
+
 All tests use injected clocks and IDs. Property tests verify reconstruction
-against the theoretical filter using Hypothesis.
+against the theoretical filter using Hypothesis — scoped to assertions that
+never change status, where the filter above is exact.
 """
 
 from __future__ import annotations
@@ -252,8 +263,14 @@ class TestAsOfSupersession:
 
 
 class TestAsOfRetractionAndFlagging:
-    """Retraction closes valid_to (SPEC §5); flagged assertions are excluded
-    from as_of by default, same as default (non-as_of) queries (SPEC §10.3).
+    """Retraction closes an *open-ended* valid_to (SPEC §5) — but, per
+    ADR-0049 (KI-095), not one already set explicitly to a later date; the
+    `test_retract_with_explicit_future_valid_to_*` vectors below exist
+    precisely because that case relies on a second, independent mechanism
+    (the retraction event's own assertion-time), not the window closure
+    this docstring used to claim covers every case. Flagged assertions are
+    excluded from as_of by default, same as default (non-as_of) queries
+    (SPEC §10.3).
     """
 
     def test_retract_visible_as_of_before_retraction(self, make_kb: KbFactory) -> None:
