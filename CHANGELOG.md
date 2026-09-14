@@ -522,6 +522,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- `.as_of(t)` no longer wrongly includes a retracted assertion once its own retraction has become
+  known (closes KI-095, ADR-0049, found reviewing KI-081) — SPEC §11.2's "excluded by default" was
+  unmet on the `as_of` path: `_retraction_valid_to()` deliberately leaves an already-set `valid_to`
+  untouched at retraction, so an assertion asserted with an explicit far-future end date kept
+  matching `.as_of(t)` for any `t` its stale window still covered, with `.include_history()`'s
+  documented `as_of` no-op leaving no opt-out either. Fix is read-side only, no schema change:
+  `entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()`'s `as_of_time`
+  branch (both backends) now also excludes a `retracted` assertion once its own retraction event's
+  timestamp is `<=` the queried instant — reusing the timestamp `_record_assertion_event()` already
+  writes exactly once per assertion (KI-051), never previously consulted by any bitemporal query
+  path. `.include_history()` becomes the opt-out, the first thing it has ever done on the `as_of`
+  path — see ADR-0049 for the full rationale and the rejected alternative (closing `valid_to` to
+  the retraction instant at write time, which would have permanently destroyed the originally
+  asserted end date). **Filed separately, found while building this fix:** KI-097 — the same
+  current-status-vs-point-in-time gap affects `flagged`/`reactivated` reconstruction on the same
+  three methods, needing a distinct fix.
 - `Ontology.create_entity()` now wraps its natural-key uniqueness check and the `put_entity` it
   guards in one `transaction()` block (closes KI-092, filed while fixing KI-084) — closing the last
   read-then-write path that could hit the raw `UNIQUE` constraint (a redacted `StorageError`, the
