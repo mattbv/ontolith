@@ -532,12 +532,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   branch (both backends) now also excludes a `retracted` assertion once its own retraction event's
   timestamp is `<=` the queried instant — reusing the timestamp `_record_assertion_event()` already
   writes exactly once per assertion (KI-051), never previously consulted by any bitemporal query
-  path. `.include_history()` becomes the opt-out, the first thing it has ever done on the `as_of`
-  path — see ADR-0049 for the full rationale and the rejected alternative (closing `valid_to` to
-  the retraction instant at write time, which would have permanently destroyed the originally
-  asserted end date). **Filed separately, found while building this fix:** KI-097 — the same
-  current-status-vs-point-in-time gap affects `flagged`/`reactivated` reconstruction on the same
-  three methods, needing a distinct fix.
+  path. `StorageBackend.assertions()` (both backends) gets the identical, unconditional exclusion —
+  a distinct bitemporal query path with its own governance-visible impact, since `SourceQuorum`
+  evaluates `kb_view.assertions(...)` during policy decisions. `.include_history()` becomes the
+  opt-out on the `QueryBuilder`-facing trio, the first thing it has ever done on the `as_of` path
+  (`assertions()` has no equivalent opt-out today) — see ADR-0049 for the full rationale and the
+  rejected alternative (closing `valid_to` to the retraction instant at write time, which would
+  have permanently destroyed the originally asserted end date). **Existing `as_of` callers may see
+  smaller result sets** for any query that previously (incorrectly) surfaced a retracted value.
+  **Filed separately, found while building this fix:** KI-097 — the same current-status-vs-
+  point-in-time gap affects `flagged`/`reactivated` reconstruction on the `QueryBuilder`-facing
+  trio specifically (`assertions()` already reconstructs that pair correctly).
 - `Ontology.create_entity()` now wraps its natural-key uniqueness check and the `put_entity` it
   guards in one `transaction()` block (closes KI-092, filed while fixing KI-084) — closing the last
   read-then-write path that could hit the raw `UNIQUE` constraint (a redacted `StorageError`, the

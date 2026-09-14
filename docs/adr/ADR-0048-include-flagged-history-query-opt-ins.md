@@ -60,19 +60,21 @@ is narrower than "no effect without `.where()`": since KI-093, `.min_confidence(
 `.where()` was called, so `kb.query(Person).min_confidence(0.5).include_history()` *does* differ
 from `kb.query(Person).min_confidence(0.5)` even with no `.where()` in sight.
 
-**`.include_history()` is a no-op under `.as_of(t)`.** The `as_of` branch never restricts matches
-to `active` in the first place — it excludes only `flagged` (gated behind `.include_flagged()`,
-which *does* still apply under `.as_of()` — a flagged assertion has an open window, and the
-`as_of` path has honored `entities_where(include_flagged=...)` since before this ADR) — so a
-`superseded` value is already visible there whenever `t` predates its supersession, with no
-opt-in needed.
+**`.include_history()` is a no-op under `.as_of(t)` for `superseded` values.** The `as_of` branch
+never restricts matches to `active` in the first place — it excludes only `flagged` (gated behind
+`.include_flagged()`, which *does* still apply under `.as_of()` — a flagged assertion has an open
+window, and the `as_of` path has honored `entities_where(include_flagged=...)` since before this
+ADR) — so a `superseded` value is already visible there whenever `t` predates its supersession,
+with no opt-in needed.
 
-This leaves one `as_of` gap this ADR does **not** fix: a `retract()` does not always narrow an
+This left one `as_of` gap this ADR did **not** fix: a `retract()` does not always narrow an
 already-open validity window (`_retraction_valid_to`), so a retracted assertion with a future
-`valid_to` still matches an `.as_of(t)` snapshot for `t` after the retraction, with no way to
-exclude it — SPEC §11.2's "retracted excluded by default" is unmet on that path. Pre-existing (the
-`as_of` branch has always been window-based, not status-based); filed as KI-095, not addressed
-here.
+`valid_to` still matched an `.as_of(t)` snapshot for `t` after the retraction, with no way to
+exclude it — SPEC §11.2's "retracted excluded by default" was unmet on that path. Pre-existing (the
+`as_of` branch has always been window-based, not status-based); filed as KI-095, **now closed by
+ADR-0049** — see this ADR's own Update section below. `.include_history()` is no longer
+unconditionally a no-op under `.as_of()`: it is still one for `superseded`, but for `retracted` it
+now opts back into ADR-0049's exclusion.
 
 **Implementation.** `entities_where()` gains an `include_history: bool = False` parameter on the
 `StorageBackend` port and both adapters. The current-state branch replaces its hard-coded
@@ -113,8 +115,9 @@ methods, and threads both through to `entities_where()` from `_base_candidates()
   decision.
 - `.include_flagged()` / `.include_history()` silently do nothing on a query with neither a
   `.where()` filter nor a confidence/trust floor, and `.include_history()` specifically is also a
-  no-op under `.as_of()`. Documented on each method; not surfaced as a warning (consistent with the
-  builder's other no-op combinations, e.g. `.limit()` larger than the result set).
+  no-op under `.as_of()` for `superseded` (though not, since ADR-0049, for `retracted`). Documented
+  on each method; not surfaced as a warning (consistent with the builder's other no-op combinations,
+  e.g. `.limit()` larger than the result set).
 
 ## Alternatives Considered
 
@@ -145,7 +148,7 @@ the identical `include_flagged`/`include_history` parameters `entities_where()` 
 their current-state branch was widened the same way: `a.status = 'active'` became a parameter-bound
 `a.status IN (?, …)` built from the same status list. Their `as_of` branches gained the identical
 `flagged_clause` treatment `entities_where()`'s `as_of` branch already had (`include_flagged`
-applies, `include_history` is a no-op — same reasoning). `QueryBuilder._apply_confidence_trust_filters`
+applies, `include_history` is a no-op for `superseded` — same reasoning; later narrowed further by ADR-0049/KI-095 for `retracted` specifically). `QueryBuilder._apply_confidence_trust_filters`
 threads `self._include_flagged`/`self._include_history` into both calls. No semantics question to
 resolve beyond "match the existing widener": an entity that *historically* had a
 ≥threshold-confidence (or ≥threshold-trust) assertion now qualifies under `.include_history()`,

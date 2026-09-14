@@ -56,6 +56,15 @@ Concretely, `entities_where()`'s (and `entities_meeting_confidence()`/`entities_
 — KI-093 established these three move together) `as_of_time` branch gains, alongside the existing
 `flagged_clause`:
 
+`StorageBackend.assertions()` — a distinct, lower-level bitemporal query path this ADR's own KI
+text named alongside `entities_where()` ("and the other bitemporal query paths") — gets the
+identical clause, unconditionally (it has no `include_history`-shaped opt-out today, unlike the
+`QueryBuilder`-facing trio, since its `status` parameter is already ignored entirely once
+`as_of_time` is set). This matters beyond direct callers: `govern/policy.py`'s `SourceQuorum`
+evaluates `kb_view.assertions(...)` on an `AsOfView`, so an un-narrowed retracted assertion could
+silently contribute a distinct `source` to quorum counting during policy evaluation — a governance
+correctness issue, not just a read-path one.
+
 ```sql
 AND (status != 'retracted' OR EXISTS (
     SELECT 1 FROM assertion_event ae
@@ -107,23 +116,49 @@ only.
 
 ## Consequences
 
-- **Behavior change, not a signature change:** `kb.as_of(t).query(...)` results for `t` after a
-  retraction's own assertion-time can now exclude an entity they previously included. No public
-  method signature changes; `StorageBackend.entities_where()` /
-  `entities_meeting_confidence()`/`entities_meeting_trust()` keep their existing parameters
-  (`include_flagged`, `include_history`) — only what `include_history` *does* under `as_of` changes,
-  from "nothing" to "opts back into the pre-ADR behavior."
-- **A new correlated `EXISTS` subquery on the `as_of` path**, scoped by the existing
-  `idx_assertion_event_assertion` index (on `assertion_event.assertion_id`) — only evaluated per
-  candidate row already matching every other `as_of` predicate, and only meaningfully hit for rows
-  with `status = 'retracted'` (SQLite/DuckDB can both short-circuit the `OR` on the cheaper
-  `status != 'retracted'` check for the common case first).
-- **`.include_history()`'s docstring, `entities_where()`'s and
-  `entities_meeting_confidence()`/`entities_meeting_trust()`'s docstrings, and every "documented
-  no-op under `as_of`" claim from KI-081/093/094/096 needed updating** to the narrower, now-accurate
-  claim.
-- **This closes KI-095's SPEC §11.2 compliance gap** on the `as_of` path without touching
-  `_retraction_valid_to()` or the write-time retraction path at all — the fix is entirely read-side.
+- **Behavior change, not a signature change:** `kb.as_of(t).query(...)` results, and
+  `kb.as_of(t).assertions(...)` results, for `t` after a retraction's own assertion-time can now
+  exclude an entity/assertion they previously included. No public method signature changes;
+  `StorageBackend.entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()` keep
+  their existing parameters (`include_flagged`, `include_history`) — only what `include_history`
+  *does* under `as_of` changes, from "nothing" to "opts back into the pre-ADR behavior."
+  `assertions()` gains no new parameter at all: the exclusion is unconditional there, since that
+  method has no equivalent opt-out today (a caller wanting a retracted assertion back under
+  `as_of` has no way to ask, on this method specifically — a known, accepted asymmetry, not
+  something this ADR adds a parameter to close).
+- **A new correlated `EXISTS` subquery on the `as_of` path** in all four methods, scoped by the
+  existing `idx_assertion_event_assertion` index (on `assertion_event.assertion_id`) — only
+  evaluated per candidate row already matching every other `as_of` predicate. Whether SQLite/DuckDB
+  actually short-circuit the `OR` on the cheaper `status != 'retracted'` check first is a query-planner
+  detail neither engine documents as guaranteed — expected, not proven, and not load-bearing for
+  correctness either way.
+- **`.include_history()`'s docstring, `entities_where()`'s/`entities_meeting_confidence()`'s/
+  `entities_meeting_trust()`'s/`assertions()`'s docstrings, `QueryBuilder.min_confidence()`'s and
+  `.trust_at_least()`'s docstrings, and every "documented no-op under `as_of`" claim from
+  KI-081/093/094/096 (including ADR-0048's own body, not just its cross-reference index) needed
+  updating** to the narrower, now-accurate claim.
+- **This closes KI-095's SPEC §11.2 compliance gap** on every `as_of`-capable read path this
+  session could find (`entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()`
+  via `QueryBuilder`, and `assertions()` directly) without touching `_retraction_valid_to()` or the
+  write-time retraction path at all — the fix is entirely read-side. **Filed separately, not
+  closed here:** KI-097 (`flagged`/`reactivated` reconstructed from current status rather than
+  point-in-time on the same three `QueryBuilder`-facing methods — `assertions()` already handles
+  that pair correctly via its own pre-existing event-log reconstruction, which this ADR's fix
+  mirrors for the one-way `retracted` case).
+- **Fail-closed on a missing event:** an assertion with `status = 'retracted'` but no matching
+  `assertion_event` row (reachable only via a direct `put_assertion()` at the port level, or a
+  pre-existing database written before this fix shipped — no migration was needed, since
+  `assertion_event` already existed) is invisible under `as_of` at *every* `t`, not just after the
+  (unknown) retraction. This is the safer of the two possible defaults and is deliberate, not an
+  oversight — called out here since neither the code comments nor an earlier draft of this ADR
+  mentioned it.
+- **"Latest retraction wins" is untested territory the code doesn't need to handle**: KI-051
+  guarantees at most one `retracted` event per assertion (retraction is a one-way terminal
+  transition — verified against all four call sites that set `status = 'retracted'`), so the
+  `EXISTS (... AND ae.at > ?)` clause never has more than one candidate row to find. If that
+  invariant were ever relaxed, this clause's semantics would become "excluded once *any* retraction
+  event is known" regardless of ordering — worth a comment at the invariant's own definition site if
+  it ever changes, not a defense added speculatively here.
 
 ## Alternatives Considered
 
