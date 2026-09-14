@@ -1448,6 +1448,62 @@ class TestDuckDBBackend:
         )
         assert no_match == []
 
+    def test_entities_where_as_of_excludes_retracted_once_known(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """ADR-0049 (KI-095): entities_where()'s as_of_time branch must
+        additionally exclude a retracted assertion once its own retraction
+        event's timestamp is <= as_of_time, not rely on the (possibly
+        un-narrowed) validity window alone. SQLite's own port-level suite
+        has this same test; DuckDB's was missing it."""
+        backend.put_entity(
+            Entity(
+                id="p1",
+                namespace="test-ns",
+                concept="Person",
+                created_at=datetime(2025, 1, 1, tzinfo=UTC),
+                created_by="alice@test.com",
+            )
+        )
+        backend.put_assertion(
+            Assertion(
+                id="a1",
+                namespace="test-ns",
+                subject="p1",
+                predicate="Person.name",
+                value_kind="literal",
+                value_type="Text",
+                value="Ada",
+                author="alice@test.com",
+                asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
+                valid_from=datetime(2025, 1, 1, tzinfo=UTC),
+                status="retracted",
+            )
+        )
+        backend.put_assertion_event(
+            AssertionEvent(
+                id="ev1",
+                assertion_id="a1",
+                actor="alice@test.com",
+                action="retracted",
+                at=datetime(2025, 3, 1, tzinfo=UTC),
+            )
+        )
+
+        def match(t: datetime, **kw: bool) -> list[str]:
+            return [
+                e.id
+                for e in backend.entities_where(
+                    "test-ns", "Person", [("Person.name", "eq", "Ada")], as_of_time=t, **kw
+                )
+            ]
+
+        before_retraction = datetime(2025, 2, 1, tzinfo=UTC)
+        after_retraction = datetime(2025, 6, 1, tzinfo=UTC)
+        assert match(before_retraction) == ["p1"]
+        assert match(after_retraction) == []
+        assert match(after_retraction, include_history=True) == ["p1"]
+
     def test_contradiction_roundtrip_and_resolution(self, backend: DuckDBBackend) -> None:
         """Contradiction can be persisted, extended, resolved, and re-fetched."""
         from ontolith.govern.contradiction import Contradiction
@@ -2089,6 +2145,34 @@ class TestCandidateIdsNarrowing:
         t = datetime(2025, 6, 1, tzinfo=UTC)
 
         assert backend.entities_meeting_trust("test-ns", "Person", 0, as_of_time=t) == set()
+
+    def test_entities_meeting_trust_as_of_still_visible_before_retraction(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """The exclusion is assertion-time-scoped, not blanket — the
+        entities_meeting_trust() counterpart to the confidence version
+        above, which the port-level suite was missing."""
+        self._seed_retracted_with_window(
+            backend, "e-retr", retracted_at=datetime(2025, 3, 1, tzinfo=UTC)
+        )
+        t = datetime(2025, 2, 1, tzinfo=UTC)  # before the retraction
+
+        assert backend.entities_meeting_trust("test-ns", "Person", 0, as_of_time=t) == {"e-retr"}
+
+    def test_entities_meeting_confidence_as_of_excludes_exactly_at_retraction_boundary(
+        self, backend: DuckDBBackend
+    ) -> None:
+        """ADR-0049 states an inclusive-exclusive boundary: t exactly equal
+        to the retraction event's own `at` must already exclude, matching
+        how `asserted_at <= t` makes an assertion visible starting exactly
+        at its own asserted_at (not strictly after)."""
+        retracted_at = datetime(2025, 3, 1, tzinfo=UTC)
+        self._seed_retracted_with_window(backend, "e-retr", retracted_at=retracted_at)
+
+        assert (
+            backend.entities_meeting_confidence("test-ns", "Person", 0.5, as_of_time=retracted_at)
+            == set()
+        )
 
     def test_entities_meeting_trust_as_of_include_history_opts_into_retracted(
         self, backend: DuckDBBackend

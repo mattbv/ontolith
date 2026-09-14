@@ -288,6 +288,50 @@ class TestAsOfRetractionAndFlagging:
         visible = kb.as_of(after_retraction).assertions(subject=entity.id, predicate="Person.name")
         assert visible == []
 
+    def test_retract_with_explicit_future_valid_to_not_visible_once_known(
+        self, make_kb: KbFactory
+    ) -> None:
+        """ADR-0049 (KI-095): unlike the test above, this assertion has an
+        explicit, far-future valid_to — the case _retraction_valid_to()
+        deliberately leaves un-narrowed, so the window alone can't tell
+        this apart from a still-active fact. assertions() must additionally
+        exclude it once its own retraction event's timestamp is known."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        a = kb.assert_literal(
+            entity.id, "Person.name", "Ada", "Text", AUTHOR, valid_to=T2 + timedelta(days=3650)
+        )
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)
+        kb.retract(a.id, AUTHOR)
+        after_retraction = clock.now()
+
+        visible = kb.as_of(after_retraction).assertions(subject=entity.id, predicate="Person.name")
+        assert visible == []
+
+    def test_retract_with_explicit_future_valid_to_still_visible_before_retraction(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The exclusion is assertion-time-scoped, not blanket: a t before
+        the retraction event's own timestamp must still show the value."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        a = kb.assert_literal(
+            entity.id, "Person.name", "Ada", "Text", AUTHOR, valid_to=T2 + timedelta(days=3650)
+        )
+        before_retraction = kb.clock.now()
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)
+        kb.retract(a.id, AUTHOR)
+
+        visible = kb.as_of(before_retraction).assertions(subject=entity.id, predicate="Person.name")
+        assert len(visible) == 1
+        assert visible[0].id == a.id
+
     def test_flagged_excluded_from_as_of_by_default(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)
         entity = kb.create_entity("Person", author=AUTHOR)

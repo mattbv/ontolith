@@ -2063,6 +2063,34 @@ class TestCandidateIdsNarrowing:
 
         assert backend.entities_meeting_trust("test-ns", "Person", 0, as_of_time=t) == set()
 
+    def test_entities_meeting_trust_as_of_still_visible_before_retraction(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """The exclusion is assertion-time-scoped, not blanket — the
+        entities_meeting_trust() counterpart to the confidence version
+        above, which the port-level suite was missing."""
+        self._seed_retracted_with_window(
+            backend, "e-retr", retracted_at=datetime(2025, 3, 1, tzinfo=UTC)
+        )
+        t = datetime(2025, 2, 1, tzinfo=UTC)  # before the retraction
+
+        assert backend.entities_meeting_trust("test-ns", "Person", 0, as_of_time=t) == {"e-retr"}
+
+    def test_entities_meeting_confidence_as_of_excludes_exactly_at_retraction_boundary(
+        self, backend: SQLiteBackend
+    ) -> None:
+        """ADR-0049 states an inclusive-exclusive boundary: t exactly equal
+        to the retraction event's own `at` must already exclude, matching
+        how `asserted_at <= t` makes an assertion visible starting exactly
+        at its own asserted_at (not strictly after)."""
+        retracted_at = datetime(2025, 3, 1, tzinfo=UTC)
+        self._seed_retracted_with_window(backend, "e-retr", retracted_at=retracted_at)
+
+        assert (
+            backend.entities_meeting_confidence("test-ns", "Person", 0.5, as_of_time=retracted_at)
+            == set()
+        )
+
     def test_entities_meeting_trust_as_of_include_history_opts_into_retracted(
         self, backend: SQLiteBackend
     ) -> None:

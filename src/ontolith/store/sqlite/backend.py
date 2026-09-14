@@ -1279,7 +1279,10 @@ class SQLiteBackend:
             include_flagged: When as_of_time is set, whether to include
                 'flagged' assertions (excluded by default — a flagged
                 assertion is disputed, not confirmed-valid; pass True for
-                explicit audit/history views)
+                explicit audit/history views). A 'retracted' assertion is
+                always excluded once its own retraction event's timestamp
+                is <= as_of_time (ADR-0049, KI-095) — unconditional, no
+                opt-out parameter exists for this yet.
 
         Returns:
             List of matching assertions
@@ -1328,6 +1331,25 @@ class SQLiteBackend:
                     'reactivated'
                 ) != 'flagged'"""
                 params.append(t_iso)
+            # ADR-0049 (KI-095): same retraction-aware exclusion the
+            # entities_where()/entities_meeting_confidence()/
+            # entities_meeting_trust() family has — see entities_where()'s
+            # comment for the full reasoning (KI-051 guarantees at most one
+            # 'retracted' event per assertion, so unlike flagged/reactivated
+            # above this needs no ORDER BY tiebreak: retraction is a
+            # one-way terminal transition, never followed by another event).
+            # Unconditional, not gated behind a parameter: this method has
+            # no include_history-style opt-out today (status itself is
+            # already ignored once as_of_time is set), so there is nothing
+            # for a flag to widen back into yet.
+            query += (
+                " AND (status != 'retracted' OR EXISTS ("
+                "SELECT 1 FROM assertion_event ae"
+                " WHERE ae.assertion_id = assertion.id"
+                " AND ae.action = 'retracted' AND ae.at > ?"
+                "))"
+            )
+            params.append(t_iso)
         elif status is not None:
             query += " AND status = ?"
             params.append(status)

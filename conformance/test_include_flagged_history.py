@@ -203,6 +203,58 @@ class TestAsOfRetraction:
         results = kb.as_of(t).query("Person").where(name="Ada").include_history().all()
         assert {r.id for r in results} == {person.id}
 
+    def test_include_flagged_and_include_history_combine_under_as_of_retraction(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The two opt-ins are independent (KI-081): combining
+        .include_flagged() with .include_history() must still opt into a
+        retracted value under .as_of(), not silently drop the retraction
+        opt-out because a different flag was also set."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        person = kb.create_entity("Person", author=AUTHOR)
+        a = kb.assert_literal(
+            person.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            AUTHOR,
+            valid_to=T0 + timedelta(days=3650),
+        )
+        clock.advance(days=10)
+        kb.retract(a.id, AUTHOR)
+
+        t = T0 + timedelta(days=365)
+        results = (
+            kb.as_of(t).query("Person").where(name="Ada").include_flagged().include_history().all()
+        )
+        assert {r.id for r in results} == {person.id}
+
+    def test_excludes_exactly_at_the_retraction_instant(self, make_kb: KbFactory) -> None:
+        """ADR-0049 states an inclusive-exclusive boundary: as_of(t) for t
+        exactly equal to the retraction event's own assertion-time must
+        already exclude — mirroring how asserted_at <= t makes an
+        assertion visible starting exactly at its own asserted_at, not
+        strictly after."""
+        kb = _kb(make_kb)
+        person = kb.create_entity("Person", author=AUTHOR)
+        a = kb.assert_literal(
+            person.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            AUTHOR,
+            valid_to=T0 + timedelta(days=3650),
+        )
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=10)
+        kb.retract(a.id, AUTHOR)
+        retraction_instant = clock.now()
+
+        assert kb.as_of(retraction_instant).query("Person").where(name="Ada").all() == []
+
 
 class TestBothFlags:
     def test_both_together_match_every_status(self, make_kb: KbFactory) -> None:
