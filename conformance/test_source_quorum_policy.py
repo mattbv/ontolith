@@ -14,7 +14,7 @@ facts can corroborate a later proposal.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from conformance.conftest import KbFactory
 from ontolith import Entity, Ontology
@@ -230,16 +230,59 @@ def test_different_subject_does_not_corroborate(make_kb: KbFactory) -> None:
 
 
 def test_retracted_assertion_does_not_corroborate(make_kb: KbFactory) -> None:
-    """A retracted assertion's validity window closes at the retraction
-    time, so it's excluded from the AsOfView snapshot SourceQuorum reads -
-    it never counts toward quorum. Uses the default ThresholdPolicy to
-    perform the retraction (SourceQuorum always requires review on
-    retractions, so it can never itself accept one), then swaps to
-    SourceQuorum for the corroboration check."""
+    """A retracted assertion must never count toward quorum. Two mechanisms
+    now cooperate to guarantee this (ADR-0049, KI-095): an open-ended
+    validity window (this test's shape — no explicit `valid_to`) gets
+    closed at the retraction time by `_retraction_valid_to()`, so the
+    window check alone already excludes it from the AsOfView snapshot
+    SourceQuorum reads; an assertion with an explicit, later `valid_to`
+    (see `test_retracted_assertion_with_explicit_valid_to_does_not_corroborate`
+    below) relies on the second mechanism instead — `assertions()`'s own
+    retraction-event-aware exclusion, since its window alone would not have
+    excluded it. Uses the default ThresholdPolicy to perform the retraction
+    (SourceQuorum always requires review on retractions, so it can never
+    itself accept one), then swaps to SourceQuorum for the corroboration
+    check."""
     kb = make_kb(FixedClock(T0), FixedIdProvider(["e-1", "a-seed", "retract-prop", "prop-1"]))
     kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
     entity = kb.create_entity("Person", author=AUTHOR)
     seed = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR, source="source-a")
+    _, retract_decision = kb.retract(seed.id, AUTHOR)
+    assert isinstance(retract_decision, AutoAccept)
+
+    kb.policy = SourceQuorum(threshold=2)
+    proposal, decision = kb.propose(
+        entity.id, "Person.name", "Ada", "Text", AUTHOR, source="source-b"
+    )
+
+    assert isinstance(decision, RequireReview)
+    assert "1/2" in decision.reason
+
+
+def test_retracted_assertion_with_explicit_valid_to_does_not_corroborate(
+    make_kb: KbFactory,
+) -> None:
+    """ADR-0049 (KI-095)'s actual governance-impact case: an assertion
+    asserted with an explicit, far-future `valid_to` has a window
+    `_retraction_valid_to()` never narrows at retraction (unlike the
+    open-ended window in the test above), so only `assertions()`'s own
+    retraction-event-aware exclusion — not the validity window — keeps it
+    from corroborating a later proposal. Verified by hand before writing
+    this test: reverting that exclusion flips the decision below from
+    RequireReview to AutoAccept, i.e. a retracted assertion would silently
+    count toward quorum."""
+    kb = make_kb(FixedClock(T0), FixedIdProvider(["e-1", "a-seed", "retract-prop", "prop-1"]))
+    kb.create_principal(AUTHOR, kind="human", auth_method="oidc", default_capability="write")
+    entity = kb.create_entity("Person", author=AUTHOR)
+    seed = kb.assert_literal(
+        entity.id,
+        "Person.name",
+        "Ada",
+        "Text",
+        AUTHOR,
+        source="source-a",
+        valid_to=T0 + timedelta(days=3650),
+    )
     _, retract_decision = kb.retract(seed.id, AUTHOR)
     assert isinstance(retract_decision, AutoAccept)
 
