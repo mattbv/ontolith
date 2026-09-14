@@ -381,7 +381,7 @@ amendment).
 - Results from symbolic and semantic paths **MUST** be combinable; ranking strategy is implementation-defined but **MUST** expose `confidence`, `recency`, and `trust` as signals.
 
 ### 11.4 Temporal queries (`as_of`)
-`kb.as_of(t)` returns a read-only view where an assertion is visible iff `valid_from ≤ t < (valid_to or ∞)` and it was asserted by `t`. Schema is resolved to the `schema_version` effective at `t`.
+`kb.as_of(t)` returns a read-only view where an assertion is visible iff `valid_from ≤ t < (valid_to or ∞)` and it was asserted by `t` — the full rule for an assertion that never changed status. §11.2's status exclusions still apply under `as_of`: a `flagged` assertion is excluded as of whenever the dispute existed (point-in-time, not current status), opt-in via `.include_flagged()`; a `retracted` assertion is additionally excluded once its own retraction has itself become known (i.e. `t` is at or after the retraction's own assertion-time) even if its validity window still nominally covers `t`, opt-in via `.include_history()` (ADR-0049). A `superseded` assertion needs no such exclusion — its `valid_to` closure already encodes the real-world end point the window check above handles directly. Schema is resolved to the `schema_version` effective at `t`.
 
 ---
 

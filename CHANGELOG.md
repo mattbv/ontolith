@@ -46,7 +46,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are independent. Match-set wideners only — `.all()` still returns `list[Entity]`, no per-entity
   timeline (that stays `kb.assertions(status=None)` / `kb.provenance()`). No effect on a query with
   neither a `.where()` filter nor a confidence/trust floor; `.include_history()` is additionally a
-  no-op under `.as_of()` (`.include_flagged()` is not). `StorageBackend.entities_where()` gains
+  no-op under `.as_of()` for `superseded` (since ADR-0049/KI-095, not for `retracted` — see that
+  entry below) (`.include_flagged()` is not a no-op under `.as_of()` at all). `StorageBackend.entities_where()` gains
   `include_history: bool`; each adapter's current-state branch's hard-coded `status = 'active'`
   becomes a parameter-bound `status IN (…)`. `_base_candidates()` always passes both flags through,
   so a third-party `StorageBackend` still on the old signature raises `TypeError` on any `.where()`
