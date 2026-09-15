@@ -2020,10 +2020,10 @@ A third review round found that second round's own docstring fix was itself wron
 
 ---
 
-## KI-097 — `entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()`'s `as_of` branch reconstructs `flagged` from current status, not point-in-time — unlike `assertions()` — found resolving KI-095
+## KI-097 — `entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()`'s `as_of` branch reconstructs `flagged` from current status, not point-in-time — unlike `assertions()` — found resolving KI-095 ✓ RESOLVED (Backlog)
 
 **Severity:** Bug — a `.where()`/`.min_confidence()`/`.trust_at_least()` query pinned to a time when an assertion *was* flagged can wrongly include it, if the contradiction has since been resolved
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §11.4 (`as_of` semantics — "reconstructs what we knew at time `t` about what was true at time `t`"), SPEC §10.3 (static contradictions)
 
 ### Description
@@ -2036,7 +2036,11 @@ This is the same class of gap ADR-0049 just fixed for `retracted` (current statu
 
 ### Fix
 
-Port `assertions()`'s event-log-based `flagged`-at-`t` reconstruction (or an equivalent EXISTS-based check, adapted for the two-way flagged/reactivated cycle rather than ADR-0049's one-way retracted case) into `entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()`'s `as_of_time` branches, on both backends — matching KI-093's established precedent that these three methods move together. Needs care around the cycle direction (a flagged-then-reactivated assertion should read as "flagged during [t1, t2), active from t2 on", not just "not currently flagged so always include"), unlike retraction's simpler one-way case — likely doesn't need its own ADR (this is applying an existing, already-decided reconstruction pattern to three more call sites, not a new bitemporal semantics decision), but should be scoped and reviewed carefully given the direction-dependent correctness.
+Ported `assertions()`'s event-log-based `flagged`-at-`t` reconstruction verbatim into `entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()`'s `as_of_time` branches, on both backends — matching KI-093's established precedent that these three methods move together. Same `COALESCE((SELECT ae.action FROM assertion_event ae WHERE ae.assertion_id = <row> AND ae.at <= ? AND ae.action IN ('flagged', 'reactivated') ORDER BY ae.at DESC, ae.id DESC LIMIT 1), 'reactivated') != 'flagged'` shape `assertions()` already used, correctly handling the two-way cycle direction (a flagged-then-reactivated assertion reads as "flagged during `[t1, t2)`, active from `t2` on") the same way `assertions()` already did — no new logic to design, this was purely a matter of the three `QueryBuilder`-facing methods never having picked up code that already existed one file over. No ADR needed, as anticipated.
+
+`include_flagged`'s docstring on all three methods (port + both adapters) updated to say so explicitly. Also corrected a stale docstring in `store/base.py`'s `entities_meeting_confidence()` that had described the *bug itself* as an accepted "One caveat" limitation ("a `status = 'flagged'` assertion... is excluded even at a `t` before it was flagged, unless `include_flagged` is set") — this KI is exactly what fixed that.
+
+New tests: `conformance/test_confidence_trust_filters.py::TestAsOfConfidenceTrust` gained `test_{min_confidence,trust_at_least}_as_of_before_dispute_still_qualifies` (the corrected half — a `t` before the dispute existed must still qualify) alongside the pre-existing `test_{min_confidence,trust_at_least}_as_of_excludes_flagged_assertion`, which were themselves restructured: they previously captured `t` *before* the disputing assertion was even written, which — the bug this KI fixes — is exactly the case that must NOT exclude; moved to capture `t` mid-dispute instead, the case that genuinely should exclude. `conformance/test_bitemporal.py::TestAsOfRetractionAndFlagging` gained `.query()`-level counterparts (`test_query_as_of_before_dispute_shows_predispute_value`, `test_query_as_of_mid_dispute_excludes_even_after_later_resolution`) to its pre-existing `assertions()`-level tests of the same two shapes — the class previously had zero `.query()`-path coverage for either, only the already-correct `assertions()` path. Two pre-existing port-level unit test fixtures (`_seed_flagged_with_window` in `test_sqlite_backend.py`/`test_duckdb_backend.py`) constructed a `status='flagged'` assertion via raw `put_assertion()` with no matching `assertion_event` row — broke once the fix started consulting the event log instead of the status column; fixed by adding the matching event, same shape the retraction fixtures already used. Mutation-tested on both backends: reverting each `flagged_clause` (all three methods) back to the current-status check fails exactly its own new "before dispute"/`.query()` tests, with zero interference elsewhere.
 
 ---
 
