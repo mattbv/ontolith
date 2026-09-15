@@ -480,7 +480,10 @@ class StorageBackend(Protocol):
                 (KI-097): reconstructed from the assertion_event log the
                 same way assertions() already does, so a query pinned to a
                 time when an assertion *was* disputed correctly excludes
-                it even after the dispute has since been resolved.
+                it even after the dispute has since been resolved — and,
+                the other direction, a time strictly before any dispute
+                existed still includes an otherwise-undisputed value, even
+                though the same assertion is flagged now.
             include_history: Whether to also match 'superseded' and
                 'retracted' assertions (KI-081). On the current-state path
                 this widens beyond 'active'. On the as_of_time path,
@@ -562,8 +565,8 @@ class StorageBackend(Protocol):
             concept: Concept to scope the scan to
             threshold: Minimum confidence, 0.0-1.0
             as_of_time: If set, evaluate against this point in time instead
-                of current state (KI-036) — see the flagged-status caveat
-                above
+                of current state (KI-036) — see the flagged-status
+                point-in-time reconstruction above
             candidate_ids: Optional narrowing hint (KI-037) — a backend may
                 use this to scope the scan below `(namespace, concept)`,
                 but is not required to
@@ -634,7 +637,8 @@ class StorageBackend(Protocol):
 
         `as_of_time` bitemporally scopes which *assertion* qualifies, the
         same way `entities_meeting_confidence` does (including its
-        flagged-status caveat) — but each individual principal's own
+        flagged-status point-in-time reconstruction, KI-097) — but each
+        individual principal's own
         `trust_level` (author's and, if delegated, `acting_as`'s) is always
         its current value, never a historical one (KI-036), and the `min()`
         this method now takes of the two (KI-047) inherits that same

@@ -2024,7 +2024,10 @@ class SQLiteBackend:
                 (KI-097): reconstructed from the assertion_event log the
                 same way assertions() already does, so a query pinned to a
                 time when an assertion *was* disputed correctly excludes
-                it even after the dispute has since been resolved.
+                it even after the dispute has since been resolved — and,
+                the other direction, a time strictly before any dispute
+                existed still includes an otherwise-undisputed value, even
+                though the same assertion is flagged now.
             include_history: Also match 'superseded'/'retracted' assertions
                 (KI-081). On the current-state path this widens the status
                 set beyond 'active'. On the as_of_time path, 'superseded' is
@@ -2057,6 +2060,16 @@ class SQLiteBackend:
             # COALESCE/tiebreak reasoning identical to assertions()'s own.
             # Interpolated piece is hardcoded SQL, no caller input — same
             # no-#nosec-needed reasoning as retracted_clause below.
+            # Fail-open on a missing event (COALESCE defaults to
+            # 'reactivated', i.e. "not flagged"): a status='flagged' row
+            # with no matching event — reachable only via a direct
+            # put_assertion() bypassing Ontology, or a pre-existing row
+            # from before assertion_event tracked this — is visible at
+            # every t. The opposite default from retracted_clause below
+            # (fail-closed, ADR-0049), but the correct one here: matches
+            # assertions()'s own identical COALESCE, and status='flagged'
+            # rows always carry a real 'flagged' event through every
+            # write path this codebase has (_apply_with_conflict_routing).
             flagged_clause = (
                 ""
                 if include_flagged

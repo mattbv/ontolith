@@ -10,8 +10,8 @@ An assertion is visible at time t iff:
 This is the full rule for an assertion that has never changed status. Two
 statuses add a further exclusion on top of it: `flagged` (reconstructed
 point-in-time from the event log on every `as_of`-capable read path —
-`assertions()` always did this; `entities_where()`/`entities_meeting_
-confidence()`/`entities_meeting_trust()` (the `QueryBuilder`-facing trio)
+`assertions()` always did this; the `QueryBuilder`-facing trio
+(`entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()`)
 only since KI-097 fixed their current-status-based version of this exact
 bug — `include_flagged` opts back in) and, for `retracted` specifically,
 once its own retraction event's assertion-time has passed (ADR-0049,
@@ -513,6 +513,41 @@ class TestAsOfRetractionAndFlagging:
         visible = kb.as_of(kb.clock.now()).assertions(subject=entity.id, predicate="Person.name")
         assert len(visible) == 1
         assert visible[0].id == winner.id
+
+    def test_query_as_of_after_same_instant_flag_and_resolve_shows_winner(
+        self, make_kb: KbFactory
+    ) -> None:
+        """KI-097: `.query()` counterpart to the `assertions()` regression
+        above, on all three `QueryBuilder`-facing surfaces that got the
+        ported reconstruction (`.where()`, `.min_confidence()`,
+        `.trust_at_least()`) — each has its own copy of the `ae.id DESC`
+        tiebreak, so each needs its own same-instant-flag-and-resolve
+        pin; a mutation dropping the tiebreak on any one of the three
+        survives the other two."""
+        kb = _kb(make_kb)
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR, confidence=0.9)
+        kb.assert_literal(
+            entity.id, "Person.name", "Ava", "Text", AUTHOR, confidence=0.9
+        )  # -> contradiction
+
+        flagged = kb.assertions(subject=entity.id, predicate="Person.name", status="flagged")
+        contradiction = kb.backend.get_open_contradiction("default", entity.id, "Person.name")
+        assert contradiction is not None
+        winner = flagged[0]
+
+        # No clock.advance() here - resolution happens at the same instant
+        # the flag did.
+        kb.resolve_contradiction(contradiction.id, winner.id, "carol@example.com")
+
+        t = kb.clock.now()
+        where_results = kb.as_of(t).query("Person").where(name=winner.value).all()
+        assert {r.id for r in where_results} == {entity.id}
+        confidence_results = kb.as_of(t).query("Person").min_confidence(0.5).all()
+        assert {r.id for r in confidence_results} == {entity.id}
+        trust_results = kb.as_of(t).query("Person").trust_at_least(0).all()
+        assert {r.id for r in trust_results} == {entity.id}
 
     def test_contradiction_resolution_closes_losers_valid_to(self, make_kb: KbFactory) -> None:
         """A retracted (losing) contradiction member's window closes at
