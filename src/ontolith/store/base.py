@@ -638,9 +638,9 @@ class StorageBackend(Protocol):
         `as_of_time` bitemporally scopes which *assertion* qualifies, the
         same way `entities_meeting_confidence` does (including its
         flagged-status point-in-time reconstruction, KI-097) — but each
-        individual principal's own
-        `trust_level` (author's and, if delegated, `acting_as`'s) is always
-        its current value, never a historical one (KI-036), and the `min()`
+        individual principal's own `trust_level` (author's and, if
+        delegated, `acting_as`'s) is always its current value, never a
+        historical one (KI-036), and the `min()`
         this method now takes of the two (KI-047) inherits that same
         property. This is not an approximation: no code path updates a
         principal's `trust_level` after creation, so "trust_level as of any

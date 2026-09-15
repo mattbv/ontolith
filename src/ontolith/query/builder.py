@@ -229,11 +229,12 @@ class QueryBuilder:
         qualifying set is never restricted to `active` in the first place —
         it already includes a `superseded` assertion valid at `t` regardless
         of status now, so `.include_history()` has nothing to add *there*.
-        `.include_flagged()` still applies (excludes `flagged` unless set),
-        same as `.where()`'s own `as_of` handling. A `retracted` assertion
-        is the one exception (ADR-0049, KI-095): `as_of(t)` additionally
-        excludes it once its own retraction event's assertion-time has
-        passed, and `.include_history()` is what opts back into seeing it.
+        `.include_flagged()` still applies (excludes `flagged` unless set,
+        reconstructed point-in-time from the event log, KI-097 — same as
+        `.where()`'s own `as_of` handling). A `retracted` assertion is the
+        one exception (ADR-0049, KI-095): `as_of(t)` additionally excludes
+        it once its own retraction event's assertion-time has passed, and
+        `.include_history()` is what opts back into seeing it.
 
         An entity with only `confidence=None` assertions does not pass —
         None never satisfies a numeric threshold (ADR-0004). Independent of
@@ -258,10 +259,11 @@ class QueryBuilder:
         Current-state (no `.as_of()`): `active` by default, also `flagged`
         when `.include_flagged()` is set and/or `superseded`/`retracted`
         when `.include_history()` is set (KI-093). Under `.as_of(t)`,
-        `.include_flagged()` still applies and `.include_history()` has
-        nothing to add for a `superseded` assertion — but does for a
-        `retracted` one (ADR-0049, KI-095), same as `.min_confidence()`'s
-        identical carve-out above.
+        `.include_flagged()` still applies (excludes `flagged`
+        point-in-time, KI-097, not by current status) and
+        `.include_history()` has nothing to add for a `superseded`
+        assertion — but does for a `retracted` one (ADR-0049, KI-095),
+        same as `.min_confidence()`'s identical carve-out above.
 
         "Effective" (KI-047): for an assertion made under delegation
         (`acting_as` set), this is `min(author.trust_level,
@@ -318,11 +320,14 @@ class QueryBuilder:
         called — only when nothing downstream inspects assertion status at
         all).
 
-        Does apply under `.as_of(t)`: a flagged assertion's open validity
-        window already makes it visible in a bitemporal snapshot unless
-        excluded, and the `as_of` path has honored this flag (for both
-        `.where()` and, since KI-093, `.min_confidence()`/
-        `.trust_at_least()`) since before KI-081 introduced this method.
+        Does apply under `.as_of(t)`, for both `.where()` and, since
+        KI-093, `.min_confidence()`/`.trust_at_least()` — but not by
+        current status: `flagged` is reconstructed point-in-time from the
+        `assertion_event` log (KI-097), so a query pinned to a `t` when an
+        assertion *was* disputed correctly excludes it even after the
+        dispute has since been resolved, and a `t` strictly before any
+        dispute existed still includes an otherwise-undisputed value, even
+        though the same assertion is `flagged` right now.
 
         Returns:
             Self for chaining

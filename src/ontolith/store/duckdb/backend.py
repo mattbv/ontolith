@@ -1924,9 +1924,8 @@ class DuckDBBackend:
             # times during a dispute that has since been resolved, since
             # `reactivated` flips current status back to `active`).
             # COALESCE/tiebreak reasoning identical to assertions()'s own.
-            # Interpolated piece is hardcoded SQL, no caller input — same
-            # no-#nosec-needed reasoning as retracted_clause below. "at" is
-            # quoted — reserved word in DuckDB (see assertions()'s note).
+            # "at" is quoted — reserved word in DuckDB (see assertions()'s
+            # note).
             # Fail-open on a missing event (COALESCE defaults to
             # 'reactivated', i.e. "not flagged"): a status='flagged' row
             # with no matching event — reachable only via a direct

@@ -2049,6 +2049,14 @@ class SQLiteBackend:
             t_iso = as_of_time.isoformat()
             query += " AND created_at <= ?"
             params.append(t_iso)
+            # flagged_clause is always one of exactly two hardcoded literals,
+            # never caller-controlled. No # nosec needed here (unlike the
+            # match_clause consumers below, e.g. `AND id IN (...SELECT...`):
+            # bandit's B608 heuristic only fires where a SQL keyword
+            # (SELECT/WHERE/...) sits in the same interpolated string as a
+            # variable, and this fragment has none - confirmed directly, not
+            # assumed (a #nosec placed here was previously dead: removing it
+            # left bandit's finding count unchanged).
             # KI-097: flagged-at-t, not current status — same event-log
             # reconstruction assertions() already uses (see its own
             # comment for the full reasoning: a static conflict flags an
@@ -2058,8 +2066,6 @@ class SQLiteBackend:
             # times during a dispute that has since been resolved, since
             # `reactivated` flips current status back to `active`).
             # COALESCE/tiebreak reasoning identical to assertions()'s own.
-            # Interpolated piece is hardcoded SQL, no caller input — same
-            # no-#nosec-needed reasoning as retracted_clause below.
             # Fail-open on a missing event (COALESCE defaults to
             # 'reactivated', i.e. "not flagged"): a status='flagged' row
             # with no matching event — reachable only via a direct

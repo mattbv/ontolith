@@ -10,7 +10,7 @@ An assertion is visible at time t iff:
 This is the full rule for an assertion that has never changed status. Two
 statuses add a further exclusion on top of it: `flagged` (reconstructed
 point-in-time from the event log on every `as_of`-capable read path —
-`assertions()` always did this; the `QueryBuilder`-facing trio
+`assertions()` already did this; the `QueryBuilder`-facing trio
 (`entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()`)
 only since KI-097 fixed their current-status-based version of this exact
 bug — `include_flagged` opts back in) and, for `retracted` specifically,
