@@ -8,12 +8,15 @@ An assertion is visible at time t iff:
   valid_from <= t < (valid_to or ∞)  AND  asserted_at <= t
 
 This is the full rule for an assertion that has never changed status. Two
-statuses add a further exclusion on top of it (ADR-0049, KI-095's own
-Update to this file's own retraction claims): `flagged` (reconstructed
-point-in-time from the event log, `include_flagged` opts back in) and, for
-`retracted` specifically, once its own retraction event's assertion-time
-has passed (`include_history`/no opt-out, depending on the query path —
-see `TestAsOfRetractionAndFlagging` below). `superseded` needs no such
+statuses add a further exclusion on top of it: `flagged` (reconstructed
+point-in-time from the event log on every `as_of`-capable read path —
+`assertions()` always did this; `entities_where()`/`entities_meeting_
+confidence()`/`entities_meeting_trust()` (the `QueryBuilder`-facing trio)
+only since KI-097 fixed their current-status-based version of this exact
+bug — `include_flagged` opts back in) and, for `retracted` specifically,
+once its own retraction event's assertion-time has passed (ADR-0049,
+KI-095; `include_history`/no opt-out, depending on the query path — see
+`TestAsOfRetractionAndFlagging` below). `superseded` needs no such
 exclusion: its `valid_to` closure already encodes the real-world end point,
 so the plain window check above already handles it correctly.
 
@@ -436,6 +439,53 @@ class TestAsOfRetractionAndFlagging:
 
         visible = kb.as_of(mid_dispute).assertions(subject=entity.id, predicate="Person.name")
         assert visible == []
+
+    def test_query_as_of_before_dispute_shows_predispute_value(self, make_kb: KbFactory) -> None:
+        """KI-097: `.query()` (`entities_where()`) counterpart to
+        `test_as_of_before_dispute_shows_predispute_value` above — before
+        this fix, `entities_where()`'s `as_of` branch excluded `flagged` by
+        *current* status, not point-in-time, so this case (unlike
+        `assertions()`'s, which already reconstructed correctly) wrongly
+        excluded the predispute value too."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        before_dispute = kb.clock.now()
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)  # -> contradiction
+
+        results = kb.as_of(before_dispute).query("Person").where(name="Ada").all()
+        assert {r.id for r in results} == {entity.id}
+
+    def test_query_as_of_mid_dispute_excludes_even_after_later_resolution(
+        self, make_kb: KbFactory
+    ) -> None:
+        """KI-097: `.query()` counterpart to
+        `test_as_of_mid_dispute_excludes_even_after_later_resolution`
+        above — the exact shape of this KI's bug: before the fix, a `t`
+        during a since-resolved dispute wrongly matched, because current
+        status (now `active` again, post-resolution) was checked instead
+        of status-at-t."""
+        kb = _kb(make_kb)
+        kb.create_principal("carol@example.com", kind="human", default_capability="review")
+        entity = kb.create_entity("Person", author=AUTHOR)
+        first = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", AUTHOR)
+        mid_dispute = clock.now()
+        contradiction = kb.backend.get_open_contradiction("default", entity.id, "Person.name")
+        assert contradiction is not None
+
+        clock.advance(days=1)
+        kb.resolve_contradiction(contradiction.id, first.id, "carol@example.com")
+
+        assert kb.as_of(mid_dispute).query("Person").where(name="Ada").all() == []
 
     def test_as_of_after_same_instant_flag_and_resolve_shows_winner(
         self, make_kb: KbFactory

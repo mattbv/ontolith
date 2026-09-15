@@ -475,7 +475,12 @@ class StorageBackend(Protocol):
             as_of_time: If set, applies bitemporal filter on assertions and entity creation
             include_flagged: Whether to also match 'flagged' assertions
                 (KI-081). Honored on both the current-state and the
-                as_of_time path (excluded by default on both).
+                as_of_time path (excluded by default on both). On the
+                as_of_time path this is point-in-time, not current status
+                (KI-097): reconstructed from the assertion_event log the
+                same way assertions() already does, so a query pinned to a
+                time when an assertion *was* disputed correctly excludes
+                it even after the dispute has since been resolved.
             include_history: Whether to also match 'superseded' and
                 'retracted' assertions (KI-081). On the current-state path
                 this widens beyond 'active'. On the as_of_time path,
@@ -517,10 +522,12 @@ class StorageBackend(Protocol):
         `valid_to` bracketing `as_of_time`) — KI-036, so
         `kb.as_of(t).query(...).min_confidence(...)` evaluates against a
         coherent point-in-time view instead of always checking
-        current-active assertions regardless of `t`. One caveat: `status`
-        itself is not bitemporally versioned, only current status is ever
-        stored, so a `status = 'flagged'` assertion (a static contradiction,
-        SPEC §10.3) is excluded even at a `t` before it was flagged, unless
+        current-active assertions regardless of `t`. `status = 'flagged'`
+        (a static contradiction, SPEC §10.3) is excluded point-in-time, not
+        by current status (KI-097): reconstructed from the assertion_event
+        log the same way `assertions()` already does, so a `t` before the
+        dispute existed still qualifies and a `t` during a dispute that has
+        since been resolved still correctly excludes — unless
         `include_flagged` is set — matching `entities_where()`'s identical
         `as_of` handling. `include_history` is mostly a no-op under
         `as_of_time`, also matching `entities_where()`: that branch never

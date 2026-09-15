@@ -2019,7 +2019,12 @@ class SQLiteBackend:
             as_of_time: If set, applies bitemporal filter on assertions and entity creation
             include_flagged: Also match 'flagged' assertions — honored on
                 both the current-state and as_of_time paths (KI-081;
-                excluded by default on both, see assertions()).
+                excluded by default on both, see assertions()). On the
+                as_of_time path this is point-in-time, not current status
+                (KI-097): reconstructed from the assertion_event log the
+                same way assertions() already does, so a query pinned to a
+                time when an assertion *was* disputed correctly excludes
+                it even after the dispute has since been resolved.
             include_history: Also match 'superseded'/'retracted' assertions
                 (KI-081). On the current-state path this widens the status
                 set beyond 'active'. On the as_of_time path, 'superseded' is
@@ -2041,15 +2046,30 @@ class SQLiteBackend:
             t_iso = as_of_time.isoformat()
             query += " AND created_at <= ?"
             params.append(t_iso)
-            # flagged_clause is always one of exactly two hardcoded literals,
-            # never caller-controlled. No # nosec needed here (unlike the
-            # match_clause consumers below, e.g. `AND id IN (...SELECT...`):
-            # bandit's B608 heuristic only fires where a SQL keyword
-            # (SELECT/WHERE/...) sits in the same interpolated string as a
-            # variable, and this fragment has none - confirmed directly, not
-            # assumed (a #nosec placed here was previously dead: removing it
-            # left bandit's finding count unchanged).
-            flagged_clause = "" if include_flagged else " AND status != 'flagged'"
+            # KI-097: flagged-at-t, not current status — same event-log
+            # reconstruction assertions() already uses (see its own
+            # comment for the full reasoning: a static conflict flags an
+            # assertion permanently, so using current status would hide it
+            # from as_of() queries for times before the dispute existed,
+            # and — the bug this KI fixes — would wrongly *include* it for
+            # times during a dispute that has since been resolved, since
+            # `reactivated` flips current status back to `active`).
+            # COALESCE/tiebreak reasoning identical to assertions()'s own.
+            # Interpolated piece is hardcoded SQL, no caller input — same
+            # no-#nosec-needed reasoning as retracted_clause below.
+            flagged_clause = (
+                ""
+                if include_flagged
+                else (
+                    " AND COALESCE("
+                    "(SELECT ae.action FROM assertion_event ae"
+                    " WHERE ae.assertion_id = assertion.id AND ae.at <= ?"
+                    " AND ae.action IN ('flagged', 'reactivated')"
+                    " ORDER BY ae.at DESC, ae.id DESC LIMIT 1),"
+                    " 'reactivated'"
+                    ") != 'flagged'"
+                )
+            )
             # retracted_clause: same two-hardcoded-literals shape as
             # flagged_clause above, same reasoning for why no #nosec is
             # needed. ADR-0049 (KI-095): a `retracted` assertion's window is
@@ -2077,6 +2097,8 @@ class SQLiteBackend:
                 f"{retracted_clause}"
             )
             match_params = [t_iso, t_iso, t_iso]
+            if not include_flagged:
+                match_params.append(t_iso)
             if not include_history:
                 match_params.append(t_iso)
         else:
@@ -2187,7 +2209,22 @@ class SQLiteBackend:
             # - no injection surface, and no #nosec needed (see
             # entities_where()'s identical comment for why bandit's B608
             # heuristic doesn't fire on this shape at all).
-            flagged_clause = "" if include_flagged else " AND a.status != 'flagged'"
+            # KI-097: flagged-at-t, not current status — same event-log
+            # reconstruction entities_where()/assertions() already use;
+            # see entities_where()'s comment for the full reasoning.
+            flagged_clause = (
+                ""
+                if include_flagged
+                else (
+                    " AND COALESCE("
+                    "(SELECT ae.action FROM assertion_event ae"
+                    " WHERE ae.assertion_id = a.id AND ae.at <= ?"
+                    " AND ae.action IN ('flagged', 'reactivated')"
+                    " ORDER BY ae.at DESC, ae.id DESC LIMIT 1),"
+                    " 'reactivated'"
+                    ") != 'flagged'"
+                )
+            )
             # ADR-0049 (KI-095): same retraction-aware exclusion
             # entities_where() has — see its comment for the full
             # reasoning. Two-hardcoded-literals shape, no #nosec needed.
@@ -2208,6 +2245,8 @@ class SQLiteBackend:
                 " AND (a.valid_to IS NULL OR a.valid_to > ?)" + flagged_clause + retracted_clause
             )
             params.extend([t_iso, t_iso, t_iso])
+            if not include_flagged:
+                params.append(t_iso)
             if not include_history:
                 params.append(t_iso)
         else:
@@ -2270,7 +2309,22 @@ class SQLiteBackend:
             # - no injection surface, and no #nosec needed (see
             # entities_where()'s identical comment for why bandit's B608
             # heuristic doesn't fire on this shape at all).
-            flagged_clause = "" if include_flagged else " AND a.status != 'flagged'"
+            # KI-097: flagged-at-t, not current status — same event-log
+            # reconstruction entities_where()/assertions() already use;
+            # see entities_where()'s comment for the full reasoning.
+            flagged_clause = (
+                ""
+                if include_flagged
+                else (
+                    " AND COALESCE("
+                    "(SELECT ae.action FROM assertion_event ae"
+                    " WHERE ae.assertion_id = a.id AND ae.at <= ?"
+                    " AND ae.action IN ('flagged', 'reactivated')"
+                    " ORDER BY ae.at DESC, ae.id DESC LIMIT 1),"
+                    " 'reactivated'"
+                    ") != 'flagged'"
+                )
+            )
             # ADR-0049 (KI-095): same retraction-aware exclusion
             # entities_where() has — see its comment for the full
             # reasoning. Two-hardcoded-literals shape, no #nosec needed.
@@ -2291,6 +2345,8 @@ class SQLiteBackend:
                 " AND (a.valid_to IS NULL OR a.valid_to > ?)" + flagged_clause + retracted_clause
             )
             params.extend([t_iso, t_iso, t_iso])
+            if not include_flagged:
+                params.append(t_iso)
             if not include_history:
                 params.append(t_iso)
         else:

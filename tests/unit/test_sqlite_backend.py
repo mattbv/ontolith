@@ -1894,7 +1894,12 @@ class TestCandidateIdsNarrowing:
 
     def _seed_flagged_with_window(self, backend: SQLiteBackend, entity_id: str) -> None:
         """A flagged assertion whose validity window covers T0 (2025-01-01),
-        for `as_of_time`-scoped widening tests."""
+        for `as_of_time`-scoped widening tests. Since KI-097, the as_of
+        branch reconstructs flagged-at-t from the assertion_event log
+        rather than current status, so a matching 'flagged' event is
+        required for the exclusion to trigger — not just the status
+        column, which a real write path always keeps in sync but this
+        raw-backend-level fixture must set explicitly."""
         backend.put_entity(
             Entity(
                 id=entity_id,
@@ -1904,9 +1909,10 @@ class TestCandidateIdsNarrowing:
                 created_by="alice@test.com",
             )
         )
+        assertion_id = f"a-{entity_id}"
         backend.put_assertion(
             Assertion(
-                id=f"a-{entity_id}",
+                id=assertion_id,
                 namespace="test-ns",
                 subject=entity_id,
                 predicate="Person.name",
@@ -1918,6 +1924,15 @@ class TestCandidateIdsNarrowing:
                 asserted_at=datetime(2025, 1, 1, tzinfo=UTC),
                 valid_from=datetime(2025, 1, 1, tzinfo=UTC),
                 status="flagged",
+            )
+        )
+        backend.put_assertion_event(
+            AssertionEvent(
+                id=f"ev-{entity_id}",
+                assertion_id=assertion_id,
+                actor="alice@test.com",
+                action="flagged",
+                at=datetime(2025, 1, 1, tzinfo=UTC),
             )
         )
 
