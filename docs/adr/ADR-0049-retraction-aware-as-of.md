@@ -126,12 +126,17 @@ only.
   method has no equivalent opt-out today (a caller wanting a retracted assertion back under
   `as_of` has no way to ask, on this method specifically — a known, accepted asymmetry, not
   something this ADR adds a parameter to close).
-- **A new correlated `EXISTS` subquery on the `as_of` path** in all four methods, scoped by the
-  existing `idx_assertion_event_assertion` index (on `assertion_event.assertion_id`) — only
-  evaluated per candidate row already matching every other `as_of` predicate. Whether SQLite/DuckDB
-  actually short-circuit the `OR` on the cheaper `status != 'retracted'` check first is a query-planner
-  detail neither engine documents as guaranteed — expected, not proven, and not load-bearing for
-  correctness either way.
+- **A new correlated `EXISTS` subquery on the `as_of` path** for `retracted_clause`, in all four
+  methods, scoped by the existing `idx_assertion_event_assertion` index (on
+  `assertion_event.assertion_id`) — only evaluated per candidate row already matching every other
+  `as_of` predicate. Whether SQLite/DuckDB actually short-circuit the `OR` on the cheaper `status
+  != 'retracted'` check first is a query-planner detail neither engine documents as guaranteed —
+  expected, not proven, and not load-bearing for correctness either way. **Update (KI-097):** the
+  three `QueryBuilder`-facing methods (not `assertions()`, which already had this) additionally
+  gained a correlated `COALESCE((SELECT ... ORDER BY ... LIMIT 1), ...)` subquery for
+  `flagged_clause` — unlike `EXISTS`, this one cannot short-circuit; measured ~15-20% overhead on
+  the affected `as_of` paths on a 40k-assertion database, comfortably inside SPEC §9's budgets (see
+  KI-097's own known-issues.md entry for the numbers).
 - **`.include_history()`'s docstring, `entities_where()`'s/`entities_meeting_confidence()`'s/
   `entities_meeting_trust()`'s/`assertions()`'s docstrings, `QueryBuilder.min_confidence()`'s and
   `.trust_at_least()`'s docstrings, and every "documented no-op under `as_of`" claim from
@@ -147,8 +152,14 @@ only.
   mirrors for the one-way `retracted` case). **Update (2026-09-15, closes KI-097):** ported
   `assertions()`'s event-log reconstruction verbatim into the three `QueryBuilder`-facing methods,
   on both backends — no new logic to design, since the two-way flagged/reactivated cycle direction
-  `assertions()` already got right transfers as-is; no ADR needed for the same reason. See
-  `docs/known-issues.md`'s KI-097 entry for the full write-up.
+  `assertions()` already got right transfers as-is; no ADR needed for the same reason. Unlike this
+  ADR's own `retracted_clause` below, the ported `flagged_clause` fails **open**, not closed, on a
+  missing `assertion_event`: `COALESCE(..., 'reactivated')` treats "no event found" as "not
+  flagged," so a `status='flagged'` row with no matching event is visible at every `t` — matching
+  `assertions()`'s own pre-existing default, not a new choice this KI made, but the opposite
+  default from the retraction bullet immediately below on the exact same three methods, worth
+  flagging explicitly for the same reason that bullet flags its own. See `docs/known-issues.md`'s
+  KI-097 entry for the full write-up.
 - **Fail-closed on a missing event:** an assertion with `status = 'retracted'` but no matching
   `assertion_event` row (reachable only via a direct `put_assertion()` at the port level, or a
   pre-existing database written before this fix shipped — no migration was needed, since
