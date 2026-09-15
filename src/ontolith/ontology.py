@@ -92,8 +92,9 @@ class AsOfView:
     log, not by current status, KI-097 — pass ``include_flagged=True`` for
     explicit audit/history views) and, since ADR-0049 (KI-095), a
     'retracted' assertion once its own retraction event's assertion-time
-    has passed (``.query()``'s ``.include_history()`` opts back into
-    seeing it; ``.assertions()`` has no equivalent opt-out today).
+    has passed (pass ``include_history=True`` to opt back into seeing it,
+    on both ``.query()`` and ``.assertions()`` — KI-098 closed the
+    asymmetry where only ``.query()`` had this opt-out).
     """
 
     def __init__(
@@ -114,6 +115,7 @@ class AsOfView:
         predicate: str | None = None,
         *,
         include_flagged: bool = False,
+        include_history: bool = False,
     ) -> list[Assertion]:
         """Assertions visible at the as_of timestamp."""
         return self._backend.assertions(
@@ -122,6 +124,7 @@ class AsOfView:
             status=None,
             as_of_time=self._as_of,
             include_flagged=include_flagged,
+            include_history=include_history,
         )
 
     def query(self, concept: str) -> QueryBuilder:

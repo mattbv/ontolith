@@ -1267,6 +1267,7 @@ class SQLiteBackend:
         status: str | None = "active",
         as_of_time: datetime | None = None,
         include_flagged: bool = False,
+        include_history: bool = False,
     ) -> list[Assertion]:
         """Query assertions with optional filters.
 
@@ -1280,9 +1281,12 @@ class SQLiteBackend:
                 'flagged' assertions (excluded by default — a flagged
                 assertion is disputed, not confirmed-valid; pass True for
                 explicit audit/history views). A 'retracted' assertion is
-                always excluded once its own retraction event's timestamp
-                is <= as_of_time (ADR-0049, KI-095) — unconditional, no
-                opt-out parameter exists for this yet.
+                excluded once its own retraction event's timestamp is <=
+                as_of_time (ADR-0049, KI-095), unless include_history is set.
+            include_history: When as_of_time is set, whether to opt back
+                into seeing a 'retracted' assertion once its own retraction
+                event's timestamp is <= as_of_time (KI-098) — mirrors
+                include_flagged's shape; ignored when as_of_time is None.
 
         Returns:
             List of matching assertions
@@ -1338,18 +1342,18 @@ class SQLiteBackend:
             # 'retracted' event per assertion, so unlike flagged/reactivated
             # above this needs no ORDER BY tiebreak: retraction is a
             # one-way terminal transition, never followed by another event).
-            # Unconditional, not gated behind a parameter: this method has
-            # no include_history-style opt-out today (status itself is
-            # already ignored once as_of_time is set), so there is nothing
-            # for a flag to widen back into yet.
-            query += (
-                " AND (status != 'retracted' OR EXISTS ("
-                "SELECT 1 FROM assertion_event ae"
-                " WHERE ae.assertion_id = assertion.id"
-                " AND ae.action = 'retracted' AND ae.at > ?"
-                "))"
-            )
-            params.append(t_iso)
+            # include_history opts back out of this check, the same
+            # mechanism the QueryBuilder-facing trio already uses (KI-098 —
+            # this method had no such opt-out when ADR-0049 first shipped).
+            if not include_history:
+                query += (
+                    " AND (status != 'retracted' OR EXISTS ("
+                    "SELECT 1 FROM assertion_event ae"
+                    " WHERE ae.assertion_id = assertion.id"
+                    " AND ae.action = 'retracted' AND ae.at > ?"
+                    "))"
+                )
+                params.append(t_iso)
         elif status is not None:
             query += " AND status = ?"
             params.append(status)

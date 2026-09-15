@@ -271,6 +271,7 @@ class StorageBackend(Protocol):
         status: str | None = "active",
         as_of_time: datetime | None = None,
         include_flagged: bool = False,
+        include_history: bool = False,
     ) -> list[Assertion]:
         """Query assertions with optional filters.
 
@@ -283,9 +284,13 @@ class StorageBackend(Protocol):
                 valid_from <= t < (valid_to or ∞) AND asserted_at <= t
             include_flagged: When as_of_time is set, whether to include
                 'flagged' assertions (excluded by default). A 'retracted'
-                assertion is always excluded once its own retraction
-                event's timestamp is <= as_of_time (ADR-0049, KI-095) —
-                unconditional, no opt-out parameter exists for this yet.
+                assertion is excluded once its own retraction event's
+                timestamp is <= as_of_time (ADR-0049, KI-095), unless
+                include_history is set.
+            include_history: When as_of_time is set, whether to opt back
+                into seeing a 'retracted' assertion once its own retraction
+                event's timestamp is <= as_of_time (KI-098) — mirrors
+                include_flagged's shape; ignored when as_of_time is None.
 
         Returns:
             List of matching assertions
