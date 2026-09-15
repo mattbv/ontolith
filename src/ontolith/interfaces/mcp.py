@@ -466,7 +466,10 @@ def create_mcp_server(
                 With ``as_of``: the qualifying set is never restricted to
                 ``active`` in the first place, so ``include_history`` has
                 nothing to add for a ``superseded`` assertion there;
-                ``include_flagged`` still applies. A ``retracted``
+                ``include_flagged`` still applies (excludes ``flagged``
+                point-in-time, KI-097 — not by current status, so a `t`
+                during a since-resolved dispute still excludes and a `t`
+                before any dispute still includes). A ``retracted``
                 assertion is the exception (ADR-0049, KI-095): ``as_of``
                 additionally excludes it once its own retraction has
                 happened (assertion-time), and ``include_history`` opts
@@ -479,6 +482,8 @@ def create_mcp_server(
             include_flagged: Also match ``filters``/``min_confidence``/
                 ``trust_at_least`` against ``flagged`` (contradicted)
                 assertions — excluded by default (SPEC §10.3, KI-081/093).
+                Under ``as_of``, point-in-time not current status (KI-097):
+                see ``min_confidence``'s own note below for what that means.
             include_history: Also match against ``superseded``/
                 ``retracted`` assertions — excluded by default (KI-081/093).
                 Mostly a no-op combined with ``as_of``: that branch never

@@ -523,6 +523,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- `entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()`'s `as_of` branch
+  now excludes/includes `flagged` assertions point-in-time, not by current status (closes KI-097,
+  found building ADR-0049's KI-095 fix) — a `.query()`/`.min_confidence()`/`.trust_at_least()` call
+  pinned to a `t` when an assertion *was* disputed could wrongly include it once the dispute was
+  later resolved (`reactivated` flips status back to `active`), and, in the opposite direction, a
+  `t` strictly before a dispute ever existed could wrongly exclude an undisputed value just because
+  the same assertion is `flagged` *now*. `StorageBackend.assertions()` already reconstructed this
+  correctly from the `assertion_event` log; the three `QueryBuilder`-facing methods never picked up
+  the identical logic. Ported verbatim, on both backends — no new bitemporal semantics decision, no
+  ADR needed.
 - `.as_of(t)` no longer wrongly includes a retracted assertion once its own retraction has become
   known (closes KI-095, ADR-0049, found reviewing KI-081) — SPEC §11.2's "excluded by default" was
   unmet on the `as_of` path: `_retraction_valid_to()` deliberately leaves an already-set `valid_to`

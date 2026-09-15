@@ -475,7 +475,15 @@ class StorageBackend(Protocol):
             as_of_time: If set, applies bitemporal filter on assertions and entity creation
             include_flagged: Whether to also match 'flagged' assertions
                 (KI-081). Honored on both the current-state and the
-                as_of_time path (excluded by default on both).
+                as_of_time path (excluded by default on both). On the
+                as_of_time path this is point-in-time, not current status
+                (KI-097): reconstructed from the assertion_event log the
+                same way assertions() already does, so a query pinned to a
+                time when an assertion *was* disputed correctly excludes
+                it even after the dispute has since been resolved — and,
+                the other direction, a time strictly before any dispute
+                existed still includes an otherwise-undisputed value, even
+                though the same assertion is flagged now.
             include_history: Whether to also match 'superseded' and
                 'retracted' assertions (KI-081). On the current-state path
                 this widens beyond 'active'. On the as_of_time path,
@@ -517,10 +525,12 @@ class StorageBackend(Protocol):
         `valid_to` bracketing `as_of_time`) — KI-036, so
         `kb.as_of(t).query(...).min_confidence(...)` evaluates against a
         coherent point-in-time view instead of always checking
-        current-active assertions regardless of `t`. One caveat: `status`
-        itself is not bitemporally versioned, only current status is ever
-        stored, so a `status = 'flagged'` assertion (a static contradiction,
-        SPEC §10.3) is excluded even at a `t` before it was flagged, unless
+        current-active assertions regardless of `t`. `status = 'flagged'`
+        (a static contradiction, SPEC §10.3) is excluded point-in-time, not
+        by current status (KI-097): reconstructed from the assertion_event
+        log the same way `assertions()` already does, so a `t` before the
+        dispute existed still qualifies and a `t` during a dispute that has
+        since been resolved still correctly excludes — unless
         `include_flagged` is set — matching `entities_where()`'s identical
         `as_of` handling. `include_history` is mostly a no-op under
         `as_of_time`, also matching `entities_where()`: that branch never
@@ -555,8 +565,8 @@ class StorageBackend(Protocol):
             concept: Concept to scope the scan to
             threshold: Minimum confidence, 0.0-1.0
             as_of_time: If set, evaluate against this point in time instead
-                of current state (KI-036) — see the flagged-status caveat
-                above
+                of current state (KI-036) — see the flagged-status
+                point-in-time reconstruction above
             candidate_ids: Optional narrowing hint (KI-037) — a backend may
                 use this to scope the scan below `(namespace, concept)`,
                 but is not required to
@@ -627,9 +637,10 @@ class StorageBackend(Protocol):
 
         `as_of_time` bitemporally scopes which *assertion* qualifies, the
         same way `entities_meeting_confidence` does (including its
-        flagged-status caveat) — but each individual principal's own
-        `trust_level` (author's and, if delegated, `acting_as`'s) is always
-        its current value, never a historical one (KI-036), and the `min()`
+        flagged-status point-in-time reconstruction, KI-097) — but each
+        individual principal's own `trust_level` (author's and, if
+        delegated, `acting_as`'s) is always its current value, never a
+        historical one (KI-036), and the `min()`
         this method now takes of the two (KI-047) inherits that same
         property. This is not an approximation: no code path updates a
         principal's `trust_level` after creation, so "trust_level as of any

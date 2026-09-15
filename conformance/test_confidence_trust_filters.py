@@ -574,25 +574,43 @@ class TestAsOfConfidenceTrust:
         assert kb.as_of(valid_to).query("Person").min_confidence(0.5).all() == []
 
     def test_min_confidence_as_of_excludes_flagged_assertion(self, make_kb: KbFactory) -> None:
-        """A high-confidence assertion that was active and undisputed at t
-        but is flagged as part of a contradiction later must still be
-        excluded at `.as_of(t)` - `status` is not itself bitemporally
-        versioned; the flagged check always reflects current status."""
+        """A high-confidence assertion is excluded at `.as_of(t)` for a `t`
+        during the dispute it's part of (KI-097: point-in-time
+        reconstruction from the assertion_event log, not current status —
+        see `test_min_confidence_as_of_before_dispute_still_qualifies`
+        immediately below for the case this KI's fix corrected: a `t`
+        *before* the dispute existed must NOT be excluded just because the
+        assertion is flagged *now*)."""
         kb = _kb(make_kb)
         clock = kb.clock
         assert isinstance(clock, FixedClock)
         entity = kb.create_entity("Person", author=TRUSTED)
-        first = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.9)
-        t = clock.now()
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.9)
+
+        clock.advance(days=1)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", TRUSTED, confidence=0.9)
+        t = clock.now()  # mid-dispute
+
+        assert kb.as_of(t).query("Person").min_confidence(0.5).all() == []
+
+    def test_min_confidence_as_of_before_dispute_still_qualifies(self, make_kb: KbFactory) -> None:
+        """KI-097: the corrected half of the case above — a `t` strictly
+        before a contradiction arose must still see the value that was
+        active and undisputed at `t`, even though the same assertion is
+        `flagged` right now. Before this fix, current-status-based
+        exclusion wrongly hid it even at a `t` predating the dispute."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.9)
+        t = clock.now()  # before the dispute
 
         clock.advance(days=1)
         kb.assert_literal(entity.id, "Person.name", "Ava", "Text", TRUSTED, confidence=0.9)
 
-        reloaded = kb.backend.get_assertion(first.id)
-        assert reloaded is not None
-        assert reloaded.status == "flagged"
-
-        assert kb.as_of(t).query("Person").min_confidence(0.5).all() == []
+        results = kb.as_of(t).query("Person").min_confidence(0.5).all()
+        assert {r.id for r in results} == {entity.id}
 
     def test_trust_at_least_as_of_excludes_assertion_not_yet_known(
         self, make_kb: KbFactory
@@ -643,41 +661,51 @@ class TestAsOfConfidenceTrust:
         assert kb.as_of(valid_to).query("Person").trust_at_least(5).all() == []
 
     def test_trust_at_least_as_of_excludes_flagged_assertion(self, make_kb: KbFactory) -> None:
+        """Mid-dispute counterpart to the min_confidence version above."""
         kb = _kb(make_kb)
         clock = kb.clock
         assert isinstance(clock, FixedClock)
         entity = kb.create_entity("Person", author=TRUSTED)
-        first = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED)
-        t = clock.now()
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED)
+
+        clock.advance(days=1)
+        kb.assert_literal(entity.id, "Person.name", "Ava", "Text", TRUSTED)
+        t = clock.now()  # mid-dispute
+
+        assert kb.as_of(t).query("Person").trust_at_least(5).all() == []
+
+    def test_trust_at_least_as_of_before_dispute_still_qualifies(self, make_kb: KbFactory) -> None:
+        """KI-097: same corrected case as the min_confidence version above,
+        for `.trust_at_least()`."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED)
+        t = clock.now()  # before the dispute
 
         clock.advance(days=1)
         kb.assert_literal(entity.id, "Person.name", "Ava", "Text", TRUSTED)
 
-        reloaded = kb.backend.get_assertion(first.id)
-        assert reloaded is not None
-        assert reloaded.status == "flagged"
-
-        assert kb.as_of(t).query("Person").trust_at_least(5).all() == []
+        results = kb.as_of(t).query("Person").trust_at_least(5).all()
+        assert {r.id for r in results} == {entity.id}
 
     def test_trust_at_least_as_of_include_flagged_opts_back_in(self, make_kb: KbFactory) -> None:
         """KI-093: `.include_flagged()` composes with `.trust_at_least()`
         under `.as_of()` too, not just the current-state path — the exact
         counterpart to `test_trust_at_least_as_of_excludes_flagged_assertion`
-        immediately above, opted back in."""
+        above, opted back in."""
         kb = _kb(make_kb)
         clock = kb.clock
         assert isinstance(clock, FixedClock)
         entity = kb.create_entity("Person", author=TRUSTED)
-        first = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED)
-        t = clock.now()
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED)
 
         clock.advance(days=1)
         kb.assert_literal(entity.id, "Person.name", "Ava", "Text", TRUSTED)
+        t = clock.now()  # mid-dispute
 
-        reloaded = kb.backend.get_assertion(first.id)
-        assert reloaded is not None
-        assert reloaded.status == "flagged"
-
+        assert kb.as_of(t).query("Person").trust_at_least(5).all() == []
         results = kb.as_of(t).query("Person").trust_at_least(5).include_flagged().all()
         assert {r.id for r in results} == {entity.id}
 
@@ -687,15 +715,11 @@ class TestAsOfConfidenceTrust:
         clock = kb.clock
         assert isinstance(clock, FixedClock)
         entity = kb.create_entity("Person", author=TRUSTED)
-        first = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.9)
-        t = clock.now()
+        kb.assert_literal(entity.id, "Person.name", "Ada", "Text", TRUSTED, confidence=0.9)
 
         clock.advance(days=1)
         kb.assert_literal(entity.id, "Person.name", "Ava", "Text", TRUSTED, confidence=0.9)
-
-        reloaded = kb.backend.get_assertion(first.id)
-        assert reloaded is not None
-        assert reloaded.status == "flagged"
+        t = clock.now()  # mid-dispute
 
         assert kb.as_of(t).query("Person").min_confidence(0.5).all() == []
         results = kb.as_of(t).query("Person").min_confidence(0.5).include_flagged().all()

@@ -86,12 +86,14 @@ class AsOfView:
 
     Status is not used as a positive filter — the temporal dimensions
     determine visibility — but two statuses are still excluded by default,
-    same as default (non-as_of) queries: 'flagged' assertions (disputed,
-    not confirmed-valid; pass ``include_flagged=True`` for explicit
-    audit/history views) and, since ADR-0049 (KI-095), a 'retracted'
-    assertion once its own retraction event's assertion-time has passed
-    (``.query()``'s ``.include_history()`` opts back into seeing it;
-    ``.assertions()`` has no equivalent opt-out today).
+    with the same opt-ins default (non-as_of) queries use, even though the
+    underlying mechanism differs: 'flagged' assertions (disputed, not
+    confirmed-valid; reconstructed point-in-time from the assertion_event
+    log, not by current status, KI-097 — pass ``include_flagged=True`` for
+    explicit audit/history views) and, since ADR-0049 (KI-095), a
+    'retracted' assertion once its own retraction event's assertion-time
+    has passed (``.query()``'s ``.include_history()`` opts back into
+    seeing it; ``.assertions()`` has no equivalent opt-out today).
     """
 
     def __init__(
