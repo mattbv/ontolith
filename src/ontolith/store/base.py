@@ -282,7 +282,10 @@ class StorageBackend(Protocol):
             as_of_time: If set, applies bitemporal filter:
                 valid_from <= t < (valid_to or ∞) AND asserted_at <= t
             include_flagged: When as_of_time is set, whether to include
-                'flagged' assertions (excluded by default)
+                'flagged' assertions (excluded by default). A 'retracted'
+                assertion is always excluded once its own retraction
+                event's timestamp is <= as_of_time (ADR-0049, KI-095) —
+                unconditional, no opt-out parameter exists for this yet.
 
         Returns:
             List of matching assertions
@@ -474,13 +477,15 @@ class StorageBackend(Protocol):
                 (KI-081). Honored on both the current-state and the
                 as_of_time path (excluded by default on both).
             include_history: Whether to also match 'superseded' and
-                'retracted' assertions (KI-081). Current-state path only —
-                the as_of_time branch never restricts matches to 'active'
-                in the first place (it excludes only 'flagged', itself
-                gated behind include_flagged), so a 'superseded'/
-                'retracted' assertion whose window covers as_of_time
-                already matches there; this parameter is a no-op when
-                as_of_time is set.
+                'retracted' assertions (KI-081). On the current-state path
+                this widens beyond 'active'. On the as_of_time path,
+                'superseded' is unaffected either way (its window already
+                never restricts to 'active') — but 'retracted' does
+                something under this flag now (ADR-0049, KI-095): the
+                as_of_time branch additionally excludes a 'retracted'
+                assertion once its own retraction event's timestamp is
+                <= as_of_time; this parameter opts back out of that
+                exclusion.
 
         Returns:
             List of entities where all filters match at the given time
@@ -517,11 +522,15 @@ class StorageBackend(Protocol):
         stored, so a `status = 'flagged'` assertion (a static contradiction,
         SPEC §10.3) is excluded even at a `t` before it was flagged, unless
         `include_flagged` is set — matching `entities_where()`'s identical
-        `as_of` handling. `include_history` is a no-op under `as_of_time`,
-        also matching `entities_where()`: that branch never restricts to
-        `active` in the first place, only conditionally excludes `flagged`,
-        so a `superseded`/`retracted` assertion whose window covers `t`
-        already qualifies without this flag.
+        `as_of` handling. `include_history` is mostly a no-op under
+        `as_of_time`, also matching `entities_where()`: that branch never
+        restricts to `active` in the first place, only conditionally
+        excludes `flagged`, so a `superseded` assertion whose window covers
+        `t` already qualifies without this flag. A `retracted` assertion is
+        the one exception (ADR-0049, KI-095): `as_of_time` additionally
+        excludes it once its own retraction event's timestamp is <=
+        `as_of_time`, and `include_history` opts back out of that
+        exclusion.
 
         Always scoped by `(namespace, concept)` — this is what keeps the
         query's parameter count constant regardless of how many entities
@@ -555,8 +564,9 @@ class StorageBackend(Protocol):
                 Honored on both the current-state and as_of_time paths,
                 matching entities_where().
             include_history: Also count 'superseded'/'retracted' assertions
-                (KI-093). Current-state path only — no-op under
-                as_of_time, matching entities_where().
+                (KI-093). Widens the current-state path beyond 'active'.
+                Under as_of_time, mostly a no-op — but not for 'retracted'
+                (ADR-0049, KI-095), matching entities_where().
 
         Returns:
             IDs of qualifying entities (may be a superset of any candidate

@@ -227,10 +227,13 @@ class QueryBuilder:
         when `.include_flagged()` is set and/or `superseded`/`retracted`
         when `.include_history()` is set (KI-093). Under `.as_of(t)`, the
         qualifying set is never restricted to `active` in the first place —
-        it already includes whatever was valid at `t` regardless of status
-        now — so `.include_history()` has nothing to add there;
+        it already includes a `superseded` assertion valid at `t` regardless
+        of status now, so `.include_history()` has nothing to add *there*.
         `.include_flagged()` still applies (excludes `flagged` unless set),
-        same as `.where()`'s own `as_of` handling.
+        same as `.where()`'s own `as_of` handling. A `retracted` assertion
+        is the one exception (ADR-0049, KI-095): `as_of(t)` additionally
+        excludes it once its own retraction event's assertion-time has
+        passed, and `.include_history()` is what opts back into seeing it.
 
         An entity with only `confidence=None` assertions does not pass —
         None never satisfies a numeric threshold (ADR-0004). Independent of
@@ -254,11 +257,11 @@ class QueryBuilder:
 
         Current-state (no `.as_of()`): `active` by default, also `flagged`
         when `.include_flagged()` is set and/or `superseded`/`retracted`
-        when `.include_history()` is set (KI-093). Under `.as_of(t)`, the
-        qualifying set is never restricted to `active` in the first place —
-        `.include_history()` has nothing to add there; `.include_flagged()`
-        still applies, same as `.min_confidence()`'s identical carve-out
-        above.
+        when `.include_history()` is set (KI-093). Under `.as_of(t)`,
+        `.include_flagged()` still applies and `.include_history()` has
+        nothing to add for a `superseded` assertion — but does for a
+        `retracted` one (ADR-0049, KI-095), same as `.min_confidence()`'s
+        identical carve-out above.
 
         "Effective" (KI-047): for an assertion made under delegation
         (`acting_as` set), this is `min(author.trust_level,
@@ -345,15 +348,17 @@ class QueryBuilder:
         see `.include_flagged()`'s docstring for why this means it is
         *not* a no-op just because `.where()` wasn't called.
 
-        Genuinely no effect under `.as_of(t)`, unlike `.include_flagged()`:
-        the `as_of` branch never restricts matches to `active` in the first
-        place — it excludes only `flagged` (itself gated behind
-        `.include_flagged()`) — so a `superseded`/`retracted` assertion
-        whose validity window covers `t` already matches there, with
-        nothing left for this opt-in to add. True for both the `.where()`
-        path and, since KI-093, the confidence/trust floors. (This is also
-        why an unwanted `as_of` match can't currently be excluded either —
-        see KI-095.)
+        Under `.as_of(t)`, mostly no effect, but not entirely (ADR-0049,
+        KI-095): the `as_of` branch never restricts matches to `active` in
+        the first place — it excludes only `flagged` (itself gated behind
+        `.include_flagged()`) — so a `superseded` assertion whose validity
+        window covers `t` already matches there regardless of this opt-in.
+        A `retracted` assertion is different: `as_of(t)` additionally
+        excludes it once its own retraction event's assertion-time has
+        passed (`t` is at or after when the retraction was recorded) —
+        `.include_history()` opts back out of *that* exclusion, the one
+        thing it does on the `as_of` path. True for both the `.where()`
+        path and, since KI-093, the confidence/trust floors.
 
         Returns:
             Self for chaining

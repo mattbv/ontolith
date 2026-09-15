@@ -7,8 +7,19 @@ Two time dimensions:
 An assertion is visible at time t iff:
   valid_from <= t < (valid_to or ∞)  AND  asserted_at <= t
 
+This is the full rule for an assertion that has never changed status. Two
+statuses add a further exclusion on top of it (ADR-0049, KI-095's own
+Update to this file's own retraction claims): `flagged` (reconstructed
+point-in-time from the event log, `include_flagged` opts back in) and, for
+`retracted` specifically, once its own retraction event's assertion-time
+has passed (`include_history`/no opt-out, depending on the query path —
+see `TestAsOfRetractionAndFlagging` below). `superseded` needs no such
+exclusion: its `valid_to` closure already encodes the real-world end point,
+so the plain window check above already handles it correctly.
+
 All tests use injected clocks and IDs. Property tests verify reconstruction
-against the theoretical filter using Hypothesis.
+against the theoretical filter using Hypothesis — scoped to assertions that
+never change status, where the filter above is exact.
 """
 
 from __future__ import annotations
@@ -252,8 +263,14 @@ class TestAsOfSupersession:
 
 
 class TestAsOfRetractionAndFlagging:
-    """Retraction closes valid_to (SPEC §5); flagged assertions are excluded
-    from as_of by default, same as default (non-as_of) queries (SPEC §10.3).
+    """Retraction closes an *open-ended* valid_to (SPEC §5) — but, per
+    ADR-0049 (KI-095), not one already set explicitly to a later date; the
+    `test_retract_with_explicit_future_valid_to_*` vectors below exist
+    precisely because that case relies on a second, independent mechanism
+    (the retraction event's own assertion-time), not the window closure
+    this docstring used to claim covers every case. Flagged assertions are
+    excluded from as_of by default, same as default (non-as_of) queries
+    (SPEC §10.3).
     """
 
     def test_retract_visible_as_of_before_retraction(self, make_kb: KbFactory) -> None:
@@ -287,6 +304,50 @@ class TestAsOfRetractionAndFlagging:
 
         visible = kb.as_of(after_retraction).assertions(subject=entity.id, predicate="Person.name")
         assert visible == []
+
+    def test_retract_with_explicit_future_valid_to_not_visible_once_known(
+        self, make_kb: KbFactory
+    ) -> None:
+        """ADR-0049 (KI-095): unlike the test above, this assertion has an
+        explicit, far-future valid_to — the case _retraction_valid_to()
+        deliberately leaves un-narrowed, so the window alone can't tell
+        this apart from a still-active fact. assertions() must additionally
+        exclude it once its own retraction event's timestamp is known."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        a = kb.assert_literal(
+            entity.id, "Person.name", "Ada", "Text", AUTHOR, valid_to=T2 + timedelta(days=3650)
+        )
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)
+        kb.retract(a.id, AUTHOR)
+        after_retraction = clock.now()
+
+        visible = kb.as_of(after_retraction).assertions(subject=entity.id, predicate="Person.name")
+        assert visible == []
+
+    def test_retract_with_explicit_future_valid_to_still_visible_before_retraction(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The exclusion is assertion-time-scoped, not blanket: a t before
+        the retraction event's own timestamp must still show the value."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        a = kb.assert_literal(
+            entity.id, "Person.name", "Ada", "Text", AUTHOR, valid_to=T2 + timedelta(days=3650)
+        )
+        before_retraction = kb.clock.now()
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)
+        kb.retract(a.id, AUTHOR)
+
+        visible = kb.as_of(before_retraction).assertions(subject=entity.id, predicate="Person.name")
+        assert len(visible) == 1
+        assert visible[0].id == a.id
 
     def test_flagged_excluded_from_as_of_by_default(self, make_kb: KbFactory) -> None:
         kb = _kb(make_kb)

@@ -701,6 +701,96 @@ class TestAsOfConfidenceTrust:
         results = kb.as_of(t).query("Person").min_confidence(0.5).include_flagged().all()
         assert {r.id for r in results} == {entity.id}
 
+    def test_min_confidence_as_of_excludes_retracted_assertion_once_known(
+        self, make_kb: KbFactory
+    ) -> None:
+        """ADR-0049 (KI-095): a retracted assertion's window is not
+        reliably narrowed at retraction time — this one has an explicit,
+        far-future valid_to, the case that exposes the bug — so `as_of(t)`
+        must additionally exclude it once its own retraction event's
+        assertion-time is <= t, not rely on the window alone."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        a = kb.assert_literal(
+            entity.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            TRUSTED,
+            confidence=0.9,
+            valid_to=T0 + timedelta(days=3650),
+        )
+        clock.advance(days=10)
+        kb.retract(a.id, TRUSTED)
+
+        t = T0 + timedelta(days=365)
+        assert kb.as_of(t).query("Person").min_confidence(0.5).all() == []
+
+    def test_trust_at_least_as_of_excludes_retracted_assertion_once_known(
+        self, make_kb: KbFactory
+    ) -> None:
+        """Same shape as the confidence version above, for `.trust_at_least()`."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        a = kb.assert_literal(
+            entity.id, "Person.name", "Ada", "Text", TRUSTED, valid_to=T0 + timedelta(days=3650)
+        )
+        clock.advance(days=10)
+        kb.retract(a.id, TRUSTED)
+
+        t = T0 + timedelta(days=365)
+        assert kb.as_of(t).query("Person").trust_at_least(5).all() == []
+
+    def test_min_confidence_as_of_include_history_opts_back_into_retraction(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The opt-out: `.include_history()` restores pre-ADR-0049 visibility
+        for a retracted assertion under `.as_of()` — the first thing it has
+        ever done on that path (previously a documented no-op)."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        a = kb.assert_literal(
+            entity.id,
+            "Person.name",
+            "Ada",
+            "Text",
+            TRUSTED,
+            confidence=0.9,
+            valid_to=T0 + timedelta(days=3650),
+        )
+        clock.advance(days=10)
+        kb.retract(a.id, TRUSTED)
+
+        t = T0 + timedelta(days=365)
+        assert kb.as_of(t).query("Person").min_confidence(0.5).all() == []
+        results = kb.as_of(t).query("Person").min_confidence(0.5).include_history().all()
+        assert {r.id for r in results} == {entity.id}
+
+    def test_trust_at_least_as_of_include_history_opts_back_into_retraction(
+        self, make_kb: KbFactory
+    ) -> None:
+        """Same shape as the confidence version above, for `.trust_at_least()`."""
+        kb = _kb(make_kb)
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        entity = kb.create_entity("Person", author=TRUSTED)
+        a = kb.assert_literal(
+            entity.id, "Person.name", "Ada", "Text", TRUSTED, valid_to=T0 + timedelta(days=3650)
+        )
+        clock.advance(days=10)
+        kb.retract(a.id, TRUSTED)
+
+        t = T0 + timedelta(days=365)
+        assert kb.as_of(t).query("Person").trust_at_least(5).all() == []
+        results = kb.as_of(t).query("Person").trust_at_least(5).include_history().all()
+        assert {r.id for r in results} == {entity.id}
+
     def test_as_of_min_confidence_combined_with_where(self, make_kb: KbFactory) -> None:
         """The exact regression shape this KI describes: an entity passes
         `.where()` both at t and now, but only qualifies on confidence at t

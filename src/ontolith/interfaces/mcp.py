@@ -465,7 +465,12 @@ def create_mcp_server(
                 ``retracted`` when ``include_history`` is set (KI-093).
                 With ``as_of``: the qualifying set is never restricted to
                 ``active`` in the first place, so ``include_history`` has
-                nothing to add there; ``include_flagged`` still applies.
+                nothing to add for a ``superseded`` assertion there;
+                ``include_flagged`` still applies. A ``retracted``
+                assertion is the exception (ADR-0049, KI-095): ``as_of``
+                additionally excludes it once its own retraction has
+                happened (assertion-time), and ``include_history`` opts
+                back out of that exclusion.
             trust_at_least: Optional floor on a qualifying assertion's
                 *effective* trust_level (min(author, acting_as) under
                 delegation, KI-047) — independent of ``min_confidence``;
@@ -476,14 +481,16 @@ def create_mcp_server(
                 assertions — excluded by default (SPEC §10.3, KI-081/093).
             include_history: Also match against ``superseded``/
                 ``retracted`` assertions — excluded by default (KI-081/093).
-                A documented no-op combined with ``as_of``: that branch
-                never restricts matches to ``active`` in the first place —
-                it excludes only ``flagged`` (itself gated behind
-                ``include_flagged``) — so a superseded/retracted assertion
-                whose validity window covers the queried instant already
-                matches without this opt-in. Per KI-095, this also means
-                there is currently no way to *exclude* a retracted
-                assertion whose window still covers that instant, either.
+                Mostly a no-op combined with ``as_of``: that branch never
+                restricts matches to ``active`` in the first place — it
+                excludes only ``flagged`` (itself gated behind
+                ``include_flagged``) — so a superseded assertion whose
+                validity window covers the queried instant already matches
+                without this opt-in. A retracted assertion is the
+                exception (ADR-0049, KI-095): ``as_of`` additionally
+                excludes it once its own retraction event's assertion-time
+                has passed, and this opt-in is what lets a caller see it
+                anyway.
 
         Returns:
             Dict with "entities" list and "count", or "error" if no token
