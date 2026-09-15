@@ -79,8 +79,10 @@ correctness issue, not just a read-path one.
 and `as_of(t)` reverts to the pre-ADR window-only behavior. This is the first thing
 `.include_history()` has ever done on the `as_of` path — every prior KI-081/093/094/096 note
 calling it "a documented no-op under `.as_of()`" is now scoped to say "unless retraction is
-involved" (their sibling claim, "`.include_flagged()` still applies under `.as_of()`", is
-unaffected and remains exactly as before).
+involved" (their sibling claim, "`.include_flagged()` still applies under `.as_of()`", still
+holds — but, per KI-097's own Update below, *why* it applies changed underneath it: the three
+`QueryBuilder`-facing methods now reconstruct `flagged` point-in-time from the event log, the
+same way `assertions()` always did, rather than by current status).
 
 No new column, no schema migration, no data loss: the timestamp this decision needs
 (`assertion_event.at` for the `retracted` action) already exists and is already written on every

@@ -62,10 +62,11 @@ from `kb.query(Person).min_confidence(0.5)` even with no `.where()` in sight.
 
 **`.include_history()` is a no-op under `.as_of(t)` for `superseded` values.** The `as_of` branch
 never restricts matches to `active` in the first place — it excludes only `flagged` (gated behind
-`.include_flagged()`, which *does* still apply under `.as_of()` — a flagged assertion has an open
-window, and the `as_of` path has honored `entities_where(include_flagged=...)` since before this
-ADR) — so a `superseded` value is already visible there whenever `t` predates its supersession,
-with no opt-in needed.
+`.include_flagged()`, which *does* still apply under `.as_of()`, and has since before this ADR —
+though *why* changed since: originally a current-status check, since KI-097 a point-in-time
+reconstruction from the `assertion_event` log, same as `assertions()` always used) — so a
+`superseded` value is already visible there whenever `t` predates its supersession, with no
+opt-in needed.
 
 This left one `as_of` gap this ADR did **not** fix: a `retract()` does not always narrow an
 already-open validity window (`_retraction_valid_to`), so a retracted assertion with a future
@@ -215,7 +216,10 @@ note (`QueryBuilder.include_history()`, `StorageBackend.entities_where()`/
 bitemporal snapshot already matches whatever was valid at that instant regardless of status now"
 is not quite true — the `as_of` branch does consult status for one case (`flagged` is excluded
 unless `include_flagged` is set, per `entities_meeting_confidence()`'s own "One caveat" paragraph
-two sections up). A first attempted reword landed on the MCP copy alone and, in trying to avoid
+two sections up — since KI-097, that paragraph no longer frames this as a caveat: the `as_of`
+branch reconstructs `flagged` point-in-time from the `assertion_event` log rather than by
+current status at all, so "consults status" is itself now imprecise; see KI-097's own entry).
+A first attempted reword landed on the MCP copy alone and, in trying to avoid
 that inaccuracy, introduced a different wrong claim ("matches purely on the validity window, not
 on current `status`") that a second review round caught by cross-checking it against the adapters'
 own SQL (`flagged_clause`) and the sibling `include_flagged` no-op-under-`as_of` claim six lines
