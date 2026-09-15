@@ -86,7 +86,7 @@ class AsOfView:
 
     Status is not used as a positive filter — the temporal dimensions
     determine visibility — but two statuses are still excluded by default,
-    the same opt-ins as default (non-as_of) queries even though the
+    with the same opt-ins default (non-as_of) queries use, even though the
     underlying mechanism differs: 'flagged' assertions (disputed, not
     confirmed-valid; reconstructed point-in-time from the assertion_event
     log, not by current status, KI-097 — pass ``include_flagged=True`` for

@@ -2052,11 +2052,18 @@ class SQLiteBackend:
             # flagged_clause is always one of exactly two hardcoded literals,
             # never caller-controlled. No # nosec needed here (unlike the
             # match_clause consumers below, e.g. `AND id IN (...SELECT...`):
-            # bandit's B608 heuristic only fires where a SQL keyword
-            # (SELECT/WHERE/...) sits in the same interpolated string as a
-            # variable, and this fragment has none - confirmed directly, not
-            # assumed (a #nosec placed here was previously dead: removing it
-            # left bandit's finding count unchanged).
+            # bandit's B608 rule only flags a SQL keyword joined into a
+            # string via BinOp/.format()/f-string - never a bare literal
+            # Constant, which is all flagged_clause/retracted_clause ever
+            # are (confirmed by AST: both branches of the ternary are plain
+            # folded string constants). The COALESCE subquery below *does*
+            # now contain SELECT/FROM/WHERE/ORDER BY/LIMIT (KI-097 - it
+            # didn't when this comment was first written), but since that
+            # text lives entirely inside the constant rather than being
+            # concatenated onto one, bandit's detector still never sees it -
+            # confirmed directly, not assumed (a #nosec placed here was
+            # previously dead: removing it left bandit's finding count
+            # unchanged).
             # KI-097: flagged-at-t, not current status — same event-log
             # reconstruction assertions() already uses (see its own
             # comment for the full reasoning: a static conflict flags an
