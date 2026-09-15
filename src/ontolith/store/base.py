@@ -283,14 +283,14 @@ class StorageBackend(Protocol):
             as_of_time: If set, applies bitemporal filter:
                 valid_from <= t < (valid_to or ∞) AND asserted_at <= t
             include_flagged: When as_of_time is set, whether to include
-                'flagged' assertions (excluded by default). A 'retracted'
-                assertion is excluded once its own retraction event's
-                timestamp is <= as_of_time (ADR-0049, KI-095), unless
-                include_history is set.
+                'flagged' assertions (excluded by default); ignored when
+                as_of_time is None (pass status=None there instead).
             include_history: When as_of_time is set, whether to opt back
                 into seeing a 'retracted' assertion once its own retraction
-                event's timestamp is <= as_of_time (KI-098) — mirrors
-                include_flagged's shape; ignored when as_of_time is None.
+                event's timestamp is <= as_of_time (ADR-0049, KI-095;
+                excluded by default) — mirrors include_flagged's shape
+                (KI-098); ignored when as_of_time is None (pass status=None
+                there instead).
 
         Returns:
             List of matching assertions

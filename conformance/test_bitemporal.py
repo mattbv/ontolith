@@ -16,9 +16,9 @@ only since KI-097 fixed their current-status-based version of this exact
 bug — `include_flagged` opts back in) and, for `retracted` specifically,
 once its own retraction event's assertion-time has passed (ADR-0049,
 KI-095; `include_history` opts back in on every `as_of`-capable read path
-— `assertions()` only since KI-098 closed the same "one path lacks the
-opt-out the others have" asymmetry `include_flagged` already had before
-KI-097 — see `TestAsOfRetractionAndFlagging` below). `superseded` needs no such
+— `assertions()` only since KI-098 closed the mirror-image gap ADR-0049 left it with: the
+`QueryBuilder`-facing trio got the `include_history` opt-out when the retraction exclusion
+shipped, `assertions()` did not — see `TestAsOfRetractionAndFlagging` below). `superseded` needs no such
 exclusion: its `valid_to` closure already encodes the real-world end point,
 so the plain window check above already handles it correctly.
 

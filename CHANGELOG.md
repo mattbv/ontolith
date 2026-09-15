@@ -555,10 +555,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a distinct bitemporal query path with its own governance-visible impact, since `SourceQuorum`
   evaluates `kb_view.assertions(...)` during policy decisions. `.include_history()` becomes the
   opt-out on the `QueryBuilder`-facing trio, the first thing it has ever done on the `as_of` path
-  (`assertions()` gained the same opt-out separately as KI-098) — see ADR-0049 for the full rationale and the
-  rejected alternative (closing `valid_to` to the retraction instant at write time, which would
-  have permanently destroyed the originally asserted end date). **Existing `as_of` callers may see
-  smaller result sets** for any query that previously (incorrectly) surfaced a retracted value.
+  (`assertions()` gained the same opt-out separately as KI-098) — see ADR-0049 for the full
+  rationale and the rejected alternative (closing `valid_to` to the retraction instant at write
+  time, which would have permanently destroyed the originally asserted end date). **Existing
+  `as_of` callers may see smaller result sets** for any query that previously (incorrectly)
+  surfaced a retracted value.
   **Filed separately, found while building this fix:** KI-097 — the same current-status-vs-
   point-in-time gap affects `flagged`/`reactivated` reconstruction on the `QueryBuilder`-facing
   trio specifically (`assertions()` already reconstructs that pair correctly).

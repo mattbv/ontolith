@@ -67,9 +67,10 @@ AND (status != 'retracted' OR EXISTS (
 
 `StorageBackend.assertions()` — a distinct, lower-level bitemporal query path this ADR's own KI
 text named alongside `entities_where()` ("and the other bitemporal query paths") — gets the
-identical clause, unconditionally (it has no `include_history`-shaped opt-out today, unlike the
-`QueryBuilder`-facing trio, since its `status` parameter is already ignored entirely once
-`as_of_time` is set). This matters beyond direct callers: `govern/policy.py`'s `SourceQuorum`
+identical clause, applied unconditionally at the time this ADR shipped (its `status` parameter is
+already ignored entirely once `as_of_time` is set, so this ADR gave it no `include_history`-shaped
+opt-out of its own — that gap was closed separately as KI-098). This matters beyond direct callers:
+`govern/policy.py`'s `SourceQuorum`
 evaluates `kb_view.assertions(...)` on an `AsOfView`, so an un-narrowed retracted assertion could
 silently contribute a distinct `source` to quorum counting during policy evaluation — a governance
 correctness issue, not just a read-path one.
