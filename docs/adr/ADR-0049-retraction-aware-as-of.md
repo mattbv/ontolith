@@ -144,7 +144,11 @@ only.
   closed here:** KI-097 (`flagged`/`reactivated` reconstructed from current status rather than
   point-in-time on the same three `QueryBuilder`-facing methods — `assertions()` already handles
   that pair correctly via its own pre-existing event-log reconstruction, which this ADR's fix
-  mirrors for the one-way `retracted` case).
+  mirrors for the one-way `retracted` case). **Update (2026-09-15, closes KI-097):** ported
+  `assertions()`'s event-log reconstruction verbatim into the three `QueryBuilder`-facing methods,
+  on both backends — no new logic to design, since the two-way flagged/reactivated cycle direction
+  `assertions()` already got right transfers as-is; no ADR needed for the same reason. See
+  `docs/known-issues.md`'s KI-097 entry for the full write-up.
 - **Fail-closed on a missing event:** an assertion with `status = 'retracted'` but no matching
   `assertion_event` row (reachable only via a direct `put_assertion()` at the port level, or a
   pre-existing database written before this fix shipped — no migration was needed, since
