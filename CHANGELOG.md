@@ -523,6 +523,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
+- `StorageBackend.assertions()` gains an `include_history` parameter (closes KI-098, found reviewing
+  KI-095) — the asymmetry ADR-0049 left where `.include_history()` opted a retracted assertion back
+  into `.query()`/`.min_confidence()`/`.trust_at_least()` under `.as_of()`, but the lower-level
+  `assertions()` read path had no equivalent opt-out at all, closing the exact same window
+  unconditionally. Both backends' `assertions()` now wrap the ADR-0049 retraction-exclusion check in
+  `if not include_history:`, mirroring `include_flagged`'s existing shape on the same method;
+  `AsOfView.assertions()` forwards the new parameter. No new bitemporal semantics, no ADR needed —
+  purely closing a parameter-shape gap the retraction fix left behind.
 - `entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()`'s `as_of` branch
   now excludes/includes `flagged` assertions point-in-time, not by current status (closes KI-097,
   found building ADR-0049's KI-095 fix) — a `.query()`/`.min_confidence()`/`.trust_at_least()` call
@@ -547,7 +555,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a distinct bitemporal query path with its own governance-visible impact, since `SourceQuorum`
   evaluates `kb_view.assertions(...)` during policy decisions. `.include_history()` becomes the
   opt-out on the `QueryBuilder`-facing trio, the first thing it has ever done on the `as_of` path
-  (`assertions()` has no equivalent opt-out today) — see ADR-0049 for the full rationale and the
+  (`assertions()` gained the same opt-out separately as KI-098) — see ADR-0049 for the full rationale and the
   rejected alternative (closing `valid_to` to the retraction instant at write time, which would
   have permanently destroyed the originally asserted end date). **Existing `as_of` callers may see
   smaller result sets** for any query that previously (incorrectly) surfaced a retracted value.

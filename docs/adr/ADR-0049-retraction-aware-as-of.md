@@ -124,10 +124,13 @@ only.
   `StorageBackend.entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()` keep
   their existing parameters (`include_flagged`, `include_history`) — only what `include_history`
   *does* under `as_of` changes, from "nothing" to "opts back into the pre-ADR behavior."
-  `assertions()` gains no new parameter at all: the exclusion is unconditional there, since that
-  method has no equivalent opt-out today (a caller wanting a retracted assertion back under
-  `as_of` has no way to ask, on this method specifically — a known, accepted asymmetry, not
-  something this ADR adds a parameter to close).
+  `assertions()` gains no new parameter at this ADR's own original scope: the exclusion is
+  unconditional there, since that method has no equivalent opt-out today (a caller wanting a
+  retracted assertion back under `as_of` has no way to ask, on this method specifically — a known,
+  accepted asymmetry, not something this ADR adds a parameter to close). **Update (KI-098):**
+  `assertions()` gained an `include_history` parameter after all, mirroring `include_flagged`'s
+  existing shape on the same method — filed and closed as its own follow-up rather than folded
+  back into this ADR, since the mechanism itself needed no redesign.
 - **A new correlated `EXISTS` subquery on the `as_of` path** for `retracted_clause`, in all four
   methods, scoped by the existing `idx_assertion_event_assertion` index (on
   `assertion_event.assertion_id`) — only evaluated per candidate row already matching every other

@@ -2050,10 +2050,10 @@ A third review round found round 2's own restored bandit-B608 comment now stated
 
 ---
 
-## KI-098 — `StorageBackend.assertions()` has no way to opt back into seeing a retracted assertion under `.as_of()` — found reviewing KI-095
+## KI-098 — `StorageBackend.assertions()` has no way to opt back into seeing a retracted assertion under `.as_of()` — found reviewing KI-095 ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — SPEC §10.3's "excluded from default retrieval **unless explicitly requested**" has no request path on this one method, post-ADR-0049
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §10.3 ("MUST be excluded from default retrieval unless explicitly requested"), SPEC §11.2 ("Flagged/superseded/retracted assertions are excluded by default; `.include_flagged()`/`.include_history()` opt in"), SPEC §11.4 (`as_of` semantics)
 
 ### Description
@@ -2064,7 +2064,9 @@ ADR-0049 (KI-095) gave `StorageBackend.assertions()`'s `as_of_time` branch the s
 
 ### Fix
 
-Add an `include_history: bool = False` parameter to `StorageBackend.assertions()` (port + both adapters) and `AsOfView.assertions()`, mirroring `include_flagged`'s existing shape: when set, skip the new retraction-exclusion clause entirely (the same mechanism `.include_history()` already uses to opt out on the `QueryBuilder`-facing trio). Mechanical once named — no new bitemporal semantics decision, since the underlying mechanism ADR-0049 already built is being exposed, not redesigned.
+Added `include_history: bool = False` to `StorageBackend.assertions()` (port + both adapters) and `AsOfView.assertions()`, mirroring `include_flagged`'s existing shape exactly: when set, the retraction-exclusion clause is skipped entirely, the same mechanism `.include_history()` already uses to opt out on the `QueryBuilder`-facing trio. Mechanical, as anticipated — no new bitemporal semantics decision, since the underlying mechanism ADR-0049 already built is being exposed, not redesigned; no ADR needed. `AsOfView`'s class docstring updated to drop the "no equivalent opt-out today" caveat; ADR-0049 gained an Update section recording the parameter was added after all, as its own follow-up rather than folded back into that ADR.
+
+New tests: `conformance/test_bitemporal.py::TestAsOfRetractionAndFlagging::test_include_history_opts_back_into_a_retracted_assertion_via_assertions` (both backends) — the same explicit-far-future-`valid_to` scenario the sibling `entities_where()`-family tests use, confirming `kb.as_of(t).assertions(...)` can now surface the retracted assertion `kb.as_of(t).query(Concept).include_history()` could already surface indirectly via the entity. Mutation-tested on both backends (forcing the exclusion clause to always apply, ignoring `include_history`, fails exactly this test on the mutated backend and nothing else). No port-level unit tests added, matching the precedent `assertions()`'s own `as_of` coverage already set during KI-095 (conformance-only, since this method has no dedicated port-level `as_of` test suite the way `entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()` do).
 
 ---
 
