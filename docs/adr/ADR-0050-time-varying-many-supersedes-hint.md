@@ -156,9 +156,10 @@ already provides avoids that entirely.
 - **Breaking**: an existing `cardinality="many"` `time_varying` property whose callers relied on the
   pre-ADR-0050 unconditional-supersession behavior (e.g. to correct a value by simply asserting a
   new one, with no `supersedes=`) now gets coexistence instead — that caller must add
-  `supersedes=<id>` to keep replacing rather than accumulating. `govern.conflict.route()`/
-  `_route_time_varying()` also gain a new keyword parameter (`supersedes_hint`, default `None`,
-  appended after every existing parameter with a default — every other call shape is unaffected);
+  `supersedes=<id>` to keep replacing rather than accumulating. `govern.conflict.route()` gains a
+  new keyword parameter (`supersedes_hint`, default `None`, appended after every existing parameter
+  with a default — every other call shape is unaffected); `_route_time_varying()` (private, no
+  external callers) gains both `cardinality` and `supersedes_hint`, since it previously took neither;
   `Ontology.assert_literal()`/`assert_ref()`/`propose()`/`propose_ref()` gain a new keyword-only
   `supersedes` parameter (default `None`) — additive, not breaking, for every other existing caller.
 - **REST, GraphQL, MCP, and CLI parity is deliberately out of scope for this ADR/KI.** `supersedes`

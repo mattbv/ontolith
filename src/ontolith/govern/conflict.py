@@ -88,16 +88,18 @@ def route(
             cardinality="many" time_varying properties — every other
             combination ignores it, since the routing there is already
             unambiguous without a hint. The caller (Ontology) is
-            responsible for validating the hint refers to a real, active,
-            same-(subject, predicate) assertion before calling route();
-            this function validates that it names an assertion incoming
-            actually overlaps-and-differs-from — see the ValueError below.
-            Checked even when `existing` has no *other* candidate
-            incoming would otherwise conflict with: an explicit hint is
-            never silently dropped just because nothing else happens to
-            overlap, including when `existing` is empty outright (e.g. a
-            caller retrying a stale hint after its target left the active
-            set some other way).
+            responsible for supplying `existing` already scoped to active
+            assertions on this incoming assertion's own (subject,
+            predicate) — the same precondition `existing` always carries,
+            hint or not. Given that, this function is what actually
+            validates the hint: it must name one of those assertions,
+            and specifically one incoming overlaps-and-differs-from — see
+            the ValueError below. Checked even when `existing` has no
+            *other* candidate incoming would otherwise conflict with: an
+            explicit hint is never silently dropped just because nothing
+            else happens to overlap, including when `existing` is empty
+            outright (e.g. a caller retrying a stale hint after its
+            target left the active set some other way).
 
     Returns:
         Activate  — no conflict; caller persists incoming as-is.
