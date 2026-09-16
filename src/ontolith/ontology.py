@@ -92,10 +92,10 @@ class AsOfView:
     log, not by current status, KI-097 — pass ``include_flagged=True`` for
     explicit audit/history views) and, since ADR-0049 (KI-095), a
     'retracted' assertion once its own retraction event's assertion-time
-    has passed (pass ``include_history=True`` to opt back into seeing
-    it — via ``.query()``'s chained ``.include_history()`` builder method,
-    or via ``.assertions()``'s own ``include_history`` keyword since
-    KI-098 closed the asymmetry where only ``.query()`` had this opt-out).
+    has passed (opt back into seeing it via ``.query()``'s chained
+    ``.include_history()`` builder method, or via ``.assertions()``'s own
+    ``include_history=True`` keyword since KI-098 closed the asymmetry
+    where only ``.query()`` had this opt-out).
     """
 
     def __init__(

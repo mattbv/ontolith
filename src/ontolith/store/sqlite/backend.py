@@ -1274,8 +1274,9 @@ class SQLiteBackend:
         Args:
             subject: Filter by subject entity ID
             predicate: Filter by predicate
-            status: Filter by current status (ignored when as_of_time is set;
-                pass status=None there for every status)
+            status: Filter by current status (ignored when as_of_time is
+                set). Defaults to "active"; pass status=None for every
+                status.
             as_of_time: If set, applies bitemporal filter:
                 asserted_at <= t AND valid_from <= t AND (valid_to IS NULL OR valid_to > t)
             include_flagged: When as_of_time is set, whether to include

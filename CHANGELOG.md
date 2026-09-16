@@ -523,8 +523,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
-- **Breaking:** `StorageBackend.assertions()` gains a required `include_history: bool = False`
-  parameter (closes KI-098, found reviewing KI-095) — the asymmetry ADR-0049 left where
+- **Breaking:** `StorageBackend.assertions()` gains an `include_history: bool = False` parameter
+  (closes KI-098, found reviewing KI-095) — the asymmetry ADR-0049 left where
   `.include_history()` opted a retracted assertion back into `.query()`/`.min_confidence()`/
   `.trust_at_least()` under `.as_of()`, but the lower-level `assertions()` read path had no
   equivalent opt-out at all, closing the exact same window unconditionally. Both backends'
@@ -554,8 +554,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   branch (both backends) now also excludes a `retracted` assertion once its own retraction event's
   timestamp is `<=` the queried instant — reusing the timestamp `_record_assertion_event()` already
   writes exactly once per assertion (KI-051), never previously consulted by any bitemporal query
-  path. `StorageBackend.assertions()` (both backends) gets the identical, unconditional exclusion —
-  a distinct bitemporal query path with its own governance-visible impact, since `SourceQuorum`
+  path. `StorageBackend.assertions()` (both backends) gets the identical exclusion, unconditional
+  as originally shipped here — a distinct bitemporal query path with its own governance-visible
+  impact, since `SourceQuorum`
   evaluates `kb_view.assertions(...)` during policy decisions. `.include_history()` becomes the
   opt-out on the `QueryBuilder`-facing trio, the first thing it has ever done on the `as_of` path
   (`assertions()` gained the same opt-out separately as KI-098) — see ADR-0049 for the full
