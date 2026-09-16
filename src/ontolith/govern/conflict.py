@@ -90,9 +90,14 @@ def route(
             unambiguous without a hint. The caller (Ontology) is
             responsible for validating the hint refers to a real, active,
             same-(subject, predicate) assertion before calling route();
-            this function only validates that it is among the assertions
-            incoming would otherwise conflict with — see the ValueError
-            below.
+            this function validates that it names an assertion incoming
+            actually overlaps-and-differs-from — see the ValueError below.
+            Checked even when `existing` has no *other* candidate
+            incoming would otherwise conflict with: an explicit hint is
+            never silently dropped just because nothing else happens to
+            overlap, including when `existing` is empty outright (e.g. a
+            caller retrying a stale hint after its target left the active
+            set some other way).
 
     Returns:
         Activate  — no conflict; caller persists incoming as-is.
@@ -106,11 +111,9 @@ def route(
             §10.2's own supersession precondition) — a caller-contract
             violation the Ontology layer is expected to translate into a
             ValidationError at the boundary, not something callers should
-            rely on route() to swallow silently.
+            rely on route() to swallow silently. Raised regardless of
+            whether any other existing assertion would otherwise route.
     """
-    if not existing:
-        return Activate()
-
     if temporality == "time_varying":
         return _route_time_varying(incoming, existing, cardinality, supersedes_hint)
     else:
@@ -137,12 +140,17 @@ def _route_time_varying(
     which never auto-supersedes at all). With supersedes_hint, exactly the
     named assertion is superseded; every other overlapping-differing one
     still coexists untouched.
+
+    The cardinality="many" + supersedes_hint check runs before the
+    "nothing overlaps" short-circuit below, deliberately — an explicit
+    hint must never be silently dropped just because no *other* candidate
+    happens to overlap too (including when `existing` is empty outright).
+    A caller who supplies a hint always gets either the supersession they
+    asked for or a ValueError explaining why not; never silent no-op.
     """
     overlapping = [
         e for e in existing if _windows_overlap(e, incoming) and e.value != incoming.value
     ]
-    if not overlapping:
-        return Activate()
 
     if cardinality == "many":
         if supersedes_hint is None:
@@ -156,6 +164,8 @@ def _route_time_varying(
             )
         return Supersede(targets=[supersedes_hint])
 
+    if not overlapping:
+        return Activate()
     return Supersede(targets=[e.id for e in overlapping])
 
 

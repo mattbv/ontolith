@@ -805,7 +805,8 @@ class Ontology:
         if temporality != "time_varying" or self._resolve_cardinality(predicate) != "many":
             raise ValidationError(
                 'supersedes is only meaningful for a cardinality="many", '
-                f'temporality="time_varying" property (ADR-0050) — {predicate!r} is not one'
+                f'temporality="time_varying" property or relation (ADR-0050) — '
+                f"{predicate!r} is not one"
             )
 
     def _validate_literal_value(self, value: str, value_type: str) -> None:
