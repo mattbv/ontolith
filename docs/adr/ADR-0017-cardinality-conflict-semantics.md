@@ -45,6 +45,8 @@ This ADR also folds in the companion fix needed to make the SPEC's own §10.1 fo
 **Why not extend this to `time_varying` properties:**
 - `time_varying` properties already support multiple coexisting values via non-overlapping windows (SPEC §10.2 — e.g. employment history). Cardinality doesn't add anything new there; two *overlapping-window*, differing-value `time_varying` assertions are a genuine supersession regardless of cardinality (the newer one replaces the older), so `cardinality` is not threaded into `_route_time_varying`.
 
+**Update (KI-080, ADR-0050):** this reasoning held for the single-concurrent-value case but implicitly assumed there was only one logical "slot" to replace — exactly what `cardinality="many"` says isn't true. Reproduced directly: two genuinely-concurrent, differing-value `time_varying` assertions on an overlapping window for a `many`-cardinality property (e.g. two concurrent job titles) collapsed to one via unconditional supersession, unlike `static`+`many`'s coexistence. ADR-0050 extends cardinality-aware routing to `_route_time_varying` after all — a `many`-cardinality overlapping differing value now coexists by default, with a new `supersedes` hint (on `assert_literal`/`assert_ref`/`propose`/`propose_ref`) to explicitly force replacement of one specific prior assertion instead, since window overlap and a differing value alone cannot tell "replace my current value" from "a new, additional concurrent value" apart the way they unambiguously can for `cardinality="single"`. See ADR-0050 for the full decision and rejected alternatives.
+
 ## Consequences
 
 **Positive:**

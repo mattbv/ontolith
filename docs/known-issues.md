@@ -1622,11 +1622,11 @@ Closed for GraphQL and CLI in one PR (**ADR-0046**'s own Update section). `Propo
 
 ---
 
-## KI-080 — `cardinality="many"` has no effect on `time_varying` properties — concurrent multi-valued facts silently collapse to one
+## KI-080 — `cardinality="many"` has no effect on `time_varying` properties — concurrent multi-valued facts silently collapse to one ✓ RESOLVED (Backlog)
 
 **Severity:** Architecture gap — `cardinality="many"` is unreachable for `time_varying` properties; current behavior is SPEC-conformant (§10.1/§10.2's pseudocode never mentions `cardinality`), so this is a design-scope gap in `cardinality`, not a SPEC violation
-**Milestone target:** Backlog
-**SPEC reference:** SPEC §4 (`cardinality: single (default) | many`), SPEC §10.1/§10.2 (temporal supersession routing, no `cardinality` parameter in either); ADR-0017 (cardinality-aware routing)
+**Milestone target:** Backlog — resolved without a milestone change
+**SPEC reference:** SPEC §4 (`cardinality: single (default) | many`), SPEC §10.1/§10.2 (temporal supersession routing, no `cardinality` parameter in either); ADR-0017 (cardinality-aware routing, amended by ADR-0050)
 
 ### Description
 
@@ -1636,7 +1636,13 @@ This is not an oversight — ADR-0017 (which introduced cardinality-aware routin
 
 ### Fix
 
-Thread `cardinality` into `_route_time_varying`. This needs a real design decision, not a mechanical port of the `static` fix: for `many`, an incoming assertion should only supersede an existing one that's a genuine update *to the same logical value slot*, not any differing-value assertion on an overlapping window. That likely needs an explicit way to say "this proposal replaces that specific prior assertion" (an optional `supersedes` hint on `propose()`?) rather than inferring it from window overlap alone, since window overlap alone can't distinguish "replace my old title" from "I now also hold a second, concurrent title." Worth a fresh ADR amending ADR-0017 rather than silently changing behavior — record the new decision, don't just patch the code.
+The user chose the fix direction via `AskUserQuestion` before implementation, over two alternatives (always-coexist with no new parameter; affirm ADR-0017's original decision and leave the gap open) — recorded in new **ADR-0050**: `govern/conflict._route_time_varying` now consults `cardinality`. A `many`-cardinality overlapping differing value coexists by default (`Activate()`, mirroring `_route_static`'s own "many" branch — the behavior change from before this fix, which superseded unconditionally). A new `supersedes: str | None = None` keyword parameter on `assert_literal()`/`assert_ref()`/`propose()`/`propose_ref()` lets a caller explicitly name the one specific existing assertion to replace instead (`Supersede(targets=[supersedes])`) — every other overlapping-differing concurrent value stays untouched, so a hint for one replacement never silently sweeps in unrelated values. `cardinality="single"` is completely unaffected — that branch never consults the hint at all, since routing is already unambiguous there.
+
+Two-layer validation: `Ontology._require_valid_supersedes_hint` rejects a non-`None` hint outright (`ValidationError`) unless the predicate resolves to `cardinality="many"`/`temporality="time_varying"`, checked once at submission time (mirroring `_require_existing_subject`/`_require_existing_target`'s "fail loud before the write reaches routing" convention); `route()` itself validates that the hint names a real, active, same-`(subject, predicate)`, overlapping-and-differing assertion, against a fresh read of `existing` — a plain `ValueError` there, translated to `ValidationError` in `_apply_with_conflict_routing`, the one call site where `govern/conflict`'s pure-layer contract violations cross into the stable, interface-facing error taxonomy (SPEC §16). For `propose()`/`propose_ref()`, the hint rides along in the staged payload (`op["supersedes"]`) and `route()`'s own membership check re-runs fresh at accept/resubmit replay time — the same "checked once at submission, re-validated fresh at apply time" pattern `temporality` itself already has in `_replay_proposal_operations`; a schema change between submission and replay that moves the predicate out of scope leaves the hint silently unconsulted rather than re-validated late, matching that method's existing, documented temporality-drift precedent, not a new gap.
+
+**Deliberately out of scope:** REST/GraphQL/MCP/CLI parity — `supersedes` is SDK-only for now, matching this project's established pattern of shipping a capability SDK-first and filing interface parity separately (e.g. KI-081 → KI-094/KI-096). Filed as its own follow-up KI.
+
+New tests: `conformance/test_conflict.py::TestManyCardinalityTimeVaryingSupersedes` — pure `route()`-level cases (coexist without a hint; supersede exactly the named target while a second concurrent value stays untouched; a hint not among `existing`, pointing at a same-value assertion, or pointing at a non-overlapping window all raise the identical `ValueError`; no genuine conflict returns `Activate()` even with a hint set; `cardinality="single"` ignores the hint entirely) plus storage-backed, both-backends end-to-end cases through `Ontology` (default coexistence; explicit-hint replacement via `assert_literal`; the same via `propose()`'s auto-accept path; the relation equivalent via `assert_ref`/`propose_ref` on a new `Person.colleague` time_varying+many relation; `supersedes` rejected for a `static` property and for `cardinality="single"` `time_varying`; an unknown hint id rejected; a regression guard confirming `cardinality="single"` `time_varying` supersession is completely unchanged).
 
 ---
 
