@@ -152,16 +152,15 @@ already provides avoids that entirely.
 - `static` properties (`single` or `many`) are completely unaffected — `_route_static` never
   receives `supersedes_hint` at all.
 
-**Breaking:** an existing `cardinality="many"` `time_varying` property whose callers relied on the
-pre-ADR-0050 unconditional-supersession behavior (e.g. to correct a value by simply asserting a new
-one, with no `supersedes=`) now gets coexistence instead — that caller must add `supersedes=<id>`
-to keep replacing rather than accumulating. `govern.conflict.route()`/`_route_time_varying()` also
-gain a new keyword parameter (`supersedes_hint`, default `None`, appended after every existing
-parameter with a default — every other call shape is unaffected); `Ontology.assert_literal()`/
-`assert_ref()`/`propose()`/`propose_ref()` gain a new keyword-only `supersedes` parameter (default
-`None`) — additive, not breaking, for every other existing caller.
-
 **Negative / follow-ups:**
+- **Breaking**: an existing `cardinality="many"` `time_varying` property whose callers relied on the
+  pre-ADR-0050 unconditional-supersession behavior (e.g. to correct a value by simply asserting a
+  new one, with no `supersedes=`) now gets coexistence instead — that caller must add
+  `supersedes=<id>` to keep replacing rather than accumulating. `govern.conflict.route()`/
+  `_route_time_varying()` also gain a new keyword parameter (`supersedes_hint`, default `None`,
+  appended after every existing parameter with a default — every other call shape is unaffected);
+  `Ontology.assert_literal()`/`assert_ref()`/`propose()`/`propose_ref()` gain a new keyword-only
+  `supersedes` parameter (default `None`) — additive, not breaking, for every other existing caller.
 - **REST, GraphQL, MCP, and CLI parity is deliberately out of scope for this ADR/KI.** `supersedes`
   is exposed on the Python SDK only (`assert_literal`/`assert_ref`/`propose`/`propose_ref`) —
   matching this project's established pattern of shipping an SDK-first capability and filing

@@ -1039,6 +1039,17 @@ class TestManyCardinalityTimeVaryingSupersedes:
         with pytest.raises(ValidationError, match="does not name an existing"):
             kb.accept_proposal(proposal.id, ADMIN)
 
+        # ADR-0050's "permanently un-acceptable as staged" consequence, pinned:
+        # the failed accept must not have partially committed anything — the
+        # proposal stays exactly where it was, still retryable (and still
+        # failing the same way, deterministically) rather than landing in
+        # some other, undocumented state.
+        still_pending = kb.backend.get_proposal(proposal.id)
+        assert still_pending is not None
+        assert still_pending.state == "require_review"
+        with pytest.raises(ValidationError, match="does not name an existing"):
+            kb.accept_proposal(proposal.id, ADMIN)
+
     def test_supersedes_hint_unconsulted_when_cardinality_drifts_to_single_at_replay(
         self, make_kb: KbFactory
     ) -> None:
