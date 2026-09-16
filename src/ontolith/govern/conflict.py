@@ -66,6 +66,7 @@ def route(
     temporality: Literal["static", "time_varying"],
     existing_contradiction_id: str | None = None,
     cardinality: Literal["single", "many"] = "single",
+    supersedes_hint: str | None = None,
 ) -> ConflictResult:
     """Determine how to handle incoming vs existing assertions (SPEC §10).
 
@@ -77,35 +78,84 @@ def route(
             (subject, predicate), if one already exists.
         cardinality: Schema-declared cardinality for this predicate.
             "many" static properties coexist on a differing value instead
-            of contradicting (ADR-0017). Not consulted for time_varying
-            properties — they already support coexistence via
-            non-overlapping windows regardless of cardinality.
+            of contradicting (ADR-0017). For "many" time_varying properties,
+            a differing overlapping-window value coexists too, unless
+            supersedes_hint says otherwise (ADR-0050). Not consulted for
+            "single" time_varying properties — window overlap and a
+            differing value are already unambiguous there.
+        supersedes_hint: id of a specific existing assertion this incoming
+            one explicitly replaces (ADR-0050). Only meaningful for
+            cardinality="many" time_varying properties — every other
+            combination ignores it, since the routing there is already
+            unambiguous without a hint. The caller (Ontology) is
+            responsible for validating the hint refers to a real, active,
+            same-(subject, predicate) assertion before calling route();
+            this function only validates that it is among the assertions
+            incoming would otherwise conflict with — see the ValueError
+            below.
 
     Returns:
         Activate  — no conflict; caller persists incoming as-is.
         Supersede — caller closes validity windows then activates incoming.
         Contradict — caller flags all members and persists/extends contradiction.
+
+    Raises:
+        ValueError: supersedes_hint is set, cardinality is "many", and
+            temporality is "time_varying", but the hint does not name an
+            assertion incoming actually overlaps-and-differs-from (SPEC
+            §10.2's own supersession precondition) — a caller-contract
+            violation the Ontology layer is expected to translate into a
+            ValidationError at the boundary, not something callers should
+            rely on route() to swallow silently.
     """
     if not existing:
         return Activate()
 
     if temporality == "time_varying":
-        return _route_time_varying(incoming, existing)
+        return _route_time_varying(incoming, existing, cardinality, supersedes_hint)
     else:
         return _route_static(incoming, existing, existing_contradiction_id, cardinality)
 
 
-def _route_time_varying(incoming: Assertion, existing: list[Assertion]) -> ConflictResult:
-    """Temporal supersession (SPEC §10.2).
+def _route_time_varying(
+    incoming: Assertion,
+    existing: list[Assertion],
+    cardinality: Literal["single", "many"] = "single",
+    supersedes_hint: str | None = None,
+) -> ConflictResult:
+    """Temporal supersession (SPEC §10.2), cardinality-aware for "many" (ADR-0050).
 
     Values MAY coexist if validity windows don't overlap; supersede only when
     an existing window overlaps with the incoming one.
+
+    For cardinality="many", an overlapping differing value no longer
+    supersedes automatically — window overlap and a differing value can't
+    tell "this replaces my current value" from "this is a new, additional
+    concurrent value" apart, unlike "single" where there is only ever one
+    logical slot to replace. Without supersedes_hint, every overlapping
+    differing value coexists (mirrors _route_static's own "many" branch,
+    which never auto-supersedes at all). With supersedes_hint, exactly the
+    named assertion is superseded; every other overlapping-differing one
+    still coexists untouched.
     """
     overlapping = [
         e for e in existing if _windows_overlap(e, incoming) and e.value != incoming.value
     ]
     if not overlapping:
         return Activate()
+
+    if cardinality == "many":
+        if supersedes_hint is None:
+            return Activate()
+        if not any(e.id == supersedes_hint for e in overlapping):
+            raise ValueError(
+                f"supersedes={supersedes_hint!r} does not name an existing, active "
+                "assertion on this (subject, predicate) whose validity window "
+                "overlaps the incoming one with a different value — nothing to "
+                "supersede"
+            )
+        return Supersede(targets=[supersedes_hint])
+
     return Supersede(targets=[e.id for e in overlapping])
 
 
