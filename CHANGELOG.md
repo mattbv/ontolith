@@ -523,14 +523,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   explicitly out of scope, tracked as its own future decision.
 
 #### Fixed
-- `StorageBackend.assertions()` gains an `include_history` parameter (closes KI-098, found reviewing
-  KI-095) — the asymmetry ADR-0049 left where `.include_history()` opted a retracted assertion back
-  into `.query()`/`.min_confidence()`/`.trust_at_least()` under `.as_of()`, but the lower-level
-  `assertions()` read path had no equivalent opt-out at all, closing the exact same window
-  unconditionally. Both backends' `assertions()` now wrap the ADR-0049 retraction-exclusion check in
-  `if not include_history:`, mirroring `include_flagged`'s existing shape on the same method;
-  `AsOfView.assertions()` forwards the new parameter. No new bitemporal semantics, no ADR needed —
-  purely closing a parameter-shape gap the retraction fix left behind.
+- **Breaking:** `StorageBackend.assertions()` gains a required `include_history: bool = False`
+  parameter (closes KI-098, found reviewing KI-095) — the asymmetry ADR-0049 left where
+  `.include_history()` opted a retracted assertion back into `.query()`/`.min_confidence()`/
+  `.trust_at_least()` under `.as_of()`, but the lower-level `assertions()` read path had no
+  equivalent opt-out at all, closing the exact same window unconditionally. Both backends'
+  `assertions()` now wrap the ADR-0049 retraction-exclusion check in `if not include_history:`,
+  mirroring `include_flagged`'s existing shape on the same method. `AsOfView.assertions()` now
+  passes `include_history` as an explicit keyword on every call, so a third-party `StorageBackend`
+  still on the old signature raises `TypeError` on every `kb.as_of(t).assertions(...)` call, not
+  only ones touching a retracted assertion. No new bitemporal semantics, no ADR needed — purely
+  closing a parameter-shape gap the retraction fix left behind.
 - `entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()`'s `as_of` branch
   now excludes/includes `flagged` assertions point-in-time, not by current status (closes KI-097,
   found building ADR-0049's KI-095 fix) — a `.query()`/`.min_confidence()`/`.trust_at_least()` call

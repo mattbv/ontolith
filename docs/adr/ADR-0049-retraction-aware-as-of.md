@@ -69,11 +69,10 @@ AND (status != 'retracted' OR EXISTS (
 text named alongside `entities_where()` ("and the other bitemporal query paths") — gets the
 identical clause, applied unconditionally at the time this ADR shipped (its `status` parameter is
 already ignored entirely once `as_of_time` is set, so this ADR gave it no `include_history`-shaped
-opt-out of its own — that gap was closed separately as KI-098). This matters beyond direct callers:
-`govern/policy.py`'s `SourceQuorum`
-evaluates `kb_view.assertions(...)` on an `AsOfView`, so an un-narrowed retracted assertion could
-silently contribute a distinct `source` to quorum counting during policy evaluation — a governance
-correctness issue, not just a read-path one.
+opt-out of its own — that gap was closed separately as KI-098). This matters beyond direct
+callers: `govern/policy.py`'s `SourceQuorum` evaluates `kb_view.assertions(...)` on an `AsOfView`,
+so an un-narrowed retracted assertion could silently contribute a distinct `source` to quorum
+counting during policy evaluation — a governance correctness issue, not just a read-path one.
 
 **`.include_history()` becomes the opt-out**, exactly mirroring its existing current-state meaning
 ("also match `retracted`/`superseded` assertions"): when set, this new clause is skipped entirely
@@ -119,19 +118,21 @@ only.
 
 ## Consequences
 
-- **Behavior change, not a signature change:** `kb.as_of(t).query(...)` results, and
+- **Behavior change, mostly not a signature change:** `kb.as_of(t).query(...)` results, and
   `kb.as_of(t).assertions(...)` results, for `t` after a retraction's own assertion-time can now
-  exclude an entity/assertion they previously included. No public method signature changes;
+  exclude an entity/assertion they previously included.
   `StorageBackend.entities_where()`/`entities_meeting_confidence()`/`entities_meeting_trust()` keep
   their existing parameters (`include_flagged`, `include_history`) — only what `include_history`
   *does* under `as_of` changes, from "nothing" to "opts back into the pre-ADR behavior."
-  `assertions()` gains no new parameter at this ADR's own original scope: the exclusion is
-  unconditional there, since that method has no equivalent opt-out today (a caller wanting a
-  retracted assertion back under `as_of` has no way to ask, on this method specifically — a known,
-  accepted asymmetry, not something this ADR adds a parameter to close). **Update (KI-098):**
-  `assertions()` gained an `include_history` parameter after all, mirroring `include_flagged`'s
-  existing shape on the same method — filed and closed as its own follow-up rather than folded
-  back into this ADR, since the mechanism itself needed no redesign.
+  `assertions()` gained no new parameter at this ADR's own original scope: the exclusion was
+  unconditional there, since that method had no equivalent opt-out yet (a caller wanting a
+  retracted assertion back under `as_of` had no way to ask, on this method specifically — a known,
+  accepted asymmetry, not something this ADR set out to add a parameter to close). **Update
+  (KI-098):** `assertions()` gained an `include_history` parameter after all, mirroring
+  `include_flagged`'s existing shape on the same method — filed and closed as its own follow-up
+  rather than folded back into this ADR, since the mechanism itself needed no redesign. That
+  parameter is itself a signature change: a third-party `StorageBackend` still on the old signature
+  now raises `TypeError` on every `AsOfView.assertions()` call (see CHANGELOG's KI-098 entry).
 - **A new correlated `EXISTS` subquery on the `as_of` path** for `retracted_clause`, in all four
   methods, scoped by the existing `idx_assertion_event_assertion` index (on
   `assertion_event.assertion_id`) — only evaluated per candidate row already matching every other

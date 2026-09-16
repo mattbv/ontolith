@@ -15,12 +15,14 @@ point-in-time from the event log on every `as_of`-capable read path —
 only since KI-097 fixed their current-status-based version of this exact
 bug — `include_flagged` opts back in) and, for `retracted` specifically,
 once its own retraction event's assertion-time has passed (ADR-0049,
-KI-095; `include_history` opts back in on every `as_of`-capable read path
-— `assertions()` only since KI-098 closed the mirror-image gap ADR-0049 left it with: the
-`QueryBuilder`-facing trio got the `include_history` opt-out when the retraction exclusion
-shipped, `assertions()` did not — see `TestAsOfRetractionAndFlagging` below). `superseded` needs no such
-exclusion: its `valid_to` closure already encodes the real-world end point,
-so the plain window check above already handles it correctly.
+KI-095; `include_history` opts back in on every `as_of`-capable read
+path — `assertions()` only since KI-098 closed the mirror-image gap
+ADR-0049 left it with: the `QueryBuilder`-facing trio got the
+`include_history` opt-out from ADR-0049's own retraction-exclusion
+fix, `assertions()` did not — see `TestAsOfRetractionAndFlagging`
+below). `superseded` needs no such exclusion: its `valid_to` closure
+already encodes the real-world end point, so the plain window check
+above already handles it correctly.
 
 All tests use injected clocks and IDs. Property tests verify reconstruction
 against the theoretical filter using Hypothesis — scoped to assertions that

@@ -1055,19 +1055,20 @@ class DuckDBBackend:
         Args:
             subject: Filter by subject entity ID
             predicate: Filter by predicate
-            status: Filter by current status (ignored when as_of_time is set)
+            status: Filter by current status (ignored when as_of_time is set;
+                pass status=None there for every status)
             as_of_time: If set, applies bitemporal filter:
                 asserted_at <= t AND valid_from <= t AND (valid_to IS NULL OR valid_to > t)
             include_flagged: When as_of_time is set, whether to include
                 'flagged' assertions (excluded by default — a flagged
                 assertion is disputed, not confirmed-valid; pass True for
-                explicit audit/history views). A 'retracted' assertion is
-                excluded once its own retraction event's timestamp is <=
-                as_of_time (ADR-0049, KI-095), unless include_history is set.
+                explicit audit/history views); ignored when as_of_time is
+                None.
             include_history: When as_of_time is set, whether to opt back
                 into seeing a 'retracted' assertion once its own retraction
-                event's timestamp is <= as_of_time (KI-098) — mirrors
-                include_flagged's shape; ignored when as_of_time is None.
+                event's timestamp is <= as_of_time (excluded by default,
+                ADR-0049/KI-095) — mirrors include_flagged's shape (KI-098);
+                ignored when as_of_time is None.
 
         Returns:
             List of matching assertions
