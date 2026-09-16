@@ -15,10 +15,14 @@ point-in-time from the event log on every `as_of`-capable read path —
 only since KI-097 fixed their current-status-based version of this exact
 bug — `include_flagged` opts back in) and, for `retracted` specifically,
 once its own retraction event's assertion-time has passed (ADR-0049,
-KI-095; `include_history`/no opt-out, depending on the query path — see
-`TestAsOfRetractionAndFlagging` below). `superseded` needs no such
-exclusion: its `valid_to` closure already encodes the real-world end point,
-so the plain window check above already handles it correctly.
+KI-095; `include_history` opts back in on every `as_of`-capable read
+path — `assertions()` only since KI-098 closed the mirror-image gap
+ADR-0049 left it with: the `QueryBuilder`-facing trio got the
+`include_history` opt-out from ADR-0049's own retraction-exclusion
+fix, `assertions()` did not — see `TestAsOfRetractionAndFlagging`
+below). `superseded` needs no such exclusion: its `valid_to` closure
+already encodes the real-world end point, so the plain window check
+above already handles it correctly.
 
 All tests use injected clocks and IDs. Property tests verify reconstruction
 against the theoretical filter using Hypothesis — scoped to assertions that
@@ -349,6 +353,35 @@ class TestAsOfRetractionAndFlagging:
         kb.retract(a.id, AUTHOR)
 
         visible = kb.as_of(before_retraction).assertions(subject=entity.id, predicate="Person.name")
+        assert len(visible) == 1
+        assert visible[0].id == a.id
+
+    def test_include_history_opts_back_into_a_retracted_assertion_via_assertions(
+        self, make_kb: KbFactory
+    ) -> None:
+        """KI-098: assertions() gains the same include_history opt-out the
+        QueryBuilder-facing trio already had (ADR-0049) — the asymmetry
+        where kb.as_of(t).query(Concept).include_history() could surface an
+        entity but kb.as_of(t).assertions(...) could not surface the
+        assertion behind it."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        a = kb.assert_literal(
+            entity.id, "Person.name", "Ada", "Text", AUTHOR, valid_to=T2 + timedelta(days=3650)
+        )
+
+        clock = kb.clock
+        assert isinstance(clock, FixedClock)
+        clock.advance(days=1)
+        kb.retract(a.id, AUTHOR)
+        after_retraction = clock.now()
+
+        default = kb.as_of(after_retraction).assertions(subject=entity.id, predicate="Person.name")
+        assert default == []
+
+        visible = kb.as_of(after_retraction).assertions(
+            subject=entity.id, predicate="Person.name", include_history=True
+        )
         assert len(visible) == 1
         assert visible[0].id == a.id
 
