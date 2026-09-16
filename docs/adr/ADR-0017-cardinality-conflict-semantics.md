@@ -3,7 +3,7 @@
 **Status**: Accepted
 **Date**: 2026-07-14
 **Deciders**: Ontolith Core Team
-**Related**: ADR-0005 (Conflict Model), SPEC §4 (Schema), SPEC §10 (Conflict handling), `.claude/rules/conflict.md`
+**Related**: ADR-0005 (Conflict Model), SPEC §4 (Schema), SPEC §10 (Conflict handling), `.claude/rules/conflict.md`, ADR-0050 (extends cardinality-aware routing to `time_varying`, KI-080)
 
 ---
 

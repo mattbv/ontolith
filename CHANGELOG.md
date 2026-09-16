@@ -25,9 +25,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   concurrent value stays untouched. `supersedes` is rejected (`ValidationError`) outside
   `cardinality="many"`/`temporality="time_varying"`, and must name a real, active,
   overlapping-and-differing assertion on the same `(subject, predicate)` or the write is rejected —
-  never silently ignored either way. `cardinality="single"` `time_varying` properties are completely
-  unaffected. REST/GraphQL/MCP/CLI parity deliberately out of scope, filed as its own follow-up KI,
-  matching KI-081's precedent of shipping an SDK-first capability separately from interface parity.
+  never silently ignored either way — including when no *other* existing assertion happens to
+  overlap the incoming one, so a stale or typo'd hint can't vanish with no error. `cardinality="single"`
+  `time_varying` properties are completely unaffected. REST/GraphQL/MCP/CLI parity deliberately out
+  of scope, filed as its own follow-up (KI-099), matching KI-081's precedent of shipping an
+  SDK-first capability separately from interface parity.
 - CLI's `ontolith query` command gains `--semantic`, `--min-confidence`, `--trust-at-least`,
   `--limit`, `--include-flagged`, and `--include-history` (closes KI-096, found resolving KI-094)
   — previously supported only `--where`, a materially larger gap than the REST/GraphQL/MCP

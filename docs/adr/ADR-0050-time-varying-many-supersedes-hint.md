@@ -152,21 +152,29 @@ already provides avoids that entirely.
 - `static` properties (`single` or `many`) are completely unaffected — `_route_static` never
   receives `supersedes_hint` at all.
 
-**Breaking:** `govern.conflict.route()` and `_route_time_varying()` gain a new keyword parameter
-(`supersedes_hint`, default `None` — existing positional/keyword call sites are unaffected since it
-is appended after every existing parameter with a default). `Ontology.assert_literal()`,
-`assert_ref()`, `propose()`, and `propose_ref()` gain a new keyword-only `supersedes` parameter
-(default `None`) — additive, not breaking, for every existing caller.
+**Breaking:** an existing `cardinality="many"` `time_varying` property whose callers relied on the
+pre-ADR-0050 unconditional-supersession behavior (e.g. to correct a value by simply asserting a new
+one, with no `supersedes=`) now gets coexistence instead — that caller must add `supersedes=<id>`
+to keep replacing rather than accumulating. `govern.conflict.route()`/`_route_time_varying()` also
+gain a new keyword parameter (`supersedes_hint`, default `None`, appended after every existing
+parameter with a default — every other call shape is unaffected); `Ontology.assert_literal()`/
+`assert_ref()`/`propose()`/`propose_ref()` gain a new keyword-only `supersedes` parameter (default
+`None`) — additive, not breaking, for every other existing caller.
 
 **Negative / follow-ups:**
 - **REST, GraphQL, MCP, and CLI parity is deliberately out of scope for this ADR/KI.** `supersedes`
   is exposed on the Python SDK only (`assert_literal`/`assert_ref`/`propose`/`propose_ref`) —
   matching this project's established pattern of shipping an SDK-first capability and filing
   interface parity as its own follow-up (e.g. KI-081 → KI-094/KI-096 for `.include_flagged()`/
-  `.include_history()`). Filed as a new KI for whichever interface a caller first needs it on.
+  `.include_history()`). Filed as **KI-099**.
 - `resubmit()`'s existing "payload is replayed unedited" limitation now also covers `supersedes` — a
   proposal cannot have its hint corrected after submission any more than its value or window can
   be, consistent with that pre-existing, documented constraint (not a new one this ADR introduces).
+  One concrete consequence: if the hinted target leaves the active set some other way (retracted,
+  or itself superseded by a different write) while the proposal sits in `require_review`, `route()`'s
+  own fresh-`existing` check rejects the accept with a `ValidationError` every time it's retried —
+  the proposal becomes permanently un-acceptable as staged, and the reviewer's only recourse is
+  `reject_proposal()`, not a fixable `resubmit()`.
 - A `many`-cardinality `time_varying` property with a genuinely large number of concurrent values
   (e.g. dozens of simultaneously-held roles) still requires one `supersedes=` write per correction —
   no batch/bulk-supersede mechanism is introduced here. Not a new gap: no bulk-write mechanism exists
