@@ -1538,6 +1538,53 @@ class TestProposeMutation:
         active = kb.assertions(subject=entity.id, predicate="Person.title", status="active")
         assert {a.value for a in active} == {"SVP Sales"}
 
+    def test_supersedes_forwarded_to_propose_ref(self, tmp_path: Path) -> None:
+        """KI-099: `supersedes` reaches `Ontology.propose_ref` through
+        `Mutation.propose`'s `target`-shaped branch, not just its
+        literal-value one."""
+        kb = _kb(tmp_path)
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    relations={
+                        "colleague": RelationDef(
+                            name="colleague",
+                            target_concept="Person",
+                            temporality="time_varying",
+                            cardinality="many",
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(schema, author=ADMIN)
+        entity = kb.create_entity("Person", author=HUMAN)
+        colleague_a = kb.create_entity("Person", author=HUMAN)
+        colleague_b = kb.create_entity("Person", author=HUMAN)
+        rel_a = kb.assert_ref(entity.id, "Person.colleague", colleague_a.id, HUMAN)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(
+            client,
+            self._MUTATION,
+            variables={
+                "input": {
+                    "subject": entity.id,
+                    "predicate": "Person.colleague",
+                    "target": colleague_b.id,
+                    "supersedes": rel_a.id,
+                }
+            },
+            headers=_auth(token),
+        )
+        assert body["data"]["propose"]["proposal"]["state"] == "auto_accepted"
+        active = kb.assertions(subject=entity.id, predicate="Person.colleague", status="active")
+        assert {a.value for a in active} == {colleague_b.id}
+
     def test_supersedes_rejected_outside_many_time_varying(self, tmp_path: Path) -> None:
         kb = _kb(tmp_path)
         entity = kb.create_entity("Person", author=HUMAN)
