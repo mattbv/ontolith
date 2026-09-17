@@ -281,7 +281,7 @@ def assert_literal(
             "--supersedes",
             help=(
                 "Id of a specific existing assertion this one explicitly replaces "
-                '(ADR-0050/KI-080) — only meaningful for a cardinality="many", '
+                '(ADR-0050/KI-080, KI-099) — only meaningful for a cardinality="many", '
                 'temporality="time_varying" property; rejected otherwise.'
             ),
         ),
