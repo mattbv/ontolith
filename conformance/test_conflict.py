@@ -61,11 +61,14 @@ def _kb(make_kb: KbFactory) -> Ontology:
     kb.create_principal(ADMIN, kind="human", auth_method="oidc", default_capability="admin")
     # Person.employer is declared time_varying so conflict routing (schema-derived
     # per SPEC §10.1) exercises supersession; Person.name defaults to static.
-    # Person.phone is static + cardinality="many" (ADR-0017). Person.manager is a
+    # Person.phone is static + cardinality="many" (ADR-0017). Person.title is
+    # time_varying + cardinality="many" (ADR-0050/KI-080) — two concurrent job
+    # titles should coexist, not auto-supersede each other. Person.manager is a
     # relation (not a property) so assert_ref/propose_ref tests have a
     # genuinely relation-declared predicate to target (KI-040's kind check
     # rejects a ref write against a property-declared predicate like
-    # employer/name).
+    # employer/name); Person.colleague mirrors Person.title's
+    # time_varying+many shape for the relation write paths.
     schema = SchemaIR(
         namespace="default",
         version=1,
@@ -78,9 +81,21 @@ def _kb(make_kb: KbFactory) -> Ontology:
                         name="employer", value_type="Text", temporality="time_varying"
                     ),
                     "phone": PropertyDef(name="phone", value_type="Text", cardinality="many"),
+                    "title": PropertyDef(
+                        name="title",
+                        value_type="Text",
+                        temporality="time_varying",
+                        cardinality="many",
+                    ),
                 },
                 relations={
                     "manager": RelationDef(name="manager", target_concept="Person"),
+                    "colleague": RelationDef(
+                        name="colleague",
+                        target_concept="Person",
+                        temporality="time_varying",
+                        cardinality="many",
+                    ),
                 },
             ),
         },
@@ -526,6 +541,592 @@ class TestCardinalityAwareRouting:
         assert active_after == []
         flagged = kb.assertions(subject=entity.id, predicate="Person.phone", status="flagged")
         assert {x.value for x in flagged} == {"555-0100", "555-0200", "555-0300"}
+
+
+class TestManyCardinalityTimeVaryingSupersedes:
+    """cardinality="many" time_varying properties (ADR-0050/KI-080): an
+    overlapping-window differing value no longer auto-supersedes — window
+    overlap and a differing value alone can't tell "replace my current
+    value" from "a new, additional concurrent value" apart, unlike
+    cardinality="single" where there is only ever one logical slot.
+    Without a `supersedes` hint, every such value coexists (mirrors
+    `_route_static`'s own "many" branch, which never auto-supersedes at
+    all); with one, exactly the named assertion is superseded and every
+    other overlapping-differing one is left untouched."""
+
+    # -- Pure routing (govern/conflict.py, no storage) ---------------------
+
+    def test_many_cardinality_overlapping_differing_value_coexists_without_hint(self) -> None:
+        existing = [_assertion("a-1", "VP Sales", valid_from=T0)]
+        incoming = _assertion("a-2", "VP Marketing", valid_from=T0)
+        result = route(incoming, existing=existing, temporality="time_varying", cardinality="many")
+        assert isinstance(result, Activate)
+
+    def test_many_cardinality_overlapping_differing_value_supersedes_with_matching_hint(
+        self,
+    ) -> None:
+        existing = [_assertion("a-1", "VP Sales", valid_from=T0)]
+        incoming = _assertion("a-2", "SVP Sales", valid_from=T1)
+        result = route(
+            incoming,
+            existing=existing,
+            temporality="time_varying",
+            cardinality="many",
+            supersedes_hint="a-1",
+        )
+        assert isinstance(result, Supersede)
+        assert result.targets == ["a-1"]
+
+    def test_many_cardinality_hint_only_supersedes_the_named_target(self) -> None:
+        """A second, unrelated concurrent value must NOT be swept in just
+        because a hint was given for a different one."""
+        existing = [
+            _assertion("a-1", "VP Sales", valid_from=T0),
+            _assertion("a-2", "VP Marketing", valid_from=T0),
+        ]
+        incoming = _assertion("a-3", "SVP Sales", valid_from=T1)
+        result = route(
+            incoming,
+            existing=existing,
+            temporality="time_varying",
+            cardinality="many",
+            supersedes_hint="a-1",
+        )
+        assert isinstance(result, Supersede)
+        assert result.targets == ["a-1"]  # a-2 (VP Marketing) is untouched
+
+    def test_many_cardinality_hint_not_among_existing_raises_value_error(self) -> None:
+        existing = [_assertion("a-1", "VP Sales", valid_from=T0)]
+        incoming = _assertion("a-2", "SVP Sales", valid_from=T1)
+        with pytest.raises(ValueError, match="does not name an existing"):
+            route(
+                incoming,
+                existing=existing,
+                temporality="time_varying",
+                cardinality="many",
+                supersedes_hint="nonexistent",
+            )
+
+    def test_many_cardinality_hint_pointing_at_same_value_raises_value_error(self) -> None:
+        """SPEC §10.2's supersession precondition is a *differing* value —
+        hinting at an assertion that already has incoming's own value isn't
+        a genuine replacement (it corroborates, if anything). A second,
+        genuinely overlapping-and-differing assertion is included so the
+        hint check is actually reached — a same-value-only `existing` would
+        route to plain Activate before the hint is ever consulted (see
+        test_many_cardinality_no_overlap_returns_activate_even_with_hint)."""
+        existing = [
+            _assertion("a-1", "VP Sales", valid_from=T0),
+            _assertion("a-2", "VP Marketing", valid_from=T0),
+        ]
+        incoming = _assertion("a-3", "VP Sales", valid_from=T1)  # same value as a-1
+        with pytest.raises(ValueError, match="does not name an existing"):
+            route(
+                incoming,
+                existing=existing,
+                temporality="time_varying",
+                cardinality="many",
+                supersedes_hint="a-1",
+            )
+
+    def test_many_cardinality_hint_pointing_at_non_overlapping_window_raises_value_error(
+        self,
+    ) -> None:
+        """Mirrors the same-value case above: a second, genuinely
+        overlapping-and-differing assertion is included so the hint check
+        is actually reached, with the hint pointing at the non-overlapping
+        one instead."""
+        existing = [
+            _assertion("a-1", "VP Sales", valid_from=T0, valid_to=T1),  # closed before T2
+            _assertion("a-2", "VP Marketing", valid_from=T0),  # still open, overlaps T2
+        ]
+        incoming = _assertion("a-3", "SVP Marketing", valid_from=T2)
+        with pytest.raises(ValueError, match="does not name an existing"):
+            route(
+                incoming,
+                existing=existing,
+                temporality="time_varying",
+                cardinality="many",
+                supersedes_hint="a-1",
+            )
+
+    def test_many_cardinality_no_overlap_no_hint_returns_activate(self) -> None:
+        """Baseline: with no hint at all, an existing non-overlapping
+        assertion has no bearing on the incoming write either way."""
+        existing = [_assertion("a-1", "VP Sales", valid_from=T0, valid_to=T1)]
+        incoming = _assertion("a-2", "SVP Sales", valid_from=T2)
+        result = route(incoming, existing=existing, temporality="time_varying", cardinality="many")
+        assert isinstance(result, Activate)
+
+    def test_many_cardinality_hint_never_silently_dropped_when_nothing_else_overlaps(
+        self,
+    ) -> None:
+        """Regression guard: a hint must raise, not silently no-op, even
+        when there is no *other* candidate incoming would have conflicted
+        with anyway — the bug an earlier version of this fix had, where
+        the "nothing overlaps" short-circuit ran before the hint was ever
+        consulted, letting a stale or typo'd hint vanish with no error."""
+        existing = [_assertion("a-1", "VP Sales", valid_from=T0, valid_to=T1)]
+        incoming = _assertion("a-2", "SVP Sales", valid_from=T2)  # doesn't overlap a-1 at all
+        with pytest.raises(ValueError, match="does not name an existing"):
+            route(
+                incoming,
+                existing=existing,
+                temporality="time_varying",
+                cardinality="many",
+                supersedes_hint="a-1",
+            )
+
+    def test_many_cardinality_hint_raises_even_against_completely_empty_existing(self) -> None:
+        """The same guard as above, taken to its limit: existing itself is
+        empty (a fresh subject/predicate, or a hint whose target has since
+        left the active set entirely — e.g. a retried write after the
+        original target was already superseded/retracted by something
+        else). A hint here must still raise, never silently Activate."""
+        incoming = _assertion("a-2", "SVP Sales", valid_from=T0)
+        with pytest.raises(ValueError, match="does not name an existing"):
+            route(
+                incoming,
+                existing=[],
+                temporality="time_varying",
+                cardinality="many",
+                supersedes_hint="nonexistent",
+            )
+
+    def test_many_cardinality_no_hint_against_empty_existing_returns_activate(self) -> None:
+        """Baseline for the case above: no hint, empty existing, still a
+        plain Activate — the very first write on a fresh (subject,
+        predicate)."""
+        incoming = _assertion("a-1", "VP Sales", valid_from=T0)
+        result = route(incoming, existing=[], temporality="time_varying", cardinality="many")
+        assert isinstance(result, Activate)
+
+    def test_single_cardinality_ignores_hint_and_supersedes_all_overlapping(self) -> None:
+        """A hint is meaningless for cardinality="single" — routing is
+        already unambiguous there without one (ADR-0050 doesn't extend the
+        hint's effect to "single"; _route_time_varying's "single" branch
+        never consults supersedes_hint at all). Two overlapping-differing
+        existing assertions and a hint naming only one of them: if
+        "single" consulted the hint the same way "many" does, only "a-1"
+        would supersede — the whole point of this test is that BOTH
+        supersede regardless, exactly the pre-ADR-0050 behavior."""
+        existing = [
+            _assertion("a-1", "Acme Corp", valid_from=T0),
+            _assertion("a-2", "Initech", valid_from=T0),
+        ]
+        incoming = _assertion("a-3", "Globex Corp", valid_from=T1)
+        result = route(
+            incoming,
+            existing=existing,
+            temporality="time_varying",
+            cardinality="single",
+            supersedes_hint="a-1",
+        )
+        assert isinstance(result, Supersede)
+        assert set(result.targets) == {"a-1", "a-2"}
+
+    def test_single_cardinality_ignores_even_a_bogus_hint(self) -> None:
+        """The strongest form of "single ignores the hint": a hint that
+        doesn't even name a real assertion still doesn't raise — proof
+        _route_time_varying's "single" branch never looks at
+        supersedes_hint at all, not even to validate it."""
+        existing = [_assertion("a-1", "Acme Corp", valid_from=T0)]
+        incoming = _assertion("a-2", "Globex Corp", valid_from=T1)
+        result = route(
+            incoming,
+            existing=existing,
+            temporality="time_varying",
+            cardinality="single",
+            supersedes_hint="nonexistent-id",
+        )
+        assert isinstance(result, Supersede)
+        assert result.targets == ["a-1"]
+
+    # -- End-to-end through Ontology (storage-backed) -----------------------
+
+    def test_time_varying_many_concurrent_values_coexist_by_default(
+        self, make_kb: KbFactory
+    ) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.title", "VP Sales", "Text", AUTHOR, valid_from=T0)
+        kb.assert_literal(entity.id, "Person.title", "VP Marketing", "Text", AUTHOR, valid_from=T0)
+
+        active = kb.assertions(subject=entity.id, predicate="Person.title", status="active")
+        assert {a.value for a in active} == {"VP Sales", "VP Marketing"}
+
+    def test_time_varying_many_explicit_supersedes_replaces_only_the_named_one(
+        self, make_kb: KbFactory
+    ) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        sales = kb.assert_literal(
+            entity.id, "Person.title", "VP Sales", "Text", AUTHOR, valid_from=T0
+        )
+        marketing = kb.assert_literal(
+            entity.id, "Person.title", "VP Marketing", "Text", AUTHOR, valid_from=T0
+        )
+
+        promoted = kb.assert_literal(
+            entity.id,
+            "Person.title",
+            "SVP Sales",
+            "Text",
+            AUTHOR,
+            valid_from=T1,
+            supersedes=sales.id,
+        )
+        assert promoted.supersedes == sales.id
+
+        active = kb.assertions(subject=entity.id, predicate="Person.title", status="active")
+        assert {a.value for a in active} == {"SVP Sales", "VP Marketing"}
+        superseded = kb.backend.get_assertion(sales.id)
+        assert superseded is not None
+        assert superseded.status == "superseded"
+        assert superseded.valid_to == T1  # window closed at the incoming assertion's valid_from
+        marketing_still = kb.backend.get_assertion(marketing.id)
+        assert marketing_still is not None
+        assert marketing_still.status == "active"
+        assert marketing_still.valid_to is None  # untouched, still open-ended
+
+    def test_supersedes_rejected_for_static_property(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        existing = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", AUTHOR)
+        with pytest.raises(ValidationError, match="only meaningful"):
+            kb.assert_literal(
+                entity.id, "Person.name", "Ava", "Text", AUTHOR, supersedes=existing.id
+            )
+
+    def test_supersedes_rejected_for_single_cardinality_time_varying(
+        self, make_kb: KbFactory
+    ) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        existing = kb.assert_literal(entity.id, "Person.employer", "Acme Corp", "Text", AUTHOR)
+        with pytest.raises(ValidationError, match="only meaningful"):
+            kb.assert_literal(
+                entity.id,
+                "Person.employer",
+                "Globex Corp",
+                "Text",
+                AUTHOR,
+                valid_from=T1,
+                supersedes=existing.id,
+            )
+
+    def test_supersedes_unknown_id_raises_validation_error(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        kb.assert_literal(entity.id, "Person.title", "VP Sales", "Text", AUTHOR, valid_from=T0)
+        with pytest.raises(ValidationError, match="does not name an existing"):
+            kb.assert_literal(
+                entity.id,
+                "Person.title",
+                "SVP Sales",
+                "Text",
+                AUTHOR,
+                valid_from=T1,
+                supersedes="nonexistent-assertion-id",
+            )
+
+    def test_supersedes_hint_on_a_different_subject_raises_validation_error(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A hint naming a real, active assertion — just on the wrong
+        subject — must be rejected exactly like an unknown id. `existing`
+        is pre-scoped to (subject, predicate) by
+        _apply_with_conflict_routing before route() ever sees it, so an
+        active assertion elsewhere never accidentally matches."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        other_entity = kb.create_entity("Person", author=AUTHOR)
+        elsewhere = kb.assert_literal(
+            other_entity.id, "Person.title", "VP Sales", "Text", AUTHOR, valid_from=T0
+        )
+        kb.assert_literal(entity.id, "Person.title", "VP Sales", "Text", AUTHOR, valid_from=T0)
+        with pytest.raises(ValidationError, match="does not name an existing"):
+            kb.assert_literal(
+                entity.id,
+                "Person.title",
+                "SVP Sales",
+                "Text",
+                AUTHOR,
+                valid_from=T1,
+                supersedes=elsewhere.id,
+            )
+
+    def test_supersedes_via_propose_auto_accept(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        _, decision1 = kb.propose(
+            entity.id, "Person.title", "VP Sales", "Text", AUTHOR, valid_from=T0
+        )
+        assert decision1.__class__.__name__ == "AutoAccept"
+        sales = kb.assertions(subject=entity.id, predicate="Person.title", status="active")[0]
+
+        proposal, decision2 = kb.propose(
+            entity.id,
+            "Person.title",
+            "SVP Sales",
+            "Text",
+            AUTHOR,
+            valid_from=T1,
+            supersedes=sales.id,
+        )
+        assert decision2.__class__.__name__ == "AutoAccept"
+        active = kb.assertions(subject=entity.id, predicate="Person.title", status="active")
+        assert {a.value for a in active} == {"SVP Sales"}
+        assert active[0].supersedes == sales.id
+        assert active[0].proposal_id == proposal.id
+
+    def test_supersedes_via_assert_ref(self, make_kb: KbFactory) -> None:
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        colleague_a = kb.create_entity("Person", author=AUTHOR)
+        colleague_b = kb.create_entity("Person", author=AUTHOR)
+
+        rel_a = kb.assert_ref(entity.id, "Person.colleague", colleague_a.id, AUTHOR, valid_from=T0)
+        kb.assert_ref(entity.id, "Person.colleague", colleague_b.id, AUTHOR, valid_from=T0)
+
+        colleague_c = kb.create_entity("Person", author=AUTHOR)
+        replaced = kb.assert_ref(
+            entity.id,
+            "Person.colleague",
+            colleague_c.id,
+            AUTHOR,
+            valid_from=T1,
+            supersedes=rel_a.id,
+        )
+        assert replaced.supersedes == rel_a.id
+
+        active = kb.assertions(subject=entity.id, predicate="Person.colleague", status="active")
+        assert {a.value for a in active} == {colleague_b.id, colleague_c.id}
+
+    def test_supersedes_via_propose_ref_auto_accept(self, make_kb: KbFactory) -> None:
+        """Mirrors test_supersedes_via_propose_auto_accept, but for the
+        relation write path — propose_ref's own supersedes wiring, not
+        just assert_ref's, since the two are separate call sites in
+        Ontology and only assert_ref was exercised above."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        colleague_a = kb.create_entity("Person", author=AUTHOR)
+
+        _, decision1 = kb.propose_ref(
+            entity.id, "Person.colleague", colleague_a.id, AUTHOR, valid_from=T0
+        )
+        assert decision1.__class__.__name__ == "AutoAccept"
+        rel_a = kb.assertions(subject=entity.id, predicate="Person.colleague", status="active")[0]
+
+        colleague_c = kb.create_entity("Person", author=AUTHOR)
+        proposal, decision2 = kb.propose_ref(
+            entity.id,
+            "Person.colleague",
+            colleague_c.id,
+            AUTHOR,
+            valid_from=T1,
+            supersedes=rel_a.id,
+        )
+        assert decision2.__class__.__name__ == "AutoAccept"
+        active = kb.assertions(subject=entity.id, predicate="Person.colleague", status="active")
+        assert {a.value for a in active} == {colleague_c.id}
+        assert active[0].supersedes == rel_a.id
+        assert active[0].proposal_id == proposal.id
+
+    def test_single_cardinality_time_varying_supersession_unaffected(
+        self, make_kb: KbFactory
+    ) -> None:
+        """Regression guard: the pre-existing default (no hint needed)
+        supersession behavior for cardinality="single" time_varying
+        properties must be completely unchanged by ADR-0050."""
+        kb = _kb(make_kb)
+        entity = kb.create_entity("Person", author=AUTHOR)
+        first = kb.assert_literal(
+            entity.id, "Person.employer", "Acme Corp", "Text", AUTHOR, valid_from=T0
+        )
+        second = kb.assert_literal(
+            entity.id, "Person.employer", "Globex Corp", "Text", AUTHOR, valid_from=T1
+        )
+        assert second.supersedes == first.id
+        active = kb.assertions(subject=entity.id, predicate="Person.employer", status="active")
+        assert {a.value for a in active} == {"Globex Corp"}
+
+    # -- Proposal replay (accept_proposal) — the staged-payload path -------
+
+    def test_supersedes_hint_honored_through_accept_proposal_replay(
+        self, make_kb: KbFactory
+    ) -> None:
+        """The hint must be honored not just on propose()'s own immediate
+        auto-accept path, but when a require_review proposal is later
+        accepted — op["supersedes"] is read back from the staged payload
+        and re-validated fresh by route() at replay time
+        (_replay_proposal_operations)."""
+        kb = _kb(make_kb)
+        low_trust_author = "low-trust@example.com"
+        kb.create_principal(
+            low_trust_author,
+            kind="human",
+            auth_method="oidc",
+            default_capability="propose",
+            trust_level=0,
+        )
+        entity = kb.create_entity("Person", author=AUTHOR)
+        sales = kb.assert_literal(
+            entity.id, "Person.title", "VP Sales", "Text", AUTHOR, valid_from=T0
+        )
+
+        proposal, decision = kb.propose(
+            entity.id,
+            "Person.title",
+            "SVP Sales",
+            "Text",
+            low_trust_author,
+            valid_from=T1,
+            supersedes=sales.id,
+        )
+        assert decision.__class__.__name__ == "RequireReview"
+        assert proposal.state == "require_review"
+
+        accepted = kb.accept_proposal(proposal.id, ADMIN)
+        assert accepted.state == "accepted"
+
+        active = kb.assertions(subject=entity.id, predicate="Person.title", status="active")
+        assert {a.value for a in active} == {"SVP Sales"}
+        assert active[0].supersedes == sales.id
+        superseded = kb.backend.get_assertion(sales.id)
+        assert superseded is not None
+        assert superseded.status == "superseded"
+
+    def test_supersedes_hint_stale_target_rejected_at_accept_time(self, make_kb: KbFactory) -> None:
+        """If the hinted target is no longer active by the time a
+        require_review proposal is accepted — here, a neutral direct
+        retract() beats review to it — route()'s own fresh-existing check
+        at replay time rejects the accept with a ValidationError, not a
+        silent no-op or a crash. ADR-0050 notes this makes the proposal
+        permanently un-acceptable as staged: resubmit() replays the
+        payload unedited, so the reviewer's only recourse is reject()."""
+        kb = _kb(make_kb)
+        low_trust_author = "low-trust@example.com"
+        kb.create_principal(
+            low_trust_author,
+            kind="human",
+            auth_method="oidc",
+            default_capability="propose",
+            trust_level=0,
+        )
+        entity = kb.create_entity("Person", author=AUTHOR)
+        sales = kb.assert_literal(
+            entity.id, "Person.title", "VP Sales", "Text", AUTHOR, valid_from=T0
+        )
+
+        proposal, decision = kb.propose(
+            entity.id,
+            "Person.title",
+            "SVP Sales",
+            "Text",
+            low_trust_author,
+            valid_from=T1,
+            supersedes=sales.id,
+        )
+        assert decision.__class__.__name__ == "RequireReview"
+
+        retract_proposal, retract_decision = kb.retract(sales.id, ADMIN)
+        assert retract_decision.__class__.__name__ == "AutoAccept"
+        stale = kb.backend.get_assertion(sales.id)
+        assert stale is not None
+        assert stale.status == "retracted"
+
+        with pytest.raises(ValidationError, match="does not name an existing"):
+            kb.accept_proposal(proposal.id, ADMIN)
+
+        # ADR-0050's "permanently un-acceptable as staged" consequence, pinned:
+        # the failed accept must not have partially committed anything — the
+        # proposal stays exactly where it was, still retryable (and still
+        # failing the same way, deterministically) rather than landing in
+        # some other, undocumented state.
+        still_pending = kb.backend.get_proposal(proposal.id)
+        assert still_pending is not None
+        assert still_pending.state == "require_review"
+        with pytest.raises(ValidationError, match="does not name an existing"):
+            kb.accept_proposal(proposal.id, ADMIN)
+
+    def test_supersedes_hint_unconsulted_when_cardinality_drifts_to_single_at_replay(
+        self, make_kb: KbFactory
+    ) -> None:
+        """A schema change between submission and replay that moves the
+        predicate out of cardinality="many" leaves a stored supersedes
+        hint silently unconsulted at replay time (ADR-0050) — not
+        re-validated and rejected late, matching this method's existing,
+        documented temporality-drift precedent for other checks. A
+        second, unhinted concurrent value ("VP Marketing") proves the
+        "single" branch's own supersede-every-overlapping-value behavior
+        genuinely ran, not a coincidental match with the hint — the
+        "many" branch's targeted-replace semantics would have left it
+        untouched."""
+        kb = _kb(make_kb)
+        low_trust_author = "low-trust@example.com"
+        kb.create_principal(
+            low_trust_author,
+            kind="human",
+            auth_method="oidc",
+            default_capability="propose",
+            trust_level=0,
+        )
+        entity = kb.create_entity("Person", author=AUTHOR)
+        sales = kb.assert_literal(
+            entity.id, "Person.title", "VP Sales", "Text", AUTHOR, valid_from=T0
+        )
+        kb.assert_literal(entity.id, "Person.title", "VP Marketing", "Text", AUTHOR, valid_from=T0)
+
+        proposal, decision = kb.propose(
+            entity.id,
+            "Person.title",
+            "SVP Sales",
+            "Text",
+            low_trust_author,
+            valid_from=T1,
+            supersedes=sales.id,
+        )
+        assert decision.__class__.__name__ == "RequireReview"
+
+        schema_v2 = SchemaIR(
+            namespace="default",
+            version=2,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "name": PropertyDef(name="name", value_type="Text"),
+                        "employer": PropertyDef(
+                            name="employer", value_type="Text", temporality="time_varying"
+                        ),
+                        "phone": PropertyDef(name="phone", value_type="Text", cardinality="many"),
+                        "title": PropertyDef(
+                            name="title",
+                            value_type="Text",
+                            temporality="time_varying",
+                            cardinality="single",  # drifted from "many"
+                        ),
+                    },
+                    relations={
+                        "manager": RelationDef(name="manager", target_concept="Person"),
+                        "colleague": RelationDef(
+                            name="colleague",
+                            target_concept="Person",
+                            temporality="time_varying",
+                            cardinality="many",
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(schema_v2, author=ADMIN)
+
+        accepted = kb.accept_proposal(proposal.id, ADMIN)
+        assert accepted.state == "accepted"
+
+        active = kb.assertions(subject=entity.id, predicate="Person.title", status="active")
+        assert {a.value for a in active} == {"SVP Sales"}
 
 
 # ===========================================================================

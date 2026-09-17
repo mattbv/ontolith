@@ -764,6 +764,51 @@ class Ontology:
         if self.get_entity(target) is None:
             raise NotFoundError(f"Target not found: {target!r}")
 
+    def _require_valid_supersedes_hint(
+        self,
+        supersedes: str | None,
+        predicate: str,
+        temporality: Literal["static", "time_varying"],
+    ) -> None:
+        """Reject a caller-supplied `supersedes` hint (ADR-0050) up front,
+        at submission time, when it plainly can't apply — mirrors
+        `_require_existing_subject`/`_require_existing_target`'s "fail
+        loud before the write reaches routing" convention.
+
+        `supersedes` is only meaningful for a cardinality="many"
+        time_varying property (ADR-0050): every other combination already
+        routes unambiguously without a hint (single: the one differing
+        overlapping value always supersedes; static: `cardinality="many"`
+        always coexists, `cardinality="single"` always contradicts), so a
+        caller supplying one elsewhere almost certainly misunderstands
+        what it does — reject rather than silently ignore it.
+
+        Deliberately does NOT check that `supersedes` names a real,
+        active, overlapping-and-differing assertion — `route()` does that
+        itself (ValueError, translated to ValidationError in
+        `_apply_with_conflict_routing`) against a fresh read of `existing`,
+        since for `propose()`/`propose_ref()` this method only runs once,
+        at submission time, while `route()` also runs again at
+        proposal-replay time against whatever is active then. Called from
+        `assert_literal`/`assert_ref`/`propose`/`propose_ref`, all four
+        submission-time-only — NOT re-run at proposal-replay time, same
+        precedent `_require_known_predicate`'s checks already set
+        (`_replay_proposal_operations`'s own docstring): a schema change
+        between submission and replay that moves a predicate out of
+        cardinality="many"/temporality="time_varying" leaves a
+        replay-time `supersedes` hint silently unconsulted by `route()`
+        rather than raising late, a narrow, accepted gap matching the
+        existing temporality-drift precedent, not a new one.
+        """
+        if supersedes is None:
+            return
+        if temporality != "time_varying" or self._resolve_cardinality(predicate) != "many":
+            raise ValidationError(
+                'supersedes is only meaningful for a cardinality="many", '
+                f'temporality="time_varying" property or relation (ADR-0050) — '
+                f"{predicate!r} is not one"
+            )
+
     def _validate_literal_value(self, value: str, value_type: str) -> None:
         """Parse `value` against its schema-declared `value_type` and raise
         `ValidationError` if it isn't well-formed content for that type
@@ -972,6 +1017,7 @@ class Ontology:
         model: str | None = None,
         valid_from: datetime | None = None,
         valid_to: datetime | None = None,
+        supersedes: str | None = None,
     ) -> Assertion:
         """Make a literal assertion about an entity, bypassing the proposal queue.
 
@@ -995,6 +1041,16 @@ class Ontology:
                 SPEC §5.3). Set explicitly to backfill historical windows,
                 e.g. time_varying employment history.
             valid_to: When the fact stopped being true (defaults to open/None)
+            supersedes: Id of a specific existing assertion this one
+                explicitly replaces (ADR-0050/KI-080). Only meaningful for
+                a cardinality="many", temporality="time_varying" property —
+                there, an overlapping differing value no longer
+                auto-supersedes (it coexists, since window overlap alone
+                can't tell "replace my current value" from "a new,
+                additional concurrent value" apart); pass this to force
+                the specific replacement instead. Every other property
+                shape rejects a non-None value outright, since routing is
+                already unambiguous there without a hint.
 
         Returns:
             Assertion as persisted (status/supersedes reflect conflict routing)
@@ -1005,13 +1061,18 @@ class Ontology:
                 value_type does not match the schema-declared value_type
                 for predicate (KI-031), value does not parse as that
                 declared value_type (KI-049), predicate is declared a
-                relation rather than a property (KI-040), or a registered
-                `Validator` rejects the assertion (KI-042)
+                relation rather than a property (KI-040), a registered
+                `Validator` rejects the assertion (KI-042), supersedes is
+                set but predicate isn't cardinality="many"/
+                temporality="time_varying" (ADR-0050), or supersedes
+                doesn't name a real, active, overlapping-and-differing
+                assertion on this (subject, predicate) (ADR-0050)
         """
         self._check_direct_write_capability(author, acting_as)
         self._require_existing_subject(subject)
         self._require_known_predicate(predicate, value_type, value, expected_kind="property")
         temporality = self._resolve_temporality(predicate)
+        self._require_valid_supersedes_hint(supersedes, predicate, temporality)
 
         assertion = Assertion(
             id=self.id_provider.next(),
@@ -1034,7 +1095,7 @@ class Ontology:
 
         self._run_validators(assertion)
         with self.backend.transaction():
-            return self._apply_with_conflict_routing(assertion, temporality)
+            return self._apply_with_conflict_routing(assertion, temporality, supersedes)
 
     def assert_ref(
         self,
@@ -1049,6 +1110,7 @@ class Ontology:
         model: str | None = None,
         valid_from: datetime | None = None,
         valid_to: datetime | None = None,
+        supersedes: str | None = None,
     ) -> Assertion:
         """Make a reference assertion (relation) between entities, bypassing the
         proposal queue.
@@ -1071,6 +1133,11 @@ class Ontology:
                 SPEC §5.3). Set explicitly to backfill historical windows,
                 e.g. time_varying employment history.
             valid_to: When the fact stopped being true (defaults to open/None)
+            supersedes: Id of a specific existing assertion this one
+                explicitly replaces (ADR-0050/KI-080) — see
+                `assert_literal`'s docstring for the full rationale; only
+                meaningful for a cardinality="many",
+                temporality="time_varying" relation.
 
         Returns:
             Assertion as persisted (status/supersedes reflect conflict routing)
@@ -1080,14 +1147,19 @@ class Ontology:
                 (KI-083, KI-089)
             ValidationError: predicate is not declared in the active
                 schema, predicate is declared a property rather than a
-                relation (KI-040), or a registered `Validator` rejects the
-                assertion (KI-042)
+                relation (KI-040), a registered `Validator` rejects the
+                assertion (KI-042), supersedes is set but predicate isn't
+                cardinality="many"/temporality="time_varying" (ADR-0050),
+                or supersedes doesn't name a real, active,
+                overlapping-and-differing assertion on this (subject,
+                predicate) (ADR-0050)
         """
         self._check_direct_write_capability(author, acting_as)
         self._require_existing_subject(subject)
         self._require_existing_target(target)
         self._require_known_predicate(predicate, expected_kind="relation")
         temporality = self._resolve_temporality(predicate)
+        self._require_valid_supersedes_hint(supersedes, predicate, temporality)
 
         assertion = Assertion(
             id=self.id_provider.next(),
@@ -1108,7 +1180,7 @@ class Ontology:
 
         self._run_validators(assertion)
         with self.backend.transaction():
-            return self._apply_with_conflict_routing(assertion, temporality)
+            return self._apply_with_conflict_routing(assertion, temporality, supersedes)
 
     def get_entity(self, entity_id: str) -> Entity | None:
         """Retrieve an entity by ID.
@@ -1301,6 +1373,7 @@ class Ontology:
         model: str | None = None,
         valid_from: datetime | None = None,
         valid_to: datetime | None = None,
+        supersedes: str | None = None,
     ) -> tuple[Proposal, Decision]:
         """Submit a literal assertion through the proposal/policy path (SPEC §9).
 
@@ -1324,6 +1397,15 @@ class Ontology:
             valid_from: When the fact became/becomes true (defaults to now —
                 SPEC §5.3). Set explicitly to backfill historical windows.
             valid_to: When the fact stopped being true (defaults to open/None)
+            supersedes: Id of a specific existing assertion this one
+                explicitly replaces (ADR-0050/KI-080) — see
+                `assert_literal`'s docstring for the full rationale; only
+                meaningful for a cardinality="many",
+                temporality="time_varying" property. Checked once at
+                submission time, not re-checked at proposal-replay time if
+                a `require_review` proposal is later accepted — matching
+                this method's own existing schema-drift precedent for
+                `temporality` itself (see `_replay_proposal_operations`).
 
         Returns:
             (Proposal, Decision) tuple
@@ -1337,8 +1419,11 @@ class Ontology:
                 does not match the schema-declared value_type for predicate
                 (KI-031), value does not parse as that declared value_type
                 (KI-049), predicate is declared a relation rather than a
-                property (KI-040), or (on auto-accept) a registered
-                `Validator` rejects the assertion (KI-042)
+                property (KI-040), supersedes is set but predicate isn't
+                cardinality="many"/temporality="time_varying" (ADR-0050),
+                or (on auto-accept) a registered `Validator` rejects the
+                assertion (KI-042) or supersedes doesn't name a real,
+                active, overlapping-and-differing assertion (ADR-0050)
         """
         principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
@@ -1346,6 +1431,7 @@ class Ontology:
         self._require_known_predicate(predicate, value_type, value, expected_kind="property")
         delegating = self._resolve_delegation(principal, author, acting_as)
         temporality = self._resolve_temporality(predicate)
+        self._require_valid_supersedes_hint(supersedes, predicate, temporality)
 
         now = self.clock.now()
         proposal_id = self.id_provider.next()
@@ -1371,6 +1457,7 @@ class Ontology:
                         "model": model,
                         "valid_from": valid_from.isoformat() if valid_from else None,
                         "valid_to": valid_to.isoformat() if valid_to else None,
+                        "supersedes": supersedes,
                     }
                 ]
             },
@@ -1416,7 +1503,7 @@ class Ontology:
         )
         with self.backend.transaction():
             self.backend.put_proposal(accepted)
-            self._apply_with_conflict_routing(assertion, temporality)
+            self._apply_with_conflict_routing(assertion, temporality, supersedes)
         return accepted, decision
 
     def propose_ref(
@@ -1433,6 +1520,7 @@ class Ontology:
         model: str | None = None,
         valid_from: datetime | None = None,
         valid_to: datetime | None = None,
+        supersedes: str | None = None,
     ) -> tuple[Proposal, Decision]:
         """Submit a reference (relation) assertion through the proposal/policy path (SPEC §9).
 
@@ -1455,6 +1543,12 @@ class Ontology:
             valid_from: When the fact became/becomes true (defaults to now —
                 SPEC §5.3). Set explicitly to backfill historical windows.
             valid_to: When the fact stopped being true (defaults to open/None)
+            supersedes: Id of a specific existing assertion this one
+                explicitly replaces (ADR-0050/KI-080) — see
+                `assert_literal`'s docstring for the full rationale; only
+                meaningful for a cardinality="many",
+                temporality="time_varying" relation. Same submission-time-
+                only checking caveat as `propose()`'s own `supersedes`.
 
         Returns:
             (Proposal, Decision) tuple
@@ -1466,9 +1560,12 @@ class Ontology:
                 (KI-083, KI-089)
             ValidationError: author is ai-kind and model is not provided,
                 predicate is not declared in the active schema, predicate
-                is declared a property rather than a relation (KI-040), or
-                (on auto-accept) a registered `Validator` rejects the
-                assertion (KI-042)
+                is declared a property rather than a relation (KI-040),
+                supersedes is set but predicate isn't cardinality="many"/
+                temporality="time_varying" (ADR-0050), or (on auto-accept)
+                a registered `Validator` rejects the assertion (KI-042) or
+                supersedes doesn't name a real, active,
+                overlapping-and-differing assertion (ADR-0050)
         """
         principal = self._get_principal_or_raise(author)
         self._require_model_for_ai(principal, model)
@@ -1477,6 +1574,7 @@ class Ontology:
         self._require_known_predicate(predicate, expected_kind="relation")
         delegating = self._resolve_delegation(principal, author, acting_as)
         temporality = self._resolve_temporality(predicate)
+        self._require_valid_supersedes_hint(supersedes, predicate, temporality)
 
         now = self.clock.now()
         proposal_id = self.id_provider.next()
@@ -1501,6 +1599,7 @@ class Ontology:
                         "model": model,
                         "valid_from": valid_from.isoformat() if valid_from else None,
                         "valid_to": valid_to.isoformat() if valid_to else None,
+                        "supersedes": supersedes,
                     }
                 ]
             },
@@ -1541,7 +1640,7 @@ class Ontology:
         )
         with self.backend.transaction():
             self.backend.put_proposal(accepted)
-            self._apply_with_conflict_routing(assertion, temporality)
+            self._apply_with_conflict_routing(assertion, temporality, supersedes)
         return accepted, decision
 
     def _reject_retract_if_party_to_contradiction(
@@ -1932,11 +2031,22 @@ class Ontology:
         self,
         assertion: Assertion,
         temporality: Literal["static", "time_varying"],
+        supersedes: str | None = None,
     ) -> Assertion:
         """Apply an assertion with SPEC §10 conflict routing. Must run inside a transaction.
 
         Returns the assertion as actually persisted (its ``status``/``supersedes``
         may differ from the input, e.g. when routing flags or supersedes it).
+
+        ``supersedes`` (ADR-0050): caller-supplied hint naming a specific
+        existing assertion this one explicitly replaces, meaningful only
+        for cardinality="many" time_varying properties. Passed through to
+        ``route()`` as ``supersedes_hint`` — its own ``ValueError`` (the
+        hint doesn't name a real, active, overlapping-and-differing
+        assertion against a fresh read of ``existing``) is translated to
+        the stable ``ValidationError`` taxonomy here, at the one call site
+        where the pure ``govern.conflict`` layer's contract violations
+        cross into caller-facing error codes.
         """
         open_contradiction = self.backend.get_open_contradiction(
             self.namespace, assertion.subject, assertion.predicate
@@ -1968,13 +2078,19 @@ class Ontology:
                 predicate=assertion.predicate,
                 status="active",
             )
-            result = route(
-                incoming=assertion,
-                existing=existing,
-                temporality=temporality,
-                existing_contradiction_id=open_contradiction.id if open_contradiction else None,
-                cardinality=self._resolve_cardinality(assertion.predicate),
-            )
+            try:
+                result = route(
+                    incoming=assertion,
+                    existing=existing,
+                    temporality=temporality,
+                    existing_contradiction_id=(
+                        open_contradiction.id if open_contradiction else None
+                    ),
+                    cardinality=self._resolve_cardinality(assertion.predicate),
+                    supersedes_hint=supersedes,
+                )
+            except ValueError as exc:
+                raise ValidationError(str(exc)) from exc
 
         if isinstance(result, Supersede):
             # Close prior window at the incoming assertion's valid_from (SPEC §10.2).
@@ -2190,6 +2306,17 @@ class Ontology:
         every commit point runs the same per-assertion Validators, so a
         proposal that went through review isn't exempt from them just
         because it skipped `propose`/`propose_ref`'s own auto-accept check.
+        Each op's stored `supersedes` hint (ADR-0050/KI-080), if any, is
+        read straight from the payload with no re-validation of its own —
+        the same "checked once at submission, not re-run here" precedent
+        as the predicate/value_type checks above, not a new one. It still
+        can't silently misfire: `route()` itself re-validates it against a
+        fresh read of `existing` every time it runs (translated to
+        `ValidationError` in `_apply_with_conflict_routing`), and a schema
+        change that moves the predicate out of cardinality="many"/
+        temporality="time_varying" by replay time simply leaves the hint
+        unconsulted (`_route_time_varying`'s "single" branch and
+        `_route_static` both ignore it), not silently wrong.
 
         ``extra_retracting_party``: the accepting reviewer, when called from
         `accept_proposal` (KI-033) — a `retract` operation's contradiction
@@ -2254,7 +2381,9 @@ class Ontology:
                 self._run_validators(assertion)
                 applied.append(
                     self._apply_with_conflict_routing(
-                        assertion, self._resolve_temporality(op["predicate"])
+                        assertion,
+                        self._resolve_temporality(op["predicate"]),
+                        op.get("supersedes"),
                     )
                 )
             elif op["kind"] == "assert_ref":
@@ -2279,7 +2408,9 @@ class Ontology:
                 self._run_validators(ref_assertion)
                 applied.append(
                     self._apply_with_conflict_routing(
-                        ref_assertion, self._resolve_temporality(op["predicate"])
+                        ref_assertion,
+                        self._resolve_temporality(op["predicate"]),
+                        op.get("supersedes"),
                     )
                 )
             elif op["kind"] == "retract":

@@ -10,6 +10,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- **Breaking:** `time_varying` properties/relations honor `cardinality="many"` (closes KI-080,
+  ADR-0050) — ADR-0017 gave `cardinality="many"` `static` properties coexistence on a differing
+  value but deliberately left `time_varying` unextended, reasoning that an overlapping differing
+  value is always a genuine supersession there; true for `cardinality="single"`, but not for
+  `"many"`, where window overlap plus a differing value can't tell "replace my current value" from
+  "a new, additional concurrent value" apart (e.g. two concurrent job titles silently collapsing to
+  one). `govern.conflict.route()`/`_route_time_varying()` now consult `cardinality`: a
+  `many`-cardinality overlapping differing value coexists by default, mirroring `_route_static`'s
+  own "many" branch — the behavior change from before this fix, which superseded unconditionally
+  regardless of cardinality. `Ontology.assert_literal()`/`assert_ref()`/`propose()`/`propose_ref()`
+  gain a new keyword-only `supersedes: str | None = None` parameter naming a specific existing
+  assertion to replace instead, for the correction case — every other overlapping-differing
+  concurrent value stays untouched. `supersedes` is rejected (`ValidationError`) outside
+  `cardinality="many"`/`temporality="time_varying"`, and must name a real, active,
+  overlapping-and-differing assertion on the same `(subject, predicate)` or the write is rejected —
+  never silently ignored either way — including when no *other* existing assertion happens to
+  overlap the incoming one, so a stale or typo'd hint can't vanish with no error. `cardinality="single"`
+  `time_varying` properties are completely unaffected. REST/GraphQL/MCP/CLI parity deliberately out
+  of scope, filed as its own follow-up (KI-099), matching KI-081's precedent of shipping an
+  SDK-first capability separately from interface parity.
 - CLI's `ontolith query` command gains `--semantic`, `--min-confidence`, `--trust-at-least`,
   `--limit`, `--include-flagged`, and `--include-history` (closes KI-096, found resolving KI-094)
   — previously supported only `--where`, a materially larger gap than the REST/GraphQL/MCP
