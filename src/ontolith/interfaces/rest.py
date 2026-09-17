@@ -318,7 +318,7 @@ class WriteAssertionIn(BaseModel):
     schema. Unlike ``ProposeIn``, ``target`` writes accept no
     ``rationale`` (``assert_ref`` doesn't take one — an existing SDK-level
     asymmetry with ``assert_literal``, not a REST omission). ``supersedes``
-    (ADR-0050/KI-080, KI-099) is the same opt-in `ProposeIn` has — see its
+    (ADR-0050/KI-080, KI-099) is the same opt-in ``ProposeIn`` has — see its
     own docstring.
     """
 

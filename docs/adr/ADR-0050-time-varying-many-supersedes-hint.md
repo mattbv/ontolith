@@ -162,11 +162,12 @@ already provides avoids that entirely.
   external callers) gains both `cardinality` and `supersedes_hint`, since it previously took neither;
   `Ontology.assert_literal()`/`assert_ref()`/`propose()`/`propose_ref()` gain a new keyword-only
   `supersedes` parameter (default `None`) — additive, not breaking, for every other existing caller.
-- **REST, GraphQL, MCP, and CLI parity is deliberately out of scope for this ADR/KI.** `supersedes`
-  is exposed on the Python SDK only (`assert_literal`/`assert_ref`/`propose`/`propose_ref`) —
-  matching this project's established pattern of shipping an SDK-first capability and filing
-  interface parity as its own follow-up (e.g. KI-081 → KI-094/KI-096 for `.include_flagged()`/
-  `.include_history()`). Filed as **KI-099**.
+- **REST, GraphQL, MCP, and CLI parity was deliberately out of scope for this ADR/KI at the time it
+  shipped.** `supersedes` was exposed on the Python SDK only (`assert_literal`/`assert_ref`/
+  `propose`/`propose_ref`) — matching this project's established pattern of shipping an SDK-first
+  capability and filing interface parity as its own follow-up (e.g. KI-081 → KI-094/KI-096 for
+  `.include_flagged()`/`.include_history()`). Filed as **KI-099** — see the Update below for how
+  that gap closed.
 - `resubmit()`'s existing "payload is replayed unedited" limitation now also covers `supersedes` — a
   proposal cannot have its hint corrected after submission any more than its value or window can
   be, consistent with that pre-existing, documented constraint (not a new one this ADR introduces).
