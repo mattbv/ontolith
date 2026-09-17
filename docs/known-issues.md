@@ -2080,10 +2080,10 @@ New tests: `conformance/test_bitemporal.py::TestAsOfRetractionAndFlagging::test_
 
 ---
 
-## KI-099 — `supersedes` (ADR-0050) is SDK-only — REST/GraphQL/MCP/CLI have no way to pass it — found reviewing KI-080
+## KI-099 — `supersedes` (ADR-0050) is SDK-only — REST/GraphQL/MCP/CLI have no way to pass it — found reviewing KI-080 ✓ RESOLVED (Backlog)
 
 **Severity:** Interface-parity gap — every write surface except the Python SDK is missing a capability the SDK now has
-**Milestone target:** Backlog
+**Milestone target:** Backlog — resolved without a milestone change
 **SPEC reference:** SPEC §9.3 (direct-write surface), SPEC §9 (proposal surface); ADR-0050 (`supersedes` hint)
 
 ### Description
@@ -2097,7 +2097,9 @@ ADR-0050/KI-080 added an optional `supersedes: str | None = None` keyword parame
 
 ### Fix
 
-Not started. Expose `supersedes` on whichever interface a caller first needs it on — a new optional field/flag on each of the shapes named above, each forwarding the string straight through to `Ontology`, which already does all real validation. Parity work, not new design.
+`supersedes: str | None = None` added to every shape named in the Description above, each forwarding straight through to `Ontology` with no additional validation of its own (all real validation stays in `Ontology._require_valid_supersedes_hint`/`route()`, per ADR-0050): REST's `WriteAssertionIn`/`ProposeIn` (`POST /assertions`/`POST /proposals`) gain the field; GraphQL's `ProposeInput` (`Mutation.propose`) gains it, camelCase needing no renaming as anticipated; MCP's `ontolith.propose` tool gains the keyword argument; the CLI's `ontolith assert` gains a `--supersedes` flag. Mechanical, as anticipated — no new validation logic anywhere, since `Ontology` already rejects an out-of-scope or invalid hint identically regardless of which interface the call came through.
+
+New tests, one pair (forwarded correctly; rejected outside `cardinality="many"`/`temporality="time_varying"`) per interface: `tests/unit/test_rest.py::TestWriteAssertionRoute`/`TestCreateProposalRoute`, `tests/unit/test_graphql.py::TestProposeMutation`, `tests/unit/test_mcp_server.py::TestProposeTool`, `tests/unit/test_cli.py::TestAssertLiteral` — each applies a small `cardinality="many"`, `temporality="time_varying"` schema, asserts a baseline value, then confirms `supersedes=<id>` on the write path in question replaces exactly that value (verified via `kb.assertions(status="active")` afterward) and that a rejected hint surfaces as `VALIDATION_ERROR`/exit code 1 through that interface's own error-mapping, not a raw exception.
 
 ---
 
