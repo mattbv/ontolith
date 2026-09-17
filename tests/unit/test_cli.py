@@ -494,6 +494,87 @@ class TestAssertLiteral:
         assert result.exit_code == 0
         assert "Ada" in result.output
 
+    def test_supersedes_replaces_named_assertion(self, temp_db: Path) -> None:
+        """KI-099: `--supersedes` (ADR-0050/KI-080) reaches
+        `Ontology.assert_literal` through `ontolith assert`."""
+        kb = Ontology.connect(temp_db)
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "title": PropertyDef(
+                            name="title",
+                            value_type="Text",
+                            temporality="time_varying",
+                            cardinality="many",
+                        ),
+                    },
+                ),
+            },
+        )
+        alice = kb.create_principal("alice@example.com", kind="human", default_capability="write")
+        admin = kb.create_principal("admin@example.com", kind="human", default_capability="admin")
+        kb.apply_schema(schema, author=admin.id)
+        entity = kb.create_entity("Person", author=alice.id)
+        sales = kb.assert_literal(entity.id, "Person.title", "VP Sales", "Text", alice.id)
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(temp_db),
+                "assert",
+                entity.id,
+                "Person.title",
+                "SVP Sales",
+                "--type",
+                "Text",
+                "--author",
+                alice.id,
+                "--supersedes",
+                sales.id,
+            ],
+        )
+        assert result.exit_code == 0
+        assert "SVP Sales" in result.output
+
+        kb = Ontology.connect(temp_db)
+        active = kb.assertions(subject=entity.id, predicate="Person.title", status="active")
+        assert {a.value for a in active} == {"SVP Sales"}
+        kb.close()
+
+    def test_supersedes_rejected_outside_many_time_varying(
+        self, seeded_db: tuple[Path, str, str]
+    ) -> None:
+        db, author, entity_id = seeded_db
+        kb = Ontology.connect(db)
+        existing = kb.assert_literal(entity_id, "Person.name", "Ada", "Text", author)
+        kb.close()
+
+        result = runner.invoke(
+            app,
+            [
+                "--db",
+                str(db),
+                "assert",
+                entity_id,
+                "Person.name",
+                "Ava",
+                "--type",
+                "Text",
+                "--author",
+                author,
+                "--supersedes",
+                existing.id,
+            ],
+        )
+        assert result.exit_code == 1
+        assert "only meaningful" in result.output
+
 
 class TestListAssertions:
     def test_lists_active_assertions(self, seeded_db: tuple[Path, str, str]) -> None:

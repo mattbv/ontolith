@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M3 - Extensible (0.3)
 
 #### Added
+- REST, GraphQL, MCP, and CLI gain `supersedes` (closes KI-099, found reviewing/closing KI-080) —
+  ADR-0050's hint was SDK-only when it shipped; REST's `WriteAssertionIn`/`ProposeIn` (`POST
+  /assertions`/`POST /proposals`), GraphQL's `ProposeInput` (`Mutation.propose`), MCP's `propose`
+  tool, and the CLI's `ontolith assert` (`--supersedes`) all now forward the parameter straight
+  through to `Ontology`, which does all real validation — no new logic on any interface. GraphQL's
+  camelCase needs no renaming (`supersedes` has no underscore); the CLI's `ontolith assert` never
+  wired `assert_ref` and there is no `propose` subcommand at all, so this KI's scope stops at the
+  one CLI command that exists — both pre-existing, separate gaps, not extended here.
 - **Breaking:** `time_varying` properties/relations honor `cardinality="many"` (closes KI-080,
   ADR-0050) — ADR-0017 gave `cardinality="many"` `static` properties coexistence on a differing
   value but deliberately left `time_varying` unextended, reasoning that an overlapping differing

@@ -162,11 +162,12 @@ already provides avoids that entirely.
   external callers) gains both `cardinality` and `supersedes_hint`, since it previously took neither;
   `Ontology.assert_literal()`/`assert_ref()`/`propose()`/`propose_ref()` gain a new keyword-only
   `supersedes` parameter (default `None`) — additive, not breaking, for every other existing caller.
-- **REST, GraphQL, MCP, and CLI parity is deliberately out of scope for this ADR/KI.** `supersedes`
-  is exposed on the Python SDK only (`assert_literal`/`assert_ref`/`propose`/`propose_ref`) —
-  matching this project's established pattern of shipping an SDK-first capability and filing
-  interface parity as its own follow-up (e.g. KI-081 → KI-094/KI-096 for `.include_flagged()`/
-  `.include_history()`). Filed as **KI-099**.
+- **REST, GraphQL, MCP, and CLI parity was deliberately out of scope for this ADR/KI at the time it
+  shipped.** `supersedes` was exposed on the Python SDK only (`assert_literal`/`assert_ref`/
+  `propose`/`propose_ref`) — matching this project's established pattern of shipping an SDK-first
+  capability and filing interface parity as its own follow-up (e.g. KI-081 → KI-094/KI-096 for
+  `.include_flagged()`/`.include_history()`). Filed as **KI-099** — see the Update below for how
+  that gap closed.
 - `resubmit()`'s existing "payload is replayed unedited" limitation now also covers `supersedes` — a
   proposal cannot have its hint corrected after submission any more than its value or window can
   be, consistent with that pre-existing, documented constraint (not a new one this ADR introduces).
@@ -203,6 +204,19 @@ accepted-as-designed:** Considered as the minimal-change option. Rejected becaus
 and reproducible (not merely a documentation nit) and the schema-declared `cardinality="many"`
 contract is silently unmet for `time_varying` properties specifically — the same category of gap
 ADR-0017 itself was written to close for `static` properties.
+
+## Update (2026-09-16, closes KI-099)
+
+`supersedes` now reaches every write-shaped interface, not just the Python SDK: REST's
+`WriteAssertionIn` (`POST /assertions`) and `ProposeIn` (`POST /proposals`), GraphQL's
+`ProposeInput` (`Mutation.propose`), MCP's `propose` tool, and the CLI's `ontolith assert`
+(`--supersedes`) all gained the field/argument, each forwarding it straight through to `Ontology`
+with no additional validation of its own — `Ontology._require_valid_supersedes_hint`/`route()`
+remain the only places that validate it, so a rejected hint surfaces identically (translated into
+each interface's own SPEC §16 error mapping) regardless of which surface the call came through.
+GraphQL's field needed no camelCase rename (`supersedes` has no underscore). The CLI's `ontolith
+assert` never wired `assert_ref` and there is no `propose` subcommand at all — both pre-existing,
+separate gaps this KI didn't extend.
 
 ## References
 

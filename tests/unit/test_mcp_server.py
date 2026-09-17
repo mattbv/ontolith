@@ -1082,6 +1082,103 @@ class TestProposeTool:
         assert "error" in result
         assert result["code"] == "VALIDATION_ERROR"
 
+    def test_supersedes_forwarded_to_propose(self, tmp_path: Path) -> None:
+        """KI-099: `supersedes` (ADR-0050/KI-080) reaches `Ontology.propose`
+        through `ontolith.propose`."""
+        kb = _kb(tmp_path)
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "title": PropertyDef(
+                            name="title",
+                            value_type="Text",
+                            temporality="time_varying",
+                            cardinality="many",
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(schema, author=ADMIN)
+        entity = kb.create_entity("Person", author=HUMAN)
+        sales = kb.assert_literal(entity.id, "Person.title", "VP Sales", "Text", HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.propose").fn(
+            subject=entity.id,
+            predicate="Person.title",
+            value="SVP Sales",
+            value_type="Text",
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            supersedes=sales.id,
+        )
+
+        assert result["proposal"]["state"] == "auto_accepted"
+        active = kb.assertions(subject=entity.id, predicate="Person.title", status="active")
+        assert {a.value for a in active} == {"SVP Sales"}
+
+    def test_supersedes_forwarded_to_propose_ref(self, tmp_path: Path) -> None:
+        """KI-099: `supersedes` reaches `Ontology.propose_ref` through
+        `ontolith.propose`'s `target`-shaped branch, not just its
+        literal-value one."""
+        kb = _kb(tmp_path)
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    relations={
+                        "colleague": RelationDef(
+                            name="colleague",
+                            target_concept="Person",
+                            temporality="time_varying",
+                            cardinality="many",
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(schema, author=ADMIN)
+        entity = kb.create_entity("Person", author=HUMAN)
+        colleague_a = kb.create_entity("Person", author=HUMAN)
+        colleague_b = kb.create_entity("Person", author=HUMAN)
+        rel_a = kb.assert_ref(entity.id, "Person.colleague", colleague_a.id, HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.propose").fn(
+            subject=entity.id,
+            predicate="Person.colleague",
+            target=colleague_b.id,
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            supersedes=rel_a.id,
+        )
+
+        assert result["proposal"]["state"] == "auto_accepted"
+        active = kb.assertions(subject=entity.id, predicate="Person.colleague", status="active")
+        assert {a.value for a in active} == {colleague_b.id}
+
+    def test_supersedes_rejected_outside_many_time_varying(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        existing = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+
+        mcp, _ = _server(kb)
+        result = mcp._tool_manager.get_tool("ontolith.propose").fn(
+            subject=entity.id,
+            predicate="Person.name",
+            value="Ava",
+            value_type="Text",
+            token=kb.issue_token(HUMAN, author=ADMIN)[0],
+            supersedes=existing.id,
+        )
+        assert "error" in result
+        assert result["code"] == "VALIDATION_ERROR"
+
     def test_no_write_tool_registered(self, tmp_path: Path) -> None:
         """ADR-0008: no direct write, update, or delete tool must be registered."""
         kb = _kb(tmp_path)

@@ -275,6 +275,17 @@ def assert_literal(
         str | None,
         typer.Option("--source", help="Source of the information."),
     ] = None,
+    supersedes: Annotated[
+        str | None,
+        typer.Option(
+            "--supersedes",
+            help=(
+                "Id of a specific existing assertion this one explicitly replaces "
+                '(ADR-0050/KI-080, KI-099) — only meaningful for a cardinality="many", '
+                'temporality="time_varying" property; rejected otherwise.'
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Make a literal assertion about an entity — a direct write (SPEC §9.3).
 
@@ -292,6 +303,7 @@ def assert_literal(
             author=author,
             confidence=confidence,
             source=source,
+            supersedes=supersedes,
         )
         typer.echo(f"Asserted: {a.id}  {a.predicate}={a.value!r}  by={a.author}")
     except Exception as exc:

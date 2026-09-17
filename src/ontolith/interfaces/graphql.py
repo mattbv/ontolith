@@ -397,7 +397,11 @@ class FilterInput:
 class ProposeInput:
     """Input for ``Mutation.propose``. Exactly one of (``value`` and
     ``value_type``) or ``target`` must be set — a literal assertion or a
-    relation, never both, never neither (mirrors REST's ``ProposeIn``)."""
+    relation, never both, never neither (mirrors REST's ``ProposeIn``).
+    ``supersedes`` (ADR-0050/KI-080, KI-099) names a specific existing
+    assertion this one explicitly replaces — only meaningful for a
+    cardinality="many", temporality="time_varying" property or relation;
+    ``Ontology.propose``/``propose_ref`` reject it otherwise."""
 
     subject: str
     predicate: str
@@ -409,6 +413,7 @@ class ProposeInput:
     rationale: str | None = None
     acting_as: str | None = None
     model: str | None = None
+    supersedes: str | None = None
 
 
 @strawberry.input
@@ -729,6 +734,7 @@ def _do_propose(kb: Ontology, author: str, payload: ProposeInput) -> ProposeResu
             rationale=payload.rationale,
             acting_as=payload.acting_as,
             model=payload.model,
+            supersedes=payload.supersedes,
         )
     else:
         assert payload.value is not None and payload.value_type is not None
@@ -743,6 +749,7 @@ def _do_propose(kb: Ontology, author: str, payload: ProposeInput) -> ProposeResu
             rationale=payload.rationale,
             acting_as=payload.acting_as,
             model=payload.model,
+            supersedes=payload.supersedes,
         )
     return ProposeResultType(proposal=_proposal_type(proposal), decision=type(decision).__name__)
 

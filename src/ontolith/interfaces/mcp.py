@@ -724,6 +724,7 @@ def create_mcp_server(
         rationale: str | None = None,
         acting_as: str | None = None,
         model: str | None = None,
+        supersedes: str | None = None,
     ) -> dict[str, Any]:
         """Create a proposal to assert a fact or relation. Does NOT write directly.
 
@@ -768,6 +769,10 @@ def create_mcp_server(
             rationale: Optional explanation for the assertion
             acting_as: Optional principal ID being acted on behalf of (delegation)
             model: Model family+version; required when the calling principal is AI-kind
+            supersedes: Id of a specific existing assertion this one explicitly
+                replaces (ADR-0050/KI-080, KI-099) — only meaningful for a
+                cardinality="many", temporality="time_varying" property or
+                relation; rejected otherwise
 
         Returns:
             Dict with "proposal" (id, state, policy_reason, acting_as) and "decision" type.
@@ -799,6 +804,7 @@ def create_mcp_server(
                     rationale=rationale,
                     acting_as=acting_as,
                     model=model,
+                    supersedes=supersedes,
                 )
             else:
                 assert value is not None and value_type is not None
@@ -813,6 +819,7 @@ def create_mcp_server(
                     rationale=rationale,
                     acting_as=acting_as,
                     model=model,
+                    supersedes=supersedes,
                 )
         except OntolithError as exc:
             return _error_response(exc)
