@@ -1,4 +1,4 @@
-"""Traversal and write performance benchmarks — M1 baseline.
+"""Traversal and write performance benchmarks — M1 baseline, M4 write-path fix.
 
 Budgets (enforced M4, baselined here per implementation plan §9):
   - Single-entity get with provenance:  p95 < 10 ms
@@ -9,6 +9,21 @@ Budgets (enforced M4, baselined here per implementation plan §9):
 
 These benchmarks are informational in M1 (no budget gate).
 Run with: uv run pytest tests/benchmarks/ --benchmark-only
+
+M4 note: `test_bench_write_assert_literal` used to call `assert_literal` on the
+*same* (subject, predicate) every round with a different value each time. With
+no schema registered, that predicate defaults to static/single cardinality —
+so the 2nd round already contradicts the 1st, and every round after that
+extends the same growing open contradiction (`_apply_with_conflict_routing`'s
+"extend an already-open contradiction" fast path scans every existing member).
+Reproduced directly: the open contradiction's `member_ids` genuinely grows one
+entry per round. The reported numbers were an artifact of how many rounds
+pytest-benchmark happened to calibrate for a given run, not a stable per-write
+cost — fixed by giving each round its own (subject, predicate), which has
+nothing to contradict. `test_bench_propose_auto_accept` is new: the budget row
+itself names "propose + policy eval + commit," a materially different, more
+expensive path than direct `assert_literal` (proposal construction/persistence
++ `ThresholdPolicy.evaluate()`), which had no benchmark of its own before.
 """
 
 from __future__ import annotations
@@ -86,6 +101,27 @@ def seeded_db_path() -> Path:
                         asserted_at=T0,
                     )
                 )
+
+    # A small, dedicated pool of write-target entities under their own
+    # concept (WriteBenchTarget, not Person) — write benchmarks below cycle
+    # through these exclusively, never the Person pool above. Keeps every
+    # write benchmark's own state from leaking into a read benchmark's
+    # exact-count assertion elsewhere in this module-scoped fixture (e.g.
+    # test_bench_assertions_by_subject's == 100, test_bench_query_all_
+    # entities_of_concept's == 1_000) regardless of pytest-benchmark's own
+    # per-run round count or test execution order.
+    num_write_bench_entities = 100
+    with backend.transaction():
+        for i in range(num_write_bench_entities):
+            backend.put_entity(
+                Entity(
+                    id=f"write-bench-entity-{i:04d}",
+                    namespace="default",
+                    concept="WriteBenchTarget",
+                    created_at=T0,
+                    created_by=AUTHOR_ID,
+                )
+            )
 
     # Wire 3-hop ref chain: entity-0 → entity-1 → entity-2 → entity-3
     # (matches the 3-hop traversal budget in the module docstring).
@@ -177,21 +213,60 @@ def test_bench_single_entity_provenance(benchmark, seeded_kb: Ontology) -> None:
 
 @pytest.mark.benchmark
 def test_bench_write_assert_literal(benchmark, seeded_kb: Ontology) -> None:
-    """p95 target: < 50 ms — Write path: assert_literal (standalone commit)."""
+    """p95 target: < 50 ms — Write path: assert_literal (standalone commit).
+
+    Each round gets its own (subject, predicate) — cycling through the
+    dedicated write-bench entity pool (never the read-benchmarked Person
+    pool, see the seeding fixture's own comment), a fresh predicate name
+    every round — so there is never anything for conflict routing to
+    contradict or supersede against. That's deliberate: this benchmark
+    measures a single write's own cost, not the separate (and unbounded)
+    cost of extending a growing contradiction — see the module docstring
+    for how the previous version of this benchmark conflated the two.
+    """
     counter = {"n": 0}
 
     def write_one() -> None:
         n = counter["n"]
         counter["n"] += 1
+        eid = f"write-bench-entity-{n % 100:04d}"
         seeded_kb.assert_literal(
-            "entity-000999",
-            "Person.bench_write",
+            eid,
+            f"WriteBenchTarget.bench_write_{n}",
             f"value-{n}",
             "Text",
             AUTHOR_ID,
         )
 
     benchmark(write_one)
+
+
+@pytest.mark.benchmark
+def test_bench_propose_auto_accept(benchmark, seeded_kb: Ontology) -> None:
+    """p95 target: < 50 ms — the budget's own named operation: propose() +
+    ThresholdPolicy.evaluate() + commit, not just assert_literal's direct-
+    write path. AUTHOR_ID is human with write capability, so ThresholdPolicy
+    auto-accepts every round — the write actually lands, exercising the
+    same commit path assert_literal does, plus proposal construction/
+    persistence and policy evaluation on top. Same fresh-(subject,
+    predicate)-per-round shape as test_bench_write_assert_literal, for the
+    same reason, and the same dedicated write-bench entity pool."""
+    counter = {"n": 0}
+
+    def propose_one() -> None:
+        n = counter["n"]
+        counter["n"] += 1
+        eid = f"write-bench-entity-{n % 100:04d}"
+        proposal, decision = seeded_kb.propose(
+            eid,
+            f"WriteBenchTarget.bench_propose_{n}",
+            f"value-{n}",
+            "Text",
+            AUTHOR_ID,
+        )
+        assert decision.__class__.__name__ == "AutoAccept"
+
+    benchmark(propose_one)
 
 
 @pytest.mark.benchmark
