@@ -1493,6 +1493,73 @@ class TestProposeMutation:
         )
         assert _error_codes(body) == ["VALIDATION_ERROR"]
 
+    def test_supersedes_forwarded_to_propose(self, tmp_path: Path) -> None:
+        """KI-099: `supersedes` (ADR-0050/KI-080) reaches `Ontology.propose`
+        through `Mutation.propose`'s `ProposeInput`."""
+        kb = _kb(tmp_path)
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "title": PropertyDef(
+                            name="title",
+                            value_type="Text",
+                            temporality="time_varying",
+                            cardinality="many",
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(schema, author=ADMIN)
+        entity = kb.create_entity("Person", author=HUMAN)
+        sales = kb.assert_literal(entity.id, "Person.title", "VP Sales", "Text", HUMAN)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(
+            client,
+            self._MUTATION,
+            variables={
+                "input": {
+                    "subject": entity.id,
+                    "predicate": "Person.title",
+                    "value": "SVP Sales",
+                    "valueType": "Text",
+                    "supersedes": sales.id,
+                }
+            },
+            headers=_auth(token),
+        )
+        assert body["data"]["propose"]["proposal"]["state"] == "auto_accepted"
+        active = kb.assertions(subject=entity.id, predicate="Person.title", status="active")
+        assert {a.value for a in active} == {"SVP Sales"}
+
+    def test_supersedes_rejected_outside_many_time_varying(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        existing = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        body = _gql(
+            client,
+            self._MUTATION,
+            variables={
+                "input": {
+                    "subject": entity.id,
+                    "predicate": "Person.name",
+                    "value": "Ava",
+                    "valueType": "Text",
+                    "supersedes": existing.id,
+                }
+            },
+            headers=_auth(token),
+        )
+        assert _error_codes(body) == ["VALIDATION_ERROR"]
+
 
 # ---------------------------------------------------------------------------
 # Mutation.acceptProposal / rejectProposal / requestChanges / resubmitProposal

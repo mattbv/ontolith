@@ -268,6 +268,10 @@ class ProposeIn(BaseModel):
 
     Exactly one of (``value`` and ``value_type``) or ``target`` must be
     set — a literal assertion or a relation, never both, never neither.
+    ``supersedes`` (ADR-0050/KI-080, KI-099) names a specific existing
+    assertion this one explicitly replaces — only meaningful for a
+    cardinality="many", temporality="time_varying" property or
+    relation; ``Ontology.propose``/``propose_ref`` reject it otherwise.
     """
 
     subject: str
@@ -280,6 +284,7 @@ class ProposeIn(BaseModel):
     rationale: str | None = None
     acting_as: str | None = None
     model: str | None = None
+    supersedes: str | None = None
 
 
 class ProposalOut(BaseModel):
@@ -312,7 +317,9 @@ class WriteAssertionIn(BaseModel):
     enforced by ``Ontology.assert_literal``/``assert_ref``, not this
     schema. Unlike ``ProposeIn``, ``target`` writes accept no
     ``rationale`` (``assert_ref`` doesn't take one — an existing SDK-level
-    asymmetry with ``assert_literal``, not a REST omission).
+    asymmetry with ``assert_literal``, not a REST omission). ``supersedes``
+    (ADR-0050/KI-080, KI-099) is the same opt-in `ProposeIn` has — see its
+    own docstring.
     """
 
     subject: str
@@ -327,6 +334,7 @@ class WriteAssertionIn(BaseModel):
     model: str | None = None
     valid_from: datetime | None = None
     valid_to: datetime | None = None
+    supersedes: str | None = None
 
 
 class AssertionDetailOut(BaseModel):
@@ -783,6 +791,7 @@ def create_rest_app(
                 rationale=body.rationale,
                 acting_as=body.acting_as,
                 model=body.model,
+                supersedes=body.supersedes,
             )
         else:
             assert body.value is not None and body.value_type is not None
@@ -797,6 +806,7 @@ def create_rest_app(
                 rationale=body.rationale,
                 acting_as=body.acting_as,
                 model=body.model,
+                supersedes=body.supersedes,
             )
 
         return ProposeOut(
@@ -903,6 +913,7 @@ def create_rest_app(
                 model=body.model,
                 valid_from=body.valid_from,
                 valid_to=body.valid_to,
+                supersedes=body.supersedes,
             )
         else:
             assert body.value is not None and body.value_type is not None
@@ -919,6 +930,7 @@ def create_rest_app(
                 model=body.model,
                 valid_from=body.valid_from,
                 valid_to=body.valid_to,
+                supersedes=body.supersedes,
             )
 
         return AssertionDetailOut(

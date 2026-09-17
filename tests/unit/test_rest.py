@@ -812,6 +812,50 @@ class TestCreateProposalRoute:
         assert response.status_code == 201
         assert response.json()["proposal"]["state"] == "auto_accepted"
 
+    def test_supersedes_forwarded_to_propose(self, tmp_path: Path) -> None:
+        """KI-099: `supersedes` (ADR-0050/KI-080) reaches `Ontology.propose`
+        through `POST /proposals`."""
+        kb = _kb(tmp_path)
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "title": PropertyDef(
+                            name="title",
+                            value_type="Text",
+                            temporality="time_varying",
+                            cardinality="many",
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(schema, author=ADMIN)
+        entity = kb.create_entity("Person", author=HUMAN)
+        sales = kb.assert_literal(entity.id, "Person.title", "VP Sales", "Text", HUMAN)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/proposals",
+            json={
+                "subject": entity.id,
+                "predicate": "Person.title",
+                "value": "SVP Sales",
+                "value_type": "Text",
+                "supersedes": sales.id,
+            },
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 201
+        assert response.json()["proposal"]["state"] == "auto_accepted"
+        active = kb.assertions(subject=entity.id, predicate="Person.title", status="active")
+        assert {a.value for a in active} == {"SVP Sales"}
+
 
 # ---------------------------------------------------------------------------
 # GET /proposals
@@ -1098,6 +1142,73 @@ class TestWriteAssertionRoute:
                 "value": "Acme",
                 "value_type": "Text",
                 "target": org.id,
+            },
+            headers=_auth(token),
+        )
+        assert response.status_code == 400
+        assert response.json()["code"] == "VALIDATION_ERROR"
+
+    def test_supersedes_forwarded_to_assert_literal(self, tmp_path: Path) -> None:
+        """KI-099: `supersedes` (ADR-0050/KI-080) reaches `Ontology.assert_literal`
+        through `POST /assertions`, replacing exactly the named prior
+        assertion on a cardinality="many" time_varying property, leaving a
+        second concurrent value untouched."""
+        kb = _kb(tmp_path)
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person",
+                    properties={
+                        "title": PropertyDef(
+                            name="title",
+                            value_type="Text",
+                            temporality="time_varying",
+                            cardinality="many",
+                        ),
+                    },
+                ),
+            },
+        )
+        kb.apply_schema(schema, author=ADMIN)
+        entity = kb.create_entity("Person", author=HUMAN)
+        sales = kb.assert_literal(entity.id, "Person.title", "VP Sales", "Text", HUMAN)
+        kb.assert_literal(entity.id, "Person.title", "VP Marketing", "Text", HUMAN)
+
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/assertions",
+            json={
+                "subject": entity.id,
+                "predicate": "Person.title",
+                "value": "SVP Sales",
+                "value_type": "Text",
+                "supersedes": sales.id,
+            },
+            headers=_auth(token),
+        )
+
+        assert response.status_code == 201
+        assert response.json()["supersedes"] == sales.id
+        active = kb.assertions(subject=entity.id, predicate="Person.title", status="active")
+        assert {a.value for a in active} == {"SVP Sales", "VP Marketing"}
+
+    def test_supersedes_rejected_outside_many_time_varying(self, tmp_path: Path) -> None:
+        kb = _kb(tmp_path)
+        entity = kb.create_entity("Person", author=HUMAN)
+        existing = kb.assert_literal(entity.id, "Person.name", "Ada", "Text", HUMAN)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+        response = client.post(
+            "/assertions",
+            json={
+                "subject": entity.id,
+                "predicate": "Person.name",
+                "value": "Ava",
+                "value_type": "Text",
+                "supersedes": existing.id,
             },
             headers=_auth(token),
         )
