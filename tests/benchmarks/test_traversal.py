@@ -21,9 +21,11 @@ entry per round. The reported numbers were an artifact of how many rounds
 pytest-benchmark happened to calibrate for a given run, not a stable per-write
 cost — fixed by giving each round its own (subject, predicate), which has
 nothing to contradict. `test_bench_propose_auto_accept` is new: the budget row
-itself names "propose + policy eval + commit," a materially different, more
-expensive path than direct `assert_literal` (proposal construction/persistence
-+ `ThresholdPolicy.evaluate()`), which had no benchmark of its own before.
+itself names "propose + policy eval + commit," a materially different path
+from direct `assert_literal` (adds proposal construction/persistence +
+`ThresholdPolicy.evaluate()` on top of the same commit) — measured overhead
+over `assert_literal` is real but modest, not dramatic — which had no
+benchmark of its own before.
 """
 
 from __future__ import annotations

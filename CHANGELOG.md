@@ -36,10 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (see the Implementation Plan's §9 for the per-row breakdown and a caveat: the hybrid-query row's
   dataset is two orders of magnitude smaller than the other four's, not the same one throughout) —
   informational only, not yet a CI-blocking gate (per the Implementation Plan's own "informational →
-  blocking by M4" note). Found while fixing this: the open-contradiction-extension code path this
-  benchmark used to accidentally exercise has a real, measured, unbounded-with-size per-write cost
-  and no benchmark of its own at all now that this fix moved every write off it — filed as
-  **KI-100**.
+  blocking by M4" note). Found while fixing this: the open-contradiction-extension code path the old
+  `test_bench_write_assert_literal` used to accidentally exercise (see `#### Fixed` above) has a
+  real, measured, unbounded-with-size per-write cost and no benchmark of its own at all now that
+  this fix moved every write off it — filed as **KI-100**.
 
 ### M3 - Extensible (0.3)
 
