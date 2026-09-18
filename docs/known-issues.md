@@ -2103,6 +2103,24 @@ New tests in `tests/unit/test_rest.py::TestWriteAssertionRoute`/`TestCreatePropo
 
 ---
 
+## KI-100 — `_apply_with_conflict_routing`'s open-contradiction extension is O(members) per write, entirely unbenchmarked, and can blow the propose+commit budget — found benchmarking M4's performance budgets
+
+**Severity:** Performance gap — a real, reproducible per-write cost with no budget coverage and no known ceiling
+**Milestone target:** Backlog
+**SPEC reference:** SPEC §9 (performance budgets — `propose` + policy eval + commit, p95 < 50 ms), SPEC §10.3 (contradiction extension)
+
+### Description
+
+`Ontology._apply_with_conflict_routing`'s "extend an already-open contradiction" fast path (the branch taken when a `static` predicate already has an open contradiction) does one `backend.get_assertion(mid)` round-trip per existing member of that contradiction, for every new write that lands in it. Reproduced directly while fixing `tests/benchmarks/test_traversal.py`'s `propose`+commit benchmark (M4, performance budgets workstream): repeatedly asserting differing static values on the same `(subject, predicate)` opens a contradiction on the 2nd write and keeps extending it — measured cost per additional write: ~1.2 ms at 10 existing members, 2.2 ms at 50, 8.7 ms at 100, 14.7 ms at 300, ~33 ms at ~950. Extrapolating, this path crosses SPEC §9's 50 ms `propose`+policy-eval+commit budget at roughly 1,500 members on the machine this was measured on — a number nothing today prevents a single misbehaving or adversarial caller from reaching by repeatedly asserting differing values on one `static` predicate (there is no cap on contradiction size).
+
+This is real production behavior, not a benchmark artifact — the benchmark this KI was found while fixing (see `CHANGELOG.md`'s M4 section) was itself broken *because* it accidentally exercised this exact path across a growing number of rounds; the fix moved every write off this path entirely (a fresh `(subject, predicate)` per round, so nothing ever contradicts), which correctly stabilized the benchmark but also means nothing in the suite exercises this path's cost at all going forward. The SPEC §10.3 pseudocode itself doesn't set a bound on contradiction size, and no code path anywhere rejects or caps one — `flag_contradiction()`/`resolve_contradiction()` both operate on `member_ids` lists of arbitrary length already.
+
+### Fix
+
+Not started. Two independent angles, not mutually exclusive: (a) a dedicated benchmark exercising this specific path at a realistic member count, so a future regression or improvement here is visible in the M4 performance-budgets workstream rather than silently unmeasured (mirrors how a benchmark for `propose()`'s own auto-accept path was missing until M4's benchmark-fixing pass found it missing); (b) investigate whether the per-member `get_assertion` round-trip is avoidable — e.g. batching, or reconsidering whether the extension path needs each member's full row at all versus just its id — and/or whether a size cap or review-routing escalation makes sense once a contradiction crosses some threshold, which would be a genuine SPEC §10.3 semantics question needing its own design decision, not a mechanical fix.
+
+---
+
 ## Format
 
 Each entry follows this structure:

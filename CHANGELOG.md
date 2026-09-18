@@ -28,12 +28,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Added
 - New `test_bench_propose_auto_accept` benchmarks the budget row's own actually-named operation —
-  `propose()` + `ThresholdPolicy.evaluate()` + commit — a materially more expensive path than
+  `propose()` + `ThresholdPolicy.evaluate()` + commit — a materially *different* path than
   `assert_literal`'s direct write (proposal construction/persistence and policy evaluation on top
-  of the same commit), which had no benchmark of its own before this. All five SPEC §9 budget rows
-  now have a valid, stable benchmark; current measured p95 on the 100k-assertion synthetic dataset
-  is comfortably under every budget by 30-1400x (informational only — not yet a CI-blocking gate,
-  per the Implementation Plan's own "informational → blocking by M4" note).
+  of the same commit), which had no benchmark of its own before this; measured cost is comparable
+  to `assert_literal`'s, not dramatically higher — the extra overhead is real but modest. All five
+  SPEC §9 budget rows now have a valid, stable benchmark and pass comfortably on their own dataset
+  (see the Implementation Plan's §9 for the per-row breakdown and a caveat: the hybrid-query row's
+  dataset is two orders of magnitude smaller than the other four's, not the same one throughout) —
+  informational only, not yet a CI-blocking gate (per the Implementation Plan's own "informational →
+  blocking by M4" note). Found while fixing this: the open-contradiction-extension code path this
+  benchmark used to accidentally exercise has a real, measured, unbounded-with-size per-write cost
+  and no benchmark of its own at all now that this fix moved every write off it — filed as
+  **KI-100**.
 
 ### M3 - Extensible (0.3)
 
