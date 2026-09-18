@@ -36,6 +36,7 @@ import pytest
 
 from ontolith import Ontology
 from ontolith.core import Assertion, Entity
+from ontolith.govern import AutoAccept
 from ontolith.identity import Principal
 from ontolith.store.sqlite import SQLiteBackend
 
@@ -264,7 +265,7 @@ def test_bench_propose_auto_accept(benchmark, seeded_kb: Ontology) -> None:
             "Text",
             AUTHOR_ID,
         )
-        assert decision.__class__.__name__ == "AutoAccept"
+        assert isinstance(decision, AutoAccept)
 
     benchmark(propose_one)
 
