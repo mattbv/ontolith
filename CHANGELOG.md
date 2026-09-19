@@ -27,6 +27,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `== 100` regardless of pytest-benchmark's own round count.
 
 #### Added
+- SPEC §18 observability port, tier (a) — structured, correlated logs (ADR-0044) — new
+  `core/observability.py`: `ObservabilitySink` (the ABC — `log`/`record_event`/`record_metric`,
+  exactly the shape ADR-0044 already decided), `StdlibLoggingSink` (the production-safe default,
+  mirrors `Clock`'s `SystemClock` — writes through Python's own `logging` module under an
+  `ontolith.observability` logger, not a no-op, so nothing regresses to silence for a deployment
+  that hasn't wired up a concrete sink, since none exist yet), `NullObservabilitySink` (explicit
+  silence), and `RecordingObservabilitySink` (test double, mirrors `FixedClock`/`FixedIdProvider`).
+  `Ontology` gains an `observability: ObservabilitySink | None = None` parameter (`__init__` and
+  `connect()`), defaulting the same way `clock`/`id_provider` already do. `pyproject.toml`'s
+  import-linter contract gains the `ontolith.observe` entry ADR-0044 named as still-needed —
+  concrete sinks (none shipped yet) will live there as adapters, same status as
+  `store.sqlite`/`store.duckdb`. All five of ADR-0044's named ad hoc `logging.getLogger()` call
+  sites now log through `kb.observability` instead: `interfaces/rest.py`'s
+  `_handle_ontolith_error`, `interfaces/graphql.py`'s `_OntolithSchema.process_errors` (both call
+  sites — its `__init__` now takes the sink at construction, since `process_errors` has no other
+  way to reach `kb`), `interfaces/mcp.py`'s `_error_response` (moved from a module-level function
+  to a closure inside `create_mcp_server`, the only scope with `kb` in it — its own ~30 call sites
+  are textually unchanged), and `plugins/registry.py`'s
+  `_warn_if_unenforced_capabilities_requested`. Tiers (b) (the four named lifecycle events) and (c)
+  (the seven-metric surface, its own follow-up ADR) remain not started — this closes only tier (a),
+  ADR-0044's own stated first M4 priority.
 - New `test_bench_propose_auto_accept` benchmarks the budget row's own actually-named operation —
   `propose()` + `ThresholdPolicy.evaluate()` + commit — a materially *different* path than
   `assert_literal`'s direct write (proposal construction/persistence and policy evaluation on top
