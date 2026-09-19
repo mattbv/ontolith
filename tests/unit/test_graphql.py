@@ -440,12 +440,44 @@ class TestAuth:
         assert "baz" not in str(body)
 
         # SPEC §18/ADR-0044: the real message still reaches kb's
-        # observability sink server-side, via the _OntolithSchema
-        # instance's own sink, not GraphQL's response body.
+        # observability sink server-side, via kb.observability (read live
+        # at emission time, not snapshotted at app construction), not
+        # GraphQL's response body.
         [(level, sink_message, fields)] = sink.logs
         assert level == logging.ERROR
         assert "sqlite3" in sink_message
         assert "baz" in sink_message
+        assert fields["code"] == "STORAGE_ERROR"
+
+    def test_observability_sink_reassigned_after_app_construction_is_still_used(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """kb.observability must be read live at emission time, not
+        snapshotted when create_graphql_app() builds the schema (review
+        finding, round 2) — otherwise reassigning kb.observability after
+        the app is built would silently keep logging through the sink
+        that existed at construction time, unlike REST/MCP/the plugin
+        registry. Build the client first, with the default sink still in
+        place, then reassign and confirm the *new* sink is the one that
+        receives the next error."""
+        kb = _kb(tmp_path)
+        client, _ = _client(kb)
+        token, _ = kb.issue_token(HUMAN, author=ADMIN)
+
+        def _raise_storage_error(*args: object, **kwargs: object) -> None:
+            raise StorageError("sqlite3.OperationalError: reassigned-sink probe")
+
+        monkeypatch.setattr(kb.backend, "get_schema", _raise_storage_error)
+
+        new_sink = RecordingObservabilitySink()
+        kb.observability = new_sink
+
+        body = _gql(client, "{ schema { version } }", headers=_auth(token))
+        assert _error_codes(body) == ["STORAGE_ERROR"]
+
+        [(level, sink_message, fields)] = new_sink.logs
+        assert level == logging.ERROR
+        assert "reassigned-sink probe" in sink_message
         assert fields["code"] == "STORAGE_ERROR"
 
     def test_non_ontolith_exception_is_redacted_like_storage_error(

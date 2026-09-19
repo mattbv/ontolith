@@ -43,7 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   four of ADR-0044's named ad hoc `logging.getLogger()` call sites (five emission sites) now log
   through `kb.observability` instead: `interfaces/rest.py`'s `_handle_ontolith_error`,
   `interfaces/graphql.py`'s `_OntolithSchema.process_errors` (both call sites — its `__init__` now
-  takes the sink at construction, since `process_errors` has no other way to reach `kb`),
+  takes the bound `Ontology` itself, since `process_errors` has no other way to reach it, and reads
+  `kb.observability` live on each call, the same as the other three sites below),
   `interfaces/mcp.py`'s `_error_response` (moved from a module-level function to a closure inside
   `create_mcp_server`, the only scope with `kb` in it — its own 24 call sites are textually
   unchanged), and `plugins/registry.py`'s `_warn_if_unenforced_capabilities_requested`. Tiers (b)
