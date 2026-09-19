@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### M4 - Production (1.0)
+
+#### Fixed
+- `tests/benchmarks/test_traversal.py`'s `propose` + policy eval + commit budget row (SPEC §9,
+  Implementation Plan §9, p95 < 50 ms) had no valid benchmark. `test_bench_write_assert_literal`
+  stood in for it, but repeated `assert_literal` calls on the *same* `(subject, predicate)` with a
+  different value each round — no schema registered, so the predicate defaulted to static/single
+  cardinality — meant the 2nd round already contradicted the 1st, and every round after extended
+  the same growing open contradiction (`_apply_with_conflict_routing`'s "extend an already-open
+  contradiction" fast path scans every existing member). Reproduced directly: the open
+  contradiction's `member_ids` genuinely grew one entry per round, so the benchmark's reported p95
+  was an artifact of however many rounds pytest-benchmark happened to calibrate for a given run
+  (observed swinging from p95=2.9 ms at 84 rounds to a 56 ms *max* at 1061 rounds of the identical
+  code), not a stable per-write cost. Fixed by giving every round its own `(subject, predicate)` —
+  a dedicated `WriteBenchTarget`-concept entity pool the fixture now seeds specifically for write
+  benchmarks, never the `Person` pool other benchmarks in the same module-scoped fixture assert
+  exact counts against, so this fix can't corrupt e.g. `test_bench_assertions_by_subject`'s
+  `== 100` regardless of pytest-benchmark's own round count.
+
+#### Added
+- New `test_bench_propose_auto_accept` benchmarks the budget row's own actually-named operation —
+  `propose()` + `ThresholdPolicy.evaluate()` + commit — a materially *different* path than
+  `assert_literal`'s direct write (proposal construction/persistence and policy evaluation on top
+  of the same commit), which had no benchmark of its own before this; measured cost is comparable
+  to `assert_literal`'s, not dramatically higher — the extra overhead is real but modest. All five
+  SPEC §9 budget rows now have a valid, stable benchmark and pass comfortably on their own dataset
+  (see the Implementation Plan's §9 for the per-row breakdown and a caveat: the hybrid-query row's
+  dataset is two orders of magnitude smaller than the other four's, not the same one throughout) —
+  informational only, not yet a CI-blocking gate (per the Implementation Plan's own "informational →
+  blocking by M4" note). Found while fixing this: the open-contradiction-extension code path the old
+  `test_bench_write_assert_literal` used to accidentally exercise (see `#### Fixed` above) has a
+  real, measured, unbounded-with-size per-write cost and no benchmark of its own at all now that
+  this fix moved every write off it — filed as **KI-100**.
+
 ### M3 - Extensible (0.3)
 
 #### Added
