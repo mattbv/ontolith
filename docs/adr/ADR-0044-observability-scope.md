@@ -182,6 +182,61 @@ that happens by nobody having planned for it.
   thread-local propagation would add a new, harder-to-test mechanism to carry data that's already
   sitting in scope.
 
+## Update (2026-09-19, M4 tier (a) shipped)
+
+`observe/` is still an empty package, but `core/observability.py` now exists: `ObservabilitySink`
+(the ABC this ADR decided the shape of — `log`/`record_event`/`record_metric`, exactly as
+specified), `StdlibLoggingSink` (the production-safe default, wired into `Ontology.observability`
+the same way `clock`/`id_provider` already default to concrete implementations — not the no-op this
+ADR's own wording could be read as implying; see Rationale below for why), `NullObservabilitySink`
+(explicit silence), and `RecordingObservabilitySink` (test double, mirrors `FixedClock`/
+`FixedIdProvider`). `pyproject.toml`'s import-linter contract gained the `ontolith.observe` entry
+this ADR's own Consequences flagged as still missing.
+
+Tier (a) itself — structured, correlated logs replacing the four ad hoc `logging.getLogger()` call
+sites (five emission sites) — is done: `interfaces/rest.py`'s `_handle_ontolith_error`,
+`interfaces/graphql.py`'s `_OntolithSchema.process_errors` (both call sites), `interfaces/mcp.py`'s
+`_error_response` (moved from a module-level function to a closure inside `create_mcp_server`,
+since only that scope has `kb` — its 24 existing call sites are textually unchanged, since they
+still resolve the name from their own enclosing scope either way), and `plugins/registry.py`'s
+`_warn_if_unenforced_capabilities_requested` all now log through `kb.observability`/
+`self._kb.observability` instead of a fixed module logger. Correlation fields threaded through as
+this ADR specified (explicit keyword arguments, no `contextvars`) — though only whatever was
+already in local scope at each of these five specific sites: three pass the error's own `code=`
+(REST, GraphQL's `process_errors` branch for a domain `OntolithError`, MCP), GraphQL's
+unhandled-exception branch (where there is no domain error code to carry) passes `exc_info=`
+instead, and the registry's warning passes `plugin=`/`unenforced=`. None carries a full
+`namespace`/`principal`/`proposal_id` set; those richer call sites belong to tier (b) (SPEC §18's
+four named events), not started.
+
+**Rationale for defaulting to `StdlibLoggingSink`, not `NullObservabilitySink`:** this ADR's own
+"a default no-op implementation ships so instrumentation calls are always safe to make" is true of
+*calling* the port (no `NoneType` crash), but a literal no-op *default* would have been a real
+regression for every one of the five sites above — they all already reach a real logger today, and
+silently losing that until a deployment opts into a concrete sink (none exist yet) would leave
+these errors unlogged anywhere by default. `StdlibLoggingSink` gives the same "just works, no
+configuration needed" guarantee this ADR's own `Clock`/`IdProvider` analogy names, by relying only
+on stdlib `logging` (not a swappable adapter in the dependency rule's sense, the same reasoning that
+already lets `SystemClock` call `datetime.now()` from `core/`) — not a design change from what this
+ADR decided, a clarification of what "always safe to make" has to mean for a port with existing
+call sites to migrate, which `Clock`/`IdProvider` didn't have when they were first introduced.
+
+The same reasoning extends to *placement*, not just default: this ADR's own text (above) says
+concrete sinks "live in `observe/` as adapters", and `StdlibLoggingSink` and
+`RecordingObservabilitySink` are two of the three examples it names there — yet both, along with
+`NullObservabilitySink`, ship in `core/observability.py`. That follows existing precedent rather
+than breaking it: `core/clock.py` already holds `SystemClock` and `FixedClock` alongside the
+`Clock` port, and `core/ids.py` holds `UlidProvider`/`SequentialIdProvider`/`FixedIdProvider`
+alongside `IdProvider` — including `UlidProvider`, which pulls in a real third-party dependency
+(`python-ulid`), so the dividing line `observe/` enforces isn't "no PyPI dependency"; it's whether
+an implementation is a *swappable I/O backend* — something that reaches an external system and a
+deployment might reasonably want to point somewhere else (a network-calling OpenTelemetry exporter,
+say). None of the three sinks shipped here do that: they all stay in-process, so none needs
+`observe/`'s adapter isolation. `observe/` stays reserved for the case that does, which is why the
+import-linter entry above is still forward-looking rather than enforcing anything today.
+
+Tiers (b) (events) and (c) (metrics, its own follow-up ADR for a backend choice) remain not started.
+
 ## References
 
 - SPEC §18: Observability

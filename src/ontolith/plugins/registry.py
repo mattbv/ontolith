@@ -18,8 +18,6 @@ from ontolith.ontology import Ontology
 from ontolith.plugins.manifest import PluginKind, PluginManifest
 from ontolith.plugins.views import ReadOnlyView, WriteView
 
-_logger = logging.getLogger(__name__)
-
 _ENTRY_POINT_GROUP = "ontolith.plugins"
 _PLUGIN_METADATA_MARKER = "ontolith_plugin"
 
@@ -194,14 +192,15 @@ class PluginRegistry:
             if requested
         ]
         if unenforced:
-            _logger.warning(
-                "Plugin %r declares capabilities.%s=True, but %s not enforced — "
-                "the plugin runs in-process with no isolation and can make network "
-                "calls / touch the filesystem regardless of this declaration "
+            verb = "is" if len(unenforced) == 1 else "are"
+            self._kb.observability.log(
+                logging.WARNING,
+                f"Plugin {manifest.name!r} declares capabilities.{'/'.join(unenforced)}=True, "
+                f"but {verb} not enforced — the plugin runs in-process with no isolation and "
+                "can make network calls / touch the filesystem regardless of this declaration "
                 "(ADR-0015, KI-014). Only capabilities.storage is actually enforced.",
-                manifest.name,
-                "/".join(unenforced),
-                "is" if len(unenforced) == 1 else "are",
+                plugin=manifest.name,
+                unenforced=unenforced,
             )
 
     def _effective_capability(self, manifest: PluginManifest, granted: str) -> str:

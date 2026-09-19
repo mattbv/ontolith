@@ -78,6 +78,10 @@ _EXPECTED: dict[str, frozenset[str]] = {
             "Embedder",
             "HashingEmbedder",
             "LookupEmbedder",
+            "ObservabilitySink",
+            "StdlibLoggingSink",
+            "NullObservabilitySink",
+            "RecordingObservabilitySink",
         }
     ),
     "ontolith.identity": frozenset(

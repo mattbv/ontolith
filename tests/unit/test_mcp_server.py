@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,7 @@ from starlette.datastructures import Headers
 
 from ontolith import Ontology
 from ontolith.core import Assertion, FixedClock, FixedIdProvider
+from ontolith.core.observability import RecordingObservabilitySink
 from ontolith.identity.token_auth import TokenAuthProvider
 from ontolith.interfaces.mcp import create_mcp_server
 from ontolith.schema.ir import ConceptDef, PropertyDef, RelationDef, SchemaIR
@@ -2395,10 +2397,12 @@ class TestBlanketErrorHandling:
 
         real = SQLiteBackend(tmp_path / "test.db")
         try:
+            sink = RecordingObservabilitySink()
             kb = Ontology(
                 _FailingSchemaBackend(real),  # type: ignore[arg-type]
                 clock=FixedClock(T0),
                 id_provider=FixedIdProvider([f"id-{i}" for i in range(10)]),
+                observability=sink,
             )
             kb.create_principal(HUMAN, kind="human", default_capability="admin")
             mcp, _ = _server(kb)
@@ -2411,6 +2415,15 @@ class TestBlanketErrorHandling:
             assert result["error"] == "An internal error occurred"
             assert "database is locked" not in result["error"]
             assert result["detail"] == {}
+
+            # SPEC §18/ADR-0044: the real message still reaches kb's
+            # observability sink server-side — _error_response is now a
+            # closure over kb inside create_mcp_server, not a module-level
+            # function logging through a fixed module logger.
+            [(level, message, fields)] = sink.logs
+            assert level == logging.ERROR
+            assert "database is locked" in message
+            assert fields["code"] == "STORAGE_ERROR"
         finally:
             real.close()
 

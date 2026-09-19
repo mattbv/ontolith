@@ -74,7 +74,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Annotated, Literal, get_args
+from typing import TYPE_CHECKING, Annotated, Any, Literal, get_args
 
 import strawberry
 from fastapi import FastAPI, Header
@@ -105,8 +105,6 @@ if TYPE_CHECKING:
     from strawberry.types.execution import ExecutionContext
 
     from ontolith.identity.ports import AuthProvider
-
-_logger = logging.getLogger(__name__)
 
 # Errors whose raw message carries internal exception detail (e.g. sqlite3
 # constraint/transaction-state text) rather than caller-actionable
@@ -1057,7 +1055,20 @@ class Mutation:
 class _OntolithSchema(strawberry.Schema):
     """Centralizes OntolithError -> GraphQL error-extensions mapping, one
     place instead of per-resolver try/except (mirrors REST's single
-    @app.exception_handler(OntolithError), module docstring)."""
+    @app.exception_handler(OntolithError), module docstring).
+
+    Takes the bound `Ontology` itself at construction time, not just its
+    `observability` sink (SPEC §18/ADR-0044) — `process_errors` has no other
+    way to reach it, since strawberry constructs/calls this class outside
+    any per-request closure over `kb`. Reading `kb.observability` live on
+    each call, the same as REST/MCP/the plugin registry do, rather than
+    snapshotting the sink at construction time, means reassigning
+    `kb.observability` after the app is built still takes effect here too.
+    """
+
+    def __init__(self, *args: Any, kb: Ontology, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._kb = kb
 
     def process_errors(
         self,
@@ -1077,12 +1088,14 @@ class _OntolithSchema(strawberry.Schema):
             original = error.original_error
             if isinstance(original, OntolithError):
                 if isinstance(original, _REDACT_MESSAGE_FOR):
-                    _logger.error("%s: %s", original.code, original.message)
+                    self._kb.observability.log(logging.ERROR, original.message, code=original.code)
                     error.message = _GENERIC_SERVER_ERROR_MESSAGE
                 error.extensions = {"code": original.code, "detail": original.detail}
             elif original is not None:
-                _logger.error(
-                    "Unhandled exception in GraphQL resolver: %s", original, exc_info=original
+                self._kb.observability.log(
+                    logging.ERROR,
+                    "Unhandled exception in GraphQL resolver",
+                    exc_info=original,
                 )
                 error.message = _GENERIC_SERVER_ERROR_MESSAGE
                 error.extensions = {"code": _INTERNAL_ERROR_CODE, "detail": {}}
@@ -1156,7 +1169,7 @@ def create_graphql_app(
     ]
     if not introspection:
         extensions.append(DisableIntrospection)
-    schema = _OntolithSchema(query=Query, mutation=Mutation, extensions=extensions)
+    schema = _OntolithSchema(query=Query, mutation=Mutation, extensions=extensions, kb=kb)
 
     async def _get_context(
         authorization: Annotated[str | None, Header()] = None,

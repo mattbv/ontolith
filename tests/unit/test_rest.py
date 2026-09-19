@@ -7,6 +7,7 @@ token resolved via AuthProvider (never a caller-asserted principal ID).
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from fastapi.testclient import TestClient
 from ontolith import Ontology
 from ontolith.core import Assertion, FixedClock, FixedIdProvider
 from ontolith.core.errors import StorageError
+from ontolith.core.observability import RecordingObservabilitySink
 from ontolith.identity.token_auth import TokenAuthProvider
 from ontolith.interfaces.rest import create_rest_app
 from ontolith.schema.ir import ConceptDef, PropertyDef, RelationDef, SchemaIR
@@ -1115,6 +1117,8 @@ class TestErrorMapping:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         kb = _kb(tmp_path)
+        sink = RecordingObservabilitySink()
+        kb.observability = sink
         client, _ = _client(kb)
         token, _ = kb.issue_token(HUMAN, author=ADMIN)
 
@@ -1131,6 +1135,15 @@ class TestErrorMapping:
         assert body["message"] == "An internal error occurred"
         assert "sqlite3" not in body["message"]
         assert "baz" not in str(body)
+
+        # SPEC §18/ADR-0044: the real (unredacted) message still reaches
+        # kb's observability sink server-side, same as it always reached
+        # this module's own logger before M4's observability rewiring.
+        [(level, message, fields)] = sink.logs
+        assert level == logging.ERROR
+        assert "sqlite3" in message
+        assert "baz" in message
+        assert fields["code"] == "STORAGE_ERROR"
 
 
 # ---------------------------------------------------------------------------

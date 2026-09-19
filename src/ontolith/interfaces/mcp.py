@@ -88,8 +88,6 @@ if TYPE_CHECKING:
     from ontolith.identity.ports import AuthProvider
     from ontolith.ontology import Ontology
 
-_logger = logging.getLogger(__name__)
-
 # Derived from ContradictionState's own named Literal alias
 # (govern/contradiction.py), not hand-duplicated, so this can't silently
 # drift if that type ever gains/loses a state (KI-077 review — this tuple
@@ -116,27 +114,6 @@ _CONTRADICTION_STATES: tuple[str, ...] = get_args(ContradictionState)
 # closed for exactly the case this isinstance check fails open on.
 _REDACT_MESSAGE_FOR: tuple[type[OntolithError], ...] = (StorageError, PluginError)
 _GENERIC_SERVER_ERROR_MESSAGE = "An internal error occurred"
-
-
-def _error_response(exc: OntolithError) -> dict[str, Any]:
-    """Map any OntolithError to this module's ``{"error", "code", "detail"}``
-    shape (SPEC §16, KI-074) — the single place every tool's error dict is
-    built, closing both the "5 of 10 taxonomy codes unreachable from MCP"
-    gap and the "detail dropped entirely" shape divergence REST/GraphQL
-    don't have. Every tool wraps its whole body (after token resolution,
-    which isn't itself an ``OntolithError`` — see ``_bearer_token``) in one
-    ``except OntolithError as exc: return _error_response(exc)``, the MCP
-    equivalent of REST's single ``@app.exception_handler(OntolithError)``
-    and GraphQL's single ``process_errors`` override — not a per-call-site
-    try/except per exception type, which is what let KI-059's drift and
-    this gap both happen unnoticed for as long as they did.
-    """
-    if isinstance(exc, _REDACT_MESSAGE_FOR):
-        _logger.error("%s: %s", exc.code, exc.message)
-        message = _GENERIC_SERVER_ERROR_MESSAGE
-    else:
-        message = exc.message
-    return {"error": message, "code": exc.code, "detail": exc.detail}
 
 
 def create_mcp_server(
@@ -169,6 +146,35 @@ def create_mcp_server(
         Configured FastMCP server with all ADR-0008 tools registered
     """
     mcp: FastMCP = FastMCP(name)
+
+    def _error_response(exc: OntolithError) -> dict[str, Any]:
+        """Map any OntolithError to this module's ``{"error", "code",
+        "detail"}`` shape (SPEC §16, KI-074) — the single place every
+        tool's error dict is built, closing both the "5 of 10 taxonomy
+        codes unreachable from MCP" gap and the "detail dropped entirely"
+        shape divergence REST/GraphQL don't have. Every tool wraps its
+        whole body (after token resolution, which isn't itself an
+        ``OntolithError`` — see ``_bearer_token``) in one
+        ``except OntolithError as exc: return _error_response(exc)``, the
+        MCP equivalent of REST's single
+        ``@app.exception_handler(OntolithError)`` and GraphQL's single
+        ``process_errors`` override — not a per-call-site try/except per
+        exception type, which is what let KI-059's drift and this gap both
+        happen unnoticed for as long as they did.
+
+        A closure over ``kb``, not a module-level function (SPEC §18/
+        ADR-0044) — this is the one call site here that logs, and reaching
+        ``kb.observability`` is the only reason it moved inside this
+        factory; every one of its 24 call sites elsewhere in this
+        function is unchanged, since ``_error_response`` still resolves
+        the same way from their own enclosing scope.
+        """
+        if isinstance(exc, _REDACT_MESSAGE_FOR):
+            kb.observability.log(logging.ERROR, exc.message, code=exc.code)
+            message = _GENERIC_SERVER_ERROR_MESSAGE
+        else:
+            message = exc.message
+        return {"error": message, "code": exc.code, "detail": exc.detail}
 
     def _bearer_token(token: str | None) -> tuple[str | None, str | None]:
         """Resolve the caller's bearer token for the current tool call,
