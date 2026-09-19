@@ -142,7 +142,12 @@ class StdlibLoggingSink(ObservabilitySink):
         as a plain field here too, not a malformed `exc_info`).
         """
         exc_info_field = fields.pop("exc_info", None)
-        exc_info = exc_info_field if isinstance(exc_info_field, BaseException) else None
+        if isinstance(exc_info_field, BaseException):
+            exc_info: BaseException | None = exc_info_field
+        else:
+            exc_info = None
+            if exc_info_field is not None:
+                fields["exc_info"] = exc_info_field
         if fields:
             self._logger.log(level, "%s %s", message, fields, exc_info=exc_info)
         else:

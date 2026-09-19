@@ -106,19 +106,23 @@ class TestStdlibLoggingSink:
         assert record.exc_info[1] is not None
         assert "boom" in str(record.exc_info[1])
 
-    def test_log_ignores_a_non_exception_exc_info_field(
+    def test_log_reports_a_non_exception_exc_info_as_a_plain_field(
         self, caplog: pytest.LogCaptureFixture
     ) -> None:
         """A caller could in principle pass exc_info=<anything> as a plain
         field by mistake — mypy --strict wouldn't catch a str, since
         **fields is typed object. Confirms the sink degrades gracefully
         (no crash, no fabricated traceback) rather than trusting the
-        field's type."""
+        field's type, and — per the docstring's own promise — reports the
+        value back as an ordinary field instead of silently discarding
+        it."""
         sink = StdlibLoggingSink()
         with caplog.at_level(logging.ERROR, logger="ontolith.observability"):
             sink.log(logging.ERROR, "not really an exception", exc_info="oops")
         [record] = caplog.records
         assert record.exc_info is None
+        assert "exc_info" in record.message
+        assert "oops" in record.message
 
     def test_record_event_logs_a_structured_line(self, caplog: pytest.LogCaptureFixture) -> None:
         sink = StdlibLoggingSink()
