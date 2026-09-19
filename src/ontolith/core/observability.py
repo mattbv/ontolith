@@ -138,8 +138,11 @@ class StdlibLoggingSink(ObservabilitySink):
         would — pulled out of `**fields` rather than a dedicated parameter
         so every other sink's `log()` signature stays exactly SPEC §18's
         three-argument shape; a sink that can't act on it just reports it
-        as a plain field instead (a non-`BaseException` value is treated
-        as a plain field here too, not a malformed `exc_info`).
+        as a plain field instead (a non-`None`, non-`BaseException` value
+        is treated as a plain field here too, not a malformed `exc_info`;
+        `exc_info=None` — the same as not passing it at all — is dropped
+        silently, matching `logging.Logger`'s own convention that `None`
+        means "no exception").
         """
         exc_info_field = fields.pop("exc_info", None)
         if isinstance(exc_info_field, BaseException):

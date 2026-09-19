@@ -96,7 +96,6 @@ from ontolith.core.errors import (
     StorageError,
     ValidationError,
 )
-from ontolith.core.observability import ObservabilitySink
 from ontolith.govern.contradiction import Contradiction, ContradictionState, safe_rationale_history
 from ontolith.govern.proposal import Proposal, ProposalState
 from ontolith.identity import Principal
@@ -1058,15 +1057,18 @@ class _OntolithSchema(strawberry.Schema):
     place instead of per-resolver try/except (mirrors REST's single
     @app.exception_handler(OntolithError), module docstring).
 
-    Takes the bound `Ontology`'s `observability` sink at construction time
-    (SPEC §18/ADR-0044) — `process_errors` has no other way to reach it,
-    since strawberry constructs/calls this class outside any per-request
-    closure over `kb`.
+    Takes the bound `Ontology` itself at construction time, not just its
+    `observability` sink (SPEC §18/ADR-0044) — `process_errors` has no other
+    way to reach it, since strawberry constructs/calls this class outside
+    any per-request closure over `kb`. Reading `kb.observability` live on
+    each call, the same as REST/MCP/the plugin registry do, rather than
+    snapshotting the sink at construction time, means reassigning
+    `kb.observability` after the app is built still takes effect here too.
     """
 
-    def __init__(self, *args: Any, sink: ObservabilitySink, **kwargs: Any) -> None:
+    def __init__(self, *args: Any, kb: Ontology, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self._sink = sink
+        self._kb = kb
 
     def process_errors(
         self,
@@ -1086,11 +1088,11 @@ class _OntolithSchema(strawberry.Schema):
             original = error.original_error
             if isinstance(original, OntolithError):
                 if isinstance(original, _REDACT_MESSAGE_FOR):
-                    self._sink.log(logging.ERROR, original.message, code=original.code)
+                    self._kb.observability.log(logging.ERROR, original.message, code=original.code)
                     error.message = _GENERIC_SERVER_ERROR_MESSAGE
                 error.extensions = {"code": original.code, "detail": original.detail}
             elif original is not None:
-                self._sink.log(
+                self._kb.observability.log(
                     logging.ERROR,
                     "Unhandled exception in GraphQL resolver",
                     exc_info=original,
@@ -1167,9 +1169,7 @@ def create_graphql_app(
     ]
     if not introspection:
         extensions.append(DisableIntrospection)
-    schema = _OntolithSchema(
-        query=Query, mutation=Mutation, extensions=extensions, sink=kb.observability
-    )
+    schema = _OntolithSchema(query=Query, mutation=Mutation, extensions=extensions, kb=kb)
 
     async def _get_context(
         authorization: Annotated[str | None, Header()] = None,
