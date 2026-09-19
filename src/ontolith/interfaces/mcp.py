@@ -165,7 +165,7 @@ def create_mcp_server(
         A closure over ``kb``, not a module-level function (SPEC §18/
         ADR-0044) — this is the one call site here that logs, and reaching
         ``kb.observability`` is the only reason it moved inside this
-        factory; every one of its ~30 call sites elsewhere in this
+        factory; every one of its 24 call sites elsewhere in this
         function is unchanged, since ``_error_response`` still resolves
         the same way from their own enclosing scope.
         """

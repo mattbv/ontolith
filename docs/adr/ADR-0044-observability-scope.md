@@ -197,15 +197,17 @@ Tier (a) itself — structured, correlated logs replacing the four ad hoc `loggi
 sites (five emission sites) — is done: `interfaces/rest.py`'s `_handle_ontolith_error`,
 `interfaces/graphql.py`'s `_OntolithSchema.process_errors` (both call sites), `interfaces/mcp.py`'s
 `_error_response` (moved from a module-level function to a closure inside `create_mcp_server`,
-since only that scope has `kb` — its ~30 unrelated call sites are unchanged, since they still
-resolve the name from their own enclosing scope either way), and `plugins/registry.py`'s
+since only that scope has `kb` — its 24 existing call sites are textually unchanged, since they
+still resolve the name from their own enclosing scope either way), and `plugins/registry.py`'s
 `_warn_if_unenforced_capabilities_requested` all now log through `kb.observability`/
 `self._kb.observability` instead of a fixed module logger. Correlation fields threaded through as
 this ADR specified (explicit keyword arguments, no `contextvars`) — though only whatever was
-already in local scope at each of these five specific sites, which for four of them (all
-error-handling paths) is just the error's own `code`/`message`, not a full `namespace`/`principal`/
-`proposal_id` set; those richer call sites belong to tier (b) (SPEC §18's four named events),
-not started.
+already in local scope at each of these five specific sites: three pass the error's own `code=`
+(REST, GraphQL's `process_errors` branch for a domain `OntolithError`, MCP), GraphQL's
+unhandled-exception branch (where there is no domain error code to carry) passes `exc_info=`
+instead, and the registry's warning passes `plugin=`/`unenforced=`. None carries a full
+`namespace`/`principal`/`proposal_id` set; those richer call sites belong to tier (b) (SPEC §18's
+four named events), not started.
 
 **Rationale for defaulting to `StdlibLoggingSink`, not `NullObservabilitySink`:** this ADR's own
 "a default no-op implementation ships so instrumentation calls are always safe to make" is true of
@@ -218,6 +220,18 @@ on stdlib `logging` (not a swappable adapter in the dependency rule's sense, the
 already lets `SystemClock` call `datetime.now()` from `core/`) — not a design change from what this
 ADR decided, a clarification of what "always safe to make" has to mean for a port with existing
 call sites to migrate, which `Clock`/`IdProvider` didn't have when they were first introduced.
+
+The same reasoning extends to *placement*, not just default: this ADR's own text (above) says
+concrete sinks "live in `observe/` as adapters", and `StdlibLoggingSink` and
+`RecordingObservabilitySink` are two of the three examples it names there — yet both, along with
+`NullObservabilitySink`, ship in `core/observability.py`. That follows existing precedent rather
+than breaking it: `core/clock.py` already holds `SystemClock` and `FixedClock` alongside the
+`Clock` port, and `core/ids.py` holds `UlidProvider`/`SequentialIdProvider`/`FixedIdProvider`
+alongside `IdProvider` — a stdlib-only default and a dependency-free test double sit with their
+port; only an implementation with a real external dependency (a network-calling OpenTelemetry
+exporter, say) would need `observe/`'s adapter isolation. `observe/` stays reserved for exactly
+that case, which is why the import-linter entry above is still forward-looking rather than
+enforcing anything today.
 
 Tiers (b) (events) and (c) (metrics, its own follow-up ADR for a backend choice) remain not started.
 
