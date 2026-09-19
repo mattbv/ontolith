@@ -255,7 +255,16 @@ source_modules = [
 	"ontolith.query",
 	"ontolith.identity",
 ]
-forbidden_modules = ["ontolith.store.sqlite", "ontolith.store.duckdb", "ontolith.interfaces"]
+forbidden_modules = [
+	"ontolith.store.sqlite",
+	"ontolith.store.duckdb",
+	"ontolith.interfaces",
+	# ADR-0044 (SPEC §18 observability, M4): concrete ObservabilitySink
+	# adapters (OpenTelemetry-backed, etc.) live here as swappable
+	# adapters, same status as store.sqlite/store.duckdb — domain code
+	# depends only on the abstract port in core.observability.
+	"ontolith.observe",
+]
 
 # NOTE: The "layers" contract is disabled because store.base (the StorageBackend
 # protocol) needs to import Entity/Assertion from core to type its methods.

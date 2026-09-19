@@ -7,6 +7,7 @@ status codes.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from fastapi.testclient import TestClient
 from ontolith import Ontology
 from ontolith.core import Assertion, FixedClock, FixedIdProvider
 from ontolith.core.errors import StorageError
+from ontolith.core.observability import RecordingObservabilitySink
 from ontolith.identity.token_auth import TokenAuthProvider
 from ontolith.interfaces.graphql import create_graphql_app
 from ontolith.schema.ir import ConceptDef, PropertyDef, RelationDef, SchemaIR
@@ -420,6 +422,8 @@ class TestAuth:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         kb = _kb(tmp_path)
+        sink = RecordingObservabilitySink()
+        kb.observability = sink
         client, _ = _client(kb)
         token, _ = kb.issue_token(HUMAN, author=ADMIN)
 
@@ -435,6 +439,15 @@ class TestAuth:
         assert "sqlite3" not in message
         assert "baz" not in str(body)
 
+        # SPEC §18/ADR-0044: the real message still reaches kb's
+        # observability sink server-side, via the _OntolithSchema
+        # instance's own sink, not GraphQL's response body.
+        [(level, sink_message, fields)] = sink.logs
+        assert level == logging.ERROR
+        assert "sqlite3" in sink_message
+        assert "baz" in sink_message
+        assert fields["code"] == "STORAGE_ERROR"
+
     def test_non_ontolith_exception_is_redacted_like_storage_error(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -444,6 +457,8 @@ class TestAuth:
         a generic message and a distinct INTERNAL_ERROR code (review
         finding - the raw message previously leaked, unlike REST)."""
         kb = _kb(tmp_path)
+        sink = RecordingObservabilitySink()
+        kb.observability = sink
         client, _ = _client(kb)
         token, _ = kb.issue_token(HUMAN, author=ADMIN)
 
@@ -458,6 +473,14 @@ class TestAuth:
         assert message == "An internal error occurred"
         assert "boom" not in message
         assert "secret_path" not in str(body)
+
+        # SPEC §18/ADR-0044: the sink still gets the real exception, with
+        # exc_info for a traceback (a genuine bug, not a taxonomy member).
+        [(level, sink_message, fields)] = sink.logs
+        assert level == logging.ERROR
+        assert "Unhandled exception" in sink_message
+        assert isinstance(fields["exc_info"], RuntimeError)
+        assert "boom" in str(fields["exc_info"])
 
     def test_plugin_error_redacts_internal_detail(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

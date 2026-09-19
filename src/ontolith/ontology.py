@@ -20,6 +20,8 @@ from ontolith.core import (
     HashingEmbedder,
     IdProvider,
     Namespace,
+    ObservabilitySink,
+    StdlibLoggingSink,
     SystemClock,
     UlidProvider,
 )
@@ -179,6 +181,7 @@ class Ontology:
         embedder: Embedder | None = None,
         validators: Sequence["Validator"] | None = None,
         completeness_validators: Sequence["Validator"] | None = None,
+        observability: ObservabilitySink | None = None,
     ) -> None:
         """Initialize Ontology with a storage backend.
 
@@ -191,6 +194,13 @@ class Ontology:
                 as an open-core extension point for proprietary strategies.
             embedder: Embedder for .semantic() queries and reindex() (defaults
                 to HashingEmbedder — ADR-0020).
+            observability: Sink for structured logs/events/metrics (SPEC §18,
+                ADR-0044; defaults to `StdlibLoggingSink`, itself a
+                production-safe default the same way `clock`/`id_provider`
+                default to concrete, always-safe implementations — pass
+                `NullObservabilitySink()` for explicit silence, or a
+                `RecordingObservabilitySink()` in tests that assert on what
+                was emitted).
             validators: Per-assertion Validators (SPEC §13.2, KI-042,
                 ADR-0029), run synchronously and blocking at every point an
                 assertion actually commits — assert_literal, assert_ref,
@@ -218,6 +228,7 @@ class Ontology:
         self.id_provider = id_provider or UlidProvider()
         self.policy = policy or ThresholdPolicy()
         self.embedder = embedder or HashingEmbedder()
+        self.observability = observability or StdlibLoggingSink()
         self.namespace = DEFAULT_NAMESPACE  # For M1, single namespace
         self.validators: Sequence[Validator] = list(validators) if validators else []
         self.completeness_validators: Sequence[Validator] = (
@@ -235,6 +246,7 @@ class Ontology:
         embedder: Embedder | None = None,
         validators: Sequence["Validator"] | None = None,
         completeness_validators: Sequence["Validator"] | None = None,
+        observability: ObservabilitySink | None = None,
     ) -> "Ontology":
         """Connect to a knowledge base.
 
@@ -249,6 +261,8 @@ class Ontology:
                 ADR-0029)
             completeness_validators: Whole-entity-completeness Validators —
                 see `__init__` (KI-041, ADR-0029)
+            observability: Optional ObservabilitySink — see `__init__`
+                (SPEC §18, ADR-0044)
 
         Returns:
             Ontology instance connected to the database
@@ -265,6 +279,7 @@ class Ontology:
             embedder=embedder,
             validators=validators,
             completeness_validators=completeness_validators,
+            observability=observability,
         )
 
     def create_principal(

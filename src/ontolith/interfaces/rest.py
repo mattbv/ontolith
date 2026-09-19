@@ -64,8 +64,6 @@ if TYPE_CHECKING:
     from ontolith.identity.ports import AuthProvider
     from ontolith.ontology import Ontology
 
-_logger = logging.getLogger(__name__)
-
 # Derived from ProposalState's/ContradictionState's own named Literal alias
 # (govern/proposal.py, govern/contradiction.py), not hand-duplicated, so
 # neither can silently drift if either type ever gains/loses a state
@@ -550,7 +548,9 @@ def create_rest_app(
         """
         status = _STATUS_BY_ERROR_TYPE.get(type(exc), 500)
         if status >= 500:
-            _logger.error("%s: %s", exc.code, exc.message)
+            # SPEC §18/ADR-0044: structured, correlated log via kb's sink —
+            # replaces the ad hoc module logger this call site used to use.
+            kb.observability.log(logging.ERROR, exc.message, code=exc.code)
             message = _GENERIC_SERVER_ERROR_MESSAGE
         else:
             message = exc.message

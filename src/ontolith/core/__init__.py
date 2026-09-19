@@ -3,6 +3,7 @@
 This module contains the fundamental building blocks:
 - Clock and IdProvider ports for deterministic behavior
 - Embedder port for hybrid retrieval (SPEC §11.3)
+- ObservabilitySink port for metrics/events/structured logs (SPEC §18, ADR-0044)
 - Error taxonomy for stable error handling
 - Entity and Assertion value objects
 - Future: meta-model, IR, validation
@@ -31,6 +32,12 @@ from ontolith.core.ids import (
     UlidProvider,
 )
 from ontolith.core.namespace import Namespace
+from ontolith.core.observability import (
+    NullObservabilitySink,
+    ObservabilitySink,
+    RecordingObservabilitySink,
+    StdlibLoggingSink,
+)
 
 __all__ = [
     # Clock
@@ -46,6 +53,11 @@ __all__ = [
     "Embedder",
     "HashingEmbedder",
     "LookupEmbedder",
+    # Observability
+    "ObservabilitySink",
+    "StdlibLoggingSink",
+    "NullObservabilitySink",
+    "RecordingObservabilitySink",
     # Domain models
     "Entity",
     "Assertion",
