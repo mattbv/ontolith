@@ -227,11 +227,13 @@ concrete sinks "live in `observe/` as adapters", and `StdlibLoggingSink` and
 `NullObservabilitySink`, ship in `core/observability.py`. That follows existing precedent rather
 than breaking it: `core/clock.py` already holds `SystemClock` and `FixedClock` alongside the
 `Clock` port, and `core/ids.py` holds `UlidProvider`/`SequentialIdProvider`/`FixedIdProvider`
-alongside `IdProvider` — a stdlib-only default and a dependency-free test double sit with their
-port; only an implementation with a real external dependency (a network-calling OpenTelemetry
-exporter, say) would need `observe/`'s adapter isolation. `observe/` stays reserved for exactly
-that case, which is why the import-linter entry above is still forward-looking rather than
-enforcing anything today.
+alongside `IdProvider` — including `UlidProvider`, which pulls in a real third-party dependency
+(`python-ulid`), so the dividing line `observe/` enforces isn't "no PyPI dependency"; it's whether
+an implementation is a *swappable I/O backend* — something that reaches an external system and a
+deployment might reasonably want to point somewhere else (a network-calling OpenTelemetry exporter,
+say). None of the three sinks shipped here do that: they all stay in-process, so none needs
+`observe/`'s adapter isolation. `observe/` stays reserved for the case that does, which is why the
+import-linter entry above is still forward-looking rather than enforcing anything today.
 
 Tiers (b) (events) and (c) (metrics, its own follow-up ADR for a backend choice) remain not started.
 
