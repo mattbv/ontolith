@@ -72,12 +72,17 @@ enforcement, honestly documented as such.**
   possible (covers the paths/strings/dicts/lists every reference plugin actually passes); if pickling
   fails **and** the value exposes a callable `.write` attribute, it is wrapped in a remote-writable
   proxy instead (covers `JsonExporter`/`RdfExporter`'s documented `io.StringIO`-as-`target` support);
-  otherwise `register()`'s caller gets a clear `PluginError` before a child process is even spawned,
-  naming the argument type that can't cross the boundary.
+  otherwise the caller gets a clear `UnwirableArgumentError` (a `TypeError` subclass) at call time,
+  before a child process is even spawned, naming the argument type that can't cross the boundary.
 - **`RemoteReadOnlyView`/`RemoteWriteView`** (`sandbox/remote_view.py`) mirror `ReadOnlyView`/
-  `WriteView`'s exact public method set and subclass relationship (so `isinstance(kb, WriteView)`
-  checks inside a plugin's own code still hold), but every method body sends one request over the
-  pipe and blocks for the reply instead of calling `Ontology` directly — nothing else. `.query()`/
+  `WriteView`'s public method set (including `principal_id`, a plain string carried on the wire
+  marker so no round trip is needed for it) and the *relationship between the two proxy classes*
+  (`RemoteWriteView` subclasses `RemoteReadOnlyView`, mirroring `WriteView`/`ReadOnlyView`'s own
+  shape) — they do **not** subclass the real `ReadOnlyView`/`WriteView` themselves, so
+  `isinstance(kb, WriteView)` against the real class is `False` inside a sandboxed call, even for a
+  writable registration (`isinstance(kb, RemoteWriteView)` is the isolated-call equivalent). Every
+  method body sends one request over the pipe and blocks for the reply instead of calling `Ontology`
+  directly — nothing else. `.query()`/
   `.as_of()` are **not supported in an isolated call** in this pass: both return fluent builder
   objects (`QueryBuilder`/`AsOfView`) that hold a live backend reference and support chained calls,
   which would need their own remote-proxy protocol; no shipped reference plugin calls either method,
@@ -268,6 +273,115 @@ a genuine process/VM boundary actually closes that.
 follow-ups here) — this ADR's isolation model is orthogonal to whether a plugin's source is verified
 before it's ever loaded; signing addresses a different threat (a tampered or spoofed plugin
 distribution), not what a legitimately-installed plugin's own code can do once it runs.
+
+## Update (2026-09-20): review found two CRITICAL bypasses of the process boundary itself — fixed
+
+Two independent review rounds (architecture + a dedicated security review) both found, independently,
+that the first version of this ADR's own IPC design gave a malicious plugin a **better** path to the
+parent than the in-process design it replaced — directly contradicting the "no object graph left to
+reach past" claim this ADR originally made. Both are fixed; the claim is accurate now, verified by
+direct reproduction of both attacks against the fixed code (not merely re-reading the fix).
+
+**CRITICAL-1 — the dispatch loop unpickled attacker-controlled bytes, which is arbitrary code
+execution.** `multiprocessing.Connection.recv()` is `pickle.loads()`; the child process is untrusted
+by this ADR's own threat model; therefore a plugin's own `DONE`/`FAILED`/`CALL` message — including
+its own return value, its own raised exception, or any argument it passes through a proxied view
+call — could carry an object whose `__reduce__` calls an arbitrary importable callable (e.g.
+`os.system`) the instant `.loads()` runs, before any of this project's own code executes. Reproduced:
+a plugin returning an object with a hostile `__reduce__` ran a shell command in the **parent**
+process. Fixed two ways, together: (1) `sandbox/wire.py`'s `RestrictedUnpickler`/`restricted_loads`
+— the parent now reads every message from the child via `recv_bytes()` and a custom `Unpickler`
+whose `find_class` refuses to construct any class instance not on an explicit allowlist (every
+`OntolithError` subclass plus a short list of ordinary builtin exceptions); every other value must
+arrive as one of `None`/`bool`/`int`/`float`/`str`/`bytes`/`list`/`dict`/`tuple`, which pickle's own
+opcodes handle without ever calling `find_class` at all. (2) `wire.to_wire_result` — a plugin's own
+return value is reduced to that same JSON-safe shape before it's ever sent (a `@dataclass` becomes a
+plain `dict` via `dataclasses.asdict()`), so the common case (a reference plugin's `ImportReport`-
+shaped return value) never needs the restricted unpickler to reconstruct an arbitrary class at all.
+**This means a plugin's dataclass-shaped return value now crosses an isolated call as a `dict`, not
+its original type — `isolate=False` still returns the real object unchanged.**
+
+**CRITICAL-2 — the dispatch loop invoked any method name the child asked for, on the real,
+unproxied view object.** `getattr(real_view, call_method_name)(*call_args, **call_kwargs)` had no
+allow-list; `call_method_name` came directly from the child's own `CALL` message. Reproduced: a
+plugin registered with `ReadOnlyView`-only, `write`-incapable access called
+`kb._call("__setattr__", "_principal_id", "admin@example.com")` on its own proxy, which forwarded
+verbatim to `__setattr__` on the parent's real, live view object — successfully forging the acting
+principal on every subsequent write through that view (the view object is long-lived on
+`LoadedPlugin.view`, so the poisoning outlives the one call). No pickle trickery needed — plain
+strings. Fixed: `runner.py`'s `_allowed_methods_for` is now an explicit, closed allow-list
+(`get_entity`/`schema`/`assertions`/`create_entity`/`propose`/`propose_ref`/`retract`/`write` —
+never a dunder, never `query()`/`as_of()`, which would hand back a live `QueryBuilder`/`AsOfView`
+holding a backend reference), consulted before `getattr` ever runs. `RestrictedUnpickler` alone does
+**not** close this: `__setattr__` and its arguments are all safe, ordinary strings.
+
+**Other fixes from the same two review rounds, smaller but real:**
+- **Call-time enforcement failures were silently discarded.** The registration-time warning
+  (`registry.py`) predicts whether Linux+seccomp *should* work; it can't guarantee the per-call
+  attempt actually succeeds (a container's own outer seccomp profile, say). The child now reports
+  its `EnforcementResult` to the parent unconditionally (a new `ENFORCEMENT` protocol message,
+  before the plugin's own method runs), and the parent logs a `WARNING` through `kb.observability`
+  whenever it didn't apply — `IsolatedPluginProxy`/`run_isolated` now take an `observability`
+  parameter for this.
+- **The registration-time warning logic was checking the wrong condition.** It only fired when a
+  capability was declared `True` (an *allow*, never restricted by seccomp on any platform — the
+  original, correct ADR-0015 concern) — but suppressed itself whenever Linux enforcement was
+  predicted available, which has no bearing on the `True` case at all. Worse, it never warned about
+  a capability declared `False` (the default) when *that* declaration wouldn't actually be enforced
+  either (macOS/Windows, or `isolate=False`) — exactly the silent-false-sense-of-enforcement case
+  this warning exists to prevent. `registry.py`'s `_warn_if_unenforced_capabilities_requested` now
+  checks both conditions independently and can log up to two distinct warnings per registration.
+- **`_child_main`'s independent entry-point resolution had drifted from `PluginRegistry`'s.** It
+  silently picked the first match on an ambiguous entry-point name instead of refusing, unlike
+  `register()`'s own check. Now mirrors `_load_entry_point`'s error handling exactly.
+- **`RemoteReadOnlyView`/`RemoteWriteView` were missing `principal_id`** (a real `ReadOnlyView`
+  public property) and did not actually subclass the real `ReadOnlyView`/`WriteView` despite this
+  ADR's original text claiming `isinstance(kb, WriteView)` "still holds" inside a sandboxed call —
+  it doesn't; only `isinstance(kb, RemoteWriteView)` does. `principal_id` now crosses via the wire
+  marker (a plain string, no round trip needed); the `isinstance` claim above is corrected.
+- **The seccomp syscall deny-lists had real gaps**, per the security review: `io_uring_setup`/
+  `_enter`/`_register` (the standard bypass — submits socket/openat/send/recv-shaped operations via
+  kernel worker threads, never issuing the syscalls seccomp filters individually), `ptrace`/
+  `process_vm_readv`/`process_vm_writev` (a direct route into the parent's memory on a host that
+  hasn't hardened `ptrace_scope`, unrelated to network/filesystem but squarely inside "reach past the
+  process boundary"), several filesystem syscalls (`fchmod`/`fchown`/`lchown`/`mknod`/`mknodat`/
+  `fallocate`/`utimensat`/the `*xattr` family/`open_by_handle_at`/the newer mount API), and
+  non-native-architecture syscalls (a 32-bit compat or x32 syscall on x86_64 matches no rule under a
+  filter that only registered the native architecture, falling through to `ALLOW`). All added;
+  `ptrace`/`process_vm_*` are denied unconditionally whenever any restriction is installed, not
+  gated on which capability was declared `False`.
+- **`pyseccomp`'s version range was loosely pinned** (`>=0.1,<1.0`) for a thin, infrequently-updated
+  dependency that is the entire security boundary for network/filesystem denial — exact-pinned now
+  (`==0.1.2`), matching `sqlite-vec`'s own precedent and stated reasoning in `pyproject.toml`.
+- **A validator loaded via `Ontology`'s own `validators`/`completeness_validators` constructor
+  parameters cannot be an `IsolatedPluginProxy`** — that path passes the trusted `Ontology` itself as
+  `kb` (per ADR-0029, always unsandboxed, unrelated to `PluginRegistry`), which isn't a
+  `ReadOnlyView` and isn't picklable, so it can't cross the sandbox boundary at all. This was never a
+  supported combination and remains none — `plugins/ports.py`'s `ValidatorKbView` docstring now says
+  so explicitly. Calling a `PluginRegistry`-loaded validator the same way every other plugin kind is
+  called (`loaded.instance.validate(assertion, loaded.view)`) works correctly and is covered by a
+  test — verified directly, not assumed.
+- `UnwirableArgumentError` (a `TypeError` subclass) is what a caller actually gets for an argument
+  that can't cross the boundary, raised at call time — this ADR's Decision section previously named
+  a different exception type at a different time, both wrong; corrected.
+
+**Deliberately not fixed in this pass, tracked as known limitations rather than silently left
+inaccurate:**
+- **No timeout anywhere on an isolated call.** A plugin that hangs blocks the calling host thread
+  indefinitely (`parent_conn.recv()`/`process.join()` have no deadline). Pre-existing risk in a
+  different shape (in-process execution also had no timeout), but the blocking-`recv()` shape is new.
+- **A `RemoteWritable.write()` call is one full IPC round trip per call**, not batched — a plugin
+  that writes in small increments (e.g. `json.dump`'s per-token writes) pays a real, measured
+  latency cost proportional to call count, not just to spawn overhead. `isolate=False` is the
+  immediate workaround for a write-heavy plugin; buffering `RemoteWritable`'s writes and flushing on
+  a size threshold or at the end of the call would remove most of this without changing the
+  boundary's safety properties, left as a future optimization.
+- **The `filesystem=False` seccomp deny-list has no dedicated test confirming a full `run_isolated()`
+  round trip still works under a live filter on Linux** — only the `network=False`/`network=True`
+  cases are covered by `TestRealSeccompEnforcementOnLinux` (`tests/unit/test_plugin_sandbox.py`,
+  Linux-only, skipped elsewhere). Since `filesystem=False` is the manifest default, this is the more
+  consequential of the two untested directions; adding it is a natural next increment, not deferred
+  for a design reason.
 
 ## Follow-ups filed
 

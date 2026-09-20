@@ -284,6 +284,23 @@ Separately, and unrelated to the warning above: `QueryBuilder`'s reachable-backe
 
 **Update (2026-09-19, M4 workstream 3, ADR-0051): process isolation shipped — both named gaps closed structurally, network/filesystem closed for real on Linux.** `PluginRegistry.register()` now defaults to `isolate=True`: a plugin's protocol entrypoint (`import_`/`export`/`derive`/`validate`/`sync`) runs in a freshly spawned child process (`plugins/sandbox/`), with its `kb` view and any other live argument proxied back over one IPC pipe. This closes the "Python has no true encapsulation" gap named in the 2026-08-30 update *structurally, on every platform*: `view.query(...)._backend.put_assertion(...)` no longer reaches anything — there is no `_backend` attribute to reach past, since only picklable messages cross the process boundary at all, not a live object graph. On Linux, with a working `pyseccomp`/libseccomp install, `capabilities.network`/`.filesystem` are now genuinely enforced at the OS syscall level (seccomp, `ERRNO(EPERM)`), closing SPEC §17's "MUST deny undeclared access" for that platform. **Still open:** macOS and Windows get no OS-level enforcement — `sandbox-exec`/job objects are real but different mechanisms this pass doesn't build (unverifiable in this project's own development environment; see ADR-0051's Rationale for why only the Linux mechanism shipped) — a plugin's declared `network=False`/`filesystem=False` on those platforms, or with `isolate=False` anywhere, remains advisory only, same as before this update, now qualified to "on this platform/registration" rather than "at all." `QueryBuilder`'s reachable-backend gap from the 2026-08-30 update is moot for an isolated plugin (`.query()`/`.as_of()` raise a clear `PluginError` inside a sandboxed call rather than being reachable at all — filed as its own follow-up, **KI-101**, since no shipped reference plugin needs them yet) and unchanged for `isolate=False`. This KI stays "partially resolved," not fully resolved — the remaining gap is now precisely "non-Linux OS-level enforcement," not "any process isolation at all."
 
+**Update (2026-09-20): the "no live object graph reaches the plugin" claim above was false when
+written — two review rounds found the process boundary itself was bypassable, both fixed and
+verified by direct reproduction before this note was written, see ADR-0051's own Update section for
+the full record.** The dispatch loop unpickled bytes the child process sent with plain
+`pickle.loads()` (a plugin's own return value, raised exception, or any proxied-call argument could
+carry a hostile `__reduce__` — reproduced running arbitrary code in the parent) and invoked any
+method name the child asked for on the real, unproxied view object with no allow-list (reproduced:
+`__setattr__("_principal_id", "admin@example.com")` forged the acting principal on every subsequent
+write through that view, from a read-only registration, using plain strings — no pickle trickery
+needed). Both are closed now (a restricted unpickler with an explicit exception-class allowlist, and
+an explicit method-name allow-list before any dispatch), and independently re-verified by direct
+reproduction of both attacks against the fixed code. The syscall deny-lists also gained several
+entries a security review found missing (`io_uring_*`, `ptrace`/`process_vm_*`, several filesystem
+syscalls, non-native-architecture registration) — see ADR-0051 for the full list. This KI's status
+is unchanged by this update (still "partially resolved" for the same non-Linux reason stated above)
+— the update is about the *fix's own correctness*, not a new scope change.
+
 ---
 
 ## KI-015 — `propose()`/`propose_ref()`/`retract()` capability floor — RESOLVED (design clarification, no code change)

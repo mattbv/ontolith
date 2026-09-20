@@ -33,16 +33,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`plugins/sandbox/`), with its `kb` view and any other live argument (e.g. an `io.StringIO`
   export target) proxied back to the parent over one IPC pipe — `LoadedPlugin.instance` is an
   `IsolatedPluginProxy`, not the real plugin object, so `isinstance(instance, SomePluginClass)` no
-  longer holds (`instance.plugin_class` is the replacement check); `isolate=False` restores exactly
-  the pre-ADR-0051 behavior. Closes ADR-0015's "Python has no true encapsulation" gap structurally,
-  on every platform — a plugin's own code can no longer reach `view._kb` or any other live object
-  graph, since only picklable messages cross the boundary at all. On Linux, with a working
-  `pyseccomp`/libseccomp install (new Linux-only dependency, `sys_platform` marker), a plugin's
-  declared `capabilities.network=False`/`.filesystem=False` are now genuinely enforced at the OS
-  syscall level (seccomp, `ERRNO(EPERM)` — a denied syscall surfaces as an ordinary caught
-  exception, not a killed process); macOS/Windows get no OS-level enforcement in this pass, honestly
-  documented rather than approximated. `.query()`/`.as_of()` raise a clear `PluginError` from inside
-  an isolated call — no shipped reference plugin needs either; filed as **KI-101**.
+  longer holds (`instance.plugin_class` is the replacement check), and a `@dataclass`-shaped return
+  value (e.g. a reference plugin's `ImportReport`) crosses as a plain `dict`, not its original type;
+  `isolate=False` restores exactly the pre-ADR-0051 behavior for both. Closes ADR-0015's "Python has
+  no true encapsulation" gap structurally, on every platform — a plugin's own code can no longer
+  reach `view._kb` or any other live object graph, since only picklable messages cross the boundary
+  at all, decoded by a restricted unpickler that only ever reconstructs this project's own exception
+  hierarchy as a class instance (everything else must arrive as `None`/`bool`/`int`/`float`/`str`/
+  `bytes`/`list`/`dict`/`tuple`), and every proxied method call is checked against an explicit
+  allow-list before dispatch. Two review rounds found the first version of this design didn't
+  actually have those two properties — a plugin's own message to the parent was unpickled with plain
+  `pickle.loads()` (reproduced: arbitrary code execution in the parent via a hostile `__reduce__`)
+  and the dispatch loop invoked any method name the child asked for on the real, unproxied view with
+  no allow-list (reproduced: `__setattr__("_principal_id", ...)` forged the acting principal on
+  every later write through that view, from a read-only registration, no pickle trickery needed) —
+  both fixed and independently re-verified by reproducing both attacks against the fixed code before
+  merge; see ADR-0051's own Update section for the full record. On Linux, with a working
+  `pyseccomp`/libseccomp install (new Linux-only dependency, `sys_platform` marker, exact-pinned
+  like `sqlite-vec`), a plugin's declared `capabilities.network=False`/`.filesystem=False` are now
+  genuinely enforced at the OS syscall level (seccomp, `ERRNO(EPERM)` — a denied syscall surfaces as
+  an ordinary caught exception, not a killed process; the deny-lists cover `io_uring`/`ptrace`/
+  `process_vm_*` and non-native-architecture syscalls too, per the same review); macOS/Windows get no
+  OS-level enforcement in this pass, honestly documented rather than approximated, and the
+  registration-time warning now covers that case too (previously it only warned when a capability
+  was declared `True`). `.query()`/`.as_of()` raise a clear `PluginError` from inside an isolated
+  call — no shipped reference plugin needs either; filed as **KI-101**.
 - SPEC §18 observability port, tier (a) — structured, correlated logs (ADR-0044) — new
   `core/observability.py`: `ObservabilitySink` (the ABC — `log`/`record_event`/`record_metric`,
   exactly the shape ADR-0044 already decided), `StdlibLoggingSink` (the production-safe default,
