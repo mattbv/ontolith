@@ -208,10 +208,14 @@ class PluginRegistry:
            this project never gates it with a ceiling the way
            `granted_capability` gates storage — there is no "grant" step
            for network/filesystem to withhold. `apply_capability_enforcement`
-           (`sandbox/enforcement.py`) only ever *denies* syscalls for a
-           capability declared `False`; a `True` declaration is never
-           restricted, on any platform, with or without `isolate`. Always
-           warn.
+           (`sandbox/enforcement.py`) never restricts *this specific*
+           declared-`True` capability, on any platform, with or without
+           `isolate` — network syscalls stay allowed if `network=True`,
+           filesystem syscalls stay allowed if `filesystem=True` (a
+           `ptrace`/`process_vm_*` denial is installed unconditionally
+           regardless of either declaration, but that's an unrelated,
+           always-on floor, not a consequence of what's declared here —
+           see `enforcement.py`'s own comment). Always warn.
         2. **Declared `False` (the default — requesting denial)** *and* this
            registration won't actually get it: `isolate=False` was passed,
            or no OS-level enforcement is available on this host/platform

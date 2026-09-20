@@ -252,13 +252,17 @@ def run_isolated(
 def _terminate_and_join(process: Any, timeout: float = 5) -> None:
     """Actively reap `process` — never a bare, unbounded `process.join()`.
 
-    Used on every exceptional path in `_dispatch_loop`: the child is
-    already known to be misbehaving (a malformed message, a decode
-    failure, an EOF that might not mean the process actually exited — see
-    the EOF handler's own comment) by the time this is called, so waiting
-    indefinitely for it to exit on its own is never the right posture
-    there, unlike `run_isolated`'s own "happy path" cleanup (a bounded
-    `join` first, `terminate` only if that times out).
+    Used on every exceptional path in `_dispatch_loop` where the child is
+    already known to be misbehaving or unreachable (a malformed message, a
+    decode failure, a broken pipe on the reply, an EOF that might not mean
+    the process actually exited — see the EOF handler's own comment) by
+    the time this is called, so waiting indefinitely for it to exit on its
+    own is never the right posture there. The one deliberate exception is
+    a FAILED message (`_Failed`, raised outside this helper's callers
+    entirely): the plugin completed and reported its own exception
+    normally, so there is nothing to actively terminate — `run_isolated`'s
+    own "happy path" cleanup (a bounded `join` first, `terminate` only if
+    that times out) reaps it instead.
     """
     process.terminate()
     process.join(timeout=timeout)
@@ -331,28 +335,39 @@ def _dispatch_loop(
             outcome = _handle_one_message(
                 message, parent_conn, real_objects, method_name, observability, enforcement_reported
             )
-        except (ValueError, TypeError, IndexError, KeyError) as exc:
-            # A malformed message shape (wrong arity, an unhashable tag/
-            # method name, etc.) - round-2 review finding: this previously
-            # escaped as a raw ValueError/TypeError/IndexError, violating
-            # this function's own documented PluginError contract for "a
-            # malformed or disallowed message." restricted_loads already
-            # keeps the *content* of every value safe; this closes the
-            # same hole for the message's own *shape*.
+        except (ValueError, TypeError, IndexError, KeyError, OSError, PluginError) as exc:
+            # Two distinct failure classes land here, both meaning "the
+            # exchange with this child is no longer trustworthy or even
+            # possible, and it is not the plugin's own documented
+            # behavior":
+            #
+            # 1. A malformed message shape (wrong arity, an unhashable
+            #    tag/method name, etc., or the "unknown protocol kind"
+            #    PluginError _handle_one_message raises directly - round-2
+            #    /round-4 review findings). restricted_loads already keeps
+            #    the *content* of every value safe; this closes the same
+            #    hole for the message's own *shape*.
+            # 2. A reply to the child (send_result/send_error) itself
+            #    fails - typically BrokenPipeError/ConnectionResetError, a
+            #    subclass of OSError, when the child has already crashed
+            #    or exited before reading the reply (round-4 review
+            #    finding: this was the one direction of the pipe rounds
+            #    2-3's hardening hadn't covered - every *receive* path was
+            #    guarded, not the *send* side).
             #
             # This is why _handle_one_message never itself raises the
             # plugin's own FAILED-message exception (see _Failed below,
             # round-3 review finding): a plugin's own ValueError/TypeError/
             # KeyError/IndexError (all on RestrictedUnpickler's allowlist,
             # so they cross the boundary as themselves) would otherwise be
-            # caught right here and mislabelled as a protocol violation
-            # instead of propagating as the real, documented exception a
-            # caller's own except ValueError/except TypeError already
-            # expects.
+            # caught right here and mislabelled as a protocol/communication
+            # failure instead of propagating as the real, documented
+            # exception a caller's own except ValueError/except TypeError
+            # already expects.
             _terminate_and_join(process)
             raise PluginError(
-                f"Plugin process sent a malformed message while completing {method_name!r} "
-                f"— terminated. ({type(exc).__name__}: {exc})"
+                f"Communication with the plugin process failed while completing "
+                f"{method_name!r} — terminated. ({type(exc).__name__}: {exc})"
             ) from exc
         if isinstance(outcome, _Failed):
             raise outcome.exc  # outside the try/except above - see its comment

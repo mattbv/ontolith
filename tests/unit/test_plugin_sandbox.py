@@ -551,6 +551,31 @@ def _child_sends_corrupt_pickle_bytes(child_conn: object) -> None:
     child_conn.send_bytes(b"\x80\x63.")  # type: ignore[attr-defined]  # bogus protocol byte
 
 
+def _child_calls_then_closes_its_pipe(child_conn: object) -> None:
+    """Round-4 review finding: a fully non-adversarial scenario - the
+    plugin makes an ordinary view call, then its process ends (crash,
+    OOM-kill, os._exit) before it ever reads the reply. Closing our own
+    end explicitly (not just exiting) forces the parent's reply send to
+    fail with a genuine BrokenPipeError, not an EOFError race on a
+    subsequent recv."""
+    import pickle
+    import time
+
+    child_conn.send_bytes(  # type: ignore[attr-defined]
+        pickle.dumps((protocol.CALL, "kb", "get_entity", ("x",), {}))
+    )
+    child_conn.close()  # type: ignore[attr-defined]
+    time.sleep(5)  # stay alive so this isn't an EOF-on-exit race either
+
+
+def _child_sends_unknown_protocol_kind(child_conn: object) -> None:
+    import pickle
+    import time
+
+    child_conn.send_bytes(pickle.dumps(("bogus-kind", 1)))  # type: ignore[attr-defined]
+    time.sleep(30)
+
+
 class TestDispatchLoopSecurityBoundary:
     """Direct reproduction of both CRITICAL findings against the real
     _dispatch_loop, using a real multiprocessing.Pipe and a real spawned
@@ -786,3 +811,48 @@ class TestToWireResultDictKeys:
 
         with pytest.raises(UnwirableArgumentError):
             to_wire_result({_Hashable(): "v"})
+
+
+class TestRoundFourDispatchLoopSendSideHardening:
+    """Round-4 review finding: rounds 2-3 hardened every path where the
+    parent *reads* from the child; the *send* side (a reply to a CALL)
+    was never wrapped, so a child that crashed or closed its pipe before
+    reading a reply surfaced as a raw BrokenPipeError, not PluginError,
+    and was never actively reaped by _terminate_and_join."""
+
+    def test_child_crashing_before_reading_a_reply_surfaces_as_plugin_error(
+        self, kb: Ontology
+    ) -> None:
+        view = ReadOnlyView(kb, ADMIN)
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
+        process = ctx.Process(target=_child_calls_then_closes_its_pipe, args=(child_conn,))
+        process.start()
+        child_conn.close()
+        time.sleep(0.3)  # let the child send + close before dispatching
+        try:
+            with pytest.raises(PluginError, match="Communication with the plugin process failed"):
+                runner._dispatch_loop(
+                    parent_conn, process, {"kb": view}, "import_", NullObservabilitySink()
+                )
+        finally:
+            parent_conn.close()
+            process.join(timeout=5)
+        assert not process.is_alive()
+
+    def test_unknown_protocol_kind_is_reaped_not_just_raised(self, kb: Ontology) -> None:
+        """The "unknown protocol kind" branch raises PluginError directly
+        from inside _handle_one_message - round 4 found this skipped
+        _terminate_and_join entirely, leaving the child alive."""
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
+        process = ctx.Process(target=_child_sends_unknown_protocol_kind, args=(child_conn,))
+        process.start()
+        child_conn.close()
+        try:
+            with pytest.raises(PluginError, match="Communication with the plugin process failed"):
+                runner._dispatch_loop(parent_conn, process, {}, "import_", NullObservabilitySink())
+        finally:
+            parent_conn.close()
+            process.join(timeout=5)
+        assert not process.is_alive()
