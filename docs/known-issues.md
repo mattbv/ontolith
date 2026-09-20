@@ -259,7 +259,7 @@ Both call sites now use `assertions(status=None)` to search across all statuses.
 ## KI-014 — No plugin capability isolation (deny-by-default network/fs/write, manifest enforcement) — PARTIALLY RESOLVED (M3)
 
 **Severity:** Architecture gap — security-relevant; originally filed as "not yet exploitable since no plugin loading mechanism exists to secure," which is now stale (a working registry and four reference plugins ship today — see the 2026-09-07 update below)
-**Milestone target:** M3 — storage-capability isolation resolved via ADR-0015; network/filesystem enforcement remains open, tracked alongside KI-010's closure
+**Milestone target:** M3 — storage-capability isolation resolved via ADR-0015; M4 — process isolation resolved via ADR-0051 (network/filesystem enforcement now real on Linux; still open on macOS/Windows and with `isolate=False`, see the 2026-09-19 update below)
 **SPEC reference:** SPEC §13 (plugin protocols and discovery), §17 (security model, plugin sandboxing); Implementation Plan `plugins/` module (registry, protocols, lifecycle, sandbox)
 
 ### Description
@@ -281,6 +281,8 @@ Surfaced during the 2026-07-08 post-remediation security re-audit: a hypothetica
 Separately, and unrelated to the warning above: `QueryBuilder`'s reachable-backend gap (previous paragraph) was also re-examined and left unchanged. "Materializing" `query()`'s results eagerly to stop it carrying a backend reference was considered and rejected: it would break the fluent builder API (`.where(...).limit(n).all()`) that's the entire point of `QueryBuilder`, for a property Python's object model can't provide regardless. See ADR-0015's 2026-08-30 update for the full record.
 
 **Update (2026-09-07, pre-M4 deep + security audit):** independently re-confirmed, no drift — network/filesystem enforcement is still unenforced (manifest declares intent, registration only warns via `_warn_if_unenforced_capabilities_requested`). The severity line above is updated to reflect that four reference plugins (`plugins/reference/`: csv_importer, json_exporter, rdf_exporter, required_fields_validator) now ship against this contract, which the original filing's "not yet exploitable" framing didn't anticipate. Flagging explicitly for M4 planning: this should be scoped as real M4 work (process/wasm isolation) rather than carried forward again as backlog, since "production" milestone exit criteria and "plugin sandbox is advisory only" are in direct tension.
+
+**Update (2026-09-19, M4 workstream 3, ADR-0051): process isolation shipped — both named gaps closed structurally, network/filesystem closed for real on Linux.** `PluginRegistry.register()` now defaults to `isolate=True`: a plugin's protocol entrypoint (`import_`/`export`/`derive`/`validate`/`sync`) runs in a freshly spawned child process (`plugins/sandbox/`), with its `kb` view and any other live argument proxied back over one IPC pipe. This closes the "Python has no true encapsulation" gap named in the 2026-08-30 update *structurally, on every platform*: `view.query(...)._backend.put_assertion(...)` no longer reaches anything — there is no `_backend` attribute to reach past, since only picklable messages cross the process boundary at all, not a live object graph. On Linux, with a working `pyseccomp`/libseccomp install, `capabilities.network`/`.filesystem` are now genuinely enforced at the OS syscall level (seccomp, `ERRNO(EPERM)`), closing SPEC §17's "MUST deny undeclared access" for that platform. **Still open:** macOS and Windows get no OS-level enforcement — `sandbox-exec`/job objects are real but different mechanisms this pass doesn't build (unverifiable in this project's own development environment; see ADR-0051's Rationale for why only the Linux mechanism shipped) — a plugin's declared `network=False`/`filesystem=False` on those platforms, or with `isolate=False` anywhere, remains advisory only, same as before this update, now qualified to "on this platform/registration" rather than "at all." `QueryBuilder`'s reachable-backend gap from the 2026-08-30 update is moot for an isolated plugin (`.query()`/`.as_of()` raise a clear `PluginError` inside a sandboxed call rather than being reachable at all — filed as its own follow-up, **KI-101**, since no shipped reference plugin needs them yet) and unchanged for `isolate=False`. This KI stays "partially resolved," not fully resolved — the remaining gap is now precisely "non-Linux OS-level enforcement," not "any process isolation at all."
 
 ---
 
@@ -2118,6 +2120,24 @@ This is real production behavior, not a benchmark artifact — the benchmark thi
 ### Fix
 
 Not started. Two independent angles, not mutually exclusive: (a) a dedicated benchmark exercising this specific path at a realistic member count, so a future regression or improvement here is visible in the M4 performance-budgets workstream rather than silently unmeasured (mirrors how a benchmark for `propose()`'s own auto-accept path was missing until M4's benchmark-fixing pass found it missing); (b) investigate whether **both** per-member round-trips are avoidable, not just the read — the `set_assertion_status(mid, "flagged")` write is the larger of the two costs and is provably a no-op whenever the member is already flagged (the code already computes `already_flagged` to skip the event write; the status write itself isn't gated the same way), so it's the more promising target, not the `get_assertion` read a narrower reading of this KI might reach for first — and/or whether a size cap or review-routing escalation makes sense once a contradiction crosses some threshold, which would be a genuine SPEC §10.3 semantics question needing its own design decision, not a mechanical fix.
+
+---
+
+## KI-101 — No remote `QueryBuilder`/`AsOfView` proxy for an isolated plugin call
+
+**Severity:** Architecture gap — a real, if currently unused, capability restriction
+**Milestone target:** Backlog — filed while building M4's plugin process isolation (ADR-0051)
+**SPEC reference:** SPEC §13.2 (plugin protocols); ADR-0051 (plugin process isolation)
+
+### Description
+
+`ReadOnlyView.query(concept)`/`.as_of(t)` both return a fluent builder object (`QueryBuilder`/`AsOfView`) holding a live `StorageBackend` reference, not a plain, picklable value — crossing ADR-0051's process boundary would need its own remote-proxy protocol (accumulate the fluent chain on the child side, replay it against the real object in the parent only on a terminal call like `.all()`/`.first()`/`.count()`), which this pass didn't build. `plugins/sandbox/remote_view.py`'s `RemoteReadOnlyView.query()`/`.as_of()` instead raise a clear `PluginError` naming this limitation.
+
+No shipped reference plugin calls either method today — `CsvImporter`/`JsonExporter`/`RdfExporter`/`RequiredFieldsValidator` all use `assertions()`/`get_entity()`/`schema()`, which are already proxied — so this is not a regression against any real, exercised code path. A future `Reasoner`/`Connector` plugin wanting anything beyond `assertions()`'s flat filter (e.g. a `.where(...).limit(n)`-shaped query) would hit it, with `isolate=False` as the immediate workaround (opts out of sandboxing entirely, not just this one limitation).
+
+### Fix
+
+Not started. Build a remote fluent-builder proxy mirroring `RemoteWriteView`'s pattern: the child-side proxy object accumulates each chained call (`.where(...)`, `.limit(...)`, etc.) locally instead of sending it immediately, and only sends one IPC message describing the full accumulated chain when a terminal method (`.all()`/`.first()`/`.count()` for `QueryBuilder`; the equivalent for `AsOfView`) is actually called — matching how `QueryBuilder` is already lazy in-process. No design decision needed beyond this shape; deferred because nothing exercises it yet, not because the approach is unclear.
 
 ---
 

@@ -27,6 +27,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `== 100` regardless of pytest-benchmark's own round count.
 
 #### Added
+- Plugin process isolation (ADR-0051, closes KI-014's still-open half on Linux; **Breaking**) —
+  `PluginRegistry.register()` gains `isolate: bool = True`: a plugin's one protocol entrypoint
+  (`import_`/`export`/`derive`/`validate`/`sync`) now runs in a freshly spawned child process
+  (`plugins/sandbox/`), with its `kb` view and any other live argument (e.g. an `io.StringIO`
+  export target) proxied back to the parent over one IPC pipe — `LoadedPlugin.instance` is an
+  `IsolatedPluginProxy`, not the real plugin object, so `isinstance(instance, SomePluginClass)` no
+  longer holds (`instance.plugin_class` is the replacement check); `isolate=False` restores exactly
+  the pre-ADR-0051 behavior. Closes ADR-0015's "Python has no true encapsulation" gap structurally,
+  on every platform — a plugin's own code can no longer reach `view._kb` or any other live object
+  graph, since only picklable messages cross the boundary at all. On Linux, with a working
+  `pyseccomp`/libseccomp install (new Linux-only dependency, `sys_platform` marker), a plugin's
+  declared `capabilities.network=False`/`.filesystem=False` are now genuinely enforced at the OS
+  syscall level (seccomp, `ERRNO(EPERM)` — a denied syscall surfaces as an ordinary caught
+  exception, not a killed process); macOS/Windows get no OS-level enforcement in this pass, honestly
+  documented rather than approximated. `.query()`/`.as_of()` raise a clear `PluginError` from inside
+  an isolated call — no shipped reference plugin needs either; filed as **KI-101**.
 - SPEC §18 observability port, tier (a) — structured, correlated logs (ADR-0044) — new
   `core/observability.py`: `ObservabilitySink` (the ABC — `log`/`record_event`/`record_metric`,
   exactly the shape ADR-0044 already decided), `StdlibLoggingSink` (the production-safe default,
