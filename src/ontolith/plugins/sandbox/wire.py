@@ -195,6 +195,36 @@ def wire_value(value: object, tag: str) -> object:
     )
 
 
+def _reduce_dict_key(key: object) -> object:
+    """Reduce a dict key to a JSON-safe, still-hashable shape.
+
+    Deliberately not `to_wire_result` itself: that function's list/tuple
+    branch always returns a `list` (JSON has no tuple type), which is
+    unhashable — reusing it here would make every tuple-keyed dict crash
+    instead of reducing safely, even though a tuple of scalars is exactly
+    as safe as a list of them for `restricted_loads`'s purposes (neither
+    needs `find_class`). Keys are narrower on purpose: only a scalar or a
+    tuple of (recursively) the same is permitted, since nothing else can
+    be a dict key at all.
+
+    Raises:
+        UnwirableArgumentError: `key` is not a scalar or scalar-tuple —
+            most such values are unhashable already (a `list`/`dict` key
+            is impossible in a real Python dict to begin with), but this
+            still names the failure clearly rather than surfacing pickle's
+            own generic unhashable-type error.
+    """
+    if isinstance(key, _JSON_SAFE_SCALARS):
+        return key
+    if isinstance(key, tuple):
+        return tuple(_reduce_dict_key(item) for item in key)
+    raise UnwirableArgumentError(
+        f"A dict key of type {type(key).__name__!r} cannot cross the plugin sandbox "
+        "boundary: only None/bool/int/float/str/bytes, or a tuple of the same, are "
+        "permitted as a key."
+    )
+
+
 def to_wire_result(value: object) -> object:
     """Reduce a plugin's own return value (child -> parent) to a JSON-safe
     shape: `None`/`bool`/`int`/`float`/`str`/`bytes` pass through; `list`/
@@ -228,8 +258,13 @@ def to_wire_result(value: object) -> object:
         # still refused a hostile key on the parent side, since nothing
         # here bypasses that, but the guarantee this function documents
         # is "JSON-safe," and an unreduced key breaks that promise even
-        # when nothing exploitable results).
-        return {to_wire_result(key): to_wire_result(item) for key, item in value.items()}
+        # when nothing exploitable results). Keys go through
+        # _reduce_dict_key, not this function itself - round-3 review
+        # finding: to_wire_result's own list/tuple branch always returns a
+        # list, which made a perfectly safe, hashable tuple key (e.g.
+        # {(1, 2): "v"}) crash with an unhandled "unhashable type: 'list'"
+        # the moment it was "reduced" the same way a value would be.
+        return {_reduce_dict_key(key): to_wire_result(item) for key, item in value.items()}
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {
             field.name: to_wire_result(getattr(value, field.name))

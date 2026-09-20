@@ -35,6 +35,7 @@ import logging
 import multiprocessing
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -511,6 +512,45 @@ def _child_calls_write_capable_method_on_a_readonly_tag(child_conn: object) -> N
 _MARKER_PATH = "/tmp/ontolith_test_plugin_sandbox_pwned_marker"  # nosec B108 - test-only
 
 
+def _child_forges_enforcement_true_then_genuine_false(child_conn: object) -> None:
+    """A malicious child sends applied=True first (to try to consume the
+    "already reported" slot), then the genuine applied=False - the real
+    report must still reach the sink."""
+    import pickle
+
+    child_conn.send_bytes(pickle.dumps((protocol.ENFORCEMENT, True, None)))  # type: ignore[attr-defined]
+    child_conn.send_bytes(  # type: ignore[attr-defined]
+        pickle.dumps((protocol.ENFORCEMENT, False, "genuine failure"))
+    )
+    child_conn.send_bytes(pickle.dumps((protocol.DONE, "ok")))  # type: ignore[attr-defined]
+
+
+def _child_floods_genuine_enforcement_false(child_conn: object) -> None:
+    import pickle
+
+    for _ in range(50):
+        child_conn.send_bytes(pickle.dumps((protocol.ENFORCEMENT, False, "flood")))  # type: ignore[attr-defined]
+    child_conn.send_bytes(pickle.dumps((protocol.DONE, "ok")))  # type: ignore[attr-defined]
+
+
+def _child_sends_empty_message_then_sleeps(child_conn: object) -> None:
+    """restricted_loads(b"") raises EOFError - indistinguishable from a
+    closed pipe at that layer - but a child that sends empty bytes and
+    then keeps running is still alive. The old EOF handler did a bare,
+    unbounded process.join(), which would hang here forever."""
+    import time
+
+    child_conn.send_bytes(b"")  # type: ignore[attr-defined]
+    time.sleep(30)  # still alive, never sends anything else
+
+
+def _child_sends_corrupt_pickle_bytes(child_conn: object) -> None:
+    """Not pickle.UnpicklingError specifically - a corrupt protocol byte
+    raises a plain ValueError from inside pickle's own decoder, uncaught
+    by a narrower except clause."""
+    child_conn.send_bytes(b"\x80\x63.")  # type: ignore[attr-defined]  # bogus protocol byte
+
+
 class TestDispatchLoopSecurityBoundary:
     """Direct reproduction of both CRITICAL findings against the real
     _dispatch_loop, using a real multiprocessing.Pipe and a real spawned
@@ -613,3 +653,136 @@ class TestEnforcementWarningReachesObservability:
             level, message, fields = enforcement_logs[0]
             assert level == logging.WARNING
             assert fields["method"] == "export"
+
+
+class TestPluginsOwnExceptionsPropagateCorrectly:
+    """Round-3 review finding: round-2's own fix for malformed-message
+    handling wrapped _handle_one_message in a broad except clause that
+    also caught the FAILED branch's raise unwire_exception(...) - since a
+    plugin's own ValueError/TypeError/KeyError/IndexError all cross the
+    boundary as themselves (they're on RestrictedUnpickler's allowlist),
+    they were mislabelled as "malformed message... terminated" instead of
+    propagating as the real, documented exception a caller's own
+    except ValueError/except TypeError already expects."""
+
+    def test_rdf_exporter_value_error_propagates_as_itself(self, kb: Ontology) -> None:
+        loaded = PluginRegistry(kb).register("rdf-owl-exporter", author=ADMIN)
+        with pytest.raises(ValueError, match="no schema registered") as exc_info:
+            loaded.instance.export(loaded.view, io.StringIO())
+        assert not isinstance(exc_info.value, PluginError)
+
+    def test_json_exporter_type_error_propagates_as_itself(self, kb: Ontology) -> None:
+        loaded = PluginRegistry(kb).register("json-exporter", author=ADMIN)
+        with pytest.raises(TypeError, match="Unsupported JSON export target type"):
+            loaded.instance.export(loaded.view, 12345)
+
+
+class TestRoundThreeDispatchLoopHardening:
+    """Direct reproduction of the round-3-found regressions in round-2's
+    own fixes, and the two new issues round 3 found - all against the
+    real _dispatch_loop, a real spawned child, and a real pipe."""
+
+    def test_forged_enforcement_true_does_not_suppress_a_later_genuine_false(
+        self, kb: Ontology
+    ) -> None:
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
+        process = ctx.Process(
+            target=_child_forges_enforcement_true_then_genuine_false, args=(child_conn,)
+        )
+        process.start()
+        child_conn.close()
+        sink = RecordingObservabilitySink()
+        try:
+            result = runner._dispatch_loop(parent_conn, process, {}, "import_", sink)
+            assert result == "ok"
+        finally:
+            parent_conn.close()
+            process.join(timeout=5)
+
+        assert len(sink.logs) == 1
+        _, message, _ = sink.logs[0]
+        assert "genuine failure" in message
+
+    def test_a_flood_of_genuine_false_still_warns_only_once(self, kb: Ontology) -> None:
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
+        process = ctx.Process(target=_child_floods_genuine_enforcement_false, args=(child_conn,))
+        process.start()
+        child_conn.close()
+        sink = RecordingObservabilitySink()
+        try:
+            runner._dispatch_loop(parent_conn, process, {}, "import_", sink)
+        finally:
+            parent_conn.close()
+            process.join(timeout=5)
+
+        assert len(sink.logs) == 1
+
+    def test_empty_message_does_not_hang_the_parent(self, kb: Ontology) -> None:
+        """restricted_loads(b"") raises EOFError - indistinguishable from
+        a closed pipe at that layer - but a child that sends empty bytes
+        and then keeps running is still alive. The old EOF handler did a
+        bare, unbounded process.join(), which would hang here forever."""
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
+        process = ctx.Process(target=_child_sends_empty_message_then_sleeps, args=(child_conn,))
+        process.start()
+        child_conn.close()
+        start = time.monotonic()
+        try:
+            with pytest.raises(PluginError, match="ended unexpectedly"):
+                runner._dispatch_loop(parent_conn, process, {}, "import_", NullObservabilitySink())
+        finally:
+            parent_conn.close()
+            process.join(timeout=5)
+        elapsed = time.monotonic() - start
+
+        assert elapsed < 10, f"parent blocked for {elapsed:.1f}s - should be reaped promptly"
+        assert not process.is_alive()
+
+    def test_corrupt_pickle_bytes_is_rejected_and_child_reaped(self, kb: Ontology) -> None:
+        """Not pickle.UnpicklingError specifically - a corrupt protocol
+        byte raises a plain ValueError from inside pickle's own decoder,
+        uncaught by a narrower except clause."""
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
+        process = ctx.Process(target=_child_sends_corrupt_pickle_bytes, args=(child_conn,))
+        process.start()
+        child_conn.close()
+        try:
+            with pytest.raises(PluginError, match="malformed or disallowed"):
+                runner._dispatch_loop(parent_conn, process, {}, "import_", NullObservabilitySink())
+        finally:
+            parent_conn.close()
+            process.join(timeout=5)
+        assert not process.is_alive()
+
+
+class TestToWireResultDictKeys:
+    """Round-3 review finding: to_wire_result's own list/tuple branch
+    always returns a list (JSON has no tuple type), so reducing a dict key
+    through that same function turned a perfectly safe, hashable tuple key
+    into an unhashable list and crashed with a raw TypeError."""
+
+    def test_tuple_key_survives_reduction(self) -> None:
+        from ontolith.plugins.sandbox.wire import to_wire_result
+
+        result = to_wire_result({(1, 2): "v", "plain": "w"})
+        assert result == {(1, 2): "v", "plain": "w"}
+
+    def test_nested_tuple_key_survives_reduction(self) -> None:
+        from ontolith.plugins.sandbox.wire import to_wire_result
+
+        result = to_wire_result({(1, (2, 3)): "nested"})
+        assert result == {(1, (2, 3)): "nested"}
+
+    def test_genuinely_unhashable_shaped_key_raises_cleanly(self) -> None:
+        from ontolith.plugins.sandbox.wire import to_wire_result
+
+        class _Hashable:
+            def __hash__(self) -> int:
+                return 1
+
+        with pytest.raises(UnwirableArgumentError):
+            to_wire_result({_Hashable(): "v"})

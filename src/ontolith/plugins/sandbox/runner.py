@@ -20,13 +20,9 @@ windows) needs to behave identically everywhere.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import multiprocessing
-
-# Referenced only for pickle.UnpicklingError (a plain exception class) - see
-# protocol.recv_from_child's own docstring for where untrusted bytes are
-# actually decoded (wire.restricted_loads), not here.
-import pickle  # nosec B403
 from importlib.metadata import entry_points
 from typing import Any
 
@@ -253,6 +249,24 @@ def run_isolated(
             process.join()
 
 
+def _terminate_and_join(process: Any, timeout: float = 5) -> None:
+    """Actively reap `process` — never a bare, unbounded `process.join()`.
+
+    Used on every exceptional path in `_dispatch_loop`: the child is
+    already known to be misbehaving (a malformed message, a decode
+    failure, an EOF that might not mean the process actually exited — see
+    the EOF handler's own comment) by the time this is called, so waiting
+    indefinitely for it to exit on its own is never the right posture
+    there, unlike `run_isolated`'s own "happy path" cleanup (a bounded
+    `join` first, `terminate` only if that times out).
+    """
+    process.terminate()
+    process.join(timeout=timeout)
+    if process.is_alive():  # pragma: no cover - terminate() not honored in time
+        process.kill()
+        process.join()
+
+
 def _dispatch_loop(
     parent_conn: Any,
     process: Any,
@@ -282,17 +296,35 @@ def _dispatch_loop(
         try:
             message = protocol.recv_from_child(parent_conn)
         except EOFError as exc:
-            process.join()
+            # The pipe's own EOF - normally a genuinely dead process, but
+            # not provably so: pickle's decoder itself raises EOFError for
+            # a deliberately-sent empty payload too (round-3 review
+            # finding), which a still-alive, still-running child could
+            # send without ever actually exiting. A plain process.join()
+            # with no timeout would then block this call forever - always
+            # actively reap with a bound, the same as every other
+            # exceptional path here, rather than assume the process is
+            # already gone.
+            _terminate_and_join(process)
             raise PluginError(
                 f"Plugin process ended unexpectedly (exit code {process.exitcode}) before "
-                f"completing {method_name!r} — it may have crashed or been terminated."
+                f"completing {method_name!r} — it may have crashed, been terminated, or sent "
+                "an empty message."
             ) from exc
-        except pickle.UnpicklingError as exc:
-            process.terminate()
-            process.join()
+        except Exception as exc:  # noqa: BLE001 - any other decode failure
+            # Not just pickle.UnpicklingError (RestrictedUnpickler's own
+            # refusal) - restricted_loads can also raise a plain
+            # ValueError (an unsupported/corrupt pickle protocol byte) or
+            # UnicodeDecodeError (a ValueError subclass, from a malformed
+            # string opcode), neither caught by a narrower except clause
+            # (round-3 review finding). Every one of these means the
+            # child sent bytes this protocol can't make sense of at all -
+            # same severity and handling as an explicit RestrictedUnpickler
+            # refusal.
+            _terminate_and_join(process)
             raise PluginError(
                 f"Plugin process sent a malformed or disallowed message while "
-                f"completing {method_name!r} — terminated. ({exc})"
+                f"completing {method_name!r} — terminated. ({type(exc).__name__}: {exc})"
             ) from exc
 
         try:
@@ -307,17 +339,38 @@ def _dispatch_loop(
             # malformed or disallowed message." restricted_loads already
             # keeps the *content* of every value safe; this closes the
             # same hole for the message's own *shape*.
-            process.terminate()
-            process.join()
+            #
+            # This is why _handle_one_message never itself raises the
+            # plugin's own FAILED-message exception (see _Failed below,
+            # round-3 review finding): a plugin's own ValueError/TypeError/
+            # KeyError/IndexError (all on RestrictedUnpickler's allowlist,
+            # so they cross the boundary as themselves) would otherwise be
+            # caught right here and mislabelled as a protocol violation
+            # instead of propagating as the real, documented exception a
+            # caller's own except ValueError/except TypeError already
+            # expects.
+            _terminate_and_join(process)
             raise PluginError(
                 f"Plugin process sent a malformed message while completing {method_name!r} "
                 f"— terminated. ({type(exc).__name__}: {exc})"
             ) from exc
+        if isinstance(outcome, _Failed):
+            raise outcome.exc  # outside the try/except above - see its comment
         if outcome is not _CONTINUE:
             return outcome
 
 
 _CONTINUE = object()  # sentinel: _handle_one_message wants the loop to keep going
+
+
+@dataclasses.dataclass(frozen=True)
+class _Failed:
+    """Wraps a FAILED message's unwired exception so `_dispatch_loop` can
+    raise it *outside* the try/except that catches a malformed message's
+    own shape — see that except clause's own comment for why raising it
+    directly from `_handle_one_message` would be wrong."""
+
+    exc: BaseException
 
 
 def _handle_one_message(
@@ -329,20 +382,28 @@ def _handle_one_message(
     enforcement_reported: list[bool],
 ) -> object:
     """Handle exactly one already-decoded message. Returns `_CONTINUE` to
-    keep looping, or the isolated call's final result (from a DONE
-    message). Raises `unwire_exception(...)` for a FAILED message, or lets
-    a malformed message's own unpacking error (ValueError/TypeError/
-    IndexError/KeyError) propagate — `_dispatch_loop`'s caller converts
-    that to a PluginError, since this function only has to worry about a
-    message that's well-typed per `restricted_loads` but the wrong shape.
+    keep looping, the isolated call's final result (from a DONE message),
+    or a `_Failed` wrapping a FAILED message's exception for the caller to
+    raise. Lets a malformed message's own unpacking error (ValueError/
+    TypeError/IndexError/KeyError) propagate — `_dispatch_loop`'s caller
+    converts that to a `PluginError`, since this function only has to
+    worry about a message that's well-typed per `restricted_loads` but
+    the wrong shape.
     """
     kind = message[0]
     if kind == protocol.ENFORCEMENT:
-        if enforcement_reported[0]:
-            return _CONTINUE  # only the first ENFORCEMENT message is honored
-        enforcement_reported[0] = True
         _, applied, reason = message
-        if not applied:
+        # Only warn the first time a genuine "did not apply" is reported -
+        # not the first ENFORCEMENT message received, regardless of its
+        # content. The child is untrusted and could send a forged
+        # applied=True first specifically to suppress a real applied=False
+        # that follows (round-3 review finding) - checking `not applied`
+        # before consulting/setting enforcement_reported means a forged
+        # True is simply ignored (no state change), never spent as the
+        # "already reported" slot a genuine False would otherwise need.
+        # A flood of genuine applied=False messages still only warns once.
+        if not applied and not enforcement_reported[0]:
+            enforcement_reported[0] = True
             observability.log(
                 logging.WARNING,
                 f"OS-level capability enforcement did not apply for this call to "
@@ -378,7 +439,7 @@ def _handle_one_message(
     if kind == protocol.DONE:
         return message[1]
     if kind == protocol.FAILED:
-        raise unwire_exception(message[1])
+        return _Failed(unwire_exception(message[1]))
     raise PluginError(f"Unknown sandbox protocol message kind: {kind!r}")
 
 

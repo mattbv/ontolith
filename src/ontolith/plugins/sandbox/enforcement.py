@@ -133,15 +133,23 @@ _FILESYSTEM_SYSCALLS: tuple[str, ...] = (
     "io_uring_register",
 )
 
-# Denied whenever *any* enforcement is installed (either capability is
-# False), regardless of which one - these have nothing to do with network
-# or filesystem access; they read/write another process's memory directly,
-# which would let a plugin reach past the process boundary ADR-0051's
-# structural isolation otherwise relies on (security review finding).
-# ptrace_scope=1 (Linux's default since 3.4) already restricts ptrace to a
-# process's own descendants, which this child process is - so without this
-# explicit denial, ptrace/process_vm_* would be a working escape route on
-# any host that hasn't hardened ptrace_scope further.
+# Always denied whenever a filter is installed at all (unconditional on
+# either capability's own value - see apply_capability_enforcement's own
+# comment) - these have nothing to do with network or filesystem access;
+# they read/write another process's memory directly, which would let a
+# plugin reach past the process boundary ADR-0051's structural isolation
+# otherwise relies on (security review finding).
+#
+# Attack direction here is child -> parent (the child tracing/reading its
+# own ancestor). YAMA's ptrace_scope=1 (a distro default on Ubuntu/Debian,
+# not a kernel-wide default - corrected in round 3, an earlier version of
+# this comment had the direction backwards) confines a *tracer* to its own
+# *descendants*, so it already blocks exactly this direction on hosts that
+# have it. This denial is what defends the ptrace_scope=0 hosts instead
+# (common on many other distros/containers), where nothing else would stop
+# it. Note filesystem=True still leaves an equivalent route open via
+# /proc/<ppid>/mem (open/pread, not ptrace/process_vm_* at all) - see
+# ADR-0051's own Update section.
 _PROCESS_ISOLATION_SYSCALLS: tuple[str, ...] = (
     "ptrace",
     "process_vm_readv",
@@ -154,12 +162,14 @@ class EnforcementResult:
     """Outcome of attempting to install OS-level capability enforcement.
 
     Attributes:
-        applied: True if a real syscall-level filter was installed
-            (including the degenerate case of both capabilities declared
-            True, so nothing needed denying).
+        applied: True if a real syscall-level filter was installed. Always
+            denies at least `_PROCESS_ISOLATION_SYSCALLS`
+            (`ptrace`/`process_vm_*`) even when both `capabilities.network`
+            and `.filesystem` are declared `True` — those two only add to
+            what's denied, they're never the sole reason a filter exists.
         reason: Human-readable explanation, always present when `applied`
-            is False (why no enforcement is active on this call) and
-            occasionally present when True (e.g. "no restriction needed").
+            is False (why no enforcement is active on this call), absent
+            when True.
     """
 
     applied: bool
@@ -218,21 +228,19 @@ def apply_capability_enforcement(capabilities: PluginCapabilities) -> Enforcemen
             reason=f"pyseccomp unavailable ({type(exc).__name__}: {exc}) — is libseccomp installed?",
         )
 
-    denied: list[str] = []
+    # _PROCESS_ISOLATION_SYSCALLS is unconditional - included even when
+    # both capabilities are declared True (round-3 review finding: an
+    # earlier version returned early in that case, "no restriction
+    # needed," which skipped installing a filter at all and left
+    # ptrace/process_vm_* undenied for the single most-capable
+    # registration a manifest can declare - the network.../filesystem
+    # checks below are a ceiling on what a plugin may reach *through*,
+    # this is a floor on what it may reach *around*).
+    denied: list[str] = list(_PROCESS_ISOLATION_SYSCALLS)
     if not capabilities.network:
         denied.extend(_NETWORK_SYSCALLS)
     if not capabilities.filesystem:
         denied.extend(_FILESYSTEM_SYSCALLS)
-
-    if not denied:
-        return EnforcementResult(
-            applied=True, reason="no restriction needed — both capabilities declared True"
-        )
-
-    # Denied whenever any restriction is being installed at all - see
-    # _PROCESS_ISOLATION_SYSCALLS's own comment for why these are
-    # unconditional rather than gated on either declared capability.
-    denied.extend(_PROCESS_ISOLATION_SYSCALLS)
 
     try:
         import errno

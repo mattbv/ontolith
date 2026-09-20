@@ -53,6 +53,14 @@ DONE: Final = "done"
 FAILED: Final = "failed"
 ENFORCEMENT: Final = "enforcement"
 
+# A generous but real bound on one message's size - large enough for any
+# legitimate isolated-call payload this project ships today (a view
+# result, a plugin's own reduced return value), small enough that a
+# malicious child sending one oversized message can't grow the parent's
+# RSS unbounded before a single byte of content is even inspected
+# (round-3 review finding).
+_MAX_MESSAGE_BYTES: Final = 256 * 1024 * 1024  # 256 MiB
+
 
 def send_enforcement(conn: Any, applied: bool, reason: str | None) -> None:
     """Report the outcome of this call's OS-level capability enforcement
@@ -112,8 +120,14 @@ def recv_from_child(conn: Any) -> tuple[Any, ...]:
         pickle.UnpicklingError: the bytes contained a disallowed class
             reference — treated by the dispatch loop as a protocol
             violation, not silently accepted.
+        OSError: the message exceeded `_MAX_MESSAGE_BYTES` — a malicious
+            child could otherwise send one arbitrarily large message and
+            grow the parent's memory unbounded before any content is even
+            inspected (round-3 review finding); `_dispatch_loop`'s own
+            broad decode-failure handling treats this the same as any
+            other malformed message.
     """
-    data = conn.recv_bytes()
+    data = conn.recv_bytes(maxlength=_MAX_MESSAGE_BYTES)
     message = restricted_loads(data)
     if not isinstance(message, tuple) or not message:
         raise pickle.UnpicklingError(f"Malformed sandbox protocol message: {message!r}")
