@@ -154,7 +154,9 @@ class PluginRegistry:
         self._kb.record_admin_event(author, "register_plugin", manifest.name)
 
         instance: object = (
-            IsolatedPluginProxy(entry_point_name, manifest, type(plugin_obj))
+            IsolatedPluginProxy(
+                entry_point_name, manifest, type(plugin_obj), self._kb.observability
+            )
             if isolate
             else plugin_obj
         )
@@ -198,27 +200,40 @@ class PluginRegistry:
     def _warn_if_unenforced_capabilities_requested(
         self, manifest: PluginManifest, isolate: bool
     ) -> None:
-        """Log a visible warning when a plugin declares network/filesystem
-        intent that won't actually be enforced for this registration
-        (ADR-0015, ADR-0051).
+        """Log a visible warning for either of two distinct ways a plugin's
+        declared network/filesystem intent doesn't mean what the manifest
+        API visually implies (ADR-0015, ADR-0051):
 
-        With `isolate=True` on Linux with a working `pyseccomp`/libseccomp
-        install, `capabilities.network`/`.filesystem` genuinely are
-        enforced at the OS syscall level once the plugin's protocol method
-        is actually called — no warning in that case. Otherwise (any other
-        platform, `isolate=False`, or seccomp unavailable on this host),
-        the declaration alone doesn't restrict anything, and this warning
-        exists so an operator deciding whether to register this plugin at
-        all — the moment that actually matters, not a docstring they may
-        never read — gets an explicit, real-time signal rather than a
-        false sense of enforcement. There is no separate "grant" for
-        network/filesystem the way there is for storage
-        (`granted_capability`); the plugin author declares intent in the
-        manifest, and the operator's only lever is whether to register the
-        plugin at all. See ADR-0015's and ADR-0051's Consequences for the
-        full statement of what is and isn't defended against.
+        1. **Declared `True` (requesting access)**: this is an *allow*, and
+           this project never gates it with a ceiling the way
+           `granted_capability` gates storage — there is no "grant" step
+           for network/filesystem to withhold. `apply_capability_enforcement`
+           (`sandbox/enforcement.py`) only ever *denies* syscalls for a
+           capability declared `False`; a `True` declaration is never
+           restricted, on any platform, with or without `isolate`. Always
+           warn.
+        2. **Declared `False` (the default — requesting denial)** *and* this
+           registration won't actually get it: `isolate=False` was passed,
+           or no OS-level enforcement is available on this host/platform
+           (`enforcement.enforcement_available()`). The manifest's `False`
+           looks like a real guarantee; for this registration it isn't.
+           Warn in that case too — silently saying nothing here would be
+           the exact false sense of enforcement this warning exists to
+           prevent (security review finding: the pre-fix version only
+           checked case 1, so a `filesystem=False` plugin on macOS/Windows,
+           or with `isolate=False` anywhere, registered with no signal
+           at all).
+
+        Either way, there is no separate "grant" lever for network/
+        filesystem the way there is for storage — the plugin author
+        declares intent in the manifest, and the operator's only lever is
+        whether to register the plugin at all. See ADR-0015's and
+        ADR-0051's Consequences for the full statement of what is and
+        isn't defended against.
         """
-        unenforced = [
+        enforced_for_real = isolate and enforcement.enforcement_available()
+
+        declared_true = [
             name
             for name, requested in (
                 ("network", manifest.capabilities.network),
@@ -226,26 +241,47 @@ class PluginRegistry:
             )
             if requested
         ]
-        if not unenforced:
+        if declared_true:
+            verb = "is" if len(declared_true) == 1 else "are"
+            self._kb.observability.log(
+                logging.WARNING,
+                f"Plugin {manifest.name!r} declares capabilities.{'/'.join(declared_true)}=True "
+                f"— {verb} an allow, never enforced as a ceiling: this plugin can make network "
+                "calls / touch the filesystem regardless of isolate or platform "
+                "(ADR-0015, ADR-0051, KI-014).",
+                plugin=manifest.name,
+                declared_true=declared_true,
+                isolate=isolate,
+            )
+
+        if enforced_for_real:
             return
-        if isolate and enforcement.enforcement_available():
-            return
-        verb = "is" if len(unenforced) == 1 else "are"
-        reason = (
-            "isolate=False was passed for this registration"
-            if not isolate
-            else "no OS-level enforcement is available on this host/platform"
-        )
-        self._kb.observability.log(
-            logging.WARNING,
-            f"Plugin {manifest.name!r} declares capabilities.{'/'.join(unenforced)}=True, "
-            f"but {verb} not enforced for this registration ({reason}) — the plugin can make "
-            "network calls / touch the filesystem regardless of this declaration "
-            "(ADR-0015, ADR-0051, KI-014).",
-            plugin=manifest.name,
-            unenforced=unenforced,
-            isolate=isolate,
-        )
+        declared_false_unenforced = [
+            name
+            for name, requested in (
+                ("network", manifest.capabilities.network),
+                ("filesystem", manifest.capabilities.filesystem),
+            )
+            if not requested
+        ]
+        if declared_false_unenforced:
+            verb = "is" if len(declared_false_unenforced) == 1 else "are"
+            reason = (
+                "isolate=False was passed for this registration"
+                if not isolate
+                else "no OS-level enforcement is available on this host/platform"
+            )
+            self._kb.observability.log(
+                logging.WARNING,
+                f"Plugin {manifest.name!r} declares "
+                f"capabilities.{'/'.join(declared_false_unenforced)}=False, but {verb} not "
+                f"enforced for this registration ({reason}) — the plugin can make network "
+                "calls / touch the filesystem regardless of this declaration "
+                "(ADR-0015, ADR-0051, KI-014).",
+                plugin=manifest.name,
+                declared_false_unenforced=declared_false_unenforced,
+                isolate=isolate,
+            )
 
     def _effective_capability(self, manifest: PluginManifest, granted: str) -> str:
         """min(requested, granted), then hard-capped to 'read' for read-only

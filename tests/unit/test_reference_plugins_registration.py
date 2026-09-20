@@ -103,8 +103,11 @@ class TestEndToEndThroughRegistry:
             }
         ]
         report = loaded.instance.import_(rows, loaded.view)
-        assert report.entities_created == 1
-        assert report.assertions_proposed == 1
+        # A dataclass return value crosses an isolated call as a plain dict
+        # (wire.to_wire_result, security review finding) - isolate=False
+        # would return the real ImportReport instance unchanged.
+        assert report["entities_created"] == 1
+        assert report["assertions_proposed"] == 1
 
         [assertion] = loaded.view.assertions(predicate="Person.name")
         assert assertion.author == loaded.principal_id
@@ -135,6 +138,6 @@ class TestEndToEndThroughRegistry:
 
         buf = io.StringIO()
         report = loaded.instance.export(loaded.view, buf)
-        assert report.entities_written == 1
-        assert report.assertions_written == 1
+        assert report["entities_written"] == 1
+        assert report["assertions_written"] == 1
         assert "Ada Lovelace" in buf.getvalue()

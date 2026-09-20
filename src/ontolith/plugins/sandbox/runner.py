@@ -20,21 +20,30 @@ windows) needs to behave identically everywhere.
 
 from __future__ import annotations
 
+import logging
 import multiprocessing
+
+# Referenced only for pickle.UnpicklingError (a plain exception class) - see
+# protocol.recv_from_child's own docstring for where untrusted bytes are
+# actually decoded (wire.restricted_loads), not here.
+import pickle  # nosec B403
 from importlib.metadata import entry_points
 from typing import Any
 
 from ontolith.core.errors import PluginError
+from ontolith.core.observability import ObservabilitySink
 from ontolith.plugins.manifest import PluginCapabilities, PluginKind, PluginManifest
 from ontolith.plugins.sandbox import enforcement, protocol
 from ontolith.plugins.sandbox.remote_view import RemoteReadOnlyView, RemoteWritable, RemoteWriteView
 from ontolith.plugins.sandbox.wire import (
     RemoteViewMarker,
     RemoteWritableMarker,
+    to_wire_result,
     unwire_exception,
     wire_exception,
     wire_value,
 )
+from ontolith.plugins.views import ReadOnlyView, WriteView
 
 _ENTRY_POINT_GROUP = "ontolith.plugins"
 
@@ -46,6 +55,44 @@ _ENTRYPOINT_METHOD_BY_KIND: dict[PluginKind, str] = {
     "connector": "sync",
 }
 
+# The dispatch loop's own allow-list — the security boundary CRITICAL-2
+# (security review) exists to close. A malicious plugin's CALL message
+# carries a method_name string it fully controls; without this, a bare
+# getattr(real_view, call_method_name)(*call_args, **call_kwargs) would
+# invoke *anything* on the parent's real, unproxied ReadOnlyView/WriteView
+# — including __setattr__("__class__", WriteView) to retype a read-only
+# view into a writable one, or __setattr__("_principal_id", "admin@...")
+# to forge the acting principal on every subsequent write through that
+# view. Restricting to exactly RemoteReadOnlyView/RemoteWriteView's own
+# public method set (never a dunder, never query()/as_of() — see below)
+# closes both: only these names are ever dispatched, regardless of what a
+# hand-crafted, protocol-bypassing message asks for.
+_READ_ONLY_VIEW_METHODS: frozenset[str] = frozenset({"get_entity", "schema", "assertions"})
+_WRITE_VIEW_METHODS: frozenset[str] = _READ_ONLY_VIEW_METHODS | frozenset(
+    {"create_entity", "propose", "propose_ref", "retract"}
+)
+_WRITABLE_METHODS: frozenset[str] = frozenset({"write"})
+# query()/as_of() are deliberately excluded even though they're real
+# ReadOnlyView methods: they return a QueryBuilder/AsOfView holding a live
+# backend reference, which send_result would then pickle and hand straight
+# to the plugin — exactly the "live object graph" ADR-0051 exists to keep
+# out of reach. RemoteReadOnlyView.query()/.as_of() never send a CALL for
+# these (see remote_view.py), and this allow-list refuses them too, so a
+# message bypassing that proxy entirely gets the same refusal.
+
+
+def _allowed_methods_for(real_obj: object) -> frozenset[str]:
+    """The method names the dispatch loop will actually invoke on
+    `real_obj` — never a bare, unrestricted getattr (see the allow-list
+    comment above)."""
+    if isinstance(real_obj, WriteView):
+        return _WRITE_VIEW_METHODS
+    if isinstance(real_obj, ReadOnlyView):
+        return _READ_ONLY_VIEW_METHODS
+    if hasattr(real_obj, "write"):
+        return _WRITABLE_METHODS
+    return frozenset()
+
 
 class IsolatedPluginProxy:
     """`LoadedPlugin.instance` when a plugin is registered with
@@ -53,11 +100,28 @@ class IsolatedPluginProxy:
     sandboxed child process instead of the caller's own process.
     """
 
-    def __init__(self, entry_point_name: str, manifest: PluginManifest, plugin_class: type) -> None:
+    def __init__(
+        self,
+        entry_point_name: str,
+        manifest: PluginManifest,
+        plugin_class: type,
+        observability: ObservabilitySink,
+    ) -> None:
         self._entry_point_name = entry_point_name
         self._manifest = manifest
         self.plugin_class = plugin_class
-        method_name = _ENTRYPOINT_METHOD_BY_KIND[manifest.kind]
+        self._observability = observability
+        try:
+            method_name = _ENTRYPOINT_METHOD_BY_KIND[manifest.kind]
+        except KeyError as exc:
+            # Matches registry.py's own precedent for an unmapped PluginKind
+            # (_WRITE_CAPABLE_KINDS' comment) - a bare KeyError here would be
+            # a confusing way to say "this pass doesn't yet know how to
+            # isolate this plugin kind."
+            raise PluginError(
+                f"No sandboxed entrypoint mapping for plugin kind {manifest.kind!r} "
+                "(ADR-0051) — register this plugin with isolate=False."
+            ) from exc
         setattr(self, method_name, self._make_bound_call(method_name))
 
     def _make_bound_call(self, method_name: str) -> Any:
@@ -70,7 +134,12 @@ class IsolatedPluginProxy:
             (ADR-0051) — runs in a fresh child process; overwritten below
             with a name-specific docstring for runtime introspection."""
             return run_isolated(
-                self._entry_point_name, method_name, self._manifest.capabilities, args, kwargs
+                self._entry_point_name,
+                method_name,
+                self._manifest.capabilities,
+                args,
+                kwargs,
+                self._observability,
             )
 
         _invoke.__name__ = method_name
@@ -118,6 +187,7 @@ def run_isolated(
     capabilities: PluginCapabilities,
     args: tuple[object, ...],
     kwargs: dict[str, object],
+    observability: ObservabilitySink,
 ) -> object:
     """Run `method_name(*args, **kwargs)` on a fresh instance of the plugin
     registered under `entry_point_name`, in a sandboxed child process.
@@ -133,15 +203,22 @@ def run_isolated(
             ReadOnlyView/WriteView argument is detected structurally and
             proxied; everything else must be picklable or `.write`-shaped.
         kwargs: Keyword arguments, same rules as `args`.
+        observability: Logged to if this specific call's OS-level
+            enforcement attempt didn't apply (e.g. seccomp is available in
+            principle but failed to install for this call) — the
+            registration-time warning (`registry.py`) can only predict
+            this, not guarantee it.
 
     Returns:
-        Whatever the plugin's real method returned.
+        Whatever the plugin's real method returned (reduced to a JSON-safe
+        shape by `wire.to_wire_result` if the real value was a dataclass —
+        see ADR-0051's Consequences).
 
     Raises:
         UnwirableArgumentError: an argument can't cross the boundary.
         PluginError: the child process ended without completing the call
             (crashed, was killed, or its own result/exception couldn't be
-            marshaled back).
+            marshaled back), or sent a malformed/disallowed message.
         Any exception the plugin's own method raised, including a denied-
             syscall OSError/PermissionError under Linux seccomp
             enforcement (ADR-0051) — reconstructed via
@@ -159,7 +236,7 @@ def run_isolated(
     child_conn.close()  # only the child's copy is used inside the child
 
     try:
-        return _dispatch_loop(parent_conn, process, real_objects, method_name)
+        return _dispatch_loop(parent_conn, process, real_objects, method_name, observability)
     finally:
         parent_conn.close()
         process.join(timeout=5)
@@ -169,26 +246,63 @@ def run_isolated(
 
 
 def _dispatch_loop(
-    parent_conn: Any, process: Any, real_objects: dict[str, object], method_name: str
+    parent_conn: Any,
+    process: Any,
+    real_objects: dict[str, object],
+    method_name: str,
+    observability: ObservabilitySink,
 ) -> object:
-    """Service CALL messages against `real_objects` until DONE/FAILED."""
+    """Service CALL messages against `real_objects` until DONE/FAILED.
+
+    Every message is read via `protocol.recv_from_child` (restricted
+    unpickling — the child is untrusted) and every CALL's method name is
+    checked against `_allowed_methods_for`'s explicit allow-list before
+    `getattr` ever runs — a bare, unrestricted dispatch would let a
+    hand-crafted CALL invoke anything on the parent's real, unproxied view
+    object, including `__setattr__` (security review finding: this is
+    what closes it).
+    """
     while True:
         try:
-            message = parent_conn.recv()
+            message = protocol.recv_from_child(parent_conn)
         except EOFError as exc:
             process.join()
             raise PluginError(
                 f"Plugin process ended unexpectedly (exit code {process.exitcode}) before "
                 f"completing {method_name!r} — it may have crashed or been terminated."
             ) from exc
+        except pickle.UnpicklingError as exc:
+            process.terminate()
+            process.join()
+            raise PluginError(
+                f"Plugin process sent a malformed or disallowed message while "
+                f"completing {method_name!r} — terminated. ({exc})"
+            ) from exc
 
         kind = message[0]
+        if kind == protocol.ENFORCEMENT:
+            _, applied, reason = message
+            if not applied:
+                observability.log(
+                    logging.WARNING,
+                    f"OS-level capability enforcement did not apply for this call to "
+                    f"{method_name!r}: {reason}. capabilities.network/.filesystem are not "
+                    "enforced for this specific call (ADR-0051).",
+                    method=method_name,
+                )
+            continue
         if kind == protocol.CALL:
             _, tag, call_method_name, call_args, call_kwargs = message
             real_obj = real_objects.get(tag)
-            if real_obj is None:
+            if real_obj is None or call_method_name not in _allowed_methods_for(real_obj):
                 protocol.send_error(
-                    parent_conn, wire_exception(PluginError(f"Unknown remote object tag {tag!r}"))
+                    parent_conn,
+                    wire_exception(
+                        PluginError(
+                            f"Call to {call_method_name!r} on tag {tag!r} is not permitted "
+                            "inside a sandboxed plugin call"
+                        )
+                    ),
                 )
                 continue
             try:
@@ -208,8 +322,8 @@ def _resolve_wired(value: object, child_conn: Any) -> object:
     """Reverse `_wire_all`'s substitution inside the child."""
     if isinstance(value, RemoteViewMarker):
         if value.writable:
-            return RemoteWriteView(child_conn, value.tag)
-        return RemoteReadOnlyView(child_conn, value.tag)
+            return RemoteWriteView(child_conn, value.tag, value.principal_id)
+        return RemoteReadOnlyView(child_conn, value.tag, value.principal_id)
     if isinstance(value, RemoteWritableMarker):
         return RemoteWritable(child_conn, value.tag)
     return value
@@ -220,12 +334,39 @@ def _load_plugin_instance(entry_point_name: str) -> Any:
     `entry_point_name`, independently of PluginRegistry's own copy of this
     logic — deliberately not shared, to avoid a circular import between
     `registry.py` (which needs IsolatedPluginProxy) and this module (which
-    would otherwise need a helper from registry.py)."""
+    would otherwise need a helper from registry.py). Mirrors
+    `PluginRegistry._load_entry_point`'s error handling exactly (including
+    the ambiguous-match case) so registration-time and call-time
+    resolution never diverge on which entry point actually gets used."""
     matches = [ep for ep in entry_points(group=_ENTRY_POINT_GROUP) if ep.name == entry_point_name]
     if not matches:
         raise PluginError(f"Plugin entry point not found: {entry_point_name!r}")
-    plugin_class = matches[0].load()
-    return plugin_class()
+    if len(matches) > 1:
+        raise PluginError(
+            f"Ambiguous plugin entry point {entry_point_name!r}: {len(matches)} distributions "
+            "register this name under the 'ontolith.plugins' group"
+        )
+    try:
+        plugin_class = matches[0].load()
+    except Exception as exc:
+        raise PluginError(f"Failed to load plugin {entry_point_name!r}: {exc}") from exc
+    try:
+        return plugin_class()
+    except Exception as exc:
+        raise PluginError(f"Failed to instantiate plugin {entry_point_name!r}: {exc}") from exc
+
+
+def _safe_send_failed(child_conn: Any, exc: BaseException) -> None:
+    """`protocol.send_failed`, swallowing a broken-pipe failure of its own —
+    if the parent already closed its end (it gave up waiting, or the
+    dispatch loop itself raised), there's nothing left to report to."""
+    try:
+        protocol.send_failed(child_conn, wire_exception(exc))
+    except Exception:  # noqa: BLE001  # nosec B110
+        # Genuinely nothing more to do: the parent's end is already gone, so
+        # there is no one left to report to and nothing to recover - this is
+        # the child process's own final action.
+        pass
 
 
 def _child_main(
@@ -244,31 +385,37 @@ def _child_main(
             name: _resolve_wired(value, child_conn) for name, value in wired_kwargs.items()
         }
     except Exception as exc:  # noqa: BLE001 - reported to the parent, not raised here
-        protocol.send_failed(child_conn, wire_exception(exc))
+        _safe_send_failed(child_conn, exc)
         return
 
     # Best-effort, never raises - see enforcement.py's own docstring for why
     # a failure to enforce degrades to "not enforced," not a hard error.
-    enforcement.apply_capability_enforcement(capabilities)
+    # Reported to the parent unconditionally (security review finding: the
+    # registration-time warning can only predict this, not guarantee it —
+    # e.g. a container's own outer seccomp profile can block installing a
+    # filter even when pyseccomp/libseccomp are both present).
+    enforcement_result = enforcement.apply_capability_enforcement(capabilities)
+    try:
+        protocol.send_enforcement(child_conn, enforcement_result.applied, enforcement_result.reason)
+    except Exception:  # noqa: BLE001 - the pipe itself is gone; nothing left to report to
+        return
 
     try:
         result = getattr(plugin_instance, method_name)(*resolved_args, **resolved_kwargs)
     except Exception as exc:  # noqa: BLE001 - reported to the parent, not raised here
-        protocol.send_failed(child_conn, wire_exception(exc))
+        _safe_send_failed(child_conn, exc)
         return
 
     try:
-        protocol.send_done(child_conn, result)
-    except Exception:  # noqa: BLE001 - result itself isn't picklable
-        protocol.send_failed(
-            child_conn,
-            wire_exception(
-                PluginError(
-                    f"{method_name}()'s return value ({type(result).__name__}) is not "
-                    "picklable and cannot cross the plugin sandbox boundary"
-                )
-            ),
-        )
+        wired_result = to_wire_result(result)
+    except Exception as exc:  # noqa: BLE001 - reported to the parent, not raised here
+        _safe_send_failed(child_conn, exc)
+        return
+
+    try:
+        protocol.send_done(child_conn, wired_result)
+    except Exception:  # noqa: BLE001  # nosec B110 - the pipe itself is gone at this point
+        pass
 
 
 __all__ = ["IsolatedPluginProxy", "run_isolated"]

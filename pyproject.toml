@@ -41,8 +41,14 @@ dependencies = [
 	# defaults to. Needs libseccomp installed on the host (a system
 	# library, not something pip provides) - degrades to "not enforced,
 	# loudly said so" if it isn't (plugins/sandbox/enforcement.py), never a
-	# hard install failure on a Linux host missing it either.
-	"pyseccomp>=0.1,<1.0; sys_platform == 'linux'",
+	# hard install failure on a Linux host missing it either. Exact-pinned,
+	# not a range - it's the entire security boundary for network/
+	# filesystem denial (a thin, infrequently-updated ctypes shim over
+	# libseccomp), the same reasoning sqlite-vec's own exact pin above
+	# already applies (security review finding: a >=/<1.0 range would
+	# auto-accept any future 0.x release sight unseen for a package this
+	# security-critical).
+	"pyseccomp==0.1.2; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]

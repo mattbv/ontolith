@@ -77,12 +77,12 @@ class TestWireValue:
     def test_a_readonly_view_becomes_a_non_writable_marker(self, kb: Ontology) -> None:
         view = ReadOnlyView(kb, ADMIN)
         wired = wire_value(view, "kb")
-        assert wired == RemoteViewMarker(tag="kb", writable=False)
+        assert wired == RemoteViewMarker(tag="kb", writable=False, principal_id=ADMIN)
 
     def test_a_write_view_becomes_a_writable_marker(self, kb: Ontology) -> None:
         view = WriteView(kb, ADMIN)
         wired = wire_value(view, "kb")
-        assert wired == RemoteViewMarker(tag="kb", writable=True)
+        assert wired == RemoteViewMarker(tag="kb", writable=True, principal_id=ADMIN)
 
     def test_an_unpicklable_write_shaped_value_becomes_a_writable_marker(self) -> None:
         buf = io.StringIO()
@@ -194,17 +194,17 @@ class TestRemoteViewQueryAsOfUnsupported:
     """These raise before ever touching a connection - no subprocess needed."""
 
     def test_query_raises_plugin_error(self) -> None:
-        view = RemoteReadOnlyView(conn=None, tag="kb")
+        view = RemoteReadOnlyView(conn=None, tag="kb", principal_id="plugin@example.com")
         with pytest.raises(PluginError, match="not available from inside a sandboxed"):
             view.query("Person")
 
     def test_as_of_raises_plugin_error(self) -> None:
-        view = RemoteReadOnlyView(conn=None, tag="kb")
+        view = RemoteReadOnlyView(conn=None, tag="kb", principal_id="plugin@example.com")
         with pytest.raises(PluginError, match="not available from inside a sandboxed"):
             view.as_of("2026-01-01")
 
     def test_write_view_inherits_the_same_restriction(self) -> None:
-        view = RemoteWriteView(conn=None, tag="kb")
+        view = RemoteWriteView(conn=None, tag="kb", principal_id="plugin@example.com")
         with pytest.raises(PluginError):
             view.query("Person")
 
@@ -330,6 +330,7 @@ class TestRunIsolatedAgainstRealReferencePlugins:
                 PluginCapabilities(storage="write"),
                 (unpicklable_source, view),
                 {},
+                kb.observability,
             )
 
     def test_unknown_entry_point_raises_plugin_error(self, kb: Ontology) -> None:
@@ -341,6 +342,7 @@ class TestRunIsolatedAgainstRealReferencePlugins:
                 PluginCapabilities(),
                 (view, io.StringIO()),
                 {},
+                kb.observability,
             )
 
     def test_isolated_proxy_exposes_the_underlying_plugin_class(self, kb: Ontology) -> None:
@@ -370,5 +372,8 @@ class TestRunIsolatedAgainstRealReferencePlugins:
         buf = io.StringIO()
         report = loaded.instance.export(loaded.view, buf)
 
-        assert report.assertions_written == 1
+        # A dataclass return value crosses an isolated call as a plain dict
+        # (wire.to_wire_result, security review finding) - isolate=False
+        # would return the real ExportReport instance unchanged.
+        assert report == {"assertions_written": 1}
         assert "Ada Lovelace" in buf.getvalue()

@@ -2,13 +2,19 @@
 (ADR-0051).
 
 `RemoteReadOnlyView`/`RemoteWriteView` mirror `plugins/views.py`'s public
-method set and subclass relationship exactly, so a plugin's own
-`isinstance(kb, WriteView)` check (none of the shipped reference plugins do
-this, but nothing stops a third-party one from it) still holds inside the
-sandboxed child — but every method sends one `protocol.CALL` message over
-the shared pipe and blocks for the matching `RESULT`/`ERROR` instead of
-touching a real `Ontology`/backend, which only the parent process ever
-holds a reference to.
+method set (including `principal_id`) and the *relationship between the
+two proxy classes* (`RemoteWriteView` subclasses `RemoteReadOnlyView`, the
+same shape `WriteView`/`ReadOnlyView` have) — but they do **not** subclass
+the real `ReadOnlyView`/`WriteView` themselves (doing so would need a real
+`Ontology`/principal at construction time, which the sandboxed child never
+has). A plugin's own `isinstance(kb, WriteView)` check against the *real*
+class is `False` inside a sandboxed call, even for a writable
+registration — `isinstance(kb, RemoteWriteView)` is the isolated-call
+equivalent, if a plugin genuinely needs to distinguish the two locally
+(none of the shipped reference plugins do). Every method sends one
+`protocol.CALL` message over the shared pipe and blocks for the matching
+`RESULT`/`ERROR` instead of touching a real `Ontology`/backend, which only
+the parent process ever holds a reference to.
 
 `.query()`/`.as_of()` are deliberately unsupported here — both return a
 fluent builder holding a live backend reference, which would need its own
@@ -60,6 +66,18 @@ class _RemoteCallMixin:
 
 class RemoteReadOnlyView(_RemoteCallMixin):
     """Sandboxed-child proxy for `plugins.views.ReadOnlyView`."""
+
+    def __init__(self, conn: Any, tag: str, principal_id: str) -> None:
+        super().__init__(conn, tag)
+        self._principal_id = principal_id
+
+    @property
+    def principal_id(self) -> str:
+        """The principal id this view is bound to — mirrors
+        `ReadOnlyView.principal_id` exactly, with no round trip needed
+        since it's a plain string already known when this proxy was
+        constructed (`sandbox/wire.py`'s `RemoteViewMarker`)."""
+        return self._principal_id
 
     def get_entity(self, entity_id: str) -> Entity | None:
         """Retrieve an entity by ID, via the parent's real view."""

@@ -79,7 +79,14 @@ class ValidatorKbView(Protocol):
     `validators`/`completeness_validators` constructor parameters runs
     synchronously inside the write path (as opposed to a Validator loaded
     through `PluginRegistry.register()`, which still receives a real,
-    capability-scoped `ReadOnlyView`). Importing `Ontology` here to spell
+    capability-scoped `ReadOnlyView`) — this path is always trusted and
+    unsandboxed, regardless of ADR-0051: never pass a `PluginRegistry`-
+    loaded plugin's `LoadedPlugin.instance` (an `IsolatedPluginProxy` when
+    `isolate=True`) into `validators`/`completeness_validators` — `Ontology`
+    itself isn't a `ReadOnlyView`/picklable, so it can't cross the sandbox
+    boundary at all; call `loaded.instance.validate(assertion, loaded.view)`
+    directly instead, the same way every other plugin kind is called
+    through `PluginRegistry`. Importing `Ontology` here to spell
     that out as a second concrete type would be circular — `ontology.py`
     needs `Validator`'s type for its own constructor parameters, and this
     module already imports `ReadOnlyView`/`WriteView` from

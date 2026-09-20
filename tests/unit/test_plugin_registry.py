@@ -150,12 +150,18 @@ class TestEntryPointDiscovery:
 
 class TestUnenforcedCapabilityWarning:
     """KI-014: registering a plugin that declares network/filesystem intent
-    logs a visible warning when that declaration won't actually be
-    enforced for this registration (ADR-0015, ADR-0051).
+    logs a visible warning for either of two distinct cases (ADR-0015,
+    ADR-0051): declaring a capability `True` (an allow this project never
+    gates as a ceiling, on any platform — always warns), and declaring a
+    capability `False` when this registration won't actually enforce that
+    denial (`isolate=False`, or no OS-level enforcement available — warns
+    too, since the pre-ADR-0051 warning only checked the `True` case and
+    silently said nothing about an unenforced `False` declaration, a
+    security review finding).
 
-    The three "warns" tests below pass isolate=False explicitly - not
-    testing that parameter itself, just making the "not enforced" condition
-    true deterministically, independent of whether this host happens to be
+    The tests below pass isolate=False explicitly - not testing that
+    parameter itself, just making the "not enforced" condition true
+    deterministically, independent of whether this host happens to be
     Linux with a working pyseccomp/libseccomp install (isolate=True would
     make the warning's presence depend on the platform running the test
     suite, see test_plugin_sandbox.py's own enforcement-availability tests
@@ -171,6 +177,8 @@ class TestUnenforcedCapabilityWarning:
     def test_warns_when_network_and_filesystem_requested(
         self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Both capabilities declared True, neither False - exactly one
+        "declared_true" warning, no "declared_false_unenforced" one."""
         _patch_entry_points(
             monkeypatch,
             _entry_point(
@@ -188,9 +196,9 @@ class TestUnenforcedCapabilityWarning:
         assert level == logging.WARNING
         assert "trivial-importer-net-fs" in message
         assert "network/filesystem" in message
-        assert "but are not enforced" in message
+        assert "never enforced as a ceiling" in message
         assert fields["plugin"] == "trivial-importer-net-fs"
-        assert fields["unenforced"] == ["network", "filesystem"]
+        assert fields["declared_true"] == ["network", "filesystem"]
 
     def test_warns_naming_only_filesystem_when_only_filesystem_requested(
         self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
@@ -198,7 +206,11 @@ class TestUnenforcedCapabilityWarning:
         """Review finding: a helper that always names both capabilities
         regardless of what was actually declared would pass every other
         test in this class - this is the real-world shape too, since
-        every shipped reference plugin declares filesystem only."""
+        every shipped reference plugin declares filesystem only.
+
+        filesystem=True triggers the "declared_true" warning;
+        network=False (the default) is itself unenforced under
+        isolate=False, triggering the second, separate warning too."""
         _patch_entry_points(
             monkeypatch,
             _entry_point(
@@ -212,10 +224,16 @@ class TestUnenforcedCapabilityWarning:
         registry = PluginRegistry(kb)
         registry.register("trivial-importer-fs-only", author=ADMIN, isolate=False)
 
-        [(_, message, _fields)] = sink.logs
-        assert "capabilities.filesystem=True" in message
-        assert "capabilities.network=True" not in message
-        assert "but is not enforced" in message
+        [(_, true_message, true_fields), (_, false_message, false_fields)] = sink.logs
+        assert "capabilities.filesystem=True" in true_message
+        assert "capabilities.network=True" not in true_message
+        assert "never enforced as a ceiling" in true_message
+        assert true_fields["declared_true"] == ["filesystem"]
+
+        assert "capabilities.network=False" in false_message
+        assert "capabilities.filesystem=False" not in false_message
+        assert "but is not enforced" in false_message
+        assert false_fields["declared_false_unenforced"] == ["network"]
 
     def test_warns_naming_only_network_when_only_network_requested(
         self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
@@ -233,19 +251,60 @@ class TestUnenforcedCapabilityWarning:
         registry = PluginRegistry(kb)
         registry.register("trivial-importer-net-only", author=ADMIN, isolate=False)
 
-        [(_, message, _fields)] = sink.logs
-        assert "capabilities.network=True" in message
-        assert "capabilities.filesystem=True" not in message
-        assert "but is not enforced" in message
+        [(_, true_message, true_fields), (_, false_message, false_fields)] = sink.logs
+        assert "capabilities.network=True" in true_message
+        assert "capabilities.filesystem=True" not in true_message
+        assert "never enforced as a ceiling" in true_message
+        assert true_fields["declared_true"] == ["network"]
 
-    def test_no_warning_when_neither_requested(
+        assert "capabilities.filesystem=False" in false_message
+        assert "capabilities.network=False" not in false_message
+        assert "but is not enforced" in false_message
+        assert false_fields["declared_false_unenforced"] == ["filesystem"]
+
+    def test_warns_for_default_capabilities_when_isolate_false(
         self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Both capabilities left at their False default: no "declared_true"
+        warning, but isolate=False still means neither denial is real —
+        the case the pre-ADR-0051 warning logic missed entirely (security
+        review finding)."""
         _patch_entry_points(
             monkeypatch,
             _entry_point(
                 "trivial-importer", "tests.fixtures.plugins.trivial_importer", "TrivialImporter"
             ),
+        )
+        sink = RecordingObservabilitySink()
+        kb.observability = sink
+        registry = PluginRegistry(kb)
+        registry.register("trivial-importer", author=ADMIN, isolate=False)
+
+        [(_, message, fields)] = sink.logs
+        assert "capabilities.network/filesystem=False" in message
+        assert "but are not enforced" in message
+        assert fields["declared_false_unenforced"] == ["network", "filesystem"]
+
+    def test_no_warning_when_neither_requested_and_enforcement_is_real(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Both capabilities left at their False default, isolate=True
+        (the actual default), AND real OS-level enforcement is available
+        for this registration — the one combination where no warning
+        should fire at all. `enforcement.enforcement_available` is
+        monkeypatched to True rather than relying on this host actually
+        being Linux with a working pyseccomp/libseccomp install, so this
+        test is deterministic regardless of what platform runs the suite
+        (see test_plugin_sandbox.py's own Linux-only enforcement tests for
+        the real thing)."""
+        _patch_entry_points(
+            monkeypatch,
+            _entry_point(
+                "trivial-importer", "tests.fixtures.plugins.trivial_importer", "TrivialImporter"
+            ),
+        )
+        monkeypatch.setattr(
+            "ontolith.plugins.registry.enforcement.enforcement_available", lambda: True
         )
         sink = RecordingObservabilitySink()
         kb.observability = sink

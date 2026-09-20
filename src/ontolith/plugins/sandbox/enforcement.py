@@ -30,14 +30,29 @@ from ontolith.plugins.manifest import PluginCapabilities
 # recognize on this kernel/arch is skipped rather than aborting the whole
 # filter - best-effort denial of everything resolvable beats no filter at
 # all over one unresolvable name.
+#
+# io_uring_setup/_enter/_register are listed in BOTH _NETWORK_SYSCALLS and
+# _FILESYSTEM_SYSCALLS (denied whenever either capability is False, not
+# only when both are): io_uring submits socket/connect/send/recv AND
+# openat/read/write-shaped operations through kernel worker threads, never
+# issuing the syscalls seccomp would otherwise catch individually - the
+# standard, well-known seccomp bypass (security review finding). Denying
+# io_uring outright for a False-declared capability is conservative (it
+# also blocks a plugin's own *legitimate* io_uring use of already-open
+# descriptors under filesystem=False, say) but this project has no
+# reference plugin using it, and "deny more than strictly necessary" is
+# the correct direction for a security boundary to err in.
 _NETWORK_SYSCALLS: tuple[str, ...] = (
     "socket",
     "socketpair",
+    "socketcall",  # i386's socket-syscall multiplexer
     "connect",
     "accept",
     "accept4",
     "bind",
     "listen",
+    "send",
+    "recv",  # older, non-x86_64 syscall names for sendto/recvfrom
     "sendto",
     "sendmsg",
     "sendmmsg",
@@ -47,12 +62,18 @@ _NETWORK_SYSCALLS: tuple[str, ...] = (
     "getsockopt",
     "setsockopt",
     "shutdown",
+    "io_uring_setup",
+    "io_uring_enter",
+    "io_uring_register",
 )
 
 # Filesystem-mutation and new-access syscalls - deliberately excludes
 # read/write/close/lseek/fstat, which only operate on already-open file
 # descriptors (stdio, the IPC pipe itself) and must keep working under a
 # filesystem=False filter for the sandbox's own RPC protocol to function.
+# ftruncate IS included despite operating on an already-open descriptor -
+# unlike read/write/close it mutates file content/size, which
+# filesystem=False means to deny.
 _FILESYSTEM_SYSCALLS: tuple[str, ...] = (
     "open",
     "openat",
@@ -67,8 +88,11 @@ _FILESYSTEM_SYSCALLS: tuple[str, ...] = (
     "mkdirat",
     "rmdir",
     "chmod",
+    "fchmod",
     "fchmodat",
     "chown",
+    "fchown",
+    "lchown",
     "fchownat",
     "truncate",
     "ftruncate",
@@ -76,6 +100,45 @@ _FILESYSTEM_SYSCALLS: tuple[str, ...] = (
     "linkat",
     "symlink",
     "symlinkat",
+    "mknod",
+    "mknodat",
+    "fallocate",
+    "utime",
+    "utimes",
+    "utimensat",
+    "futimesat",
+    "setxattr",
+    "lsetxattr",
+    "fsetxattr",
+    "removexattr",
+    "lremovexattr",
+    "fremovexattr",
+    "name_to_handle_at",
+    "open_by_handle_at",  # opens a file without going through open/openat
+    "fsopen",
+    "fsconfig",
+    "fsmount",
+    "fspick",
+    "move_mount",
+    "open_tree",  # the newer (kernel 5.2+) mount API
+    "io_uring_setup",
+    "io_uring_enter",
+    "io_uring_register",
+)
+
+# Denied whenever *any* enforcement is installed (either capability is
+# False), regardless of which one - these have nothing to do with network
+# or filesystem access; they read/write another process's memory directly,
+# which would let a plugin reach past the process boundary ADR-0051's
+# structural isolation otherwise relies on (security review finding).
+# ptrace_scope=1 (Linux's default since 3.4) already restricts ptrace to a
+# process's own descendants, which this child process is - so without this
+# explicit denial, ptrace/process_vm_* would be a working escape route on
+# any host that hasn't hardened ptrace_scope further.
+_PROCESS_ISOLATION_SYSCALLS: tuple[str, ...] = (
+    "ptrace",
+    "process_vm_readv",
+    "process_vm_writev",
 )
 
 
@@ -159,10 +222,33 @@ def apply_capability_enforcement(capabilities: PluginCapabilities) -> Enforcemen
             applied=True, reason="no restriction needed — both capabilities declared True"
         )
 
+    # Denied whenever any restriction is being installed at all - see
+    # _PROCESS_ISOLATION_SYSCALLS's own comment for why these are
+    # unconditional rather than gated on either declared capability.
+    denied.extend(_PROCESS_ISOLATION_SYSCALLS)
+
     try:
         import errno
 
         syscall_filter = seccomp.SyscallFilter(defaction=seccomp.ALLOW)
+        # Rules are matched per-architecture; seccomp_init only registers
+        # the running process's native one. On x86_64 (by far the common
+        # case), a 32-bit compat syscall (int 0x80) or an x32 one
+        # (syscall number | 0x40000000) would otherwise match no rule at
+        # all and fall through to defaction=ALLOW - a known seccomp
+        # bypass on this architecture specifically (security review
+        # finding). Best-effort: an architecture pyseccomp/this kernel
+        # doesn't support is skipped, same posture as an unresolvable
+        # syscall name below.
+        for compat_arch in (getattr(seccomp.Arch, "X86", None), getattr(seccomp.Arch, "X32", None)):
+            if compat_arch is None:
+                continue
+            try:
+                syscall_filter.add_arch(compat_arch)
+            except Exception:  # nosec B112 - this architecture isn't available on this
+                # kernel/build of libseccomp - skip it, the native architecture's own
+                # rules (added below) still apply regardless.
+                continue
         for name in denied:
             try:
                 syscall_filter.add_rule(seccomp.ERRNO(errno.EPERM), name)
