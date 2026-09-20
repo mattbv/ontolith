@@ -16,6 +16,8 @@ from ontolith.core.errors import PluginError, ValidationError
 from ontolith.identity.principal import min_capability
 from ontolith.ontology import Ontology
 from ontolith.plugins.manifest import PluginKind, PluginManifest
+from ontolith.plugins.sandbox import enforcement
+from ontolith.plugins.sandbox.runner import IsolatedPluginProxy
 from ontolith.plugins.views import ReadOnlyView, WriteView
 
 _ENTRY_POINT_GROUP = "ontolith.plugins"
@@ -38,7 +40,16 @@ class LoadedPlugin:
         principal_id: The service-Principal id this plugin acts as.
         view: ReadOnlyView or WriteView scoped to principal_id, per the
             plugin's effective capability.
-        instance: The instantiated plugin object.
+        instance: The plugin's one protocol entrypoint, callable the same
+            way the real object would be (`instance.import_(...)`,
+            `instance.export(...)`, etc.). When registered with
+            `isolate=True` (the default), this is an `IsolatedPluginProxy`
+            (ADR-0051) that runs the call in a sandboxed child process —
+            not the real, directly-instantiated plugin object, so
+            `isinstance(instance, SomePluginClass)` no longer holds; use
+            `instance.plugin_class` for that check instead. With
+            `isolate=False`, this is the real, unsandboxed plugin instance,
+            exactly as before ADR-0051.
     """
 
     manifest: PluginManifest
@@ -59,6 +70,7 @@ class PluginRegistry:
         *,
         author: str,
         granted_capability: str = "propose",
+        isolate: bool = True,
     ) -> LoadedPlugin:
         """Discover, load, and sandbox a plugin by entry-point name.
 
@@ -71,6 +83,18 @@ class PluginRegistry:
                 plugin may be granted, regardless of what its manifest
                 requests. Defaults to "propose" (least privilege) —
                 further capped to "read" for read-only plugin kinds.
+            isolate: Run the plugin's protocol entrypoint in a sandboxed
+                child process (ADR-0051), not this process. Defaults to
+                `True` — deny-by-default, the same posture default
+                temporality/MCP's read-propose-flag-only surface/capability
+                floors already take elsewhere in this project. Pass
+                `False` only for a plugin whose `source`/`target` argument
+                genuinely can't cross a process boundary (an unpicklable,
+                non-`.write`-shaped live object) or a fully trusted
+                first-party plugin where the per-call subprocess overhead
+                isn't worth paying — this restores the pre-ADR-0051
+                behavior exactly: the real, unsandboxed plugin instance,
+                network/filesystem fully unenforced regardless of platform.
 
         Returns:
             LoadedPlugin bound to a capability-scoped view.
@@ -86,11 +110,12 @@ class PluginRegistry:
 
         Note:
             Logs a `logging.WARNING` (KI-014) if the plugin's manifest
-            declares `capabilities.network`/`.filesystem` — neither is
-            actually enforced yet, so the manifest declaration alone
-            doesn't restrict anything. Only logged on successful
-            registration (the plugin actually becomes a standing
-            in-process actor), not on a failed attempt.
+            declares `capabilities.network`/`.filesystem` and either
+            `isolate=False` was passed or no OS-level enforcement is
+            available for this platform/capability (ADR-0051) — the
+            declaration alone doesn't restrict anything in that case. Only
+            logged on successful registration (the plugin actually becomes
+            a standing in-process actor), not on a failed attempt.
 
             Records a `register_plugin` `AdminEvent` on successful
             registration (KI-060), same "only on success" timing as the
@@ -125,14 +150,21 @@ class PluginRegistry:
         # warning makes — a registration attempt that fails before this
         # point never becomes a standing in-process actor at all, and
         # shouldn't be recorded as though one was created.
-        self._warn_if_unenforced_capabilities_requested(manifest)
+        self._warn_if_unenforced_capabilities_requested(manifest, isolate)
         self._kb.record_admin_event(author, "register_plugin", manifest.name)
 
+        instance: object = (
+            IsolatedPluginProxy(
+                entry_point_name, manifest, type(plugin_obj), self._kb.observability
+            )
+            if isolate
+            else plugin_obj
+        )
         return LoadedPlugin(
             manifest=manifest,
             principal_id=principal_id,
             view=view,
-            instance=plugin_obj,
+            instance=instance,
         )
 
     def _load_entry_point(self, name: str) -> Any:
@@ -165,25 +197,47 @@ class PluginRegistry:
             )
         return manifest
 
-    def _warn_if_unenforced_capabilities_requested(self, manifest: PluginManifest) -> None:
-        """Log a visible warning when a plugin declares network/filesystem
-        intent — only `capabilities.storage` is actually enforced (KI-014):
-        the plugin runs in-process with no process/wasm isolation, so
-        declaring `network=False`/`filesystem=False` does not prevent a
-        plugin from making network calls or touching the filesystem
-        anyway. `PluginCapabilities`'s own docstring already states this;
-        this warning exists so an operator deciding whether to register
-        this plugin at all — the moment that actually matters, not a
-        docstring they may never read — gets an explicit, real-time
-        signal rather than a false sense of enforcement. There is no
-        separate "grant" for network/filesystem the way there is for
-        storage (`granted_capability`); the plugin author declares intent
-        in the manifest, and the operator's only lever is whether to
-        register the plugin at all. See ADR-0015's Consequences for the
-        full statement of what this module does and doesn't defend
-        against.
+    def _warn_if_unenforced_capabilities_requested(
+        self, manifest: PluginManifest, isolate: bool
+    ) -> None:
+        """Log a visible warning for either of two distinct ways a plugin's
+        declared network/filesystem intent doesn't mean what the manifest
+        API visually implies (ADR-0015, ADR-0051):
+
+        1. **Declared `True` (requesting access)**: this is an *allow*, and
+           this project never gates it with a ceiling the way
+           `granted_capability` gates storage — there is no "grant" step
+           for network/filesystem to withhold. `apply_capability_enforcement`
+           (`sandbox/enforcement.py`) never restricts *this specific*
+           declared-`True` capability, on any platform, with or without
+           `isolate` — network syscalls stay allowed if `network=True`,
+           filesystem syscalls stay allowed if `filesystem=True` (a
+           `ptrace`/`process_vm_*` denial is installed unconditionally
+           regardless of either declaration, but that's an unrelated,
+           always-on floor, not a consequence of what's declared here —
+           see `enforcement.py`'s own comment). Always warn.
+        2. **Declared `False` (the default — requesting denial)** *and* this
+           registration won't actually get it: `isolate=False` was passed,
+           or no OS-level enforcement is available on this host/platform
+           (`enforcement.enforcement_available()`). The manifest's `False`
+           looks like a real guarantee; for this registration it isn't.
+           Warn in that case too — silently saying nothing here would be
+           the exact false sense of enforcement this warning exists to
+           prevent (security review finding: the pre-fix version only
+           checked case 1, so a `filesystem=False` plugin on macOS/Windows,
+           or with `isolate=False` anywhere, registered with no signal
+           at all).
+
+        Either way, there is no separate "grant" lever for network/
+        filesystem the way there is for storage — the plugin author
+        declares intent in the manifest, and the operator's only lever is
+        whether to register the plugin at all. See ADR-0015's and
+        ADR-0051's Consequences for the full statement of what is and
+        isn't defended against.
         """
-        unenforced = [
+        enforced_for_real = isolate and enforcement.enforcement_available()
+
+        declared_true = [
             name
             for name, requested in (
                 ("network", manifest.capabilities.network),
@@ -191,16 +245,46 @@ class PluginRegistry:
             )
             if requested
         ]
-        if unenforced:
-            verb = "is" if len(unenforced) == 1 else "are"
+        if declared_true:
+            verb = "is" if len(declared_true) == 1 else "are"
             self._kb.observability.log(
                 logging.WARNING,
-                f"Plugin {manifest.name!r} declares capabilities.{'/'.join(unenforced)}=True, "
-                f"but {verb} not enforced — the plugin runs in-process with no isolation and "
-                "can make network calls / touch the filesystem regardless of this declaration "
-                "(ADR-0015, KI-014). Only capabilities.storage is actually enforced.",
+                f"Plugin {manifest.name!r} declares capabilities.{'/'.join(declared_true)}=True "
+                f"— {verb} an allow, never enforced as a ceiling: this plugin can make network "
+                "calls / touch the filesystem regardless of isolate or platform "
+                "(ADR-0015, ADR-0051, KI-014).",
                 plugin=manifest.name,
-                unenforced=unenforced,
+                declared_true=declared_true,
+                isolate=isolate,
+            )
+
+        if enforced_for_real:
+            return
+        declared_false_unenforced = [
+            name
+            for name, requested in (
+                ("network", manifest.capabilities.network),
+                ("filesystem", manifest.capabilities.filesystem),
+            )
+            if not requested
+        ]
+        if declared_false_unenforced:
+            verb = "is" if len(declared_false_unenforced) == 1 else "are"
+            reason = (
+                "isolate=False was passed for this registration"
+                if not isolate
+                else "no OS-level enforcement is available on this host/platform"
+            )
+            self._kb.observability.log(
+                logging.WARNING,
+                f"Plugin {manifest.name!r} declares "
+                f"capabilities.{'/'.join(declared_false_unenforced)}=False, but {verb} not "
+                f"enforced for this registration ({reason}) — the plugin can make network "
+                "calls / touch the filesystem regardless of this declaration "
+                "(ADR-0015, ADR-0051, KI-014).",
+                plugin=manifest.name,
+                declared_false_unenforced=declared_false_unenforced,
+                isolate=isolate,
             )
 
     def _effective_capability(self, manifest: PluginManifest, granted: str) -> str:
