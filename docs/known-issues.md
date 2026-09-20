@@ -2158,6 +2158,45 @@ Not started. Build a remote fluent-builder proxy mirroring `RemoteWriteView`'s p
 
 ---
 
+## KI-102 — No timeout on an isolated plugin call — a hung plugin blocks the caller indefinitely
+
+**Severity:** Architecture gap — a real, currently-unbounded blocking risk with no test or mitigation
+**Milestone target:** Backlog — found in round-2 review of M4's plugin process isolation (ADR-0051)
+**SPEC reference:** ADR-0051 (plugin process isolation)
+
+### Description
+
+`plugins/sandbox/runner.py`'s `_dispatch_loop` reads every message from the sandboxed child via `protocol.recv_from_child`, which wraps `Connection.recv_bytes()` — a blocking call with no deadline. A plugin whose own code hangs (an infinite loop, a blocked network call the platform doesn't deny, a deadlock) never sends another message, so the parent's calling thread blocks indefinitely inside `recv_bytes()`. `run_isolated`'s own cleanup (`process.join(timeout=5)` then `process.terminate()`) is in a `finally` block that only runs once `_dispatch_loop` itself returns or raises — it provides no help while still blocked waiting on the child's next message, so it does not bound the caller's own wait time despite looking like it would.
+
+This is a real, if narrower, escalation of a pre-existing gap: in-process plugin execution (pre-ADR-0051) also had no timeout, but a hang there was at least visible as the caller's own thread doing nothing productive, in the caller's own process. Under isolation, the caller's thread is blocked on IPC specifically, with a live but unresponsive child process consuming resources on the other end of the pipe — a materially different (and, for a "Production 1.0" milestone, more consequential) failure mode to leave unbounded.
+
+### Fix
+
+Not started. Bound `recv_bytes()` with a `poll(timeout)` check before each blocking read (`Connection.poll()` accepts a timeout and returns whether data is ready without blocking indefinitely), escalating to `process.terminate()`/`process.kill()` and a clear `PluginError` if a deadline is exceeded. No design decision needed for the mechanism; the open question is what the default deadline should be (and whether it should be configurable per `register()`/per-call) — SPEC §9 names no performance budget for plugin invocation to anchor a default against, so this needs its own, if small, design call before implementation.
+
+---
+
+## KI-103 — Three more known-vulnerable transitive dependencies (`anyio`, `httpx2`, `httpcore2`); `pip-audit` CI gate red a third time ✓ RESOLVED (Backlog)
+
+**Severity:** Security/supply-chain — `anyio` is runtime-reachable this time, unlike KI-062/KI-087's dev-only exposure
+**Milestone target:** Backlog — resolved without a milestone change
+**SPEC reference:** Implementation Plan §7.1 (supply-chain gate)
+
+### Description
+
+`pip-audit` against the full locked dependency set reported nine findings, found while reviewing M4's plugin process isolation (ADR-0051) — unrelated to that branch's own changes (`git diff main...HEAD -- uv.lock` before this fix touched only the two `pyseccomp` lines it added):
+- `anyio==4.14.1` — CVE-2026-63374 / CVE-2026-64847 / CVE-2026-63349, fixed in `4.14.2`. **Runtime-reachable**, unlike KI-062's and KI-087's dev/docs-only findings: `mcp` and `starlette` both depend on it, so it ships with `ontolith[mcp]`, `ontolith[rest]`, and `ontolith[graphql]`, on the authenticated request path. CVE-2026-64847 in particular concerns `anyio`'s own process-pool workers not draining a subprocess's `stderr`, worth a second look given this KI was found while building a `multiprocessing`-based sandbox — Ontolith's own sandbox doesn't use `anyio`'s process pool, so it isn't directly affected, but the failure shape (untrusted/faulty code writing too much to a pipe) is exactly this project's own current threat model.
+- `httpcore2==2.7.0` — PYSEC-2026-3844, fixed in `2.10.0`.
+- `httpx2==2.7.0` — PYSEC-2026-3845/3846/3847/3848/3849, fixed across `2.10.0`–`2.12.0`. Dev-only (test-suite dependency), same class as KI-062's original two findings.
+
+`.github/workflows/security.yml`'s `pip-audit` step is unconditional, so the `scan` job fails on every PR regardless of that PR's own changes — the third recurrence of the identical pattern KI-062 and KI-087 already resolved once each; KI-087's own closing note anticipated this happening again.
+
+### Fix
+
+`uv lock --upgrade-package anyio --upgrade-package httpx2 --upgrade-package httpcore2` — same mechanical fix as KI-062/KI-087, all three transitive (no direct `pyproject.toml` dependency changed). `anyio` resolved to `4.14.2`; `httpcore2`/`httpx2` both resolved to `2.13.0`. `uv run pip-audit` now reports zero findings.
+
+---
+
 ## Format
 
 Each entry follows this structure:

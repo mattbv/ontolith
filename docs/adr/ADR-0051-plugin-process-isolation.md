@@ -231,12 +231,16 @@ covers both "the plugin raised on purpose" and "the sandbox denied a syscall," r
   §9 performance budgets, since none of those budgets name plugin invocation; `isolate=False` is the
   documented opt-out for a caller who has already decided this overhead isn't worth paying for a
   specific, trusted registration.
-- ⚠️ **A plugin's constructor still runs once, unsandboxed, in the parent process** (unchanged from
-  ADR-0015/`register()`'s existing behavior) purely to validate the manifest and catch a broken
-  `__init__` early, before the security-relevant boundary this ADR adds even applies — an operator
-  registering a plugin at all is already an explicit trust decision (`register()` requires `admin`
-  capability, unchanged), so this is the same trust boundary ADR-0015 already relied on, not a new
-  one this ADR introduces.
+- ⚠️ **A plugin's module import and constructor still run once, unsandboxed, in the parent process**
+  (unchanged from ADR-0015/`register()`'s existing behavior — `entry_point.load()` imports the
+  plugin's module, then `plugin_class()` constructs it) purely to validate the manifest and catch a
+  broken `__init__` early, before the security-relevant boundary this ADR adds even applies —
+  arbitrary module-level code, not just the constructor, runs with full parent privileges at this
+  point (round-2 review finding: naming only "constructor" here understated the exposure by one
+  step). An operator registering a plugin at all is already an explicit trust decision (`register()`
+  requires `admin` capability, unchanged), so this is the same trust boundary ADR-0015 already relied
+  on, not a new one this ADR introduces — but it is, honestly, the single largest remaining
+  unsandboxed surface in this design.
 - ⚠️ **A third-party exception type that isn't picklable loses its exact type crossing the
   boundary** (degrades to a plain `RuntimeError` carrying the original name and message) — documented
   above, a narrow fidelity loss versus `isolate=False`'s exact-type-preserving behavior.
@@ -296,8 +300,10 @@ whose `find_class` refuses to construct any class instance not on an explicit al
 arrive as one of `None`/`bool`/`int`/`float`/`str`/`bytes`/`list`/`dict`/`tuple`, which pickle's own
 opcodes handle without ever calling `find_class` at all. (2) `wire.to_wire_result` — a plugin's own
 return value is reduced to that same JSON-safe shape before it's ever sent (a `@dataclass` becomes a
-plain `dict` via `dataclasses.asdict()`), so the common case (a reference plugin's `ImportReport`-
-shaped return value) never needs the restricted unpickler to reconstruct an arbitrary class at all.
+plain `dict`, each field value recursively reduced the same way — deliberately not
+`dataclasses.asdict()`, which would `deepcopy` a non-dataclass field value unrestricted and could
+defeat this same guarantee), so the common case (a reference plugin's `ImportReport`-shaped return
+value) never needs the restricted unpickler to reconstruct an arbitrary class at all.
 **This means a plugin's dataclass-shaped return value now crosses an isolated call as a `dict`, not
 its original type — `isolate=False` still returns the real object unchanged.**
 
@@ -365,11 +371,67 @@ holding a backend reference), consulted before `getattr` ever runs. `RestrictedU
   that can't cross the boundary, raised at call time — this ADR's Decision section previously named
   a different exception type at a different time, both wrong; corrected.
 
+**Round-2 review — both CRITICAL fixes independently re-verified via 12+16 reproduction variants
+(hostile-pickle payloads and dispatch-escalation attempts, respectively, plus a full end-to-end run
+with a real malicious plugin under a real entry point) — both hold, no third bypass of the process
+boundary found. Six smaller issues found and fixed in the same round:**
+- `wire_exception` checked the exception's full **MRO** against the allowlist, not its concrete
+  class — since every exception's MRO includes `("builtins", "Exception")` (itself allowlisted), the
+  check always passed regardless of the concrete type, so the documented `RuntimeError` fallback
+  never fired for a picklable-but-not-allowlisted exception (e.g. a plugin-defined `MyValueError`).
+  The parent's `restricted_loads` then refused the concrete class outright, destroying the
+  exception's message entirely instead of degrading gracefully. Fixed: checks
+  `(type(exc).__module__, type(exc).__name__)` — the concrete class — matching
+  `RestrictedUnpickler.find_class`'s own check exactly.
+- A malformed message's own *shape* (wrong arity, an unhashable tag or method name) previously
+  escaped `_dispatch_loop` as a raw `ValueError`/`TypeError`/`IndexError`, contradicting
+  `run_isolated`'s own documented `PluginError` contract for "a malformed or disallowed message" —
+  `restricted_loads` already kept every value's *content* safe, this closes the same hole for the
+  message's own shape. Fixed: message handling is wrapped so any such error is converted to
+  `PluginError` and the child process is terminated, the same severity as an `UnpicklingError`.
+- `to_wire_result` reduced a dict's *values* but not its *keys* — a hostile key still failed closed
+  (the parent's `restricted_loads` refuses it regardless), but the function's own "JSON-safe" promise
+  didn't hold for keys. Fixed: keys are reduced too.
+- The new `ENFORCEMENT` message had no cap on how many a child could send — a child sending
+  thousands produced one `WARNING` per message through `kb.observability`, a log-amplification
+  vector. Fixed: only the first `ENFORCEMENT` message per call is honored.
+- Added `execve`/`execveat` to the filesystem deny-list: the kernel opens the target program image
+  internally, bypassing `open`/`openat`, so `filesystem=False` previously denied *reading* a file's
+  contents but not *running* it as a new program. Bounded even before this fix — an installed filter
+  is inherited across `execve` (`NO_NEW_PRIVS`), so the new image runs under the same restrictions,
+  not a wider set — but worth closing directly rather than relying on that as the only mitigation.
+- **The `ENFORCEMENT` message is self-reported by the untrusted child, so a malicious plugin can
+  forge it** (report `applied=True` when it isn't, or send nothing at all) — not fixed, and
+  deliberately so: the message is a diagnostic courtesy for a *cooperating* plugin/operator
+  debugging a misconfiguration, not a security control. Forging it doesn't weaken what's actually
+  enforced (the real seccomp filter state is entirely independent of what the child claims about
+  it) — it can only make the operator-facing warning wrong, which a plugin author with no reason to
+  lie (accepting the manifest's own declared capabilities) never triggers. Documented here so the
+  distinction is explicit, not implied.
+- **A `filesystem=True` registration (already drawing its own loud "declared, not enforced" warning)
+  can still reach the parent's memory via `/proc/<ppid>/mem`**, the file-based equivalent of the
+  `process_vm_readv`/`process_vm_writev` syscalls this ADR's `_PROCESS_ISOLATION_SYSCALLS` denies —
+  since those syscalls are denied but the file that does the same thing through `open`/`pread` isn't,
+  when filesystem access is itself allowed. Not a regression (the same `filesystem=True` declaration
+  already accepts unenforced filesystem access broadly) and host-dependent (blocked by
+  `ptrace_scope=1`, the common Linux default, when the target is an ancestor process) — documented
+  as a residual gap in what "denied unconditionally whenever any restriction is installed" (above)
+  can actually deliver once `filesystem=True` is declared.
+- Nine known CVEs in transitive dev/runtime dependencies (`anyio`, `httpx2`, `httpcore2`) were
+  failing `pip-audit` — not introduced by this branch (`git diff main...HEAD -- uv.lock` before this
+  fix touched only the two `pyseccomp` lines) but blocking this PR's own CI regardless, and `anyio`
+  is runtime-reachable (`mcp`/`starlette` depend on it), unlike KI-062's/KI-087's dev-only exposure —
+  filed and resolved as its own entry, **KI-103**, rather than folded silently into this ADR, since
+  it's unrelated to plugin isolation itself.
+
 **Deliberately not fixed in this pass, tracked as known limitations rather than silently left
 inaccurate:**
 - **No timeout anywhere on an isolated call.** A plugin that hangs blocks the calling host thread
-  indefinitely (`parent_conn.recv()`/`process.join()` have no deadline). Pre-existing risk in a
-  different shape (in-process execution also had no timeout), but the blocking-`recv()` shape is new.
+  indefinitely — `_dispatch_loop`'s `recv_bytes()` call has no deadline (`run_isolated`'s own
+  cleanup `finally` block does bound `process.join(timeout=5)`, but only runs after `_dispatch_loop`
+  itself returns or raises, so it doesn't help while still blocked in `recv_bytes()`). Filed as
+  **KI-102**. Pre-existing risk in a different shape (in-process execution also had no timeout), but
+  the blocking-`recv_bytes()` shape is new.
 - **A `RemoteWritable.write()` call is one full IPC round trip per call**, not batched — a plugin
   that writes in small increments (e.g. `json.dump`'s per-token writes) pays a real, measured
   latency cost proportional to call count, not just to spawn overhead. `isolate=False` is the
@@ -391,11 +453,16 @@ inaccurate:**
 - **Remote `QueryBuilder`/`AsOfView` proxy for isolated plugins** — filed as **KI-101**: an isolated
   plugin cannot call `kb.query(...)`/`kb.as_of(...)` today; no shipped reference plugin needs it yet,
   but a future `Reasoner`/`Connector` plugin doing anything beyond `assertions()`'s flat filter would.
+- **No timeout on an isolated call** — filed as **KI-102** (round-2 review finding): a hung plugin
+  blocks the calling host thread indefinitely; see this Update section's own "Deliberately not fixed"
+  list above for the precise blocking call.
 
 ## References
 
 - `docs/known-issues.md` KI-014 (network/filesystem half; Linux now resolved, macOS/Windows remain
-  open per this ADR's own scoping) and **KI-101** (new, the `.query()`/`.as_of()` follow-up above)
+  open per this ADR's own scoping), **KI-101** (new, the `.query()`/`.as_of()` follow-up above),
+  **KI-102** (new, the no-timeout follow-up above), and **KI-103** (new, unrelated to plugin
+  isolation itself — the `anyio`/`httpx2`/`httpcore2` `pip-audit` fix found while reviewing this ADR)
 - ADR-0015 (Plugin Capability Isolation — the storage-capability half this ADR doesn't change, and
   the "Python has no true encapsulation" gap this ADR closes structurally)
 - ADR-0044 (Observability — `kb.observability` is how this ADR's enforcement-degradation warning is

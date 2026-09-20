@@ -39,7 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no true encapsulation" gap structurally, on every platform — a plugin's own code can no longer
   reach `view._kb` or any other live object graph, since only picklable messages cross the boundary
   at all, decoded by a restricted unpickler that only ever reconstructs this project's own exception
-  hierarchy as a class instance (everything else must arrive as `None`/`bool`/`int`/`float`/`str`/
+  hierarchy plus a short list of ordinary builtin exceptions as a class instance (everything else
+  must arrive as `None`/`bool`/`int`/`float`/`str`/
   `bytes`/`list`/`dict`/`tuple`), and every proxied method call is checked against an explicit
   allow-list before dispatch. Two review rounds found the first version of this design didn't
   actually have those two properties — a plugin's own message to the parent was unpickled with plain
