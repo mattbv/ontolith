@@ -514,6 +514,41 @@ the `ENFORCEMENT` fix's own "only the first message" cap could let a malicious c
 `applied=False`* is honored," which closes that without reopening the log-flood round 2's own fix
 was for (verified: a flood of 50 genuine `applied=False` messages still logs exactly once).
 
+Round 3 also added a length cap to `recv_bytes()` (`protocol.py`'s `_MAX_MESSAGE_BYTES`, 256 MiB) —
+generous for any legitimate isolated-call payload this project ships today, small enough that one
+oversized message from a malicious child can't grow the parent's memory unbounded before a single
+byte of content is even inspected. This shipped in the same commit as the rest of round 3's fixes
+but was missing from this record until round 4 pointed it out.
+
+**Round-4 review — both CRITICALs re-reproduced a fourth time (21+ dispatch-escalation variants,
+several hostile-`__reduce__` placements) after round 3's `_dispatch_loop` control-flow refactor —
+both still hold, no new self-inflicted regression from that refactor. One MEDIUM found and fixed,
+closing the last uncovered direction of the message-handling hardening rounds 2-3 built:**
+- **MEDIUM — the *send* side of `_dispatch_loop` was never wrapped, only the *receive* side.**
+  Rounds 2-3 hardened every path where the parent *reads* from the child (a malformed message, a
+  decode failure, an EOF that might not mean the process exited) to surface as `PluginError` and
+  actively reap the child. The three `protocol.send_*` calls in the same loop (the CALL allow-list
+  refusal, the real method's success reply, the real method's own exception forwarded back) were
+  never covered — if the child had already crashed or exited by the time the parent tried to reply,
+  `send_result`/`send_error` raised a raw `BrokenPipeError` that propagated to the caller verbatim,
+  contradicting `run_isolated`'s own documented contract ("`PluginError`: the child process ended
+  without completing the call") and never actively reaping the child (`run_isolated`'s own `finally`
+  still did, just up to 5s slower). Reproduced deterministically, including the fully non-adversarial
+  case: a plugin makes an ordinary `kb.assertions()` call and then dies (segfault, `os._exit`,
+  OOM-kill) before reading the reply. Fixed: `_dispatch_loop`'s wrapping `try`/`except` around
+  `_handle_one_message` now also catches `OSError` (covers `BrokenPipeError`/
+  `ConnectionResetError`) and `PluginError` (covers the "unknown protocol kind" branch
+  `_handle_one_message` itself raises directly, a second, smaller gap round 4 found in the same
+  sweep — it also skipped `_terminate_and_join`) — both now terminate the child and surface as
+  `PluginError`, the same as every other protocol-level failure in this loop.
+- Two doc-accuracy fixes from the same round: `_terminate_and_join`'s own docstring claimed it ran
+  on "every exceptional path" when two didn't yet (the "unknown kind" branch and the send-side
+  failures above, both now fixed to match); `registry.py`'s warning docstring claimed a declared-
+  `True` capability is "never restricted, on any platform" — true for the *specific* capability
+  declared `True`, but round 3's own `_PROCESS_ISOLATION_SYSCALLS` fix means a `network=True,
+  filesystem=True` registration now gets a `ptrace`/`process_vm_*` denial regardless, an unrelated,
+  always-on floor the original wording didn't anticipate — reworded to say so explicitly.
+
 ## Follow-ups filed
 
 - **macOS/Windows OS-level network/filesystem enforcement** — no KI filed as a *new* gap; this
