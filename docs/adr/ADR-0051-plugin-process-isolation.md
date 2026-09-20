@@ -445,6 +445,75 @@ inaccurate:**
   consequential of the two untested directions; adding it is a natural next increment, not deferred
   for a design reason.
 
+**Round-3 review — both CRITICAL fixes re-verified a third time (28 reproduction variants across
+both, plus a real malicious plugin installed under a real entry point and invoked via
+`run_isolated()`) — both still hold, no third bypass of the process boundary found. Round 2's own
+fixes, however, were not the convergent pass the trend suggested: two of its six fixes each
+introduced a new regression, one of them reachable through two shipped reference plugins. All fixed
+here, four for real, two by an explicit design decision:**
+- **HIGH — round-2 fix #2 (malformed-message handling) also caught a plugin's own legitimate
+  exception when it happened to be one of the four wrapped types.** `_handle_one_message`'s FAILED
+  branch raised the plugin's unwired exception *from inside* the same function round 2 wrapped in
+  `except (ValueError, TypeError, IndexError, KeyError)` — and every `OntolithError` subclass aside,
+  a plugin's own `ValueError`/`TypeError`/`KeyError`/`IndexError` all cross the boundary as
+  themselves (they're on `RestrictedUnpickler`'s builtin-exception allowlist). Reproduced through two
+  shipped reference plugins: `RdfExporter.export()` with no schema registered raises `ValueError`
+  unsandboxed, but `PluginError: ...sent a malformed message... (ValueError: ...)` under
+  `isolate=True` (the default); `JsonExporter.export(target=12345)` raises `TypeError` unsandboxed,
+  same mislabelling under isolation. Both plugins document these exceptions in their own `Raises:`
+  sections, so a caller's `except ValueError:`/`except TypeError:` silently stopped working the
+  moment the plugin was sandboxed. Fixed: `_handle_one_message`'s FAILED branch now returns a
+  `_Failed` wrapper instead of raising directly, and `_dispatch_loop` raises the wrapped exception
+  *outside* the try/except that catches a malformed message's own shape — the two concerns (a
+  plugin's own exception vs. a protocol violation) are now structurally distinct, not
+  distinguished by exception type alone.
+- **MEDIUM — the EOF handler's plain `process.join()` (no timeout) assumed EOF always means the
+  process already exited.** `restricted_loads(b"")` raises `EOFError` too (pickle's own decoder, not
+  the pipe closing) — a still-alive child that deliberately sends an empty message and then keeps
+  running would hang the parent's `process.join()` forever, since `_dispatch_loop`'s own EOF branch
+  never actually terminates the process, only waits for it. Fixed: every exceptional path in
+  `_dispatch_loop` now goes through a new `_terminate_and_join` helper (`terminate()` then a bounded
+  `join(timeout=5)`, `kill()` as a last resort) instead of an unbounded `join()` — reproduced with a
+  child that sends `b""` then sleeps 30s: the parent now returns in well under 10s instead of hanging.
+- **MEDIUM — round-2 fix #2's decode-error handling only caught `pickle.UnpicklingError`, not every
+  way `restricted_loads` can fail on corrupt bytes.** A bogus pickle protocol byte raises a plain
+  `ValueError`; a malformed string opcode raises `UnicodeDecodeError` (itself a `ValueError`
+  subclass) — neither was caught by the narrower clause, so both escaped as raw exceptions, and
+  (unlike the `UnpicklingError` branch) neither terminated the child. Reproduced with hand-crafted
+  corrupt byte sequences for both. Fixed: the decode step's error handling is now `except EOFError`
+  (specific, see above) followed by `except Exception` (broad — any other decode failure is treated
+  as a protocol violation, same severity as an explicit `RestrictedUnpickler` refusal, and now
+  actively terminates the child too).
+- **MEDIUM — round-2 fix #3 (dict-key reduction in `to_wire_result`) broke every tuple-keyed dict.**
+  Reducing a key through `to_wire_result` itself ran it through the same list/tuple branch a value
+  would use, which always returns a `list` (JSON has no tuple type) — an unhashable result, so
+  `to_wire_result({(1, 2): "v"})` raised a raw, undocumented `TypeError: unhashable type: 'list'`
+  where it had previously (pre-round-2) worked, since a tuple of scalars is exactly as safe as a list
+  of them for `restricted_loads`'s purposes. Fixed: keys go through a new, narrower
+  `_reduce_dict_key` — scalars pass through, tuples recurse *as tuples*, anything else raises the
+  documented `UnwirableArgumentError` instead of a raw `TypeError`.
+- **LOW — `_PROCESS_ISOLATION_SYSCALLS` (the `ptrace`/`process_vm_*` denial) was skipped entirely
+  for the single most-capable registration** (`network=True, filesystem=True`): the early-return "no
+  restriction needed" branch ran before those syscalls were ever added to the deny list, so no filter
+  was installed at all in that case. Fixed: the process-isolation syscalls are now unconditional,
+  included even when neither `network` nor `filesystem` needs denying — they're a floor on what a
+  plugin may reach *around* the boundary, not a consequence of what it's denied *through* it.
+- **LOW (design decision, not a code fix) — the `ptrace_scope` rationale comment had the attack
+  direction backwards.** It claimed `ptrace_scope=1` (a distro default on Ubuntu/Debian, not — as
+  originally stated — a kernel-wide default) *permits* the child-to-parent attack this denial closes;
+  YAMA's `ptrace_scope=1` actually confines a *tracer* to its own *descendants*, so it already
+  *blocks* exactly this direction on hosts that have it — the denial defends the `ptrace_scope=0`
+  hosts instead, where nothing else stops it. Corrected in place (`enforcement.py`'s own comment),
+  not treated as an ADR self-Update, since it was never a design decision, only a wrong justification
+  for a decision that itself was already correct.
+
+Two round-2 items (the self-reported `ENFORCEMENT` message, `/proc/<ppid>/mem` under
+`filesystem=True`) were re-examined and their reasoning confirmed sound; round 3 additionally found
+the `ENFORCEMENT` fix's own "only the first message" cap could let a malicious child's forged
+`applied=True` suppress a later *genuine* `applied=False` — narrowed to "only the first *genuine
+`applied=False`* is honored," which closes that without reopening the log-flood round 2's own fix
+was for (verified: a flood of 50 genuine `applied=False` messages still logs exactly once).
+
 ## Follow-ups filed
 
 - **macOS/Windows OS-level network/filesystem enforcement** — no KI filed as a *new* gap; this
