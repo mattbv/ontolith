@@ -159,15 +159,20 @@ class TestUnenforcedCapabilityWarning:
     silently said nothing about an unenforced `False` declaration, a
     security review finding).
 
-    The tests below pass isolate=False explicitly - not testing that
+    Most tests below pass isolate=False explicitly - not testing that
     parameter itself, just making the "not enforced" condition true
     deterministically, independent of whether this host happens to be
     Linux with a working pyseccomp/libseccomp install (isolate=True would
     make the warning's presence depend on the platform running the test
-    suite, see test_plugin_sandbox.py's own enforcement-availability tests
-    for that axis instead). The "no warning" test doesn't declare
-    network/filesystem at all, so isolate's value doesn't affect it either
-    way.
+    suite otherwise). The two exceptions monkeypatch
+    `enforcement.enforcement_available` directly instead, for the same
+    determinism reason: one to pin that "declared True" still warns even
+    when isolate=True and enforcement is genuinely available (round-2
+    review finding — every isolate=False test in this class passes
+    trivially under the bug this pins, since isolate=False makes
+    "enforced_for_real" false regardless of what the declared-True branch
+    does), the other to pin the one combination where no warning should
+    fire at all.
 
     Asserted via a RecordingObservabilitySink swapped onto kb.observability
     (SPEC §18/ADR-0044), not caplog: the warning goes through
@@ -198,6 +203,40 @@ class TestUnenforcedCapabilityWarning:
         assert "network/filesystem" in message
         assert "never enforced as a ceiling" in message
         assert fields["plugin"] == "trivial-importer-net-fs"
+        assert fields["declared_true"] == ["network", "filesystem"]
+
+    def test_declared_true_still_warns_even_when_isolate_true_and_enforcement_available(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-2 review finding: a mutation reinstating the original
+        backwards suppression (`if enforced_for_real: return` before the
+        declared_true check even ran) passed every other test in this
+        class, because they all pass isolate=False. A declared-True
+        capability is never restricted by seccomp regardless of platform
+        (seccomp only denies a capability declared False) - this test
+        pins that the warning fires even in the one combination
+        (isolate=True, real enforcement available) every other test in
+        this class can't reach, mutation-tested against the exact bug
+        that shipped once already."""
+        _patch_entry_points(
+            monkeypatch,
+            _entry_point(
+                "trivial-importer-net-fs",
+                "tests.fixtures.plugins.trivial_importer_network_and_filesystem",
+                "TrivialImporterNetworkAndFilesystem",
+            ),
+        )
+        monkeypatch.setattr(
+            "ontolith.plugins.registry.enforcement.enforcement_available", lambda: True
+        )
+        sink = RecordingObservabilitySink()
+        kb.observability = sink
+        registry = PluginRegistry(kb)
+        registry.register("trivial-importer-net-fs", author=ADMIN, isolate=True)
+
+        [(level, message, fields)] = sink.logs
+        assert level == logging.WARNING
+        assert "never enforced as a ceiling" in message
         assert fields["declared_true"] == ["network", "filesystem"]
 
     def test_warns_naming_only_filesystem_when_only_filesystem_requested(

@@ -210,9 +210,17 @@ def run_isolated(
             this, not guarantee it.
 
     Returns:
-        Whatever the plugin's real method returned (reduced to a JSON-safe
-        shape by `wire.to_wire_result` if the real value was a dataclass —
-        see ADR-0051's Consequences).
+        Whatever the plugin's real method returned, as decoded by
+        `restricted_loads` on the parent side (round-2 review finding:
+        `to_wire_result` runs in the *child*, reducing a dataclass return
+        value to a JSON-safe `dict` before it's ever sent — see ADR-0051's
+        Consequences — but it is not itself a parent-side control; the
+        parent's only real guarantee is whatever `restricted_loads`
+        accepted, which also includes an allowlisted exception *instance*
+        with attacker-chosen `args`/`__dict__` if a plugin sends one as
+        its own "result" rather than raising it. A caller expecting a
+        `dict` should not assume it cannot instead receive an
+        `Exception`).
 
     Raises:
         UnwirableArgumentError: an argument can't cross the boundary.
@@ -262,6 +270,14 @@ def _dispatch_loop(
     object, including `__setattr__` (security review finding: this is
     what closes it).
     """
+    # A single-element mutable container (not a plain bool) so
+    # _handle_one_message can update it across loop iterations - only the
+    # first ENFORCEMENT message is honored; a malicious child sending an
+    # unbounded stream of them (nothing in the protocol otherwise limits
+    # how many it may send) would otherwise flood kb.observability with
+    # one WARNING per message (round-2 review finding).
+    enforcement_reported = [False]
+
     while True:
         try:
             message = protocol.recv_from_child(parent_conn)
@@ -279,43 +295,91 @@ def _dispatch_loop(
                 f"completing {method_name!r} — terminated. ({exc})"
             ) from exc
 
-        kind = message[0]
-        if kind == protocol.ENFORCEMENT:
-            _, applied, reason = message
-            if not applied:
-                observability.log(
-                    logging.WARNING,
-                    f"OS-level capability enforcement did not apply for this call to "
-                    f"{method_name!r}: {reason}. capabilities.network/.filesystem are not "
-                    "enforced for this specific call (ADR-0051).",
-                    method=method_name,
-                )
-            continue
-        if kind == protocol.CALL:
-            _, tag, call_method_name, call_args, call_kwargs = message
-            real_obj = real_objects.get(tag)
-            if real_obj is None or call_method_name not in _allowed_methods_for(real_obj):
-                protocol.send_error(
-                    parent_conn,
-                    wire_exception(
-                        PluginError(
-                            f"Call to {call_method_name!r} on tag {tag!r} is not permitted "
-                            "inside a sandboxed plugin call"
-                        )
-                    ),
-                )
-                continue
-            try:
-                result = getattr(real_obj, call_method_name)(*call_args, **call_kwargs)
-                protocol.send_result(parent_conn, result)
-            except Exception as exc:  # noqa: BLE001 - forwarded to the child as-is
-                protocol.send_error(parent_conn, wire_exception(exc))
-        elif kind == protocol.DONE:
-            return message[1]
-        elif kind == protocol.FAILED:
-            raise unwire_exception(message[1])
-        else:  # pragma: no cover - defensive, protocol is closed and internal
-            raise PluginError(f"Unknown sandbox protocol message kind: {kind!r}")
+        try:
+            outcome = _handle_one_message(
+                message, parent_conn, real_objects, method_name, observability, enforcement_reported
+            )
+        except (ValueError, TypeError, IndexError, KeyError) as exc:
+            # A malformed message shape (wrong arity, an unhashable tag/
+            # method name, etc.) - round-2 review finding: this previously
+            # escaped as a raw ValueError/TypeError/IndexError, violating
+            # this function's own documented PluginError contract for "a
+            # malformed or disallowed message." restricted_loads already
+            # keeps the *content* of every value safe; this closes the
+            # same hole for the message's own *shape*.
+            process.terminate()
+            process.join()
+            raise PluginError(
+                f"Plugin process sent a malformed message while completing {method_name!r} "
+                f"— terminated. ({type(exc).__name__}: {exc})"
+            ) from exc
+        if outcome is not _CONTINUE:
+            return outcome
+
+
+_CONTINUE = object()  # sentinel: _handle_one_message wants the loop to keep going
+
+
+def _handle_one_message(
+    message: tuple[Any, ...],
+    parent_conn: Any,
+    real_objects: dict[str, object],
+    method_name: str,
+    observability: ObservabilitySink,
+    enforcement_reported: list[bool],
+) -> object:
+    """Handle exactly one already-decoded message. Returns `_CONTINUE` to
+    keep looping, or the isolated call's final result (from a DONE
+    message). Raises `unwire_exception(...)` for a FAILED message, or lets
+    a malformed message's own unpacking error (ValueError/TypeError/
+    IndexError/KeyError) propagate — `_dispatch_loop`'s caller converts
+    that to a PluginError, since this function only has to worry about a
+    message that's well-typed per `restricted_loads` but the wrong shape.
+    """
+    kind = message[0]
+    if kind == protocol.ENFORCEMENT:
+        if enforcement_reported[0]:
+            return _CONTINUE  # only the first ENFORCEMENT message is honored
+        enforcement_reported[0] = True
+        _, applied, reason = message
+        if not applied:
+            observability.log(
+                logging.WARNING,
+                f"OS-level capability enforcement did not apply for this call to "
+                f"{method_name!r}: {reason}. capabilities.network/.filesystem are not "
+                "enforced for this specific call (ADR-0051).",
+                method=method_name,
+            )
+        return _CONTINUE
+    if kind == protocol.CALL:
+        _, tag, call_method_name, call_args, call_kwargs = message
+        real_obj = real_objects.get(tag)
+        if (
+            real_obj is None
+            or not isinstance(call_method_name, str)
+            or call_method_name not in _allowed_methods_for(real_obj)
+        ):
+            protocol.send_error(
+                parent_conn,
+                wire_exception(
+                    PluginError(
+                        f"Call to {call_method_name!r} on tag {tag!r} is not permitted "
+                        "inside a sandboxed plugin call"
+                    )
+                ),
+            )
+            return _CONTINUE
+        try:
+            result = getattr(real_obj, call_method_name)(*call_args, **call_kwargs)
+            protocol.send_result(parent_conn, result)
+        except Exception as exc:  # noqa: BLE001 - forwarded to the child as-is
+            protocol.send_error(parent_conn, wire_exception(exc))
+        return _CONTINUE
+    if kind == protocol.DONE:
+        return message[1]
+    if kind == protocol.FAILED:
+        raise unwire_exception(message[1])
+    raise PluginError(f"Unknown sandbox protocol message kind: {kind!r}")
 
 
 def _resolve_wired(value: object, child_conn: Any) -> object:

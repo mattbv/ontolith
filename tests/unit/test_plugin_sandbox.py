@@ -31,6 +31,7 @@ test session).
 from __future__ import annotations
 
 import io
+import logging
 import multiprocessing
 import sys
 import tempfile
@@ -40,15 +41,17 @@ import pytest
 
 from ontolith import Ontology
 from ontolith.core.errors import PluginError, ValidationError
+from ontolith.core.observability import NullObservabilitySink, RecordingObservabilitySink
 from ontolith.plugins.manifest import PluginCapabilities
 from ontolith.plugins.registry import PluginRegistry
-from ontolith.plugins.sandbox import enforcement
+from ontolith.plugins.sandbox import enforcement, protocol, runner
 from ontolith.plugins.sandbox.remote_view import RemoteReadOnlyView, RemoteWritable, RemoteWriteView
 from ontolith.plugins.sandbox.runner import IsolatedPluginProxy, run_isolated
 from ontolith.plugins.sandbox.wire import (
     RemoteViewMarker,
     RemoteWritableMarker,
     UnwirableArgumentError,
+    restricted_loads,
     unwire_exception,
     wire_exception,
     wire_value,
@@ -56,6 +59,13 @@ from ontolith.plugins.sandbox.wire import (
 from ontolith.plugins.views import ReadOnlyView, WriteView
 
 ADMIN = "admin@example.com"
+
+
+class _ModulePicklableValueError(ValueError):
+    """Module-level (so it's actually picklable - pickle needs an
+    importable qualname) stand-in for a plugin-defined exception type
+    that subclasses a builtin RestrictedUnpickler allows, without being
+    on the allowlist itself."""
 
 
 @pytest.fixture
@@ -150,6 +160,37 @@ class TestWireException:
         assert isinstance(restored, RuntimeError)
         assert "_Unpicklable" in str(restored)
         assert "boom" in str(restored)
+
+    def test_a_picklable_third_party_exception_also_degrades_to_runtimeerror(self) -> None:
+        """Round-2 review finding: a plugin-defined exception subclassing
+        an allowlisted builtin (e.g. ValueError) is picklable, but its
+        concrete class isn't on RestrictedUnpickler's allowlist - an
+        earlier version of this check used the MRO instead of the
+        concrete class, which always matched (every exception's MRO
+        includes "builtins.Exception", itself allowlisted), so this case
+        was never degraded and the message was destroyed wholesale when
+        the parent's restricted unpickler refused the concrete class."""
+
+        # _ModulePicklableValueError, not a locally-defined class here - a
+        # class defined inside a test function/method isn't picklable at
+        # all (pickle needs a module-level, importable qualname), which
+        # would make the "picklable" premise of this test false.
+        original = _ModulePicklableValueError("custom message")
+        import pickle
+
+        pickle.dumps(original)  # sanity: confirms this case really is picklable
+
+        wired = wire_exception(original)
+        assert isinstance(wired, RuntimeError)
+        assert "_ModulePicklableValueError" in str(wired)
+        assert "custom message" in str(wired)
+
+        # And restricted_loads must actually accept the degraded form -
+        # this is what a real cross-process round trip does, not just
+        # wire_exception/unwire_exception in the same process.
+        restored = restricted_loads(pickle.dumps(wired))
+        assert isinstance(restored, RuntimeError)
+        assert "custom message" in str(restored)
 
 
 class TestRemoteWritable:
@@ -352,6 +393,47 @@ class TestRunIsolatedAgainstRealReferencePlugins:
 
         assert loaded.instance.plugin_class is JsonExporter
 
+    def test_validator_end_to_end_through_a_registry_loaded_view(self, kb: Ontology) -> None:
+        """H1 (round-1 finding): a PluginRegistry-loaded validator's kb is
+        a real ReadOnlyView (not the trusted Ontology instance passed when
+        a validator is wired into Ontology's own validators/
+        completeness_validators parameters instead - see ports.py's
+        ValidatorKbView docstring, that combination is unsupported and
+        unrelated to PluginRegistry). Calling it the same way every other
+        plugin kind is called through the registry works correctly -
+        round-2 review finding: this exact path had no test before."""
+        from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
+
+        schema = SchemaIR(
+            namespace="default",
+            version=1,
+            concepts={
+                "Person": ConceptDef(
+                    name="Person", properties={"name": PropertyDef(name="name", value_type="Text")}
+                )
+            },
+        )
+        kb.apply_schema(schema, author=ADMIN)
+        entity = kb.create_entity("Person", author=ADMIN)
+        assertion = kb.assert_literal(entity.id, "Person.name", "Ada Lovelace", "Text", ADMIN)
+
+        loaded = PluginRegistry(kb).register("required-fields-validator", author=ADMIN)
+        assert isinstance(loaded.instance, IsolatedPluginProxy)
+
+        violations = loaded.instance.validate(assertion, loaded.view)
+        assert violations == []
+
+        # And a genuine violation is reported correctly too, not just the
+        # empty-list happy path.
+        incomplete_entity = kb.create_entity("Person", author=ADMIN)
+        incomplete_assertion = kb.assert_literal(
+            incomplete_entity.id, "Person.name", "", "Text", ADMIN
+        )
+        kb.retract(incomplete_assertion.id, ADMIN)
+        violations = loaded.instance.validate(incomplete_assertion, loaded.view)
+        assert violations
+        assert "missing required predicate" in violations[0]
+
     def test_json_export_end_to_end_via_a_real_writable_proxy(self, kb: Ontology) -> None:
         from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
 
@@ -377,3 +459,157 @@ class TestRunIsolatedAgainstRealReferencePlugins:
         # would return the real ExportReport instance unchanged.
         assert report == {"assertions_written": 1}
         assert "Ada Lovelace" in buf.getvalue()
+
+
+# --- Module-level child-process targets --------------------------------
+# multiprocessing's "spawn" pickles the target by reference (module +
+# qualname), so these can't be closures/lambdas defined inside a test.
+
+
+def _child_sends_hostile_reduce(child_conn: object) -> None:
+    """CRITICAL-1 PoC: a plugin returning an object whose __reduce__ names
+    an arbitrary callable, as the DONE message's own result."""
+    import os
+    import pickle
+
+    class _Hostile:
+        def __reduce__(self) -> tuple[object, tuple[str]]:
+            return (os.system, (f"touch {_MARKER_PATH}",))  # nosec B605 - test-only PoC
+
+    child_conn.send_bytes(pickle.dumps((protocol.DONE, _Hostile())))  # type: ignore[attr-defined]
+
+
+def _child_attempts_setattr_escalation(child_conn: object) -> None:
+    """CRITICAL-2 PoC: a plugin calling __setattr__ on its own kb proxy's
+    tag, targeting the parent's real view object directly - no pickle
+    trickery, plain strings."""
+    import pickle
+
+    child_conn.send_bytes(  # type: ignore[attr-defined]
+        pickle.dumps(
+            (protocol.CALL, "kb", "__setattr__", ("_principal_id", "admin@example.com"), {})
+        )
+    )
+    child_conn.recv()  # type: ignore[attr-defined]  # the ERROR reply, discarded
+    child_conn.send_bytes(pickle.dumps((protocol.DONE, "done")))  # type: ignore[attr-defined]
+
+
+def _child_calls_write_capable_method_on_a_readonly_tag(child_conn: object) -> None:
+    """_allowed_methods_for must be keyed to the real object's actual
+    type, not a flat "any allowed name anywhere" set - a plugin with only
+    ReadOnlyView access must not reach create_entity/propose/propose_ref/
+    retract, even though those names are valid on a WriteView tag."""
+    import pickle
+
+    child_conn.send_bytes(  # type: ignore[attr-defined]
+        pickle.dumps((protocol.CALL, "kb", "create_entity", ("Person",), {}))
+    )
+    kind, payload = child_conn.recv()  # type: ignore[attr-defined]
+    child_conn.send_bytes(pickle.dumps((protocol.DONE, (kind, str(payload)))))  # type: ignore[attr-defined]
+
+
+_MARKER_PATH = "/tmp/ontolith_test_plugin_sandbox_pwned_marker"  # nosec B108 - test-only
+
+
+class TestDispatchLoopSecurityBoundary:
+    """Direct reproduction of both CRITICAL findings against the real
+    _dispatch_loop, using a real multiprocessing.Pipe and a real spawned
+    child - the same level this project's own review rounds verified at,
+    not a diff-reading confirmation (round-2 review finding: the fix
+    commit shipped this exact boundary with no regression test at all)."""
+
+    def test_hostile_reduce_payload_does_not_execute_in_the_parent(self, tmp_path: Path) -> None:
+        import os
+
+        if os.path.exists(_MARKER_PATH):
+            os.remove(_MARKER_PATH)
+
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
+        process = ctx.Process(target=_child_sends_hostile_reduce, args=(child_conn,))
+        process.start()
+        child_conn.close()
+        try:
+            with pytest.raises(PluginError, match="malformed or disallowed"):
+                runner._dispatch_loop(parent_conn, process, {}, "import_", NullObservabilitySink())
+        finally:
+            parent_conn.close()
+            process.join(timeout=5)
+
+        assert not os.path.exists(_MARKER_PATH)
+        if os.path.exists(_MARKER_PATH):  # pragma: no cover - cleanup only if the PoC leaked
+            os.remove(_MARKER_PATH)
+
+    def test_setattr_escalation_does_not_reach_the_real_view(self, kb: Ontology) -> None:
+        kb.create_principal("lowtrust-plugin", kind="service", default_capability="write")
+        view = WriteView(kb, "lowtrust-plugin")
+
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
+        process = ctx.Process(target=_child_attempts_setattr_escalation, args=(child_conn,))
+        process.start()
+        child_conn.close()
+        try:
+            result = runner._dispatch_loop(
+                parent_conn, process, {"kb": view}, "import_", NullObservabilitySink()
+            )
+            assert result == "done"
+        finally:
+            parent_conn.close()
+            process.join(timeout=5)
+
+        assert view.principal_id == "lowtrust-plugin"
+
+    def test_readonly_tag_cannot_reach_write_capable_methods(self, kb: Ontology) -> None:
+        """The allow-list must be keyed to the real object's type via
+        isinstance, not a flat set of "any allowed name anywhere" -
+        create_entity is a real, allowed WriteView method, but must still
+        be refused against a tag that maps to a plain ReadOnlyView."""
+        view = ReadOnlyView(kb, ADMIN)
+
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
+        process = ctx.Process(
+            target=_child_calls_write_capable_method_on_a_readonly_tag, args=(child_conn,)
+        )
+        process.start()
+        child_conn.close()
+        try:
+            kind, message = runner._dispatch_loop(
+                parent_conn, process, {"kb": view}, "import_", NullObservabilitySink()
+            )
+        finally:
+            parent_conn.close()
+            process.join(timeout=5)
+
+        assert kind == protocol.ERROR
+        assert "not permitted" in message
+
+
+class TestEnforcementWarningReachesObservability:
+    """H3 (round-1 finding): a call-time enforcement failure must be
+    reported to the caller's observability sink, not silently discarded -
+    the registration-time warning can only predict this, not guarantee
+    it."""
+
+    def test_enforcement_not_applied_logs_a_warning(self, kb: Ontology) -> None:
+        # IsolatedPluginProxy captures kb.observability at registration
+        # time (registry.py) - the sink must be swapped in before
+        # register() runs, not after.
+        sink = RecordingObservabilitySink()
+        kb.observability = sink
+        loaded = PluginRegistry(kb).register("json-exporter", author=ADMIN, isolate=True)
+
+        buf = io.StringIO()
+        loaded.instance.export(loaded.view, buf)
+
+        enforcement_logs = [
+            (level, message, fields)
+            for level, message, fields in sink.logs
+            if "capability enforcement did not apply" in message
+        ]
+        if sys.platform != "linux" or not _linux_seccomp_available():
+            assert enforcement_logs, "expected a call-time enforcement warning on this platform"
+            level, message, fields = enforcement_logs[0]
+            assert level == logging.WARNING
+            assert fields["method"] == "export"

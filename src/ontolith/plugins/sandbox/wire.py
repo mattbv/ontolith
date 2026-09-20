@@ -200,7 +200,10 @@ def to_wire_result(value: object) -> object:
     shape: `None`/`bool`/`int`/`float`/`str`/`bytes` pass through; `list`/
     `tuple`/`dict` recurse; a `@dataclass` instance (e.g. a reference
     plugin's `ImportReport`/`ExportReport`) becomes a plain `dict` of its
-    fields via `dataclasses.asdict()` (itself recursive).
+    fields, each field value recursively reduced by this same function —
+    deliberately not `dataclasses.asdict()`, which would `deepcopy` a
+    non-dataclass field value through unrestricted and could silently
+    defeat the JSON-safe-shape guarantee this function exists to provide.
 
     This is the reason a plugin's dataclass-shaped return value crosses an
     isolated call as a `dict`, not its original type — `isolate=False`
@@ -220,7 +223,13 @@ def to_wire_result(value: object) -> object:
     if isinstance(value, (list, tuple)):
         return [to_wire_result(item) for item in value]
     if isinstance(value, dict):
-        return {key: to_wire_result(item) for key, item in value.items()}
+        # Keys are reduced too, not just values (round-2 review finding:
+        # an earlier version left keys unsanitized - restricted_loads
+        # still refused a hostile key on the parent side, since nothing
+        # here bypasses that, but the guarantee this function documents
+        # is "JSON-safe," and an unreduced key breaks that promise even
+        # when nothing exploitable results).
+        return {to_wire_result(key): to_wire_result(item) for key, item in value.items()}
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return {
             field.name: to_wire_result(getattr(value, field.name))
@@ -249,8 +258,16 @@ def wire_exception(exc: BaseException) -> object:
         allowlist, whether or not it happens to be picklable — a narrow,
         documented fidelity loss, see ADR-0051's Consequences).
     """
-    allowed = {(cls.__module__, cls.__name__) for cls in (type(exc), *type(exc).__mro__)}
-    if allowed & _SAFE_EXCEPTION_CLASSES and _is_picklable(exc):
+    # The *concrete* class, not the MRO - RestrictedUnpickler.find_class
+    # checks the exact (module, name) a pickle GLOBAL opcode names, and
+    # every exception's MRO includes ("builtins", "Exception") (itself on
+    # the allowlist), so an MRO-based check here would always pass
+    # regardless of the concrete type - round-2 review finding: this
+    # exact bug shipped once already, sending a plugin-defined exception
+    # class the parent's restricted unpickler then refused wholesale,
+    # destroying the exception's message instead of falling back to it.
+    concrete = (type(exc).__module__, type(exc).__name__)
+    if concrete in _SAFE_EXCEPTION_CLASSES and _is_picklable(exc):
         return exc
     return RuntimeError(f"{type(exc).__name__}: {exc}")
 

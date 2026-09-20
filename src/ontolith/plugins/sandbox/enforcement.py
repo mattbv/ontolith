@@ -102,6 +102,13 @@ _FILESYSTEM_SYSCALLS: tuple[str, ...] = (
     "symlinkat",
     "mknod",
     "mknodat",
+    "execve",
+    "execveat",  # the kernel opens the target image internally, bypassing
+    # open/openat - round-2 review finding: without this, filesystem=False
+    # denies reading a file's contents but not running it as a new program.
+    # Bounded even so: an installed filter is inherited across execve
+    # (libseccomp sets NO_NEW_PRIVS by default), so the new image runs
+    # under the exact same restrictions, not a wider set.
     "fallocate",
     "utime",
     "utimes",
