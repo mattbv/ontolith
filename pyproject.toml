@@ -34,6 +34,15 @@ dependencies = [
 	# Required, not optional (SPEC §12.1 MUST): the default SQLite backend
 	# uses sqlite-vec for embeddings (ADR-0020).
 	"sqlite-vec==0.1.3", # pinned: pre-v1, breaking changes possible (bumped for PYSEC-2026-1938)
+	# Linux-only (sys_platform marker, not an optional-dependencies extra):
+	# ADR-0051's OS-level plugin sandbox enforcement needs this wherever it
+	# can actually work, without an operator having to remember an extra to
+	# get the deny-by-default posture register(isolate=True) already
+	# defaults to. Needs libseccomp installed on the host (a system
+	# library, not something pip provides) - degrades to "not enforced,
+	# loudly said so" if it isn't (plugins/sandbox/enforcement.py), never a
+	# hard install failure on a Linux host missing it either.
+	"pyseccomp>=0.1,<1.0; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
@@ -174,6 +183,14 @@ disallow_untyped_defs = false
 
 [[tool.mypy.overrides]]
 module = "sqlite_vec"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# Linux-only (pyproject.toml's sys_platform marker) and unstubbed - mypy
+# runs on every platform in CI (ADR-0051's own plugin sandbox enforcement),
+# so this can't rely on the package actually being installed/importable
+# wherever mypy happens to run.
+module = "pyseccomp"
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -1,9 +1,13 @@
-"""Plugin manifest schema (ADR-0015).
+"""Plugin manifest schema (ADR-0015, ADR-0051).
 
 A plugin declares its identity, kind, and requested capabilities via a
-PluginManifest. Only `capabilities.storage` is enforced by PluginRegistry in
-v1 — see ADR-0015's Consequences section for why `network`/`filesystem` are
-declared but not yet enforced.
+PluginManifest. `capabilities.storage` is enforced by PluginRegistry
+(ADR-0015). `capabilities.network`/`.filesystem` are enforced at the OS
+syscall level when a plugin is registered with `isolate=True` (the
+default) on Linux (ADR-0051, via seccomp); on other platforms, or when a
+plugin is registered with `isolate=False`, they remain declared but not
+enforced — see ADR-0051's Consequences section for the platform-by-platform
+breakdown.
 """
 
 from typing import Literal
@@ -35,11 +39,12 @@ class PluginCapabilities(BaseModel):
             min(this, the capability granted at registration), further
             capped to "read" for read-only plugin kinds regardless of what
             is requested here.
-        network: Declares intent to make network calls. NOT enforced in v1
-            — see ADR-0015. Reserved for future process/wasm isolation.
-        filesystem: Declares intent to touch the filesystem. NOT enforced
-            in v1 — see ADR-0015. Reserved for future process/wasm
-            isolation.
+        network: Declares intent to make network calls. Enforced via OS
+            syscall denial when `False` and the plugin runs isolated on
+            Linux (ADR-0051); declared but not enforced with
+            `isolate=False` or on a non-Linux platform.
+        filesystem: Declares intent to touch the filesystem. Same
+            enforcement story as `network` (ADR-0051).
     """
 
     storage: Literal["read", "propose", "write"] = "read"

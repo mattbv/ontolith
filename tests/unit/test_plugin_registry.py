@@ -150,8 +150,18 @@ class TestEntryPointDiscovery:
 
 class TestUnenforcedCapabilityWarning:
     """KI-014: registering a plugin that declares network/filesystem intent
-    logs a visible warning, since only capabilities.storage is actually
-    enforced - the plugin runs in-process with no isolation.
+    logs a visible warning when that declaration won't actually be
+    enforced for this registration (ADR-0015, ADR-0051).
+
+    The three "warns" tests below pass isolate=False explicitly - not
+    testing that parameter itself, just making the "not enforced" condition
+    true deterministically, independent of whether this host happens to be
+    Linux with a working pyseccomp/libseccomp install (isolate=True would
+    make the warning's presence depend on the platform running the test
+    suite, see test_plugin_sandbox.py's own enforcement-availability tests
+    for that axis instead). The "no warning" test doesn't declare
+    network/filesystem at all, so isolate's value doesn't affect it either
+    way.
 
     Asserted via a RecordingObservabilitySink swapped onto kb.observability
     (SPEC §18/ADR-0044), not caplog: the warning goes through
@@ -172,7 +182,7 @@ class TestUnenforcedCapabilityWarning:
         sink = RecordingObservabilitySink()
         kb.observability = sink
         registry = PluginRegistry(kb)
-        registry.register("trivial-importer-net-fs", author=ADMIN)
+        registry.register("trivial-importer-net-fs", author=ADMIN, isolate=False)
 
         [(level, message, fields)] = sink.logs
         assert level == logging.WARNING
@@ -200,7 +210,7 @@ class TestUnenforcedCapabilityWarning:
         sink = RecordingObservabilitySink()
         kb.observability = sink
         registry = PluginRegistry(kb)
-        registry.register("trivial-importer-fs-only", author=ADMIN)
+        registry.register("trivial-importer-fs-only", author=ADMIN, isolate=False)
 
         [(_, message, _fields)] = sink.logs
         assert "capabilities.filesystem=True" in message
@@ -221,7 +231,7 @@ class TestUnenforcedCapabilityWarning:
         sink = RecordingObservabilitySink()
         kb.observability = sink
         registry = PluginRegistry(kb)
-        registry.register("trivial-importer-net-only", author=ADMIN)
+        registry.register("trivial-importer-net-only", author=ADMIN, isolate=False)
 
         [(_, message, _fields)] = sink.logs
         assert "capabilities.network=True" in message

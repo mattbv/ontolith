@@ -1603,6 +1603,7 @@ version = "0.0.1"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
+    { name = "pyseccomp", marker = "sys_platform == 'linux'" },
     { name = "python-ulid" },
     { name = "sqlite-vec" },
     { name = "typer" },
@@ -1686,6 +1687,7 @@ requires-dist = [
     { name = "pip-audit", marker = "extra == 'dev'", specifier = ">=2.7" },
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.6" },
     { name = "pydantic", specifier = ">=2.0,<3.0" },
+    { name = "pyseccomp", marker = "sys_platform == 'linux'", specifier = ">=0.1,<1.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "pytest-benchmark", marker = "extra == 'dev'", specifier = ">=4.0" },
@@ -2041,6 +2043,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/f3/91/9c6ee907786a473bf81c5f53cf703ba0957b23ab84c264080fb5a450416f/pyparsing-3.3.2.tar.gz", hash = "sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc", size = 6851574, upload-time = "2026-01-21T03:57:59.36Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl", hash = "sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d", size = 122781, upload-time = "2026-01-21T03:57:55.912Z" },
+]
+
+[[package]]
+name = "pyseccomp"
+version = "0.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/08/e2/f761ad7bd34745af8c8aa6d76a71a240eef45ee4635e2022dcc1b133b4d8/pyseccomp-0.1.2.tar.gz", hash = "sha256:0d54efacf71bda4bdfd21233f5444b730cbecf593d602f796e6412a8682258bd", size = 4943, upload-time = "2021-01-02T22:48:01.278Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cd/5a/2c454fe11c9bf0d8d77a8d89d05e9f2f4203b39c000d0e38a060c273ab7f/pyseccomp-0.1.2-py3-none-any.whl", hash = "sha256:19177748e1202603ca4b2c41d728916402c018c4fee49dca1e3568ea218b7c23", size = 5667, upload-time = "2021-01-02T22:48:00.578Z" },
 ]
 
 [[package]]
