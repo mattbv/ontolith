@@ -49,10 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no allow-list (reproduced: `__setattr__("_principal_id", ...)` forged the acting principal on
   every later write through that view, from a read-only registration, no pickle trickery needed) —
   both fixed and independently re-verified by reproducing both attacks against the fixed code before
-  merge. Three review rounds total; the second and third each found a real regression in the prior
-  round's own fix (most notably: a plugin's own documented `ValueError`/`TypeError` was briefly
-  mislabelled as a protocol violation instead of propagating normally) — all fixed, all re-verified;
-  see ADR-0051's own Update section for the full record. On Linux, with a working
+  merge. Five review rounds total; the second, third, and fourth each found a real regression in the
+  prior round's own fix (most notably: a plugin's own documented `ValueError`/`TypeError` was briefly
+  mislabelled as a protocol violation instead of propagating normally, round 3; round 4 then closed
+  an unguarded send-side `BrokenPipeError` path round 3's own refactor had left open) — all fixed,
+  all re-verified; a fifth round found no further code-level issues. See ADR-0051's own Update
+  section for the full record. On Linux, with a working
   `pyseccomp`/libseccomp install (new Linux-only dependency, `sys_platform` marker, exact-pinned
   like `sqlite-vec`), a plugin's declared `capabilities.network=False`/`.filesystem=False` are now
   genuinely enforced at the OS syscall level (seccomp, `ERRNO(EPERM)` — a denied syscall surfaces as

@@ -549,6 +549,14 @@ closing the last uncovered direction of the message-handling hardening rounds 2-
   filesystem=True` registration now gets a `ptrace`/`process_vm_*` denial regardless, an unrelated,
   always-on floor the original wording didn't anticipate — reworded to say so explicitly.
 
+**Round-5 review — both CRITICALs re-reproduced a fifth time, every round 2-4 fix independently
+re-verified (including the full gate suite, `--cov-fail-under=90` showing 95.35%) — no CRITICAL, no
+HIGH, no MEDIUM, and no further code change requested. Ready to merge.** Only three LOW
+documentation-staleness items found, all in paragraphs that summarize this ADR's own review history
+elsewhere (`CHANGELOG.md`'s M4 entry and `docs/Ontolith_Implementation_Plan.md`'s status paragraph
+and §8, all still saying "three review rounds" and, in one spot, an inconsistent shipped-date) —
+fixed in the same commit as this record, no code touched.
+
 ## Follow-ups filed
 
 - **macOS/Windows OS-level network/filesystem enforcement** — no KI filed as a *new* gap; this
