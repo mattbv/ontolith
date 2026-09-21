@@ -12,6 +12,7 @@ from ontolith.core.errors import ValidationError
 from ontolith.govern.contradiction import ContradictionState, safe_rationale_history
 from ontolith.govern.proposal import ProposalState
 from ontolith.schema.linkml import from_yaml
+from ontolith.store.sqlite import migrations as sqlite_migrations
 
 # Derived from ProposalState's/ContradictionState's own named Literal alias
 # (govern/proposal.py, govern/contradiction.py), not hand-duplicated, so
@@ -34,6 +35,10 @@ contradiction_app = typer.Typer(help="Inspect and act on contradictions.", no_ar
 namespace_app = typer.Typer(help="Inspect namespaces.", no_args_is_help=True)
 schema_app = typer.Typer(help="Inspect and apply the schema.", no_args_is_help=True)
 admin_event_app = typer.Typer(help="Inspect admin-action audit events.", no_args_is_help=True)
+db_app = typer.Typer(
+    help="Inspect and apply on-disk storage-format migrations (SPEC §15, ADR-0052).",
+    no_args_is_help=True,
+)
 app.add_typer(principal_app, name="principal")
 app.add_typer(entity_app, name="entity")
 app.add_typer(proposal_app, name="proposal")
@@ -41,14 +46,28 @@ app.add_typer(contradiction_app, name="contradiction")
 app.add_typer(namespace_app, name="namespace")
 app.add_typer(schema_app, name="schema")
 app.add_typer(admin_event_app, name="admin-event")
+app.add_typer(db_app, name="db")
 
 # Module-level DB path, set by the root callback before any command runs.
 _db_path: Path = Path("ontolith.db")
 
 
 def _kb() -> Ontology:
-    """Connect to the KB at the module-level `_db_path`."""
-    return Ontology.connect(_db_path)
+    """Connect to the KB at the module-level `_db_path`.
+
+    Every command calls this *before* entering its own `try:`/`except
+    Exception as exc: typer.echo(f"Error: {exc}", err=True); raise
+    typer.Exit(1)` block — a construction failure (e.g. `SchemaError` from
+    an out-of-date format_version, ADR-0052) needs that exact same
+    treatment, or it surfaces as a raw, unhandled traceback instead of the
+    CLI's own consistent error convention. Handled centrally here rather
+    than moving `_kb()` inside each of the ~25 command bodies individually.
+    """
+    try:
+        return Ontology.connect(_db_path)
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
 
 
 @app.callback()
@@ -1000,6 +1019,79 @@ def schema_migrate(
         raise typer.Exit(1) from None
     finally:
         kb.close()
+
+
+# ─── db ───────────────────────────────────────────────────────────────────────
+
+
+@db_app.command("status")
+def db_status() -> None:
+    """Report the on-disk format_version at `--db` without changing anything
+    (SPEC §15, ADR-0052).
+
+    Deliberately does not go through `_kb()`/`Ontology.connect()` — that
+    path refuses (SchemaError) to open a file below the current
+    format_version, which is exactly the file this command exists to
+    inspect. Reads via `sqlite_migrations.migrate_file(dry_run=True)`
+    directly, so it's a pure preview: nothing on disk changes, matching
+    SPEC §15's "dry-run mode" requirement.
+    """
+    try:
+        report = sqlite_migrations.migrate_file(_db_path, dry_run=True)
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    if report.up_to_date:
+        typer.echo(f"format_version={report.from_version} — up to date.")
+        return
+    typer.echo(
+        f"format_version={report.from_version}, current is {report.to_version} — "
+        f"{len(report.steps)} migration(s) pending:"
+    )
+    for step in report.steps:
+        reversible = "reversible" if step.reversible else "irreversible"
+        typer.echo(f"  -> v{step.version} ({reversible}): {step.description}")
+    typer.echo("Run `ontolith db migrate` to apply.")
+
+
+@db_app.command("migrate")
+def db_migrate(
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Report pending migrations without applying them."),
+    ] = False,
+) -> None:
+    """Apply pending on-disk format-version migrations at `--db` (SPEC §15,
+    ADR-0052).
+
+    Standalone — deliberately does not go through `_kb()`/`Ontology.connect()`,
+    which refuses to open a file below the current format_version; this
+    command is what actually brings such a file forward. Safe to run
+    unconditionally (e.g. before every deploy): a file already at the
+    current format_version reports nothing pending and changes nothing.
+
+    Does not migrate or backfill *domain* data (`ontolith schema migrate`'s
+    own scope, ADR-0034, is a separate and narrower thing — a namespace's
+    schema version, not this backend's own DDL shape).
+    """
+    try:
+        report = sqlite_migrations.migrate_file(_db_path, dry_run=dry_run)
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
+    if report.up_to_date:
+        typer.echo(f"Already at format_version={report.to_version} — nothing to do.")
+        return
+    verb = "Would apply" if dry_run else "Applied"
+    for step in report.steps:
+        typer.echo(f"{verb} v{step.version}: {step.description}")
+    if dry_run:
+        typer.echo(
+            f"{len(report.steps)} migration(s) pending (format_version "
+            f"{report.from_version} -> {report.to_version}). Re-run without --dry-run to apply."
+        )
+    else:
+        typer.echo(f"Migrated format_version {report.from_version} -> {report.to_version}.")
 
 
 # ─── admin-event ───────────────────────────────────────────────────────────────

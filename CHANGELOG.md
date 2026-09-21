@@ -100,6 +100,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test_bench_write_assert_literal` used to accidentally exercise (see `#### Fixed` above) has a
   real, measured, unbounded-with-size per-write cost and no benchmark of its own at all now that
   this fix moved every write off it — filed as **KI-100**.
+- On-disk storage-format migrations (SPEC §15, ADR-0052; **Breaking**) — new `format_version`
+  single-row table, tracked independently per backend (`store/sqlite/migrations.py`,
+  `store/duckdb/migrations.py`; both currently at `CURRENT_FORMAT_VERSION = 3`). Formalizes the two
+  historical, previously ad hoc `PRAGMA table_info` + `ALTER TABLE` fixups
+  (`principal_credential.issued_by`/`.revoked_by`, KI-060; `proposal.reviewers`, KI-078) as
+  registered migrations (v2, v3), each declaring `reversible: bool` and a `down()`.
+  `SQLiteBackend`/`DuckDBBackend` now **refuse** (`SchemaError`) to open an existing file below
+  `CURRENT_FORMAT_VERSION` instead of silently upgrading it on connect — a fresh, empty file is
+  unaffected (created directly at the current format). `migrate_file(path, *, dry_run=False)` is
+  the explicit, standalone action that applies pending migrations (or, dry-run, only reports them,
+  writing nothing at all) — new CLI commands `ontolith db status`/`ontolith db migrate [--dry-run]`
+  (SQLite only, matching `Ontology.connect()`'s own scope; DuckDB's `migrate_file` is reached
+  programmatically). Any existing database file below the current format_version now needs an
+  explicit `ontolith db migrate` before it opens again. Data migration/backfill for a renamed or
+  retyped *domain* predicate against already-stored assertion data (ADR-0034's own "scope (b)")
+  remains a distinct, still-open problem this does not solve. Five review rounds — rounds 2 through 4
+  each found a real bug in the same narrow area (a registered migration's `up()` needing to tolerate
+  one more state of its own target table/column than the previous round anticipated: already applied,
+  absent entirely, shadowed by a view); round 5 found none, backed by an exhaustive empirical sweep of
+  every reachable table/column-state combination. See ADR-0052's own Update section for the full
+  record. Filed **KI-104** as a maintainability follow-up (not a bug) for centralizing that
+  defensiveness into a declarative registry once a third migration is added.
 
 ### M3 - Extensible (0.3)
 
