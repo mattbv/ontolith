@@ -11,12 +11,13 @@ registry directly.
 """
 
 import sqlite3
+import time
 from pathlib import Path
 
 import duckdb
 import pytest
 
-from ontolith.core.errors import SchemaError
+from ontolith.core.errors import SchemaError, StorageError
 from ontolith.store.duckdb import migrations as duckdb_migrations
 from ontolith.store.duckdb.backend import DuckDBBackend
 from ontolith.store.sqlite import migrations as sqlite_migrations
@@ -188,6 +189,39 @@ class TestSQLiteMigrations:
         finally:
             conn.close()
 
+    def test_require_current_format_stamps_when_table_exists_but_row_is_absent(
+        self, tmp_path: Path
+    ) -> None:
+        """Same defensive branch as above (table exists, no row yet), but
+        for an already-v3-shaped file — the specific case that reaches
+        `require_current_format`'s own table-exists-but-row-check (a v1
+        file never gets there at all, since it's refused earlier on the
+        version-too-low check, before this branch is ever reached).
+        `require_current_format` must fall through to actually stamping
+        the row rather than crashing or wrongly trusting an empty table as
+        "already confirmed"."""
+        path = tmp_path / "already_v3_empty_table.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
+            "token_hash TEXT, created_at TEXT, revoked_at TEXT, issued_by TEXT, revoked_by TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT, author TEXT, "
+            "reviewers TEXT NOT NULL DEFAULT '[]')"
+        )
+        sqlite_migrations._ensure_format_version_table(conn.cursor())
+        conn.commit()
+        conn.close()
+
+        backend = SQLiteBackend(path)
+        try:
+            row = backend.conn.execute("SELECT version FROM format_version").fetchone()
+            assert row[0] == sqlite_migrations.CURRENT_FORMAT_VERSION
+        finally:
+            backend.close()
+
     def test_each_migration_reversal_restores_the_prior_shape(self, tmp_path: Path) -> None:
         """White-box test of `_MIGRATIONS`' declared `down()` — there's no
         public downgrade entry point (SPEC §15 requires a migration declare
@@ -347,6 +381,34 @@ class TestDuckDBMigrations:
         finally:
             conn.close()
 
+    def test_require_current_format_stamps_when_table_exists_but_row_is_absent(
+        self, tmp_path: Path
+    ) -> None:
+        """See the SQLite module's identical test - an already-v3-shaped
+        file (not v1 - that's refused before this branch is ever reached)
+        with an empty `format_version` table, exercised through
+        `require_current_format`."""
+        path = tmp_path / "already_v3_empty_table.duckdb"
+        conn = duckdb.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
+            "token_hash TEXT, created_at TEXT, revoked_at TEXT, issued_by TEXT, revoked_by TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT, author TEXT, "
+            "reviewers TEXT DEFAULT '[]')"
+        )
+        duckdb_migrations._ensure_format_version_table(conn)
+        conn.close()
+
+        backend = DuckDBBackend(path)
+        try:
+            row = backend.conn.execute("SELECT version FROM format_version").fetchone()
+            assert row[0] == duckdb_migrations.CURRENT_FORMAT_VERSION
+        finally:
+            backend.close()
+
     def test_each_migration_reversal_restores_the_prior_shape(self, tmp_path: Path) -> None:
         path = tmp_path / "fresh.duckdb"
         backend = DuckDBBackend(path)
@@ -374,3 +436,206 @@ class TestDuckDBMigrations:
             assert "reviewers" not in proposal_columns
         finally:
             backend.close()
+
+
+class TestRoundOneReviewFindings:
+    """Regression tests for round-1 review of ADR-0052 — each of these
+    reproduced a real bug before its corresponding fix landed; see
+    ADR-0052's own Update section for the full record."""
+
+    def test_h1_sqlite_file_missing_principal_credential_entirely_is_not_misread_as_current(
+        self, tmp_path: Path
+    ) -> None:
+        """H1: a real, older shape from before `principal_credential`
+        existed at all (added after `proposal`, per git history) —
+        `proposal` exists, missing `reviewers`; `principal_credential` is
+        absent entirely, not just missing columns. This used to be misread
+        as "empty database", stamped `format_version=3`, and left
+        `proposal.reviewers` permanently missing. Each table must now be
+        checked independently."""
+        path = tmp_path / "pre_credential.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT, author TEXT)")
+        conn.commit()
+        conn.close()
+
+        report = sqlite_migrations.migrate_file(path, dry_run=True)
+        assert report.from_version == 2
+        assert [s.version for s in report.steps] == [3]
+
+        with pytest.raises(SchemaError, match="format_version 2"):
+            SQLiteBackend(path)
+
+        sqlite_migrations.migrate_file(path)
+        backend = SQLiteBackend(path)
+        try:
+            columns = {r[1] for r in backend.conn.execute("PRAGMA table_info(proposal)")}
+            assert "reviewers" in columns
+            # principal_credential was missing entirely - _create_schema()
+            # creates it fresh, at the current shape, no migration needed.
+            cred_columns = {
+                r[1] for r in backend.conn.execute("PRAGMA table_info(principal_credential)")
+            }
+            assert {"issued_by", "revoked_by"}.issubset(cred_columns)
+        finally:
+            backend.close()
+
+    def test_h1_duckdb_file_missing_principal_credential_entirely_is_not_misread_as_current(
+        self, tmp_path: Path
+    ) -> None:
+        """See the SQLite test above - identical shape, DuckDB backend."""
+        path = tmp_path / "pre_credential.duckdb"
+        conn = duckdb.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute("CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT, author TEXT)")
+        conn.close()
+
+        report = duckdb_migrations.migrate_file(path, dry_run=True)
+        assert report.from_version == 2
+        assert [s.version for s in report.steps] == [3]
+
+        with pytest.raises(SchemaError, match="format_version 2"):
+            DuckDBBackend(path)
+
+        duckdb_migrations.migrate_file(path)
+        backend = DuckDBBackend(path)
+        try:
+            columns = {
+                r[0]
+                for r in backend.conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'proposal'"
+                ).fetchall()
+            }
+            assert "reviewers" in columns
+        finally:
+            backend.close()
+
+    def test_h2_stale_file_error_message_names_a_working_cli_invocation(
+        self, tmp_path: Path
+    ) -> None:
+        """H2: the message said `ontolith db migrate --db {path}` - `--db`
+        is a root-callback option and must precede the subcommand; the
+        literal suggested command failed with "No such option: --db"."""
+        path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
+            "token_hash TEXT, created_at TEXT, revoked_at TEXT)"
+        )
+        conn.execute("CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT, author TEXT)")
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(SchemaError) as exc_info:
+            SQLiteBackend(path)
+        message = str(exc_info.value)
+        assert f"ontolith --db {path} db migrate" in message
+        assert "db migrate --db" not in message
+
+    def test_m1_failed_migration_rolls_back_every_step_from_this_call(self, tmp_path: Path) -> None:
+        """M1: a v3 failure used to leave v2's ALTER TABLEs committed with
+        no format_version row recording it - half-migrated, only
+        "recovering" by the accident of inference. Now the whole call is
+        one transaction."""
+        path = tmp_path / "will_fail.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
+            "token_hash TEXT, created_at TEXT, revoked_at TEXT)"
+        )
+        # No `proposal` table at all - v3's up() will fail.
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(StorageError, match="rolled back"):
+            sqlite_migrations.migrate_file(path)
+
+        conn = sqlite3.connect(str(path))
+        try:
+            tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+            assert "format_version" not in tables
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(principal_credential)")}
+            assert "issued_by" not in columns
+            assert "revoked_by" not in columns
+        finally:
+            conn.close()
+
+    def test_m1_failed_migration_rolls_back_every_step_from_this_call_duckdb(
+        self, tmp_path: Path
+    ) -> None:
+        """See the SQLite test above - identical shape, DuckDB backend."""
+        path = tmp_path / "will_fail.duckdb"
+        conn = duckdb.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
+            "token_hash TEXT, created_at TEXT, revoked_at TEXT)"
+        )
+        # No `proposal` table at all - v3's up() will fail.
+        conn.close()
+
+        with pytest.raises(StorageError, match="rolled back"):
+            duckdb_migrations.migrate_file(path)
+
+        conn = duckdb.connect(str(path))
+        try:
+            tables = {
+                r[0]
+                for r in conn.execute("SELECT table_name FROM information_schema.tables").fetchall()
+            }
+            assert "format_version" not in tables
+            columns = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'principal_credential'"
+                ).fetchall()
+            }
+            assert "issued_by" not in columns
+            assert "revoked_by" not in columns
+        finally:
+            conn.close()
+
+    def test_m2_migrate_file_on_current_stamped_file_takes_no_write_lock(
+        self, tmp_path: Path
+    ) -> None:
+        """M2: calling migrate_file() on an already-current, already-stamped
+        file used to still attempt a write, contending with a concurrent
+        writer's own transaction - reproduced stalling for the full
+        busy-timeout against a live BEGIN IMMEDIATE (KI-084) before this
+        fix. Now it's read-only and returns immediately."""
+        path = tmp_path / "current.db"
+        backend = SQLiteBackend(path)
+        backend.begin()
+        try:
+            start = time.monotonic()
+            report = sqlite_migrations.migrate_file(path)
+            elapsed = time.monotonic() - start
+        finally:
+            backend.rollback()
+            backend.close()
+        assert report.up_to_date
+        assert elapsed < 1.0, f"migrate_file blocked for {elapsed:.2f}s against a live writer"
+
+    def test_m2_connect_on_current_stamped_file_takes_no_write_lock(self, tmp_path: Path) -> None:
+        """Same as above, but for the ordinary SQLiteBackend() connect path
+        (require_current_format's own stamp step, not just migrate_file's)."""
+        path = tmp_path / "current2.db"
+        setup = SQLiteBackend(path)
+        setup.close()
+
+        writer = SQLiteBackend(path)
+        writer.begin()
+        try:
+            start = time.monotonic()
+            reader = SQLiteBackend(path)
+            elapsed = time.monotonic() - start
+            reader.close()
+        finally:
+            writer.rollback()
+            writer.close()
+        assert elapsed < 1.0, f"connect() blocked for {elapsed:.2f}s against a live writer"

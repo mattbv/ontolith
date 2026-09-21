@@ -2539,6 +2539,24 @@ class TestDbStatusAndMigrate:
         assert result.exit_code == 1
         assert "No database file" in result.output
 
+    def test_any_other_command_against_a_stale_db_gets_the_cli_s_own_error_convention(
+        self, temp_db: Path
+    ) -> None:
+        """H3 (round-1 review): every command besides `db status`/`db
+        migrate` calls `_kb()` outside its own `try:` block. Before this
+        fix, `_kb()` raising `SchemaError` (a stale format_version) escaped
+        as a raw, unhandled traceback instead of the `Error: ...`/exit-1
+        convention every command's own body already gives every other
+        failure - reproduced against `namespace list`, picked as one
+        representative of the ~25 commands sharing this exact `_kb()` call
+        shape, not because it's special-cased."""
+        self._build_legacy_v1_file(temp_db)
+        result = runner.invoke(app, ["--db", str(temp_db), "namespace", "list"])
+        assert result.exit_code == 1
+        assert "Error:" in result.output
+        assert "format_version" in result.output
+        assert "Traceback" not in result.output
+
 
 class TestAdminEventsList:
     """KI-072: `ontolith admin-event list` - the read half of KI-060's
