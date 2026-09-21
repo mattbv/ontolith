@@ -6,7 +6,10 @@ This module contains the fundamental building blocks:
 - ObservabilitySink port for metrics/events/structured logs (SPEC §18, ADR-0044)
 - Error taxonomy for stable error handling
 - Entity and Assertion value objects
-- Future: meta-model, IR, validation
+
+The meta-model/IR/validation this docstring once listed as "Future" now
+lives in `ontolith.schema` (`SchemaIR`, `ConceptDef`/`PropertyDef`/
+`RelationDef`, the class DSL) — not `ontolith.core`, and shipped in M1/M3.
 """
 
 from ontolith.core.assertion import Assertion, AssertionEvent

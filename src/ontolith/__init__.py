@@ -5,7 +5,7 @@ Where humans and AI agents are co-equal authors of a shared, governed ontology.
 
 from ontolith.core import Assertion, Entity, FixedClock, Namespace, SequentialIdProvider
 from ontolith.identity import Principal
-from ontolith.ontology import Ontology
+from ontolith.ontology import AsOfView, Ontology
 from ontolith.schema import (
     JSON,
     URI,
@@ -25,6 +25,7 @@ __version__ = "0.0.1"
 
 __all__ = [
     "Ontology",
+    "AsOfView",
     "Entity",
     "Assertion",
     "Namespace",
