@@ -115,7 +115,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   programmatically). Any existing database file below the current format_version now needs an
   explicit `ontolith db migrate` before it opens again. Data migration/backfill for a renamed or
   retyped *domain* predicate against already-stored assertion data (ADR-0034's own "scope (b)")
-  remains a distinct, still-open problem this does not solve.
+  remains a distinct, still-open problem this does not solve. Five review rounds — rounds 2 through 4
+  each found a real bug in the same narrow area (a registered migration's `up()` needing to tolerate
+  one more state of its own target table/column than the previous round anticipated: already applied,
+  absent entirely, shadowed by a view); round 5 found none, backed by an exhaustive empirical sweep of
+  every reachable table/column-state combination. See ADR-0052's own Update section for the full
+  record. Filed **KI-104** as a maintainability follow-up (not a bug) for centralizing that
+  defensiveness into a declarative registry once a third migration is added.
 
 ### M3 - Extensible (0.3)
 
