@@ -639,3 +639,101 @@ class TestRoundOneReviewFindings:
             writer.rollback()
             writer.close()
         assert elapsed < 1.0, f"connect() blocked for {elapsed:.2f}s against a live writer"
+
+
+class TestRoundTwoReviewFindings:
+    """Regression test for round-2 review of ADR-0052 — reproduced a real
+    bug before its fix landed; see ADR-0052's own Update section."""
+
+    def test_partial_v2_sqlite_file_one_column_present_one_missing_still_migrates(
+        self, tmp_path: Path
+    ) -> None:
+        """A real, reachable shape: `issued_by` present, `revoked_by`
+        absent - `_infer_format_version` only distinguishes "has both" from
+        "missing at least one," so it correctly calls this version 1 and
+        dispatches the whole of `_up_v2`. Before the fix, `_up_v2`'s bare
+        `ALTER TABLE ADD COLUMN issued_by` (issued unconditionally) raised
+        `duplicate column name: issued_by` on a file shaped exactly this
+        way, making it permanently un-migratable. `main`'s own old ad hoc
+        fixup checked each column independently and never had this bug -
+        reachable in practice because each `ALTER TABLE` there autocommits
+        separately (`isolation_level=None`), so a process killed between
+        the two leaves exactly this state on disk. DuckDB's `_up_v2` was
+        never affected (`ADD COLUMN IF NOT EXISTS` is naturally idempotent
+        per column) - this is a SQLite-only gap."""
+        path = tmp_path / "partial_v2.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
+            "token_hash TEXT, created_at TEXT, revoked_at TEXT, issued_by TEXT)"
+        )
+        conn.execute("CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT, author TEXT)")
+        conn.commit()
+        conn.close()
+
+        report = sqlite_migrations.migrate_file(path)
+        assert [s.applied for s in report.steps] == [True, True]
+
+        backend = SQLiteBackend(path)
+        try:
+            columns = {
+                r[1] for r in backend.conn.execute("PRAGMA table_info(principal_credential)")
+            }
+            assert {"issued_by", "revoked_by"}.issubset(columns)
+            proposal_columns = {r[1] for r in backend.conn.execute("PRAGMA table_info(proposal)")}
+            assert "reviewers" in proposal_columns
+        finally:
+            backend.close()
+
+    def test_partial_v2_sqlite_file_the_other_column_present_still_migrates(
+        self, tmp_path: Path
+    ) -> None:
+        """The complementary shape to the test above - `revoked_by`
+        present, `issued_by` absent - exercising `_up_v2`'s other branch."""
+        path = tmp_path / "partial_v2_other.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
+            "token_hash TEXT, created_at TEXT, revoked_at TEXT, revoked_by TEXT)"
+        )
+        conn.execute("CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT, author TEXT)")
+        conn.commit()
+        conn.close()
+
+        sqlite_migrations.migrate_file(path)
+
+        backend = SQLiteBackend(path)
+        try:
+            columns = {
+                r[1] for r in backend.conn.execute("PRAGMA table_info(principal_credential)")
+            }
+            assert {"issued_by", "revoked_by"}.issubset(columns)
+        finally:
+            backend.close()
+
+    def test_duckdb_table_existence_checks_dont_count_a_view_as_the_table(
+        self, tmp_path: Path
+    ) -> None:
+        """DuckDB's `information_schema.tables` lists views alongside real
+        tables, unfiltered by `table_type` - a view happening to be named
+        `proposal` used to read as the real table, get its (view-shaped)
+        columns inspected, and then fail migration with `Can only modify
+        view with ALTER VIEW` when `_up_v3` tried an `ALTER TABLE` against
+        it. SQLite's own `_table_exists` already filtered `type = 'table'`;
+        DuckDB's now filters `table_type = 'BASE TABLE'` to match."""
+        path = tmp_path / "view_named_proposal.duckdb"
+        conn = duckdb.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
+            "token_hash TEXT, created_at TEXT, revoked_at TEXT, issued_by TEXT, revoked_by TEXT)"
+        )
+        conn.execute("CREATE VIEW proposal AS SELECT 1 AS id")
+        conn.close()
+
+        # Treated the same as "proposal doesn't exist" - no attempt to
+        # ALTER the view, no crash.
+        report = duckdb_migrations.migrate_file(path, dry_run=True)
+        assert report.up_to_date
