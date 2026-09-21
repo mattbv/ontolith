@@ -761,8 +761,22 @@ class TestRoundTwoReviewFindings:
         `proposal` used to read as the real table, get its (view-shaped)
         columns inspected, and then fail migration with `Can only modify
         view with ALTER VIEW` when `_up_v3` tried an `ALTER TABLE` against
-        it. SQLite's own `_table_exists` already filtered `type = 'table'`;
-        DuckDB's now filters `table_type = 'BASE TABLE'` to match."""
+        it. Fixed by filtering `table_type = 'BASE TABLE'`, matching
+        SQLite's own `type = 'table'` filter, in `_table_exists`.
+
+        Round-5 review found a further consequence worth pinning explicitly
+        rather than leaving implicit in `report.up_to_date`: round 4's own
+        table-existence guard (`_up_v3`'s `if not _table_exists(...):
+        return`) treats a view the same as "absent" - `_table_exists`
+        alone can't distinguish them - so `_up_v3` now skips itself here
+        too, silently. `CREATE TABLE IF NOT EXISTS` in `_create_schema()`
+        then no-ops against the existing view rather than replacing it
+        (verified directly - not asserted blindly), so this reports a
+        successful migration while `proposal` stays a view forever. A
+        deliberately-created, pathological shape (a view named exactly
+        `proposal` is not something this project's own code ever
+        produces), documented on `_up_v3`'s own docstring rather than
+        further guarded against."""
         path = tmp_path / "view_named_proposal.duckdb"
         conn = duckdb.connect(str(path))
         conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
@@ -777,6 +791,18 @@ class TestRoundTwoReviewFindings:
         # ALTER the view, no crash.
         report = duckdb_migrations.migrate_file(path, dry_run=True)
         assert report.up_to_date
+
+        # Explicitly pin the documented consequence: a real (non-dry-run)
+        # migrate "succeeds" but leaves `proposal` a view, not a table.
+        duckdb_migrations.migrate_file(path)
+        conn = duckdb.connect(str(path))
+        try:
+            kind = conn.execute(
+                "SELECT table_type FROM information_schema.tables WHERE table_name = 'proposal'"
+            ).fetchone()
+            assert kind == ("VIEW",)
+        finally:
+            conn.close()
 
 
 class TestRoundThreeReviewFindings:

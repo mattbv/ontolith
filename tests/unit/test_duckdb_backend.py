@@ -865,8 +865,12 @@ class TestDuckDBBackend:
         a true v1 file: `proposal` also predates `reviewers` (KI-078), same
         as `principal_credential` predates issued_by/revoked_by here — a
         real legacy file always has every table `_create_schema()` creates,
-        just some missing later columns, so both migrations apply, in order
-        (`proposal` is needed for v3's `up()` to have a table to ALTER)."""
+        just some missing later columns, so both migrations apply, in
+        order. (`_up_v3` no longer strictly needs `proposal` to already
+        exist to run correctly, round 4's own review — it no-ops instead
+        of failing when the table is absent — but this fixture still
+        includes it: it's the realistic legacy shape, not merely a
+        prerequisite for this test to pass.)"""
         raw = duckdb.connect(str(temp_db))
         raw.execute(
             "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, "
