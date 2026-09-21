@@ -59,13 +59,22 @@ def _up_v2(conn: duckdb.DuckDBPyConnection) -> None:
     `principal_credential` has since been dropped (or never existed under
     that stamp) dispatches `_up_v2` against a table that isn't there —
     reproduced: `Catalog Error: Table with name principal_credential does
-    not exist!`. Skipped the same way `_up_v3` skips itself:
-    `_create_schema()` creates the table fresh, at the current shape, on
-    the next real connect, so no `up()` of its own is needed for this
-    case. Also closes the same gap for a view named `principal_credential`
-    (round 2's detection fix already treats a view as "table absent" —
-    this makes the application side agree, instead of attempting `ALTER
-    TABLE` on it).
+    not exist!`. Skipped the same way `_up_v3` skips itself: for a
+    genuinely *absent* table, `_create_schema()` creates it fresh, at the
+    current shape, on the next real connect, so no `up()` of its own is
+    needed for this case.
+
+    **Caveat (round-5 review, not further hardened):** `_table_exists`
+    treats a view named `principal_credential` the same as "absent," so
+    this guard also skips itself for that shape (matching round 2's own
+    detection fix, which already treats a view the same way) — but
+    `CREATE TABLE IF NOT EXISTS` is a silent no-op when a same-named view
+    already exists, verified directly, not a replacement. The file ends up
+    stamped `format_version=3` and opens without error while
+    `principal_credential` stays a view forever, a deliberately-created
+    shape this project's own code never produces on its own — see the
+    SQLite module's own `_up_v2` docstring for the full explanation, not
+    repeated here.
     """
     if not _table_exists(conn, "principal_credential"):
         return
@@ -119,8 +128,12 @@ def _up_v3(conn: duckdb.DuckDBPyConnection) -> None:
     this against a file where `proposal` doesn't exist at all yet
     (reproduced: `Catalog Error: Table with name proposal does not
     exist!`) or is a view (round 2's own scenario, reproduced: `Can only
-    modify view with ALTER VIEW statement`). Skipped the same way — the
-    table is created fresh, at the current shape, on the next real connect.
+    modify view with ALTER VIEW statement`). Skipped the same way — for a
+    genuinely *absent* table, it's created fresh, at the current shape, on
+    the next real connect. Same view-shadowing caveat as `_up_v2`'s
+    docstring: `CREATE TABLE IF NOT EXISTS` silently no-ops against a
+    same-named view rather than replacing it — see that docstring for the
+    full explanation, not repeated here.
     """
     if not _table_exists(conn, "proposal"):
         return

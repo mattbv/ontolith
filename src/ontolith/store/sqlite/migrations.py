@@ -96,9 +96,22 @@ def _up_v2(cursor: sqlite3.Cursor) -> None:
       where `principal_credential` has since been dropped, or never
       existed under that stamp, dispatches `_up_v2` against a table that
       isn't there (reproduced: `no such table: principal_credential`).
-      Skipped the same way `_up_v3` skips itself: `_create_schema()`'s
-      `CREATE TABLE IF NOT EXISTS` creates the table fresh, at the current
-      shape, on the next real connect — no `up()` of its own is needed.
+      Skipped the same way `_up_v3` skips itself: for a genuinely *absent*
+      table, `_create_schema()`'s `CREATE TABLE IF NOT EXISTS` creates it
+      fresh, at the current shape, on the next real connect — no `up()` of
+      its own is needed. **Caveat (round-5 review, not further hardened):**
+      `_table_exists` treats a *view* named `principal_credential` the same
+      as "absent" (it filters `type = 'table'`), so this guard also skips
+      itself for that shape — but `CREATE TABLE IF NOT EXISTS` is a silent
+      no-op when a same-named view already exists, verified directly, so
+      the view is never replaced. The file ends up stamped
+      `format_version=3` and opens without error, while `principal_credential`
+      remains a view forever — a small loud-failure-on-`main`-becomes-
+      silent-success regression for this specific, deliberately-created
+      shape (a view shadowing a core table name is not a state anything in
+      this project produces on its own). Left undefended rather than
+      guessed at: detecting and rejecting a shadowing view would need its
+      own design, not a corollary of this fix.
     - **One column present, the other not** (round-2 review, still needed):
       `main`'s own old ad hoc fixup ran each `ALTER TABLE` as its own
       autocommit statement too, so a process killed between the two columns
@@ -142,8 +155,13 @@ def _up_v3(cursor: sqlite3.Cursor) -> None:
       `proposal` missing entirely is *also* inferred as version 1,
       dispatching `_up_v3` right after `_up_v2` against a table that
       doesn't exist (reproduced: `no such table: proposal`). Skipped the
-      same way — `_create_schema()` creates `proposal` fresh, at the
-      current shape, on the next real connect.
+      same way — for a genuinely *absent* table, `_create_schema()`
+      creates `proposal` fresh, at the current shape, on the next real
+      connect. Same view-shadowing caveat as `_up_v2`'s docstring: a view
+      named `proposal` is also treated as "absent" by this guard, but
+      `CREATE TABLE IF NOT EXISTS` silently no-ops against it rather than
+      replacing it — see `_up_v2`'s docstring for the full explanation,
+      not repeated here.
     - **Column already present** (round-3 review, still needed): a file
       needing v2 but already v3-shaped on `proposal` is inferred as version
       1 regardless of `proposal`'s own state, dispatching `_up_v3`
