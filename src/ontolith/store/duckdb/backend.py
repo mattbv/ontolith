@@ -60,12 +60,13 @@ from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 import duckdb
 
 from ontolith.core import Assertion, AssertionEvent, Clock, Entity, Namespace, SystemClock
-from ontolith.core.errors import StorageError, ValidationError
+from ontolith.core.errors import SchemaError, StorageError, ValidationError
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import AdminEvent, Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
 from ontolith.store.base import DEFAULT_NAMESPACE, VECTOR_SCOPES
+from ontolith.store.duckdb import migrations
 
 _RANGE_SQL_OPERATORS = {"gt": ">", "lt": "<", "gte": ">=", "lte": "<="}
 """entities_where() operator name -> SQL comparison operator (KI-039)."""
@@ -147,6 +148,15 @@ class DuckDBBackend:
         # inside a transaction() block, each of which re-acquires it via the
         # @_synchronized decorator.
         self._lock = threading.RLock()
+        # ADR-0052: refuses (SchemaError) an existing file below
+        # migrations.CURRENT_FORMAT_VERSION — see SQLiteBackend's identical
+        # check for the full reasoning; closes the connection before
+        # propagating so a refused open doesn't leak a live handle.
+        try:
+            migrations.require_current_format(self.conn, path=self.path)
+        except SchemaError:
+            self.conn.close()
+            raise
         self._create_schema()
 
     def _create_schema(self) -> None:
@@ -189,16 +199,13 @@ class DuckDBBackend:
             ON principal_credential(principal_id)
         """)
 
-        # KI-060: `issued_by`/`revoked_by` were added after this table was
-        # first shipped — `CREATE TABLE IF NOT EXISTS` above is a no-op
-        # against a database file that already has this table. Unlike
-        # SQLite, DuckDB supports `ADD COLUMN IF NOT EXISTS` natively.
-        self.conn.execute(
-            "ALTER TABLE principal_credential ADD COLUMN IF NOT EXISTS issued_by TEXT"
-        )
-        self.conn.execute(
-            "ALTER TABLE principal_credential ADD COLUMN IF NOT EXISTS revoked_by TEXT"
-        )
+        # KI-060's `issued_by`/`revoked_by` columns are declared directly in
+        # the CREATE TABLE above (current format shape) — a file that
+        # predates them is refused before reaching this method at all
+        # (require_current_format in __init__, ADR-0052) rather than
+        # idempotently ALTER TABLE'd here on every connect. The historical
+        # migration itself now lives in duckdb/migrations.py, applied only
+        # by an explicit migrate_file() call.
 
         # Namespace registry table (SPEC §12.2, KI-022) — tracks namespaces
         # that have a schema applied or are the seeded default; NOT a
@@ -349,28 +356,12 @@ class DuckDBBackend:
             )
         """)
 
-        # KI-078: `reviewers` was added after this table was first shipped —
-        # `CREATE TABLE IF NOT EXISTS` above is a no-op against a database
-        # file that already has this table. Unlike SQLite, DuckDB supports
-        # `ADD COLUMN IF NOT EXISTS` natively (same pattern as
-        # principal_credential's issued_by/revoked_by, KI-060, whose own
-        # `issued_by`/`revoked_by` columns carry no constraint and needed no
-        # backfill) - but this column can't carry any constraint at ALTER
-        # time: DuckDB's parser rejects `NOT NULL`, `UNIQUE`, and `CHECK`
-        # alike on `ADD COLUMN` ("Adding columns with constraints not yet
-        # supported"), verified directly against the pinned duckdb version
-        # (all three tried, all three rejected identically). A plain
-        # `DEFAULT` is not treated as a constraint, though, and DuckDB
-        # backfills every existing row with it (also verified directly) -
-        # so this one statement both adds the column and leaves no row
-        # NULL, without needing a separate backfill statement the way a
-        # constraint-rejecting `ADD COLUMN` alone would have left one
-        # short of. A fresh database's own `CREATE TABLE` above still gets
-        # the stronger `NOT NULL DEFAULT '[]'` constraint this migrated
-        # column can't carry.
-        self.conn.execute(
-            "ALTER TABLE proposal ADD COLUMN IF NOT EXISTS reviewers TEXT DEFAULT '[]'"
-        )
+        # KI-078's `reviewers` column is declared directly in the CREATE
+        # TABLE above, same reasoning as issued_by/revoked_by just above —
+        # see that comment and ADR-0052. The historical migration
+        # (duckdb/migrations.py's _up_v3) keeps the note about DuckDB
+        # rejecting a constraint on ADD COLUMN, since that limitation is
+        # specific to the ALTER-TABLE path a fresh CREATE TABLE never hits.
 
         # Proposal event table (SPEC §9.4) — structured review actions.
         # Scoped to accept/reject/request_changes/assign, the four review

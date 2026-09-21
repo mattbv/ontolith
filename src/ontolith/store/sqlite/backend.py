@@ -21,12 +21,13 @@ from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 import sqlite_vec
 
 from ontolith.core import Assertion, AssertionEvent, Clock, Entity, Namespace, SystemClock
-from ontolith.core.errors import StorageError, ValidationError
+from ontolith.core.errors import SchemaError, StorageError, ValidationError
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import AdminEvent, Principal, PrincipalCredential
 from ontolith.schema import SchemaIR
 from ontolith.store.base import DEFAULT_NAMESPACE, VECTOR_SCOPES
+from ontolith.store.sqlite import migrations
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -159,6 +160,20 @@ class SQLiteBackend:
         # which re-acquires it via the @_synchronized decorator.
         self._lock = threading.RLock()
         self._clock: Clock = clock or SystemClock()
+        # ADR-0052: refuses (SchemaError) an existing file below
+        # migrations.CURRENT_FORMAT_VERSION rather than silently applying
+        # pending migrations — see require_current_format's own docstring.
+        # Must run before _create_schema() below: a stale file must not have
+        # any DDL touch it on this connect at all, so the only difference
+        # between "refused" and "opened" is this one check, not how much of
+        # _create_schema() happened to run first. Closes the connection
+        # before propagating — a refused open shouldn't leak a live handle
+        # on the file it just declined to use.
+        try:
+            migrations.require_current_format(self.conn.cursor(), path=self.path)
+        except SchemaError:
+            self.conn.close()
+            raise
         self._create_schema()
 
     def _create_schema(self) -> None:
@@ -203,20 +218,13 @@ class SQLiteBackend:
             ON principal_credential(principal_id)
         """)
 
-        # KI-060: `issued_by`/`revoked_by` were added after this table was
-        # first shipped — `CREATE TABLE IF NOT EXISTS` above is a no-op
-        # against a database file that already has this table, so a
-        # pre-existing file needs an explicit, idempotent migration step.
-        # SQLite has no `ADD COLUMN IF NOT EXISTS`, so check first via
-        # PRAGMA rather than catching "duplicate column name" (which would
-        # also mask a genuine, different OperationalError).
-        existing_columns = {
-            row[1] for row in cursor.execute("PRAGMA table_info(principal_credential)")
-        }
-        if "issued_by" not in existing_columns:
-            cursor.execute("ALTER TABLE principal_credential ADD COLUMN issued_by TEXT")
-        if "revoked_by" not in existing_columns:
-            cursor.execute("ALTER TABLE principal_credential ADD COLUMN revoked_by TEXT")
+        # KI-060's `issued_by`/`revoked_by` columns are declared directly in
+        # the CREATE TABLE above (current format shape) — a file that
+        # predates them is refused before reaching this method at all
+        # (require_current_format in __init__, ADR-0052) rather than
+        # idempotently ALTER TABLE'd here on every connect. The historical
+        # migration itself now lives in sqlite/migrations.py, applied only
+        # by an explicit migrate_file() call.
 
         # Namespace registry table (SPEC §12.2, KI-022) — tracks namespaces
         # that have a schema applied or are the seeded default; NOT a
@@ -385,14 +393,9 @@ class SQLiteBackend:
             )
         """)
 
-        # KI-078: `reviewers` was added after this table was first shipped —
-        # `CREATE TABLE IF NOT EXISTS` above is a no-op against a database
-        # file that already has this table, so a pre-existing file needs an
-        # explicit, idempotent migration step (same pattern as
-        # principal_credential's issued_by/revoked_by, KI-060).
-        proposal_columns = {row[1] for row in cursor.execute("PRAGMA table_info(proposal)")}
-        if "reviewers" not in proposal_columns:
-            cursor.execute("ALTER TABLE proposal ADD COLUMN reviewers TEXT NOT NULL DEFAULT '[]'")
+        # KI-078's `reviewers` column is declared directly in the CREATE
+        # TABLE above, same reasoning as issued_by/revoked_by just above —
+        # see that comment and ADR-0052.
 
         # Proposal event table (SPEC §9.4) — structured review actions.
         # Scoped to accept/reject/request_changes/assign, the four review
