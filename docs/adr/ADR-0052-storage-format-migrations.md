@@ -40,13 +40,18 @@ really gesturing at. That remains a distinct, still-open problem (see Consequenc
 on both `SQLiteBackend` and `DuckDBBackend` today (both have shipped the identical two historical
 column additions, so the numbers coincide — nothing requires them to stay in sync going forward).
 Each backend owns its own registry: `store/sqlite/migrations.py`, `store/duckdb/migrations.py` — the
-DDL is inherently backend-specific (SQLite's `up()`s issue a bare `ALTER TABLE ADD COLUMN`, relying
-on each migration only ever running once per file, in order; DuckDB supports `ADD COLUMN IF NOT
-EXISTS` directly but rejects any constraint on it) and version *inference* for a file with no
-tracking row yet is column-existence-based on both (`PRAGMA table_info` on SQLite,
-`information_schema.columns` on DuckDB), so there is no cross-backend `StorageBackend` port method
-for this — see
-Alternatives.
+DDL is inherently backend-specific (DuckDB supports `ADD COLUMN IF NOT EXISTS` directly, naturally
+idempotent, but rejects any constraint on it; SQLite has no such syntax, so each `up()` there checks
+its own target column's existence via `PRAGMA table_info` before its own `ALTER TABLE ADD COLUMN` —
+required, not just defensive: `read_current_version`'s inference reports the *minimum* version
+implied across every table's own independent check, so a migration can genuinely be dispatched
+against a table that already has its change, and must tolerate that as a no-op rather than raising
+`duplicate column name`) and version *inference* for a file with no tracking row yet is
+column-existence-based on both (`PRAGMA table_info` on SQLite, `information_schema.columns` on
+DuckDB, itself scoped to `table_schema = 'main'`/`table_catalog = current_database()` on DuckDB
+specifically — `information_schema` spans every attached catalog and schema, unlike SQLite's
+`sqlite_master`, which is always scoped to the one file), so there is no cross-backend
+`StorageBackend` port method for this — see Alternatives.
 
 **A brand-new (empty) database file is always created directly at `CURRENT_FORMAT_VERSION`** — its
 `CREATE TABLE` statements already declare the current shape, so there is nothing to migrate *from*.
@@ -194,7 +199,7 @@ actually needs it, not built preemptively.
   different mechanism and a different kind of "version" than this backend's own DDL shape; conflating
   the two under one command would blur exactly the distinction ADR-0034 went out of its way to draw.
 
-## Update (2026-09-21): two review rounds, five real findings fixed, code correct from round 3
+## Update (2026-09-21): three review rounds so far, each finding real issues
 
 **Round 1** (architecture + a dedicated review of this ADR's own diff) found three HIGH and two
 MEDIUM issues, all reproduced by direct execution before being trusted, all fixed and re-verified:
@@ -249,17 +254,57 @@ further real bug, reachable specifically because of round 1's own fix:
   hoc fixup ran each `ALTER TABLE` as its own autocommit statement, so a process killed between the
   two leaves exactly this shape on disk. DuckDB's `_up_v2` was never affected — `ADD COLUMN IF NOT
   EXISTS` is naturally idempotent per column — this was a SQLite-only gap. Fixed: `_up_v2` now checks
-  each column's own existence before its own `ALTER TABLE`, the same way the old ad hoc fixup did;
-  `_up_v3` needs no equivalent fix (a single-column migration has no partial state for inference to
-  under-detect in the first place — documented on its own docstring).
+  each column's own existence before its own `ALTER TABLE`, the same way the old ad hoc fixup did.
+  (Round 2's own claim that `_up_v3` needed no equivalent fix — reasoning that a single-column
+  migration has no partial state for inference to under-detect — was itself wrong; see round 3
+  below.)
+- Two LOWs from the same round: DuckDB's `_table_exists`/`_any_table_exists` queried
+  `information_schema.tables` unfiltered, which also lists views — a view happening to be named e.g.
+  `proposal` read as the real table and then failed migration trying to `ALTER TABLE` it. Fixed to
+  filter `table_type = 'BASE TABLE'`, matching SQLite's own `type = 'table'` filter. A mid-sequence
+  migration failure's `StorageError` always named the sequence's overall target version, not the
+  specific step that actually failed — fixed to track and report the actually-failing step.
 - Also found and fixed two documentation-accuracy issues from round 1's own docs commit: the Decision
   section still described "empty" as keyed off `principal_credential` specifically (the exact rule
   round 1's own fix replaced) instead of "any table"; and the atomicity guarantee round 1's fix
   actually built (one transaction, `StorageError` on failure) was never stated anywhere in this ADR's
   prose at all, only in the code — now recorded as its own Decision bullet.
 
+**Round 3** independently re-verified every round-2 fix (all three held, all mutation-tested) and
+found:
+
+- **MEDIUM — round 2's own "`_up_v3` needs no fix" rationale was false, and the exact bug it just
+  fixed for `_up_v2` recurs one version later.** `_infer_format_version` reports the *minimum*
+  version implied across its two independent per-table checks, not a per-migration one — a file
+  needing v2 (`principal_credential` still short a column) but already v3-shaped on `proposal` is
+  inferred as version 1 regardless of `proposal`'s own state, and `_up_v3` then runs unconditionally
+  right after `_up_v2`, against a table that already has `reviewers`. Reproduced: the identical
+  `duplicate column name` failure round 2 fixed for `_up_v2`. DuckDB's `_up_v3` was never affected —
+  same reason as `_up_v2`. Fixed: `_up_v3` now checks `reviewers`' own existence first, the same
+  pattern as `_up_v2`; the underlying contract — every registered `up()` must tolerate its own change
+  already being present, not just the one motivating case that happened to be reproduced first — is
+  now stated on `_Migration.version`'s own docstring rather than assumed per-migration.
+- **MEDIUM — DuckDB's round-2 view-filter fix matched SQLite on table *type* but not on schema/catalog
+  *scope*.** `information_schema.tables`/`.columns` span every schema and every attached catalog;
+  SQLite's `sqlite_master` is always scoped to the one file. A same-named table in a user-created
+  schema (or an `ATTACH`ed second database file) was read as a match too — reproduced two ways: a
+  decoy `analytics.proposal` with a `reviewers` column made `main.proposal`'s own still-pending v3
+  migration silently invisible (permanently, since this branch removes the self-healing ad hoc
+  `ALTER`s `main` had); a decoy `format_version` table in another schema made the unqualified
+  `SELECT version FROM format_version` raise a raw `duckdb.CatalogException` instead of the intended
+  `SchemaError`. Fixed: every `information_schema` query now adds `table_schema = 'main' AND
+  table_catalog = current_database()`. This module never `ATTACH`es/`USE`s another catalog itself; a
+  caller who does so on the connection it's given is outside what this fix (or `DuckDBBackend`'s own
+  single-catalog design) covers.
+- Documentation-accuracy issues: this Update section's own round-2 entry claimed the round-2 fix was
+  complete and stated an outcome ("code correct from round 3") before that round had actually run —
+  corrected to not pre-assert an unrun review's result; the Decision section's DDL-backend-specificity
+  paragraph still described SQLite's `up()`s as "issuing a bare `ALTER TABLE ADD COLUMN`" (the exact
+  behavior round 1/2's fixes replaced) and didn't mention DuckDB's own schema/catalog-scoping
+  requirement at all — reworded to state both fixes' actual mechanism, not the pre-fix one.
+
 Every claim in this Update section was independently re-verified against source and by direct
-execution before being written, not carried forward from either review round's own report.
+execution before being written, not carried forward from any review round's own report.
 
 ## References
 
