@@ -40,9 +40,12 @@ really gesturing at. That remains a distinct, still-open problem (see Consequenc
 on both `SQLiteBackend` and `DuckDBBackend` today (both have shipped the identical two historical
 column additions, so the numbers coincide — nothing requires them to stay in sync going forward).
 Each backend owns its own registry: `store/sqlite/migrations.py`, `store/duckdb/migrations.py` — the
-DDL is inherently backend-specific (SQLite needs a `PRAGMA table_info` existence check before
-`ALTER TABLE ADD COLUMN`; DuckDB supports `ADD COLUMN IF NOT EXISTS` directly but rejects any
-constraint on it), so there is no cross-backend `StorageBackend` port method for this — see
+DDL is inherently backend-specific (SQLite's `up()`s issue a bare `ALTER TABLE ADD COLUMN`, relying
+on each migration only ever running once per file, in order; DuckDB supports `ADD COLUMN IF NOT
+EXISTS` directly but rejects any constraint on it) and version *inference* for a file with no
+tracking row yet is column-existence-based on both (`PRAGMA table_info` on SQLite,
+`information_schema.columns` on DuckDB), so there is no cross-backend `StorageBackend` port method
+for this — see
 Alternatives.
 
 **A brand-new (empty) database file is always created directly at `CURRENT_FORMAT_VERSION`** — its
@@ -64,11 +67,21 @@ message.
 **Migrating is a separate, explicit, standalone action — `migrate_file(path, *, dry_run=False)` —
 not something a connect ever does implicitly.** It does not go through `SQLiteBackend`/
 `DuckDBBackend` at all: it opens its own raw connection, since the entire point is to work on a file
-the normal constructor just refused. `dry_run=True` reports every pending migration
+the normal constructor just refused. (DuckDB's Python client returns the *same* underlying instance
+for two same-process connections to one path, so on that backend specifically this isn't full
+process-level isolation from a live `DuckDBBackend` — only reachable on an already-current file
+anyway, since a stale one has no live in-process backend to race in the first place; see
+`duckdb/migrations.py`'s own `migrate_file` docstring.) `dry_run=True` reports every pending migration
 (`MigrationReport`/`MigrationStep`, `store/migrations.py`, shared shape across both backends)
 without writing anything at all — not even creating the `format_version` table itself. A file
-already at `CURRENT_FORMAT_VERSION` returns an empty report either way; calling `migrate_file` is
-safe unconditionally (e.g. before every deploy). The CLI exposes this as `ontolith db status`
+already at `CURRENT_FORMAT_VERSION` and already stamped takes no write at all when
+`dry_run=False` either — only reads — so calling `migrate_file` is safe unconditionally (e.g.
+before every deploy), including one racing a concurrent writer's own transaction on the same file
+(round-1 review reproduced the earlier, unconditional-write version of this stalling for the full
+busy-timeout against a live `BEGIN IMMEDIATE`, KI-084, then raising `database is locked` — fixed by
+skipping the write entirely once the row is confirmed already correct). Applying a *pending*
+migration still needs the same write-contention care any other write does — this only removes the
+lock attempt from the common no-op case. The CLI exposes this as `ontolith db status`
 (read-only preview) and `ontolith db migrate [--dry-run]` — SQLite only, since `Ontology.connect()`/
 the CLI are SQLite-only today (ADR-0034's own scoping); `DuckDBBackend`'s `migrate_file` is reached
 programmatically.
@@ -183,5 +196,6 @@ actually needs it, not built preemptively.
 - `docs/known-issues.md` KI-060 (`principal_credential.issued_by`/`.revoked_by`, the v2 migration),
   KI-078 (`proposal.reviewers`, the v3 migration) — both retroactively formalized here
 - `docs/Ontolith_Implementation_Plan.md` §2 (M4 milestone table — "migration tooling," this ADR's
-  workstream) and §8 ("on-disk `format_version` frozen" exit criterion, which this ADR makes
-  meaningful for the first time by giving `format_version` something to freeze)
+  workstream, and its "on-disk `format_version` frozen" exit criterion, which this ADR makes
+  meaningful for the first time by giving `format_version` something to freeze) and §7.2 (Branching
+  & releases, the same `format_version`-frozen-at-1.0 commitment stated again there)
