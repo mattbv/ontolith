@@ -53,8 +53,21 @@ _db_path: Path = Path("ontolith.db")
 
 
 def _kb() -> Ontology:
-    """Connect to the KB at the module-level `_db_path`."""
-    return Ontology.connect(_db_path)
+    """Connect to the KB at the module-level `_db_path`.
+
+    Every command calls this *before* entering its own `try:`/`except
+    Exception as exc: typer.echo(f"Error: {exc}", err=True); raise
+    typer.Exit(1)` block — a construction failure (e.g. `SchemaError` from
+    an out-of-date format_version, ADR-0052) needs that exact same
+    treatment, or it surfaces as a raw, unhandled traceback instead of the
+    CLI's own consistent error convention. Handled centrally here rather
+    than moving `_kb()` inside each of the ~25 command bodies individually.
+    """
+    try:
+        return Ontology.connect(_db_path)
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
 
 
 @app.callback()
