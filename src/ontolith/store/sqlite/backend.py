@@ -21,7 +21,7 @@ from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 import sqlite_vec
 
 from ontolith.core import Assertion, AssertionEvent, Clock, Entity, Namespace, SystemClock
-from ontolith.core.errors import SchemaError, StorageError, ValidationError
+from ontolith.core.errors import StorageError, ValidationError
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import AdminEvent, Principal, PrincipalCredential
@@ -126,6 +126,23 @@ class SQLiteBackend:
             str(self.path), timeout=5.0, isolation_level=None, check_same_thread=False
         )
         self.conn.row_factory = sqlite3.Row
+        # ADR-0052: refuses (SchemaError) an existing file below
+        # migrations.CURRENT_FORMAT_VERSION rather than silently applying
+        # pending migrations — see require_current_format's own docstring.
+        # Runs before every PRAGMA/DDL below, not just _create_schema() —
+        # round-1 review found `PRAGMA journal_mode = WAL` (further down)
+        # still ran ahead of this check, switching a stale file's on-disk
+        # journal mode before refusing to open it, which the neighboring
+        # "a stale file must not have any DDL touch it on this connect at
+        # all" claim didn't actually hold for a session-level PRAGMA like
+        # this one. Closes the connection on *any* failure here, not just
+        # SchemaError (a corrupt/non-database file raises sqlite3.Error
+        # instead) — a refused open shouldn't leak a live handle either way.
+        try:
+            migrations.require_current_format(self.conn.cursor(), path=self.path)
+        except BaseException:
+            self.conn.close()
+            raise
         self.conn.execute("PRAGMA foreign_keys = ON")
         # KI-066 review: recursive_triggers defaults OFF, and SQLite only
         # fires a BEFORE DELETE trigger for an `INSERT OR REPLACE`
@@ -160,20 +177,6 @@ class SQLiteBackend:
         # which re-acquires it via the @_synchronized decorator.
         self._lock = threading.RLock()
         self._clock: Clock = clock or SystemClock()
-        # ADR-0052: refuses (SchemaError) an existing file below
-        # migrations.CURRENT_FORMAT_VERSION rather than silently applying
-        # pending migrations — see require_current_format's own docstring.
-        # Must run before _create_schema() below: a stale file must not have
-        # any DDL touch it on this connect at all, so the only difference
-        # between "refused" and "opened" is this one check, not how much of
-        # _create_schema() happened to run first. Closes the connection
-        # before propagating — a refused open shouldn't leak a live handle
-        # on the file it just declined to use.
-        try:
-            migrations.require_current_format(self.conn.cursor(), path=self.path)
-        except SchemaError:
-            self.conn.close()
-            raise
         self._create_schema()
 
     def _create_schema(self) -> None:

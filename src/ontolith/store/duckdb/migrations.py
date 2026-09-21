@@ -17,7 +17,7 @@ from pathlib import Path
 
 import duckdb
 
-from ontolith.core.errors import SchemaError
+from ontolith.core.errors import SchemaError, StorageError
 from ontolith.store.migrations import MigrationReport, MigrationStep
 
 CURRENT_FORMAT_VERSION = 3
@@ -117,6 +117,11 @@ def _table_exists(conn: duckdb.DuckDBPyConnection, name: str) -> bool:
     return row is not None
 
 
+def _any_table_exists(conn: duckdb.DuckDBPyConnection) -> bool:
+    row = conn.execute("SELECT 1 FROM information_schema.tables LIMIT 1").fetchone()
+    return row is not None
+
+
 def _columns_of(conn: duckdb.DuckDBPyConnection, table: str) -> set[str]:
     return {
         row[0]
@@ -129,13 +134,22 @@ def _columns_of(conn: duckdb.DuckDBPyConnection, table: str) -> set[str]:
 
 def _infer_format_version(conn: duckdb.DuckDBPyConnection) -> int:
     """See `store.sqlite.migrations._infer_format_version` — identical
-    reasoning, DuckDB introspection. Assumes `principal_credential`/
-    `proposal` already exist — only called for an existing file."""
-    columns = _columns_of(conn, "principal_credential")
-    if "issued_by" not in columns or "revoked_by" not in columns:
+    reasoning and the identical fix, DuckDB introspection: each table is
+    checked independently rather than gated on `principal_credential`'s
+    presence (a real, older file can have `proposal` without
+    `principal_credential` at all — see the SQLite module's docstring for
+    the reproduced regression this closes)."""
+    needs_v2 = False
+    if _table_exists(conn, "principal_credential"):
+        columns = _columns_of(conn, "principal_credential")
+        needs_v2 = "issued_by" not in columns or "revoked_by" not in columns
+    needs_v3 = False
+    if _table_exists(conn, "proposal"):
+        proposal_columns = _columns_of(conn, "proposal")
+        needs_v3 = "reviewers" not in proposal_columns
+    if needs_v2:
         return 1
-    proposal_columns = _columns_of(conn, "proposal")
-    if "reviewers" not in proposal_columns:
+    if needs_v3:
         return 2
     return 3
 
@@ -151,11 +165,13 @@ def _ensure_format_version_table(conn: duckdb.DuckDBPyConnection) -> None:
 
 def read_current_version(conn: duckdb.DuckDBPyConnection) -> int:
     """See `store.sqlite.migrations.read_current_version` — identical
-    contract (keyed off table existence, not file existence — a
-    pre-created zero-byte placeholder path is the same "nothing to
-    migrate from" case as a path that didn't exist at all), DuckDB
-    introspection. Safe to call in a dry run (no writes)."""
-    if not _table_exists(conn, "principal_credential"):
+    contract (keyed off whether any table at all exists, not file
+    existence — a pre-created zero-byte placeholder path is the same
+    "nothing to migrate from" case as a path that didn't exist at all;
+    "any table" rather than one specific table matters for the same reason
+    named in `_infer_format_version`'s docstring), DuckDB introspection.
+    Safe to call in a dry run (no writes)."""
+    if not _any_table_exists(conn):
         return CURRENT_FORMAT_VERSION
     if _table_exists(conn, "format_version"):
         row = conn.execute("SELECT version FROM format_version WHERE id = 1").fetchone()
@@ -166,7 +182,10 @@ def read_current_version(conn: duckdb.DuckDBPyConnection) -> int:
 
 def require_current_format(conn: duckdb.DuckDBPyConnection, *, path: Path) -> None:
     """See `store.sqlite.migrations.require_current_format` — identical
-    contract, called from `DuckDBBackend.__init__` before any DDL runs."""
+    contract, called from `DuckDBBackend.__init__` before any DDL runs.
+    Skips the stamp write entirely when a correct row already exists (same
+    reasoning: avoid taking a write lock on the common already-current
+    case)."""
     version = read_current_version(conn)
     if version < CURRENT_FORMAT_VERSION:
         raise SchemaError(
@@ -191,6 +210,10 @@ def require_current_format(conn: duckdb.DuckDBPyConnection, *, path: Path) -> No
                 "to_version": CURRENT_FORMAT_VERSION,
             },
         )
+    if _table_exists(conn, "format_version"):
+        row = conn.execute("SELECT version FROM format_version WHERE id = 1").fetchone()
+        if row is not None and int(row[0]) == version:
+            return
     _ensure_format_version_table(conn)
     conn.execute(
         "INSERT INTO format_version (id, version) VALUES (1, ?) ON CONFLICT (id) DO NOTHING",
@@ -200,9 +223,31 @@ def require_current_format(conn: duckdb.DuckDBPyConnection, *, path: Path) -> No
 
 def migrate_file(path: str | Path, *, dry_run: bool = False) -> MigrationReport:
     """Standalone migration entry point for a DuckDB file. See
-    `store.sqlite.migrations.migrate_file` — identical contract; this
-    backend has no CLI command yet (`Ontology.connect()`/the CLI are
-    SQLite-only today, ADR-0052), so this is reached programmatically."""
+    `store.sqlite.migrations.migrate_file` — identical contract (one
+    transaction covering every pending `up()` plus the stamp, rolled back
+    and re-raised as `StorageError` on a driver failure; no write at all
+    when the file is already current and already stamped); this backend has
+    no CLI command yet (`Ontology.connect()`/the CLI are SQLite-only today,
+    ADR-0034's own scoping), so this is reached programmatically.
+
+    Unlike the SQLite module, this is *not* fully isolated from a live
+    `DuckDBBackend` on the same path within the same process: DuckDB's
+    Python client returns the same underlying instance for two same-process
+    connections to the same file (verified directly — a second connection's
+    `ALTER TABLE` was immediately visible to, and bypassed the `threading.RLock`
+    of, a live `DuckDBBackend` on that path). Only reachable when the file is
+    already current (a stale one is refused before `DuckDBBackend.__init__`
+    ever returns, so there's no live in-process backend on a stale file to
+    race in the first place); a cross-process caller gets DuckDB's own file
+    lock instead (`IOException`, not silently interleaved).
+
+    Raises:
+        SchemaError: `path` doesn't exist yet, or the file's version is
+            newer than this build supports.
+        StorageError: a migration's `up()` (or the format_version stamp)
+            failed against the driver; every change from this call is
+            rolled back first.
+    """
     file_path = Path(path)
     if not file_path.exists():
         raise SchemaError(
@@ -236,20 +281,28 @@ def migrate_file(path: str | Path, *, dry_run: bool = False) -> MigrationReport:
             for m in pending
         )
         if not dry_run:
-            _ensure_format_version_table(conn)
-            for m in pending:
-                m.up(conn)
-                conn.execute(
-                    "INSERT INTO format_version (id, version) VALUES (1, ?) "
-                    "ON CONFLICT (id) DO UPDATE SET version = excluded.version",
-                    [m.version],
-                )
-            if not pending:
-                conn.execute(
-                    "INSERT INTO format_version (id, version) VALUES (1, ?) "
-                    "ON CONFLICT (id) DO NOTHING",
-                    [current],
-                )
+            already_stamped = False
+            if _table_exists(conn, "format_version"):
+                row = conn.execute("SELECT version FROM format_version WHERE id = 1").fetchone()
+                already_stamped = row is not None and int(row[0]) == current
+            if pending or not already_stamped:
+                final_version = pending[-1].version if pending else current
+                try:
+                    conn.execute("BEGIN")
+                    _ensure_format_version_table(conn)
+                    for m in pending:
+                        m.up(conn)
+                    conn.execute(
+                        "INSERT INTO format_version (id, version) VALUES (1, ?) "
+                        "ON CONFLICT (id) DO UPDATE SET version = excluded.version",
+                        [final_version],
+                    )
+                    conn.commit()
+                except duckdb.Error as e:
+                    conn.rollback()
+                    raise StorageError(
+                        f"Migration to format_version {final_version} failed, rolled back: {e}"
+                    ) from e
         return MigrationReport(
             from_version=current,
             to_version=CURRENT_FORMAT_VERSION,

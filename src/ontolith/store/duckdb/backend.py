@@ -60,7 +60,7 @@ from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 import duckdb
 
 from ontolith.core import Assertion, AssertionEvent, Clock, Entity, Namespace, SystemClock
-from ontolith.core.errors import SchemaError, StorageError, ValidationError
+from ontolith.core.errors import StorageError, ValidationError
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import AdminEvent, Principal, PrincipalCredential
@@ -151,10 +151,12 @@ class DuckDBBackend:
         # ADR-0052: refuses (SchemaError) an existing file below
         # migrations.CURRENT_FORMAT_VERSION — see SQLiteBackend's identical
         # check for the full reasoning; closes the connection before
-        # propagating so a refused open doesn't leak a live handle.
+        # propagating so a refused open doesn't leak a live handle. Catches
+        # any failure here, not just SchemaError (round-1 review: a
+        # corrupt/non-database file raises duckdb.Error instead).
         try:
             migrations.require_current_format(self.conn, path=self.path)
-        except SchemaError:
+        except BaseException:
             self.conn.close()
             raise
         self._create_schema()

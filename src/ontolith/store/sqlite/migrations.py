@@ -30,7 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from ontolith.core.errors import SchemaError
+from ontolith.core.errors import SchemaError, StorageError
 from ontolith.store.migrations import MigrationReport, MigrationStep
 
 CURRENT_FORMAT_VERSION = 3
@@ -113,20 +113,43 @@ def _table_exists(cursor: sqlite3.Cursor, name: str) -> bool:
     return row is not None
 
 
+def _any_table_exists(cursor: sqlite3.Cursor) -> bool:
+    row = cursor.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' LIMIT 1").fetchone()
+    return row is not None
+
+
 def _infer_format_version(cursor: sqlite3.Cursor) -> int:
     """Best-effort version for a file with no `format_version` row/table —
     every such file predates this migration framework, so its true version
     is recoverable from which columns it actually has (the same check the
     old ad hoc `_create_schema()` fixups used to decide whether to `ALTER
     TABLE`, repurposed here for detection instead of blind application).
-    Assumes `principal_credential`/`proposal` already exist — only called
-    for an existing file, never a brand-new one (see `read_current_version`).
+
+    Only called for a file with at least one table (see `read_current_version`)
+    — but that doesn't guarantee `principal_credential` specifically exists.
+    A real, older file can have `proposal` (present since M1) without
+    `principal_credential` at all (added later, KI-060's own predecessor
+    commit) — round-1 review of this ADR caught this exact shape being
+    misread as fully current, silently leaving `proposal.reviewers` missing
+    forever, reproduced end to end. `principal_credential` missing *entirely*
+    needs no `up()` of its own to fix: `_create_schema()`'s
+    `CREATE TABLE IF NOT EXISTS` creates it fresh, at the current shape,
+    unconditionally, on every connect that reaches it — only a column
+    missing from a table that already exists needs an explicit `ALTER
+    TABLE`. So each table is checked independently, not gated on the other's
+    presence.
     """
-    columns = {row[1] for row in cursor.execute("PRAGMA table_info(principal_credential)")}
-    if "issued_by" not in columns or "revoked_by" not in columns:
+    needs_v2 = False
+    if _table_exists(cursor, "principal_credential"):
+        columns = {row[1] for row in cursor.execute("PRAGMA table_info(principal_credential)")}
+        needs_v2 = "issued_by" not in columns or "revoked_by" not in columns
+    needs_v3 = False
+    if _table_exists(cursor, "proposal"):
+        proposal_columns = {row[1] for row in cursor.execute("PRAGMA table_info(proposal)")}
+        needs_v3 = "reviewers" not in proposal_columns
+    if needs_v2:
         return 1
-    proposal_columns = {row[1] for row in cursor.execute("PRAGMA table_info(proposal)")}
-    if "reviewers" not in proposal_columns:
+    if needs_v3:
         return 2
     return 3
 
@@ -144,17 +167,22 @@ def read_current_version(cursor: sqlite3.Cursor) -> int:
     """Read the on-disk format_version without writing anything — safe to
     call in a dry run.
 
-    Deliberately keys off table existence, not whether the *file* existed
-    before this connection was opened — a caller-supplied path can already
-    exist as a zero-byte placeholder (e.g. `tempfile.NamedTemporaryFile`)
-    that SQLite/this project has never written to, which is exactly the
-    same "nothing to migrate from" case as a path that didn't exist at all.
-    No `principal_credential` table at all means an empty database either
-    way: return `CURRENT_FORMAT_VERSION` directly rather than inferring
-    (there's nothing to introspect yet), matching what a fresh
-    `_create_schema()` call is about to create.
+    Deliberately keys off *whether any table at all exists*, not whether the
+    *file* existed before this connection was opened — a caller-supplied
+    path can already exist as a zero-byte placeholder (e.g.
+    `tempfile.NamedTemporaryFile`) that SQLite/this project has never
+    written to, which is exactly the same "nothing to migrate from" case as
+    a path that didn't exist at all: return `CURRENT_FORMAT_VERSION`
+    directly rather than inferring (there's nothing to introspect yet),
+    matching what a fresh `_create_schema()` call is about to create.
+
+    Checking "any table" rather than one specific table (`principal_credential`,
+    the original — and buggy — version of this check) matters: a real,
+    older file can have some tables without having that one specifically
+    (see `_infer_format_version`'s own docstring) — misreading that as
+    "empty" would silently skip every pending migration.
     """
-    if not _table_exists(cursor, "principal_credential"):
+    if not _any_table_exists(cursor):
         return CURRENT_FORMAT_VERSION
     if _table_exists(cursor, "format_version"):
         row = cursor.execute("SELECT version FROM format_version WHERE id = 1").fetchone()
@@ -170,13 +198,20 @@ def require_current_format(cursor: sqlite3.Cursor, *, path: Path) -> None:
     upgrading it — ADR-0052) or above it (a file written by a newer build
     than this one). Stamps/confirms the `format_version` row for an
     already-current file so future opens read it directly instead of
-    re-inferring every time.
+    re-inferring every time — skipped when a correct row already exists, so
+    the common (already-stamped, already-current) case takes no write lock
+    at all, only ever reading. An unconditional `INSERT ... ON CONFLICT DO
+    NOTHING` still asks SQLite for a write lock even when the conflict
+    means nothing ends up changing — reproduced contending against a live
+    `transaction()` (`BEGIN IMMEDIATE`, KI-084): the unconditional version
+    blocked for the full busy-timeout and then raised `OperationalError:
+    database is locked` on every ordinary connect, not just a migration.
     """
     version = read_current_version(cursor)
     if version < CURRENT_FORMAT_VERSION:
         raise SchemaError(
             f"Database at {path} is format_version {version}, this build requires "
-            f"{CURRENT_FORMAT_VERSION}. Run `ontolith db migrate --db {path}` first "
+            f"{CURRENT_FORMAT_VERSION}. Run `ontolith --db {path} db migrate` first "
             "(add --dry-run to preview).",
             detail={
                 "path": str(path),
@@ -195,6 +230,10 @@ def require_current_format(cursor: sqlite3.Cursor, *, path: Path) -> None:
                 "to_version": CURRENT_FORMAT_VERSION,
             },
         )
+    if _table_exists(cursor, "format_version"):
+        row = cursor.execute("SELECT version FROM format_version WHERE id = 1").fetchone()
+        if row is not None and int(row[0]) == version:
+            return
     _ensure_format_version_table(cursor)
     cursor.execute(
         "INSERT INTO format_version (id, version) VALUES (1, ?) ON CONFLICT(id) DO NOTHING",
@@ -209,14 +248,26 @@ def migrate_file(path: str | Path, *, dry_run: bool = False) -> MigrationReport:
     format-version refusal, since that refusal is exactly what a stale file
     needs this function to get past. Opens its own connection, applies (or,
     with `dry_run=True`, only reports) every migration between the file's
-    current version and `CURRENT_FORMAT_VERSION`, in order. A file already
-    at `CURRENT_FORMAT_VERSION` returns an empty-`steps` report — safe to
-    call unconditionally, e.g. before every deploy.
+    current version and `CURRENT_FORMAT_VERSION`, in order, inside one
+    transaction — a mid-sequence failure (a later migration's `up()` raising)
+    rolls back every earlier `up()` in the same call too, rather than
+    leaving the file half-migrated with no `format_version` row recording
+    what actually landed (reproduced before this fix: a failing v3 left v2's
+    `ALTER TABLE`s committed but no tracking row at all). A driver-level
+    failure surfaces as `StorageError`, not a raw `sqlite3.Error`, matching
+    every other backend method's SPEC §16 error-taxonomy convention. A file
+    already at `CURRENT_FORMAT_VERSION` and already stamped takes no write
+    at all (only reads) — safe to call unconditionally, e.g. before every
+    deploy, including one contending with another connection's own
+    transaction on the same file.
 
     Raises:
         SchemaError: `path` doesn't exist yet (nothing to migrate — connect
             once first to create a fresh database), or the file's version is
             newer than this build supports.
+        StorageError: a migration's `up()` (or the format_version stamp)
+            failed against the driver; every change from this call is rolled
+            back first.
     """
     file_path = Path(path)
     if not file_path.exists():
@@ -252,21 +303,28 @@ def migrate_file(path: str | Path, *, dry_run: bool = False) -> MigrationReport:
             for m in pending
         )
         if not dry_run:
-            _ensure_format_version_table(cursor)
-            for m in pending:
-                m.up(cursor)
-                cursor.execute(
-                    "INSERT INTO format_version (id, version) VALUES (1, ?) "
-                    "ON CONFLICT(id) DO UPDATE SET version = excluded.version",
-                    (m.version,),
-                )
-            if not pending:
-                cursor.execute(
-                    "INSERT INTO format_version (id, version) VALUES (1, ?) "
-                    "ON CONFLICT(id) DO NOTHING",
-                    (current,),
-                )
-            conn.commit()
+            already_stamped = False
+            if _table_exists(cursor, "format_version"):
+                row = cursor.execute("SELECT version FROM format_version WHERE id = 1").fetchone()
+                already_stamped = row is not None and int(row[0]) == current
+            if pending or not already_stamped:
+                final_version = pending[-1].version if pending else current
+                try:
+                    cursor.execute("BEGIN")
+                    _ensure_format_version_table(cursor)
+                    for m in pending:
+                        m.up(cursor)
+                    cursor.execute(
+                        "INSERT INTO format_version (id, version) VALUES (1, ?) "
+                        "ON CONFLICT(id) DO UPDATE SET version = excluded.version",
+                        (final_version,),
+                    )
+                    conn.commit()
+                except sqlite3.Error as e:
+                    conn.rollback()
+                    raise StorageError(
+                        f"Migration to format_version {final_version} failed, rolled back: {e}"
+                    ) from e
         return MigrationReport(
             from_version=current,
             to_version=CURRENT_FORMAT_VERSION,
