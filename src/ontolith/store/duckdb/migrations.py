@@ -123,9 +123,21 @@ def _table_exists(conn: duckdb.DuckDBPyConnection, name: str) -> bool:
     # `information_schema.tables` also lists views — a view happening to be
     # named e.g. `proposal` would otherwise read as the real table, matching
     # SQLite's own `_table_exists`, which already filters `type = 'table'`).
+    # table_schema = 'main' AND table_catalog = current_database() scope to
+    # this file's own default schema/catalog (round-3 review:
+    # information_schema spans every schema, and every attached catalog —
+    # a user schema, or an ATTACHed second database file, containing its
+    # own same-named table was read as a match too, either silently masking
+    # a genuinely pending migration on the real `main` table, or making
+    # `format_version` itself ambiguous and raising a raw
+    # `duckdb.CatalogException` instead of the intended `SchemaError`).
+    # This module never ATTACHes/USEs another catalog itself — a caller
+    # who does so on the connection this module is given is outside what
+    # this fix (or `DuckDBBackend`'s own single-catalog design) covers.
     row = conn.execute(
         "SELECT 1 FROM information_schema.tables "
-        "WHERE table_name = ? AND table_type = 'BASE TABLE'",
+        "WHERE table_name = ? AND table_type = 'BASE TABLE' "
+        "AND table_schema = 'main' AND table_catalog = current_database()",
         [name],
     ).fetchone()
     return row is not None
@@ -133,16 +145,21 @@ def _table_exists(conn: duckdb.DuckDBPyConnection, name: str) -> bool:
 
 def _any_table_exists(conn: duckdb.DuckDBPyConnection) -> bool:
     row = conn.execute(
-        "SELECT 1 FROM information_schema.tables WHERE table_type = 'BASE TABLE' LIMIT 1"
+        "SELECT 1 FROM information_schema.tables WHERE table_type = 'BASE TABLE' "
+        "AND table_schema = 'main' AND table_catalog = current_database() LIMIT 1"
     ).fetchone()
     return row is not None
 
 
 def _columns_of(conn: duckdb.DuckDBPyConnection, table: str) -> set[str]:
+    # See _table_exists's comment — same schema/catalog scoping, for the
+    # same reason (an unscoped query previously returned the *union* of
+    # columns across every same-named table in every schema/catalog).
     return {
         row[0]
         for row in conn.execute(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+            "SELECT column_name FROM information_schema.columns WHERE table_name = ? "
+            "AND table_schema = 'main' AND table_catalog = current_database()",
             [table],
         ).fetchall()
     }
@@ -260,9 +277,10 @@ def migrate_file(path: str | Path, *, dry_run: bool = False) -> MigrationReport:
     Raises:
         SchemaError: `path` doesn't exist yet, or the file's version is
             newer than this build supports.
-        StorageError: a migration's `up()` (or the format_version stamp)
-            failed against the driver; every change from this call is
-            rolled back first.
+        StorageError: opening `path` as a DuckDB database or reading the
+            current version failed against the driver, or a migration's
+            `up()` (or the format_version stamp) failed; every change from
+            this call is rolled back first.
     """
     file_path = Path(path)
     if not file_path.exists():
@@ -272,9 +290,20 @@ def migrate_file(path: str | Path, *, dry_run: bool = False) -> MigrationReport:
             "current format.",
             detail={"path": str(file_path)},
         )
-    conn = duckdb.connect(str(file_path))
+    # Unlike sqlite3.connect() (lazy - a corrupt file only fails on first
+    # real read, caught below), duckdb.connect() validates the file format
+    # eagerly and raises immediately - round-3 review found this connect()
+    # call itself, not just the read after it, needed the same StorageError
+    # translation.
     try:
-        current = read_current_version(conn)
+        conn = duckdb.connect(str(file_path))
+    except duckdb.Error as e:
+        raise StorageError(f"Could not open {file_path} as a DuckDB database: {e}") from e
+    try:
+        try:
+            current = read_current_version(conn)
+        except duckdb.Error as e:
+            raise StorageError(f"Could not read format_version from {file_path}: {e}") from e
         if current > CURRENT_FORMAT_VERSION:
             raise SchemaError(
                 f"Database at {file_path} is format_version {current}, newer than this "

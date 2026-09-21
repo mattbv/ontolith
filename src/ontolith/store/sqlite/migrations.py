@@ -50,8 +50,13 @@ class _Migration:
     callers see only `MigrationStep`/`MigrationReport`, in `store/migrations.py`)."""
 
     version: int
-    """The format_version this migration moves the database *to* (i.e. the
-    database was at `version - 1` immediately before `up()` runs)."""
+    """The format_version this migration moves the database *to*. Not
+    necessarily *from* `version - 1` exactly — `read_current_version`
+    reports the minimum version implied across every table's own
+    independent check, so a file can be at an inferred version below this
+    migration's own table-specific "already done" state (round-3 review:
+    `_up_v2`'s and `_up_v3`'s own per-column checks are what make running
+    against an already-current table a safe no-op rather than an error)."""
 
     description: str
     reversible: bool
@@ -60,6 +65,14 @@ class _Migration:
 
 
 def _columns_of(cursor: sqlite3.Cursor, table: str) -> set[str]:
+    """Column names on `table`, via `PRAGMA table_info`.
+
+    `table` is f-string-interpolated (`PRAGMA` doesn't accept bound
+    parameters) — safe today because every call site in this module passes
+    a hardcoded literal (`"principal_credential"`, `"proposal"`), never a
+    caller-controlled value; there is no public entry point into this
+    private helper.
+    """
     return {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
 
 
@@ -99,14 +112,23 @@ def _down_v2(cursor: sqlite3.Cursor) -> None:
 def _up_v3(cursor: sqlite3.Cursor) -> None:
     """KI-078: proposal gains reviewers.
 
-    Unlike `_up_v2`, no per-column existence check is needed here: this
-    migration adds exactly one column, so there is no *partial* v3 shape
-    for `_infer_format_version` to under-detect the way it could for v2's
-    two columns — if `reviewers` already exists, inference already reports
-    version 3 (nothing pending), so this function is never dispatched
-    against a file that already has it.
+    Checks column existence first, same reasoning as `_up_v2` — round-3
+    review found the previous version of this docstring's own claim
+    ("inference already reports version 3 if `reviewers` exists, so this
+    is never dispatched against a file that already has it") false:
+    `_infer_format_version` reports the *minimum* version implied across
+    its two independent per-table checks, not a per-migration one, so a
+    file needing v2 (`principal_credential` still short a column) but
+    already v3-shaped on `proposal` is inferred as version 1 regardless —
+    `_up_v3` then runs unconditionally right after `_up_v2`, against a
+    table that already has `reviewers`. Reproduced: exactly the same
+    `duplicate column name` failure round 2 fixed for `_up_v2`, one version
+    later. Every registered `up()` must tolerate its own change already
+    being present, not just the one motivating case that happened to be
+    reproduced first — `_up_v2`'s fix generalizes here.
     """
-    cursor.execute("ALTER TABLE proposal ADD COLUMN reviewers TEXT NOT NULL DEFAULT '[]'")
+    if "reviewers" not in _columns_of(cursor, "proposal"):
+        cursor.execute("ALTER TABLE proposal ADD COLUMN reviewers TEXT NOT NULL DEFAULT '[]'")
 
 
 def _down_v3(cursor: sqlite3.Cursor) -> None:
@@ -171,11 +193,11 @@ def _infer_format_version(cursor: sqlite3.Cursor) -> int:
     """
     needs_v2 = False
     if _table_exists(cursor, "principal_credential"):
-        columns = {row[1] for row in cursor.execute("PRAGMA table_info(principal_credential)")}
+        columns = _columns_of(cursor, "principal_credential")
         needs_v2 = "issued_by" not in columns or "revoked_by" not in columns
     needs_v3 = False
     if _table_exists(cursor, "proposal"):
-        proposal_columns = {row[1] for row in cursor.execute("PRAGMA table_info(proposal)")}
+        proposal_columns = _columns_of(cursor, "proposal")
         needs_v3 = "reviewers" not in proposal_columns
     if needs_v2:
         return 1
@@ -295,9 +317,10 @@ def migrate_file(path: str | Path, *, dry_run: bool = False) -> MigrationReport:
         SchemaError: `path` doesn't exist yet (nothing to migrate — connect
             once first to create a fresh database), or the file's version is
             newer than this build supports.
-        StorageError: a migration's `up()` (or the format_version stamp)
-            failed against the driver; every change from this call is rolled
-            back first.
+        StorageError: reading the current version failed against the driver
+            (e.g. `path` exists but isn't a valid SQLite file), or a
+            migration's `up()` (or the format_version stamp) failed; every
+            change from this call is rolled back first.
     """
     file_path = Path(path)
     if not file_path.exists():
@@ -310,7 +333,15 @@ def migrate_file(path: str | Path, *, dry_run: bool = False) -> MigrationReport:
     conn = sqlite3.connect(str(file_path))
     try:
         cursor = conn.cursor()
-        current = read_current_version(cursor)
+        # round-3 review: a corrupt/non-database file raised a raw
+        # sqlite3.DatabaseError here, contradicting this function's own
+        # documented "surfaces as StorageError, not a raw sqlite3.Error"
+        # claim, which previously only covered the migration transaction
+        # below, not this read.
+        try:
+            current = read_current_version(cursor)
+        except sqlite3.Error as e:
+            raise StorageError(f"Could not read format_version from {file_path}: {e}") from e
         if current > CURRENT_FORMAT_VERSION:
             raise SchemaError(
                 f"Database at {file_path} is format_version {current}, newer than this "
