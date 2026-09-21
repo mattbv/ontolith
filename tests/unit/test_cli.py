@@ -2471,6 +2471,75 @@ class TestSchemaMigrate:
         assert "lacks admin capability" in result.output
 
 
+class TestDbStatusAndMigrate:
+    """SPEC §15, ADR-0052: `ontolith db status`/`ontolith db migrate` — the
+    standalone entry points for a file `_kb()`/`Ontology.connect()` would
+    otherwise refuse (SchemaError) to open at all, since that's exactly the
+    case these commands exist to inspect/fix. Note: unlike most other CLI
+    tests, these deliberately don't route through `_kb()`, so `temp_db`'s
+    zero-byte placeholder file is itself already a valid, current-format
+    "database" (empty database = fresh, ADR-0052) rather than something
+    needing a real `Ontology.connect()` first."""
+
+    def _build_legacy_v1_file(self, path: Path) -> None:
+        import sqlite3
+
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
+            "token_hash TEXT, created_at TEXT, revoked_at TEXT)"
+        )
+        conn.execute("CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT, author TEXT)")
+        conn.commit()
+        conn.close()
+
+    def test_status_on_fresh_db_reports_up_to_date(self, temp_db: Path) -> None:
+        result = runner.invoke(app, ["--db", str(temp_db), "db", "status"])
+        assert result.exit_code == 0
+        assert "up to date" in result.output
+
+    def test_status_on_legacy_file_lists_pending_migrations(self, temp_db: Path) -> None:
+        self._build_legacy_v1_file(temp_db)
+        result = runner.invoke(app, ["--db", str(temp_db), "db", "status"])
+        assert result.exit_code == 0
+        assert "format_version=1" in result.output
+        assert "v2 (reversible)" in result.output
+        assert "v3 (reversible)" in result.output
+
+    def test_migrate_dry_run_reports_without_applying(self, temp_db: Path) -> None:
+        self._build_legacy_v1_file(temp_db)
+        result = runner.invoke(app, ["--db", str(temp_db), "db", "migrate", "--dry-run"])
+        assert result.exit_code == 0
+        assert "Would apply v2" in result.output
+        assert "Would apply v3" in result.output
+
+        # Still refused afterward - a dry run changed nothing.
+        with pytest.raises(Exception, match="format_version"):
+            Ontology.connect(temp_db)
+
+    def test_migrate_applies_pending_migrations_and_unblocks_connect(self, temp_db: Path) -> None:
+        self._build_legacy_v1_file(temp_db)
+        result = runner.invoke(app, ["--db", str(temp_db), "db", "migrate"])
+        assert result.exit_code == 0
+        assert "Applied v2" in result.output
+        assert "Applied v3" in result.output
+        assert "1 -> 3" in result.output
+
+        kb = Ontology.connect(temp_db)
+        kb.close()
+
+    def test_migrate_on_already_current_db_is_a_no_op(self, temp_db: Path) -> None:
+        result = runner.invoke(app, ["--db", str(temp_db), "db", "migrate"])
+        assert result.exit_code == 0
+        assert "nothing to do" in result.output
+
+    def test_migrate_on_nonexistent_db_errors(self, tmp_path: Path) -> None:
+        result = runner.invoke(app, ["--db", str(tmp_path / "does_not_exist.db"), "db", "migrate"])
+        assert result.exit_code == 1
+        assert "No database file" in result.output
+
+
 class TestAdminEventsList:
     """KI-072: `ontolith admin-event list` - the read half of KI-060's
     audit trail for create_principal/apply_schema/register_plugin (token

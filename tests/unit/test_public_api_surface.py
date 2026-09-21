@@ -88,8 +88,8 @@ _EXPECTED: dict[str, frozenset[str]] = {
         {"AdminAction", "AdminEvent", "Principal", "PrincipalCredential", "min_capability"}
     ),
     "ontolith.store": frozenset({"StorageBackend"}),
-    "ontolith.store.sqlite": frozenset({"SQLiteBackend"}),
-    "ontolith.store.duckdb": frozenset({"DuckDBBackend"}),
+    "ontolith.store.sqlite": frozenset({"SQLiteBackend", "migrations"}),
+    "ontolith.store.duckdb": frozenset({"DuckDBBackend", "migrations"}),
     "ontolith.govern": frozenset(
         {
             "Proposal",
