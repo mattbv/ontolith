@@ -199,7 +199,7 @@ actually needs it, not built preemptively.
   different mechanism and a different kind of "version" than this backend's own DDL shape; conflating
   the two under one command would blur exactly the distinction ADR-0034 went out of its way to draw.
 
-## Update (2026-09-21): three review rounds so far, each finding real issues
+## Update (2026-09-21): four review rounds so far, each finding real issues
 
 **Round 1** (architecture + a dedicated review of this ADR's own diff) found three HIGH and two
 MEDIUM issues, all reproduced by direct execution before being trusted, all fixed and re-verified:
@@ -302,6 +302,36 @@ found:
   paragraph still described SQLite's `up()`s as "issuing a bare `ALTER TABLE ADD COLUMN`" (the exact
   behavior round 1/2's fixes replaced) and didn't mention DuckDB's own schema/catalog-scoping
   requirement at all — reworded to state both fixes' actual mechanism, not the pre-fix one.
+
+**Round 4** independently re-verified every round-3 fix (all held, all mutation-tested) and found:
+
+- **MEDIUM — round 3's own fix for `_up_v3` was one instance of a wider pattern, not the whole of
+  it.** Rounds 2 and 3 taught detection (`_infer_format_version`) to tolerate a table being absent
+  entirely (round 1) or being a view (round 2's DuckDB fix) — but application (each `up()`) was only
+  ever hardened against its own column already being present. Because `_infer_format_version` reports
+  the minimum version across two *independent* per-table checks, a file needing v2
+  (`principal_credential` still short a column) with `proposal` missing entirely — not just already
+  v3-shaped, but absent — was still inferred as version 1, dispatching `_up_v3` against a table that
+  doesn't exist at all (reproduced: `no such table: proposal` / DuckDB `Catalog Error: Table with
+  name proposal does not exist!`), permanently un-migratable via the same rollback mechanism round 1
+  built. Fixed: both `_up_v2` and `_up_v3`, on both backends, now check their own target table's
+  existence first and no-op if it's absent — `_create_schema()` creates it fresh, at the current
+  shape, on the next real connect, so no explicit `up()` work is needed for that case. `_up_v2`'s own
+  version of this guard has a narrower reachability than `_up_v3`'s (ordinary column-based inference
+  alone can't dispatch `_up_v2` while `principal_credential` is absent, since `needs_v2` is itself
+  gated on that table's existence — the guard is reachable instead through a stale/tampered stored
+  `format_version` row, which `read_current_version` trusts over inference by design); both
+  reachability paths are documented on each function's own docstring and covered by a dedicated
+  regression test.
+- **LOW — SQLite's `migrate_file()` still leaked a raw `sqlite3.Error` from `sqlite3.connect()`
+  itself**, missed by round 3's fix, which wrapped only the read that follows a successful connect
+  (reasoning that `sqlite3.connect()` is lazy — true for file *content*, not for a bad *path*: a
+  directory or a permission-denied file raised a raw `OperationalError` at connect time). Fixed by
+  wrapping `sqlite3.connect()` the same way round 3 already wrapped DuckDB's own eager `connect()`.
+- Documentation-accuracy issues: DuckDB's `read_current_version` docstring claimed "identical
+  contract" to SQLite's zero-byte-placeholder handling — false; `duckdb.connect()` refuses to open a
+  pre-existing empty file outright (a pre-existing DuckDB limitation, not something this module
+  changes), so that function is never even reached for that shape — corrected to say so.
 
 Every claim in this Update section was independently re-verified against source and by direct
 execution before being written, not carried forward from any review round's own report.
