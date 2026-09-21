@@ -539,7 +539,12 @@ class TestRoundOneReviewFindings:
         """M1: a v3 failure used to leave v2's ALTER TABLEs committed with
         no format_version row recording it - half-migrated, only
         "recovering" by the accident of inference. Now the whole call is
-        one transaction."""
+        one transaction. `_up_v3` is monkeypatched to fail deliberately -
+        the original fixture shape this test used (no `proposal` table at
+        all) stopped failing once round 4's own fix taught `_up_v3` to
+        tolerate its target table being absent entirely; this test's own
+        purpose (atomicity across a real failure) needs a failure
+        independent of that fix."""
         path = tmp_path / "will_fail.db"
         conn = sqlite3.connect(str(path))
         conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
@@ -547,12 +552,29 @@ class TestRoundOneReviewFindings:
             "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
             "token_hash TEXT, created_at TEXT, revoked_at TEXT)"
         )
-        # No `proposal` table at all - v3's up() will fail.
+        conn.execute("CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT, author TEXT)")
         conn.commit()
         conn.close()
 
-        with pytest.raises(StorageError, match="rolled back"):
-            sqlite_migrations.migrate_file(path)
+        def broken_up_v3(cursor: sqlite3.Cursor) -> None:
+            raise sqlite3.OperationalError("deliberately broken")
+
+        original = sqlite_migrations._MIGRATIONS
+        sqlite_migrations._MIGRATIONS = tuple(
+            sqlite_migrations._Migration(
+                version=m.version,
+                description=m.description,
+                reversible=m.reversible,
+                up=broken_up_v3 if m.version == 3 else m.up,
+                down=m.down,
+            )
+            for m in original
+        )
+        try:
+            with pytest.raises(StorageError, match="rolled back"):
+                sqlite_migrations.migrate_file(path)
+        finally:
+            sqlite_migrations._MIGRATIONS = original
 
         conn = sqlite3.connect(str(path))
         try:
@@ -567,7 +589,8 @@ class TestRoundOneReviewFindings:
     def test_m1_failed_migration_rolls_back_every_step_from_this_call_duckdb(
         self, tmp_path: Path
     ) -> None:
-        """See the SQLite test above - identical shape, DuckDB backend."""
+        """See the SQLite test above - identical shape and reasoning,
+        DuckDB backend."""
         path = tmp_path / "will_fail.duckdb"
         conn = duckdb.connect(str(path))
         conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
@@ -575,11 +598,28 @@ class TestRoundOneReviewFindings:
             "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
             "token_hash TEXT, created_at TEXT, revoked_at TEXT)"
         )
-        # No `proposal` table at all - v3's up() will fail.
+        conn.execute("CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT, author TEXT)")
         conn.close()
 
-        with pytest.raises(StorageError, match="rolled back"):
-            duckdb_migrations.migrate_file(path)
+        def broken_up_v3(conn: duckdb.DuckDBPyConnection) -> None:
+            raise duckdb.IOException("deliberately broken")
+
+        original = duckdb_migrations._MIGRATIONS
+        duckdb_migrations._MIGRATIONS = tuple(
+            duckdb_migrations._Migration(
+                version=m.version,
+                description=m.description,
+                reversible=m.reversible,
+                up=broken_up_v3 if m.version == 3 else m.up,
+                down=m.down,
+            )
+            for m in original
+        )
+        try:
+            with pytest.raises(StorageError, match="rolled back"):
+                duckdb_migrations.migrate_file(path)
+        finally:
+            duckdb_migrations._MIGRATIONS = original
 
         conn = duckdb.connect(str(path))
         try:
@@ -888,3 +928,160 @@ class TestRoundThreeReviewFindings:
                 sqlite_migrations.migrate_file(path)
         finally:
             sqlite_migrations._MIGRATIONS = original
+
+
+class TestRoundFourReviewFindings:
+    """Regression tests for round-4 review of ADR-0052 — each reproduced a
+    real bug before its corresponding fix landed; see ADR-0052's own Update
+    section for the full record."""
+
+    def test_up_v2_and_up_v3_tolerate_proposal_missing_entirely_sqlite(
+        self, tmp_path: Path
+    ) -> None:
+        """MEDIUM: rounds 2/3 taught each up() to tolerate its own column
+        already being present, but not its own target table being absent
+        entirely - a file needing v2 (principal_credential still short
+        both columns) with no `proposal` table at all was inferred as
+        version 1 (the minimum across both independent per-table checks),
+        dispatching _up_v3 right after _up_v2 against a table that doesn't
+        exist (`no such table: proposal`), permanently un-migratable
+        (round 1's own atomicity fix rolls the whole call back every
+        retry). Fixed: both up()s now skip themselves when their own
+        target table doesn't exist yet - _create_schema() creates it
+        fresh, at the current shape, on the next real connect."""
+        path = tmp_path / "no_proposal_at_all.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
+            "token_hash TEXT, created_at TEXT, revoked_at TEXT)"
+        )
+        # No `proposal` table at all.
+        conn.commit()
+        conn.close()
+
+        report = sqlite_migrations.migrate_file(path)
+        assert [s.applied for s in report.steps] == [True, True]
+
+        backend = SQLiteBackend(path)
+        try:
+            columns = {
+                r[1] for r in backend.conn.execute("PRAGMA table_info(principal_credential)")
+            }
+            assert {"issued_by", "revoked_by"}.issubset(columns)
+            proposal_columns = {r[1] for r in backend.conn.execute("PRAGMA table_info(proposal)")}
+            assert "reviewers" in proposal_columns
+        finally:
+            backend.close()
+
+    def test_up_v2_and_up_v3_tolerate_proposal_missing_entirely_duckdb(
+        self, tmp_path: Path
+    ) -> None:
+        """See the SQLite test above - identical shape, DuckDB backend."""
+        path = tmp_path / "no_proposal_at_all.duckdb"
+        conn = duckdb.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
+            "token_hash TEXT, created_at TEXT, revoked_at TEXT)"
+        )
+        conn.close()
+
+        report = duckdb_migrations.migrate_file(path)
+        assert [s.applied for s in report.steps] == [True, True]
+
+        backend = DuckDBBackend(path)
+        try:
+            columns = {
+                r[0]
+                for r in backend.conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'proposal'"
+                ).fetchall()
+            }
+            assert "reviewers" in columns
+        finally:
+            backend.close()
+
+    def test_up_v2_tolerates_principal_credential_missing_entirely_via_stale_stamp_sqlite(
+        self, tmp_path: Path
+    ) -> None:
+        """MEDIUM (the `_up_v2` half): unlike `_up_v3`'s absent-table case,
+        `_up_v2` being dispatched while `principal_credential` is entirely
+        absent isn't reachable through ordinary column-based inference
+        alone (`_infer_format_version` can only report version 1 - forcing
+        `_up_v2` into `pending` - when `principal_credential` already
+        exists, since that's the only place `needs_v2` can become True) -
+        but a stale/tampered `format_version` row (read_current_version
+        trusts a stored row over inference, by design) that claims version
+        1 against a file with *both* `principal_credential` and `proposal`
+        missing entirely reaches it directly. Confirms the guard added for
+        symmetry with `_up_v3` is reachable and correct, not just
+        defensive dead code."""
+        path = tmp_path / "tampered_stamp.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE format_version (id INTEGER PRIMARY KEY CHECK(id = 1), "
+            "version INTEGER NOT NULL)"
+        )
+        conn.execute("INSERT INTO format_version (id, version) VALUES (1, 1)")
+        conn.commit()
+        conn.close()
+
+        report = sqlite_migrations.migrate_file(path)
+        assert [s.applied for s in report.steps] == [True, True]
+
+        backend = SQLiteBackend(path)
+        try:
+            columns = {
+                r[1] for r in backend.conn.execute("PRAGMA table_info(principal_credential)")
+            }
+            assert {"issued_by", "revoked_by"}.issubset(columns)
+        finally:
+            backend.close()
+
+    def test_up_v2_tolerates_principal_credential_missing_entirely_via_stale_stamp_duckdb(
+        self, tmp_path: Path
+    ) -> None:
+        """See the SQLite test above - identical shape and reasoning,
+        DuckDB backend."""
+        path = tmp_path / "tampered_stamp.duckdb"
+        conn = duckdb.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE format_version (id INTEGER PRIMARY KEY CHECK(id = 1), "
+            "version INTEGER NOT NULL)"
+        )
+        conn.execute("INSERT INTO format_version (id, version) VALUES (1, 1)")
+        conn.close()
+
+        report = duckdb_migrations.migrate_file(path)
+        assert [s.applied for s in report.steps] == [True, True]
+
+        backend = DuckDBBackend(path)
+        try:
+            columns = {
+                r[0]
+                for r in backend.conn.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'principal_credential'"
+                ).fetchall()
+            }
+            assert {"issued_by", "revoked_by"}.issubset(columns)
+        finally:
+            backend.close()
+
+    def test_migrate_file_on_directory_path_raises_storage_error_sqlite(
+        self, tmp_path: Path
+    ) -> None:
+        """LOW: sqlite3.connect() opens the file handle eagerly - a
+        directory path raised a raw sqlite3.OperationalError, missed by
+        round 3's fix, which only wrapped the read after a successful
+        connect(). This is the SQLite twin of the connect()-time wrap round
+        3 already added for DuckDB."""
+        path = tmp_path / "a_directory.db"
+        path.mkdir()
+
+        with pytest.raises(StorageError, match="Could not open"):
+            sqlite_migrations.migrate_file(path)
