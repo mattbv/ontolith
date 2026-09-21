@@ -2197,6 +2197,24 @@ Not started. Bound `recv_bytes()` with a `poll(timeout)` check before each block
 
 ---
 
+## KI-104 — `store/{sqlite,duckdb}/migrations.py`'s per-`up()` defensiveness should become a declarative, centrally-applied registry once a third migration is added
+
+**Severity:** Architecture gap — not a bug in the current two-migration registry, a maintainability risk for the next one
+**Milestone target:** Backlog — filed in round-5 review of M4's storage-format migrations (ADR-0052)
+**SPEC reference:** SPEC §15 (Versioning & migration); ADR-0052 (on-disk storage-format migrations)
+
+### Description
+
+ADR-0052's migration framework took five review rounds to converge, and four of those rounds (2 through 5, the last coming back clean) each found the *same* root-cause class of bug: `_infer_format_version` collapses each table's own independent state into one global version scalar, then `migrate_file` dispatches every registered migration above that scalar regardless of which specific table each one targets — so a migration can be handed a target table in a state its own version number says nothing about (the column already present; the table absent entirely; the table shadowed by a view). Each round discovered one more such state the relevant `up()` hadn't been taught to tolerate, and fixed it by adding another existence/column check to that specific `up()` function, by hand, on both backends.
+
+The current registry (`_MIGRATIONS`, two entries: `principal_credential.issued_by`/`.revoked_by`, `proposal.reviewers`) is now correct and exhaustively verified for every reachable combination (round 5's own 100-shape empirical sweep found zero failures), so there is no bug to fix today. But the defensiveness this took five rounds to build lives entirely inside each `up()` function's own hand-written guard clauses, duplicated per-migration and per-backend — a **third** migration (a hypothetical v4) would need the identical class of guard re-derived by hand, by whoever adds it, without the benefit of the four rounds of review that found this shape the first three times.
+
+### Fix
+
+Not started; no design decision needed beyond confirming the shape. When a third migration is actually added, consider replacing the callable-`up`/`down`-per-`_Migration` shape with a declarative one for the common (single-table, add-columns) case — e.g. `_Migration(version=4, table="...", add_columns={"col": "TYPE", ...})` — with one central applier that does, for any such entry: skip if the table isn't a base table (absent or a view), skip each column already present, else `ALTER TABLE ADD COLUMN`. That makes the whole bug class structurally unrepresentable instead of requiring per-migration vigilance, and lets `_infer_format_version` derive its own per-table checks from the same declarative data instead of the two being hand-maintained in parallel (a second source of the divergence this round's own findings kept surfacing). Keep an `up`/`down` callable escape hatch for a future migration that isn't column-shaped (a widened `CHECK`, a table rewrite, an index change) — not every migration will fit the declarative shape, and forcing one that doesn't would be worse than the status quo. Deliberately not done now: refactoring working, exhaustively-verified code with no reachable bug, purely to reduce future maintenance risk, isn't worth the churn on its own — the trigger is the next migration actually being added, not this filing.
+
+---
+
 ## Format
 
 Each entry follows this structure:

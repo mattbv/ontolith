@@ -41,17 +41,21 @@ on both `SQLiteBackend` and `DuckDBBackend` today (both have shipped the identic
 column additions, so the numbers coincide — nothing requires them to stay in sync going forward).
 Each backend owns its own registry: `store/sqlite/migrations.py`, `store/duckdb/migrations.py` — the
 DDL is inherently backend-specific (DuckDB supports `ADD COLUMN IF NOT EXISTS` directly, naturally
-idempotent, but rejects any constraint on it; SQLite has no such syntax, so each `up()` there checks
-its own target column's existence via `PRAGMA table_info` before its own `ALTER TABLE ADD COLUMN` —
-required, not just defensive: `read_current_version`'s inference reports the *minimum* version
-implied across every table's own independent check, so a migration can genuinely be dispatched
-against a table that already has its change, and must tolerate that as a no-op rather than raising
-`duplicate column name`) and version *inference* for a file with no tracking row yet is
-column-existence-based on both (`PRAGMA table_info` on SQLite, `information_schema.columns` on
-DuckDB, itself scoped to `table_schema = 'main'`/`table_catalog = current_database()` on DuckDB
-specifically — `information_schema` spans every attached catalog and schema, unlike SQLite's
-`sqlite_master`, which is always scoped to the one file), so there is no cross-backend
-`StorageBackend` port method for this — see Alternatives.
+idempotent on the column, but rejects any constraint on it and still needs its own explicit guard for
+the table itself; SQLite has no `ADD COLUMN IF NOT EXISTS` at all, so each `up()` there checks its
+own target column's existence via `PRAGMA table_info` before its own `ALTER TABLE ADD COLUMN`).
+**Every registered `up()`, on both backends, also checks its own target table's existence first and
+no-ops if it's absent** — required, not just defensive: `read_current_version`'s inference reports
+the *minimum* version implied across every table's own independent check, so a migration can
+genuinely be dispatched against a table that already has its change (tolerated as a no-op rather than
+raising `duplicate column name`) or against a table that doesn't exist yet at all (tolerated as a
+no-op too — `_create_schema()`'s own `CREATE TABLE IF NOT EXISTS` creates it fresh, at the current
+shape, on the next real connect, so no explicit migration work is needed for that case either).
+Version *inference* for a file with no tracking row yet is column-existence-based on both (`PRAGMA
+table_info` on SQLite, `information_schema.columns` on DuckDB, itself scoped to `table_schema =
+'main'`/`table_catalog = current_database()` on DuckDB specifically — `information_schema` spans
+every attached catalog and schema, unlike SQLite's `sqlite_master`, which is always scoped to the one
+file), so there is no cross-backend `StorageBackend` port method for this — see Alternatives.
 
 **A brand-new (empty) database file is always created directly at `CURRENT_FORMAT_VERSION`** — its
 `CREATE TABLE` statements already declare the current shape, so there is nothing to migrate *from*.
@@ -182,6 +186,11 @@ actually needs it, not built preemptively.
   here; matches this project's existing posture that operational/deployment sequencing (don't run
   `db migrate` against a file another process has open) is the operator's responsibility, the same
   boundary KI-084's `BEGIN IMMEDIATE` fix already draws for ordinary writes.
+- **Each registered migration's own `up()` defends itself against every state its target table could
+  be in, by hand, per-migration, per-backend** — the shape the five-round review arc converged on (see
+  Update section below). Correct and exhaustively verified for the current two migrations, but not
+  centralized — filed as **KI-104**, a maintainability follow-up (not a bug) to revisit once a third
+  migration is actually added.
 
 ## Alternatives Considered
 
@@ -199,7 +208,7 @@ actually needs it, not built preemptively.
   different mechanism and a different kind of "version" than this backend's own DDL shape; conflating
   the two under one command would blur exactly the distinction ADR-0034 went out of its way to draw.
 
-## Update (2026-09-21): four review rounds so far, each finding real issues
+## Update (2026-09-21): five review rounds, code correct from round 5
 
 **Round 1** (architecture + a dedicated review of this ADR's own diff) found three HIGH and two
 MEDIUM issues, all reproduced by direct execution before being trusted, all fixed and re-verified:
@@ -333,6 +342,39 @@ found:
   pre-existing empty file outright (a pre-existing DuckDB limitation, not something this module
   changes), so that function is never even reached for that shape — corrected to say so.
 
+**Round 5** independently re-verified every round-4 fix — including an exhaustive empirical sweep of
+`{principal_credential, proposal} × {absent, view, short a column, full}` (100 SQLite files, each
+migrated then re-opened) confirming `_up_v2`'s absent-table branch really is unreachable through
+ordinary inference alone (only through a tampered stored row, as round 4 claimed) and that no
+combination in that sweep raises from `migrate_file` any more — and found no CRITICAL/HIGH/MEDIUM
+issue. This is the first round with no code-level finding, after four consecutive rounds that each
+found a real bug in the same narrow area (each registered migration's `up()` needing to tolerate one
+more state of its own target than the previous round anticipated). It found three LOW
+documentation/test-accuracy items, all fixed here:
+
+- The table-absent guards' own docstrings (`_up_v2`/`_up_v3`, both backends) claimed
+  `_create_schema()` "creates the table fresh" unconditionally once the guard skips a migration — true
+  for a genuinely absent table, but not for a *view* occupying the same name: `_table_exists` treats a
+  view the same as "absent" (by design, matching round 2's own detection fix), but `CREATE TABLE IF
+  NOT EXISTS` silently no-ops against an existing same-named view rather than replacing it (verified
+  directly, both backends) — so that specific, deliberately-created shape (a view named exactly
+  `principal_credential`/`proposal`) ends up stamped `format_version=3` and opens without error while
+  the view is never replaced by the real table. Narrowed each docstring to state this caveat
+  explicitly rather than overclaiming full self-healing; the existing DuckDB view regression test
+  (`test_duckdb_table_existence_checks_dont_count_a_view_as_the_table`) now pins this exact
+  consequence directly (post-migrate, `proposal` is still `table_type = 'VIEW'`) instead of only
+  checking `report.up_to_date`. Not further guarded against — detecting and rejecting a shadowing view
+  would need its own design, and this shape is not one this project's own code ever produces.
+- Two backend-test docstrings (`test_sqlite_backend.py`/`test_duckdb_backend.py`'s
+  `test_principal_credential_migration_adds_new_columns_to_existing_db`) stated `proposal` was
+  "needed for v3's `up()` to have a table to ALTER" — true before round 4's own fix, false after (the
+  fixture still correctly includes `proposal`, since it's the realistic legacy shape, but the stated
+  *reason* was stale).
+- This Decision section's DDL-backend-specificity paragraph described the per-`up()` defensiveness as
+  column-existence checking only, and described DuckDB's `up()`s as needing no guard at all — both
+  incomplete after round 4's fix, which added a table-existence guard to every `up()` on both
+  backends. Reworded to state both guarantees (column and table).
+
 Every claim in this Update section was independently re-verified against source and by direct
 execution before being written, not carried forward from any review round's own report.
 
@@ -346,7 +388,9 @@ execution before being written, not carried forward from any review round's own 
 - ADR-0034 (`ontolith schema migrate` — explicitly deferred this exact problem as "scope (b)"; this
   ADR is that follow-up, though narrower than ADR-0034's own framing — DDL shape, not domain data)
 - `docs/known-issues.md` KI-060 (`principal_credential.issued_by`/`.revoked_by`, the v2 migration),
-  KI-078 (`proposal.reviewers`, the v3 migration) — both retroactively formalized here
+  KI-078 (`proposal.reviewers`, the v3 migration) — both retroactively formalized here; KI-104 (new,
+  filed in round-5 review — a declarative, centrally-applied migration registry as a follow-up once a
+  third migration is added, replacing the current per-`up()` hand-written defensiveness)
 - `docs/Ontolith_Implementation_Plan.md` §2 (M4 milestone table — "migration tooling," this ADR's
   workstream, and its "on-disk `format_version` frozen" exit criterion, which this ADR makes
   meaningful for the first time by giving `format_version` something to freeze) and §7.2 (Branching
