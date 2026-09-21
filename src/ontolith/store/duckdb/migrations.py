@@ -36,7 +36,15 @@ class _Migration:
 
 
 def _up_v2(conn: duckdb.DuckDBPyConnection) -> None:
-    """KI-060: principal_credential gains issued_by/revoked_by."""
+    """KI-060: principal_credential gains issued_by/revoked_by.
+
+    `IF NOT EXISTS` on each `ADD COLUMN` makes this naturally safe against a
+    partial-v2 file (one column present, the other not — round-2 review
+    found this shape reachable and genuinely un-migratable on SQLite, whose
+    bare `ALTER TABLE ADD COLUMN` has no such guard; see the SQLite
+    module's own `_up_v2` docstring for the fix there). No equivalent fix
+    needed here — this was already correct.
+    """
     conn.execute("ALTER TABLE principal_credential ADD COLUMN IF NOT EXISTS issued_by TEXT")
     conn.execute("ALTER TABLE principal_credential ADD COLUMN IF NOT EXISTS revoked_by TEXT")
 
@@ -111,14 +119,22 @@ assert [m.version for m in _MIGRATIONS] == list(range(2, CURRENT_FORMAT_VERSION 
 
 
 def _table_exists(conn: duckdb.DuckDBPyConnection, name: str) -> bool:
+    # table_type = 'BASE TABLE' excludes views (round-2 review: unfiltered,
+    # `information_schema.tables` also lists views — a view happening to be
+    # named e.g. `proposal` would otherwise read as the real table, matching
+    # SQLite's own `_table_exists`, which already filters `type = 'table'`).
     row = conn.execute(
-        "SELECT 1 FROM information_schema.tables WHERE table_name = ?", [name]
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE table_name = ? AND table_type = 'BASE TABLE'",
+        [name],
     ).fetchone()
     return row is not None
 
 
 def _any_table_exists(conn: duckdb.DuckDBPyConnection) -> bool:
-    row = conn.execute("SELECT 1 FROM information_schema.tables LIMIT 1").fetchone()
+    row = conn.execute(
+        "SELECT 1 FROM information_schema.tables WHERE table_type = 'BASE TABLE' LIMIT 1"
+    ).fetchone()
     return row is not None
 
 
@@ -287,10 +303,15 @@ def migrate_file(path: str | Path, *, dry_run: bool = False) -> MigrationReport:
                 already_stamped = row is not None and int(row[0]) == current
             if pending or not already_stamped:
                 final_version = pending[-1].version if pending else current
+                # See the SQLite module's identical comment - tracks which
+                # specific step failed, not just the sequence's overall
+                # target.
+                failing_version = final_version
                 try:
                     conn.execute("BEGIN")
                     _ensure_format_version_table(conn)
                     for m in pending:
+                        failing_version = m.version
                         m.up(conn)
                     conn.execute(
                         "INSERT INTO format_version (id, version) VALUES (1, ?) "
@@ -301,7 +322,7 @@ def migrate_file(path: str | Path, *, dry_run: bool = False) -> MigrationReport:
                 except duckdb.Error as e:
                     conn.rollback()
                     raise StorageError(
-                        f"Migration to format_version {final_version} failed, rolled back: {e}"
+                        f"Migration to format_version {failing_version} failed, rolled back: {e}"
                     ) from e
         return MigrationReport(
             from_version=current,

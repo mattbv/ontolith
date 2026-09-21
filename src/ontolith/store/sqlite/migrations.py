@@ -59,10 +59,32 @@ class _Migration:
     down: Callable[[sqlite3.Cursor], None] | None = None
 
 
+def _columns_of(cursor: sqlite3.Cursor, table: str) -> set[str]:
+    return {row[1] for row in cursor.execute(f"PRAGMA table_info({table})")}
+
+
 def _up_v2(cursor: sqlite3.Cursor) -> None:
-    """KI-060: principal_credential gains issued_by/revoked_by."""
-    cursor.execute("ALTER TABLE principal_credential ADD COLUMN issued_by TEXT")
-    cursor.execute("ALTER TABLE principal_credential ADD COLUMN revoked_by TEXT")
+    """KI-060: principal_credential gains issued_by/revoked_by.
+
+    Checks each column independently before its own `ALTER TABLE`, rather
+    than assuming neither exists yet — round-2 review found a real,
+    reachable partial-v2 shape (one column added, the other not) that a
+    bare pair of `ALTER TABLE ADD COLUMN`s can't tolerate: `main`'s own old
+    ad hoc fixup ran each `ALTER TABLE` as its own autocommit statement
+    (`isolation_level=None`), so a process killed between the two leaves
+    exactly this shape on disk, and `_infer_format_version` — which only
+    distinguishes "has both" from "missing at least one," not which one —
+    correctly calls that version 1, then dispatches the whole of `_up_v2`
+    unconditionally. Reproduced: `issued_by` present, `revoked_by` absent,
+    inferred version 1, `_up_v2`'s first statement raised `duplicate column
+    name: issued_by` before ever reaching the second. Fixed by checking
+    columns here instead of relying on the caller's coarser detection.
+    """
+    columns = _columns_of(cursor, "principal_credential")
+    if "issued_by" not in columns:
+        cursor.execute("ALTER TABLE principal_credential ADD COLUMN issued_by TEXT")
+    if "revoked_by" not in columns:
+        cursor.execute("ALTER TABLE principal_credential ADD COLUMN revoked_by TEXT")
 
 
 def _down_v2(cursor: sqlite3.Cursor) -> None:
@@ -75,7 +97,15 @@ def _down_v2(cursor: sqlite3.Cursor) -> None:
 
 
 def _up_v3(cursor: sqlite3.Cursor) -> None:
-    """KI-078: proposal gains reviewers."""
+    """KI-078: proposal gains reviewers.
+
+    Unlike `_up_v2`, no per-column existence check is needed here: this
+    migration adds exactly one column, so there is no *partial* v3 shape
+    for `_infer_format_version` to under-detect the way it could for v2's
+    two columns — if `reviewers` already exists, inference already reports
+    version 3 (nothing pending), so this function is never dispatched
+    against a file that already has it.
+    """
     cursor.execute("ALTER TABLE proposal ADD COLUMN reviewers TEXT NOT NULL DEFAULT '[]'")
 
 
@@ -309,10 +339,17 @@ def migrate_file(path: str | Path, *, dry_run: bool = False) -> MigrationReport:
                 already_stamped = row is not None and int(row[0]) == current
             if pending or not already_stamped:
                 final_version = pending[-1].version if pending else current
+                # Tracks which specific step was running when a driver error
+                # hits, not just the sequence's overall target — round-2
+                # review found the error otherwise always named
+                # `final_version` regardless of which earlier step actually
+                # failed, misleading for a multi-step sequence.
+                failing_version = final_version
                 try:
                     cursor.execute("BEGIN")
                     _ensure_format_version_table(cursor)
                     for m in pending:
+                        failing_version = m.version
                         m.up(cursor)
                     cursor.execute(
                         "INSERT INTO format_version (id, version) VALUES (1, ?) "
@@ -323,7 +360,7 @@ def migrate_file(path: str | Path, *, dry_run: bool = False) -> MigrationReport:
                 except sqlite3.Error as e:
                     conn.rollback()
                     raise StorageError(
-                        f"Migration to format_version {final_version} failed, rolled back: {e}"
+                        f"Migration to format_version {failing_version} failed, rolled back: {e}"
                     ) from e
         return MigrationReport(
             from_version=current,
