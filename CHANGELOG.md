@@ -100,6 +100,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test_bench_write_assert_literal` used to accidentally exercise (see `#### Fixed` above) has a
   real, measured, unbounded-with-size per-write cost and no benchmark of its own at all now that
   this fix moved every write off it — filed as **KI-100**.
+- On-disk storage-format migrations (SPEC §15, ADR-0052; **Breaking**) — new `format_version`
+  single-row table, tracked independently per backend (`store/sqlite/migrations.py`,
+  `store/duckdb/migrations.py`; both currently at `CURRENT_FORMAT_VERSION = 3`). Formalizes the two
+  historical, previously ad hoc `PRAGMA table_info` + `ALTER TABLE` fixups
+  (`principal_credential.issued_by`/`.revoked_by`, KI-060; `proposal.reviewers`, KI-078) as
+  registered migrations (v2, v3), each declaring `reversible: bool` and a `down()`.
+  `SQLiteBackend`/`DuckDBBackend` now **refuse** (`SchemaError`) to open an existing file below
+  `CURRENT_FORMAT_VERSION` instead of silently upgrading it on connect — a fresh, empty file is
+  unaffected (created directly at the current format). `migrate_file(path, *, dry_run=False)` is
+  the explicit, standalone action that applies pending migrations (or, dry-run, only reports them,
+  writing nothing at all) — new CLI commands `ontolith db status`/`ontolith db migrate [--dry-run]`
+  (SQLite only, matching `Ontology.connect()`'s own scope; DuckDB's `migrate_file` is reached
+  programmatically). Any existing database file below the current format_version now needs an
+  explicit `ontolith db migrate` before it opens again. Data migration/backfill for a renamed or
+  retyped *domain* predicate against already-stored assertion data (ADR-0034's own "scope (b)")
+  remains a distinct, still-open problem this does not solve.
 
 ### M3 - Extensible (0.3)
 
