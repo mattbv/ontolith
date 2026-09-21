@@ -581,8 +581,10 @@ Entity:
 
 > **Implementation deviations.** Abbreviated and drifted from the shipped command set in places not
 > yet reconciled row-by-row, the same as §14.4's own note below — `interfaces/cli.py` is current.
-> Notably: `entity`/`contradiction`/`namespace`/`admin-event` command groups exist with no mention
-> above; `import|export` and `history` as named here were never implemented (plugin
+> Notably: `ontolith init` doesn't exist as its own command (a database file is created implicitly on
+> first connect, via `--db`/`ONTOLITH_DB`); `principal {add|list}` shipped as `principal
+> {create|list}`; `entity`/`contradiction`/`namespace`/`admin-event` command groups exist with no
+> mention above; `import|export` and `history` as named here were never implemented (plugin
 > import/export is reached via `Ontology`/the plugin registry directly, not a CLI verb; `history`'s
 > equivalent is `ontolith assertions --subject`). `ontolith db {status|migrate}` (SPEC §15,
 > ADR-0052) was added 2026-09-20 for on-disk format-version migrations — a distinct thing from

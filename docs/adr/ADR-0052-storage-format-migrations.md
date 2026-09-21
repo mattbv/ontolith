@@ -50,11 +50,13 @@ Alternatives.
 
 **A brand-new (empty) database file is always created directly at `CURRENT_FORMAT_VERSION`** — its
 `CREATE TABLE` statements already declare the current shape, so there is nothing to migrate *from*.
-"Empty" is judged by table existence (specifically: no `principal_credential` table), not by
-whether the file path existed before this connection opened it — a caller-supplied path can already
-exist as a zero-byte placeholder (`tempfile.NamedTemporaryFile(delete=False)`, which several existing
-test fixtures use, and which this ADR's own review round caught breaking on first pass), and that
-case must read the same as a path that didn't exist at all.
+"Empty" is judged by whether *any* table exists at all, not by whether the file path existed before
+this connection opened it — a caller-supplied path can already exist as a zero-byte placeholder
+(`tempfile.NamedTemporaryFile(delete=False)`, which several existing test fixtures use, and which
+this ADR's own review round caught breaking on first pass), and that case must read the same as a
+path that didn't exist at all. (An earlier version of this check keyed "empty" off one specific
+table, `principal_credential` — round-1 review found and fixed a real bug that shape caused; see
+this ADR's own Update section.)
 
 **`SQLiteBackend.__init__`/`DuckDBBackend.__init__` refuse (raise `SchemaError`) to open an
 existing file below `CURRENT_FORMAT_VERSION`**, rather than silently applying pending migrations the
@@ -85,6 +87,14 @@ lock attempt from the common no-op case. The CLI exposes this as `ontolith db st
 (read-only preview) and `ontolith db migrate [--dry-run]` — SQLite only, since `Ontology.connect()`/
 the CLI are SQLite-only today (ADR-0034's own scoping); `DuckDBBackend`'s `migrate_file` is reached
 programmatically.
+
+**Applying every pending migration is one transaction, not one per step.** `migrate_file` runs the
+whole pending sequence — every `up()`, in order, plus the final `format_version` stamp — inside one
+explicit `BEGIN`/`commit()`, catching a driver-level failure and `rollback()`ing before re-raising as
+`StorageError` (SPEC §16's own taxonomy, not a raw `sqlite3.Error`/`duckdb.Error`). A mid-sequence
+failure therefore leaves the file exactly as it was before the call, never half-migrated with
+earlier steps silently committed and no record of what actually landed (round-1 review reproduced
+the earlier, per-statement-autocommit version of this leaving exactly that half-migrated state).
 
 **Each migration declares `reversible: bool` and, when true, a `down()`.** Both historical
 migrations are reversible on SQLite (SQLite supports `ALTER TABLE ... DROP COLUMN` since 3.35,
@@ -183,6 +193,73 @@ actually needs it, not built preemptively.
   command is explicitly scoped (ADR-0034) to a namespace's *domain* schema via `apply_schema`, a
   different mechanism and a different kind of "version" than this backend's own DDL shape; conflating
   the two under one command would blur exactly the distinction ADR-0034 went out of its way to draw.
+
+## Update (2026-09-21): two review rounds, five real findings fixed, code correct from round 3
+
+**Round 1** (architecture + a dedicated review of this ADR's own diff) found three HIGH and two
+MEDIUM issues, all reproduced by direct execution before being trusted, all fixed and re-verified:
+
+- **HIGH — version inference misread a real, older file as fully current, permanently losing a
+  pending migration.** `read_current_version`/`_infer_format_version` originally keyed "empty
+  database" off `principal_credential` existing at all — but that table postdates `proposal` (added
+  later, per git history), so a genuine older file (`proposal` present without `reviewers`,
+  `principal_credential` absent entirely) was misread as empty, stamped `format_version=3`
+  immediately, and left `proposal.reviewers` missing with no error until a query against it finally
+  failed. Fixed: `_any_table_exists` now gates the "genuinely empty" fast path (any table, not one
+  specific table), and `_infer_format_version` checks each table's own columns independently rather
+  than gating one on the other's presence.
+- **HIGH — the `SchemaError` remediation message named a command that doesn't work.** It read
+  `` `ontolith db migrate --db {path}` ``; `--db` is a root-level Typer option and must precede the
+  subcommand, so the literal suggested command failed with `No such option: --db`. Fixed to
+  `` `ontolith --db {path} db migrate` ``.
+- **HIGH — every CLI command besides `db status`/`db migrate` surfaced a raw, unhandled traceback
+  against a stale file.** `_kb()` was called outside each command's own `try:`/`except Exception`
+  block; `Ontology.connect()` now genuinely raises (`SchemaError`) where it previously never did for
+  an openable file, and that exception escaped the CLI's own `Error: ...`/exit-1 convention entirely.
+  Fixed centrally in `_kb()` itself, once, rather than in all ~25 command bodies.
+- **MEDIUM — `migrate_file` applied each pending migration statement-by-statement, not atomically.**
+  A mid-sequence failure left the file half-migrated (earlier steps' DDL already committed) with no
+  `format_version` row recording what actually landed, and a raw `sqlite3.Error`/`duckdb.Error`
+  escaped instead of this project's `StorageError` taxonomy. Fixed: the whole pending sequence plus
+  the final stamp now runs inside one explicit transaction, rolled back and re-raised as
+  `StorageError` on failure — recorded as its own Decision bullet above.
+- **MEDIUM — `migrate_file`/`require_current_format` still attempted a write on the common no-op
+  case.** An unconditional `INSERT ... ON CONFLICT DO NOTHING` still asks for a write lock even when
+  nothing changes — reproduced stalling for the full busy-timeout against a live `BEGIN IMMEDIATE`
+  (KI-084) before raising `database is locked`, contradicting the "safe to call unconditionally"
+  claim for the exact deploy scenario it names. Fixed: both now skip the write entirely once a
+  matching row is confirmed already present.
+- Two LOWs from the same round: `SQLiteBackend.__init__`'s `PRAGMA journal_mode = WAL` ran *before*
+  the format-version refusal, mutating a stale file's on-disk journal mode ahead of declining to open
+  it — moved the refusal earlier, ahead of every PRAGMA. Both backends' refusal-path cleanup only
+  caught `SchemaError`, leaking a connection on a genuinely corrupt/non-database file (a different
+  exception type) — broadened to `except BaseException`.
+
+**Round 2** independently re-verified every round-1 fix by direct reproduction and mutation testing
+(reverting each fix in turn and confirming its regression test fails) — all five held. It found one
+further real bug, reachable specifically because of round 1's own fix:
+
+- **MEDIUM — a partially-applied v2 file (one of the two v2 columns present, the other missing) was
+  permanently un-migratable on SQLite.** `_infer_format_version` only distinguishes "has both
+  columns" from "missing at least one" — it can't tell *which* one is missing — so it correctly
+  reports version 1 and dispatches the whole of `_up_v2`. `_up_v2`'s bare `ALTER TABLE ADD COLUMN
+  issued_by` (unconditional) then raised `duplicate column name: issued_by` before ever reaching
+  `revoked_by`, and — because of round 1's own atomicity fix — the whole call rolled back and raised
+  `StorageError`, with no path forward short of manual SQL. Reachable in practice: `main`'s own old ad
+  hoc fixup ran each `ALTER TABLE` as its own autocommit statement, so a process killed between the
+  two leaves exactly this shape on disk. DuckDB's `_up_v2` was never affected — `ADD COLUMN IF NOT
+  EXISTS` is naturally idempotent per column — this was a SQLite-only gap. Fixed: `_up_v2` now checks
+  each column's own existence before its own `ALTER TABLE`, the same way the old ad hoc fixup did;
+  `_up_v3` needs no equivalent fix (a single-column migration has no partial state for inference to
+  under-detect in the first place — documented on its own docstring).
+- Also found and fixed two documentation-accuracy issues from round 1's own docs commit: the Decision
+  section still described "empty" as keyed off `principal_credential` specifically (the exact rule
+  round 1's own fix replaced) instead of "any table"; and the atomicity guarantee round 1's fix
+  actually built (one transaction, `StorageError` on failure) was never stated anywhere in this ADR's
+  prose at all, only in the code — now recorded as its own Decision bullet.
+
+Every claim in this Update section was independently re-verified against source and by direct
+execution before being written, not carried forward from either review round's own report.
 
 ## References
 
