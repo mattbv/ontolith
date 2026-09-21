@@ -737,3 +737,154 @@ class TestRoundTwoReviewFindings:
         # ALTER the view, no crash.
         report = duckdb_migrations.migrate_file(path, dry_run=True)
         assert report.up_to_date
+
+
+class TestRoundThreeReviewFindings:
+    """Regression tests for round-3 review of ADR-0052 — each reproduced a
+    real bug before its corresponding fix landed; see ADR-0052's own Update
+    section for the full record."""
+
+    def test_up_v3_tolerates_reviewers_already_present_sqlite(self, tmp_path: Path) -> None:
+        """MEDIUM: a file needing v2 (principal_credential still short a
+        column) but already v3-shaped on `proposal` was inferred as version
+        1 regardless of `proposal`'s own state (inference reports the
+        *minimum* implied version, not a per-migration one) - `_up_v3` then
+        ran unconditionally right after `_up_v2`, against a table that
+        already had `reviewers`, raising `duplicate column name: reviewers`.
+        Reproduces the same bug class round 2 fixed for `_up_v2`, one
+        version later - round 2's own claim that `_up_v3` needed no
+        equivalent fix was itself wrong."""
+        path = tmp_path / "already_v3_proposal.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
+            "token_hash TEXT, created_at TEXT, revoked_at TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT, author TEXT, "
+            "reviewers TEXT NOT NULL DEFAULT '[]')"
+        )
+        conn.commit()
+        conn.close()
+
+        report = sqlite_migrations.migrate_file(path)
+        assert [s.applied for s in report.steps] == [True, True]
+
+        backend = SQLiteBackend(path)
+        try:
+            columns = {
+                r[1] for r in backend.conn.execute("PRAGMA table_info(principal_credential)")
+            }
+            assert {"issued_by", "revoked_by"}.issubset(columns)
+        finally:
+            backend.close()
+
+    def test_duckdb_columns_of_scoped_to_main_schema_not_a_decoy_in_another_schema(
+        self, tmp_path: Path
+    ) -> None:
+        """MEDIUM: `information_schema` spans every schema and attached
+        catalog, unlike SQLite's file-scoped `sqlite_master` - a decoy
+        table in a user-created schema, same name and a `reviewers` column,
+        made `main.proposal`'s own still-pending v3 migration silently
+        invisible. Fixed by scoping every information_schema query to
+        table_schema='main' AND table_catalog=current_database()."""
+        path = tmp_path / "decoy_schema.duckdb"
+        conn = duckdb.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
+            "token_hash TEXT, created_at TEXT, revoked_at TEXT, issued_by TEXT, revoked_by TEXT)"
+        )
+        conn.execute("CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT, author TEXT)")
+        conn.execute("CREATE SCHEMA analytics")
+        conn.execute("CREATE TABLE analytics.proposal (id TEXT, reviewers TEXT, status TEXT)")
+        conn.close()
+
+        report = duckdb_migrations.migrate_file(path, dry_run=True)
+        assert not report.up_to_date
+        assert [s.version for s in report.steps] == [3]
+
+    def test_migrate_file_on_corrupt_sqlite_file_raises_storage_error(self, tmp_path: Path) -> None:
+        """LOW: a corrupt/non-database file raised a raw sqlite3.Error from
+        the read-current-version step, outside the migration transaction's
+        own StorageError translation - contradicting migrate_file's own
+        documented error-taxonomy claim."""
+        path = tmp_path / "corrupt.db"
+        path.write_text("not a database")
+
+        with pytest.raises(StorageError, match="format_version"):
+            sqlite_migrations.migrate_file(path)
+
+    def test_migrate_file_on_corrupt_duckdb_file_raises_storage_error(self, tmp_path: Path) -> None:
+        """LOW: same as above, DuckDB. duckdb.connect() itself (not just a
+        later read) validates the file format eagerly and raises
+        immediately for a corrupt file - needed its own translation,
+        distinct from wrapping the read that follows it."""
+        path = tmp_path / "corrupt.duckdb"
+        path.write_text("not a database")
+
+        with pytest.raises(StorageError, match="DuckDB database"):
+            duckdb_migrations.migrate_file(path)
+
+    def test_migrate_file_wraps_a_read_current_version_failure_after_connect_succeeds(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """LOW: distinct guard from the connect()-time one above - a
+        failure reading the current version *after* a successful connect
+        (a scenario `duckdb.connect()`'s own eager format validation makes
+        hard to construct with a real file, since a file that opens cleanly
+        essentially never fails a subsequent read) must also translate to
+        StorageError, not a raw duckdb.Error. Monkeypatches
+        read_current_version directly to simulate it, since this is a
+        defensive guard for a case with no natural repro via file
+        corruption alone."""
+        path = tmp_path / "will_fail_on_read.duckdb"
+        conn = duckdb.connect(str(path))
+        conn.close()
+
+        def broken_read(conn: duckdb.DuckDBPyConnection) -> int:
+            raise duckdb.IOException("simulated read failure")
+
+        monkeypatch.setattr(duckdb_migrations, "read_current_version", broken_read)
+
+        with pytest.raises(StorageError, match="Could not read format_version"):
+            duckdb_migrations.migrate_file(path)
+
+    def test_failing_version_names_the_step_that_actually_failed_not_the_target(
+        self, tmp_path: Path
+    ) -> None:
+        """LOW: a mid-sequence failure's StorageError previously always
+        named the sequence's overall target version (e.g. v2 failing still
+        said "to format_version 3"). Simulated by monkeypatching v2's own
+        up() to fail deliberately, confirming the message names 2, not 3."""
+        path = tmp_path / "v2_fails.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute("CREATE TABLE principal (id TEXT PRIMARY KEY)")
+        conn.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT, "
+            "token_hash TEXT, created_at TEXT, revoked_at TEXT)"
+        )
+        conn.execute("CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT, author TEXT)")
+        conn.commit()
+        conn.close()
+
+        def broken_up_v2(cursor: sqlite3.Cursor) -> None:
+            raise sqlite3.OperationalError("deliberately broken")
+
+        original = sqlite_migrations._MIGRATIONS
+        sqlite_migrations._MIGRATIONS = tuple(
+            sqlite_migrations._Migration(
+                version=m.version,
+                description=m.description,
+                reversible=m.reversible,
+                up=broken_up_v2 if m.version == 2 else m.up,
+                down=m.down,
+            )
+            for m in original
+        )
+        try:
+            with pytest.raises(StorageError, match="format_version 2 failed"):
+                sqlite_migrations.migrate_file(path)
+        finally:
+            sqlite_migrations._MIGRATIONS = original
