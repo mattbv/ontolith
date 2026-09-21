@@ -122,6 +122,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every reachable table/column-state combination. See ADR-0052's own Update section for the full
   record. Filed **KI-104** as a maintainability follow-up (not a bug) for centralizing that
   defensiveness into a declarative registry once a third migration is added.
+- Public API surface audit and 1.0 freeze declaration (Implementation Plan §14 open question #6,
+  ADR-0019's Update section) — three real exports added, each already public in spirit (the
+  defining module's own `__all__` already listed it) but never reachable from the package it belongs
+  to: `AsOfView` (from `ontolith`, alongside `Ontology` — the return type of `Ontology.as_of()`/
+  `ReadOnlyView.as_of()`, previously importable only via `ontolith.ontology`), `AuthProvider` (from
+  `ontolith.identity` — the abstract port every `create_rest_app`/`create_graphql_app`/
+  `create_mcp_server` factory takes), `VECTOR_SCOPES`/`DEFAULT_NAMESPACE` (from `ontolith.store`,
+  alongside `StorageBackend` — both relevant to a third-party backend implementer). Declares the
+  resulting, now-audited eleven-package surface the 1.0 API-freeze candidate. New regression test
+  (`test_pinned_packages_import_cleanly_without_any_optional_extra`, subprocess-isolated) catches a
+  package eagerly importing an optional-extra dependency (`pyyaml`/`rdflib`/`duckdb`/etc.) — added
+  after the audit's own first pass briefly reintroduced exactly that mistake (re-exporting
+  `schema.linkml`'s `from_yaml`/`to_yaml`, verified broken, reverted before merge). See ADR-0019's
+  own Update section for the full record.
 
 ### M3 - Extensible (0.3)
 

@@ -55,9 +55,101 @@ Meanwhile, every public package already ships a curated `__all__` (`ontolith`, `
 
 **Do nothing until `griffe` tooling is ready, leave the exit criterion unmet**: Rejected — "begins" is the actual M3 bar per the Implementation Plan, not "fully automated." A written policy plus a cheap regression test is a genuine start; waiting on a specific tool's packaging to stabilize before writing anything down was the status quo this ADR replaces.
 
+## Update (2026-09-21): M4 audit + 1.0 freeze declaration, closing Implementation Plan §14's open question 6
+
+**KI-020 (the deferred `griffe diff` CI gate named in Consequences/Alternatives above) is now resolved.**
+`.github/workflows/ci.yml`'s `quality` job runs `griffe check` against the PR's base commit on
+every PR, reporting via native GitHub Actions annotations — `continue-on-error: true` keeps it
+informational pre-1.0, exactly as this ADR's own Decision #4 anticipated. Flipping it to blocking is
+a one-line removal of that flag, done at the actual 1.0 tag (see below), not now — see KI-020's own
+resolution note for the full record.
+
+**M4 Workstream 5 (Implementation Plan §14's open question 6 — "SemVer 1.0 API freeze") audited the
+full surface this ADR's Decision #1 defines, before declaring it the 1.0 baseline.** The audit walked
+every package named in Decision #1, checking for a class/constant/function defined in a public
+module with its own `__all__` that the *package*-level `__init__.py` never picked up — the exact
+shape a later addition can silently introduce, since nothing enforces "every module-level `__all__`
+entry reaches the package" the way `test_public_api_surface.py` enforces "the package's own
+`__all__` doesn't drift." Found and fixed three real gaps, each verified by direct import (not just
+inspection) before and after:
+
+- **`AsOfView`** (`ontology.py`, the return type of `Ontology.as_of()` and `ReadOnlyView.as_of()`,
+  structurally identical to `QueryBuilder` — a live-backend-holding view class — which *was* already
+  exported) was reachable only via `kb.as_of(t)`'s return value, never importable directly for type
+  annotation. `ontology.py`'s own module-level `__all__` already listed it (`["AsOfView",
+  "Ontology"]`) — the package `__init__.py` just never re-exported it. Now exported from `ontolith`
+  alongside `Ontology`.
+- **`AuthProvider`** (`identity/ports.py`, the abstract port `create_rest_app`/`create_graphql_app`/
+  `create_mcp_server` all take, and whose own docstring is the canonical description of the
+  interface a custom auth backend implements) had no import path shorter than
+  `ontolith.identity.ports`. Now exported from `ontolith.identity`. `TokenAuthProvider`/`hash_token`
+  (the concrete `ADR-0014` implementation, `identity/token_auth.py`) remain deliberately
+  NOT re-exported — that module's own docstring already documents why (a genuine circular import:
+  `store.base` imports `Principal` from `ontolith.identity`, and `token_auth.py` imports
+  `StorageBackend` from `store.base`) — this audit verified that reasoning still holds rather than
+  overriding it.
+- **`VECTOR_SCOPES`/`DEFAULT_NAMESPACE`** (`store/base.py`, both directly relevant to anyone
+  implementing a third-party `StorageBackend` — the exact audience `ontolith.store`'s own
+  `StorageBackend` export already serves) had no import path shorter than `ontolith.store.base`. Now
+  exported from `ontolith.store` alongside `StorageBackend`.
+
+**One near-miss, caught before merge.** An earlier pass of this same audit found `schema/linkml.py`'s
+`to_yaml`/`from_yaml` had the identical "module `__all__` exists, package never re-exports it" shape
+and added them to `ontolith.schema`'s exports — verified broken immediately after
+(`ModuleNotFoundError: No module named 'yaml'` on plain `import ontolith.schema`): `pyyaml` is gated
+behind the optional `interop` extra, not a base dependency, and `schema/linkml.py` imports it at
+module level. `schema/rdf.py`'s own docstring already documented this exact class of trap for its
+own `rdflib` dependency ("mirrors `schema/linkml.py`'s own `pyyaml` opt-in, which for the identical
+reason isn't re-exported") — but `linkml.py`'s own docstring never stated it, which is what let this
+slip through on a first pass. Reverted before merge; `linkml.py`'s docstring now states the same
+reasoning `rdf.py`'s always has, and `test_public_api_surface.py` gained a new regression test
+(`test_pinned_packages_import_cleanly_without_any_optional_extra`, a subprocess-isolated check that
+poisons `sys.modules` for every optional-extra package — `yaml`, `rdflib`, `duckdb`, `fastapi`,
+`strawberry`, `mcp` — before importing the full pinned surface) so this exact mistake fails CI
+automatically next time, mutation-tested against the reverted change itself to confirm it actually
+catches it.
+
+**One scoping question considered and resolved: `ontolith.plugins.reference` stays out of this
+policy's pinned surface.** The four reference plugins (`CsvImporter`/`JsonExporter`/
+`RequiredFieldsValidator`/`RdfExporter`, KI-010/ADR-0036) predate this ADR by four days but were
+never added to Decision #1's package list. Deliberately left out, not an oversight found late:
+they're discovered and invoked via `pyproject.toml` entry points (`PluginRegistry`'s own loading
+path), not typically imported by class name from application code the way `Ontology`/`QueryBuilder`
+are — "proves plugin discovery... with working code" (the package's own docstring) describes
+reference/example implementations a real deployment is expected to replace or extend, not a stable
+library surface this policy's SemVer guarantee is about. `RdfExporter` itself already isn't even
+re-exported from `plugins.reference`'s own `__init__.py`, for the identical optional-`rdflib`-extra
+reason this Update's near-miss paragraph names above — internally consistent with staying out of the
+pinned surface entirely.
+
+**Also found and fixed**: `ontolith.core`'s package docstring still listed "Future: meta-model, IR,
+validation" — stale since M1/M3; that work shipped as `ontolith.schema`, not `ontolith.core`.
+Reworded to say so. This ADR's own Context (line 16, above) also named only ten packages, predating
+`ontolith.store.migrations` (added when M4 Workstream 4/ADR-0052 shipped `format_version` migration
+reporting) — the current pinned set is eleven packages: the ten line 16 names, plus
+`ontolith.store.migrations`.
+
+**Declaration: the resulting, now-audited surface is the 1.0 API-freeze candidate.** This closes
+Implementation Plan §14's open question 6 — "exactly which symbols are covered by the SemVer
+guarantee at 1.0" — definitively: every symbol in `tests/unit/test_public_api_surface.py`'s
+`_EXPECTED` dict, as of this Update, across all eleven pinned packages. "Freeze" at this stage (the
+project is at version `0.0.1`, still pre-1.0, with the security-review and complete-docs M4
+workstreams still ahead) means: this is the committed baseline going forward — any further addition,
+removal, or rename before the actual 1.0 tag still follows this ADR's existing Decision #2 (pre-1.0
+minor versions may break the surface, but every break **MUST** get a CHANGELOG `**Breaking:**`
+marker), the same discipline already in force; it does not mean the surface is now literally
+immutable pre-1.0. What changes at the *actual* 1.0 tag (a separate, later release event this
+workstream does not itself trigger) is enforcement: `ci.yml`'s `griffe check` step drops
+`continue-on-error: true` and starts blocking, matching KI-020's own resolution note and this ADR's
+original Decision #4. The signature-level gap Consequences already named (`griffe` catches
+export-set changes and, when made blocking, a subset of signature changes it can diff; the pinned
+`__all__` test alone never did) remains a real, accepted residual either way — not resolved by this
+Update, not newly introduced by it either.
+
 ## References
 
-- Implementation Plan §2 (M3 exit criteria), §5 (quality gates table), §7.2 (SemVer commitment), §14.6 (open question)
+- Implementation Plan §2 (M3 exit criteria), §5 (quality gates table), §7.2 (SemVer commitment), §14.6 (open question, now resolved — see Update above)
 - `CHANGELOG.md` (existing informal `**Breaking:**` convention, now formalized)
 - ADR-0016 (DuckDB Second Backend — the sibling M3 exit criterion this ADR's introduction contrasts against)
-- `docs/known-issues.md` (new entry tracking the deferred `griffe` CI gate)
+- ADR-0052 (on-disk storage-format migrations — added `ontolith.store.migrations` to the pinned surface, the package this Update's own audit found this ADR's Context paragraph hadn't caught up to)
+- `docs/known-issues.md` KI-020 (the deferred `griffe` CI gate — resolved, see Update above)
