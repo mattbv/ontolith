@@ -79,20 +79,37 @@ def _columns_of(cursor: sqlite3.Cursor, table: str) -> set[str]:
 def _up_v2(cursor: sqlite3.Cursor) -> None:
     """KI-060: principal_credential gains issued_by/revoked_by.
 
-    Checks each column independently before its own `ALTER TABLE`, rather
-    than assuming neither exists yet — round-2 review found a real,
-    reachable partial-v2 shape (one column added, the other not) that a
-    bare pair of `ALTER TABLE ADD COLUMN`s can't tolerate: `main`'s own old
-    ad hoc fixup ran each `ALTER TABLE` as its own autocommit statement
-    (`isolation_level=None`), so a process killed between the two leaves
-    exactly this shape on disk, and `_infer_format_version` — which only
-    distinguishes "has both" from "missing at least one," not which one —
-    correctly calls that version 1, then dispatches the whole of `_up_v2`
-    unconditionally. Reproduced: `issued_by` present, `revoked_by` absent,
-    inferred version 1, `_up_v2`'s first statement raised `duplicate column
-    name: issued_by` before ever reaching the second. Fixed by checking
-    columns here instead of relying on the caller's coarser detection.
+    Checks the table's own existence first, then each column independently
+    before its own `ALTER TABLE`, rather than assuming the table exists
+    with neither column yet:
+
+    - **Table absent entirely**: added for symmetry with `_up_v3`'s own
+      identical guard (below) — but note the reachability path differs.
+      `_infer_format_version` can only report a version low enough to
+      dispatch `_up_v2` (i.e. 1) when `principal_credential` *does* exist
+      (`needs_v2` is gated on `_table_exists(..., "principal_credential")`
+      first) — so ordinary column-based inference alone never reaches this
+      branch for `_up_v2` the way it naturally does for `_up_v3`'s
+      absent-`proposal` case below. What *does* reach it: `read_current_version`
+      trusts a stored `format_version` row over inference by design — a
+      stale or externally-tampered row claiming version 1 against a file
+      where `principal_credential` has since been dropped, or never
+      existed under that stamp, dispatches `_up_v2` against a table that
+      isn't there (reproduced: `no such table: principal_credential`).
+      Skipped the same way `_up_v3` skips itself: `_create_schema()`'s
+      `CREATE TABLE IF NOT EXISTS` creates the table fresh, at the current
+      shape, on the next real connect — no `up()` of its own is needed.
+    - **One column present, the other not** (round-2 review, still needed):
+      `main`'s own old ad hoc fixup ran each `ALTER TABLE` as its own
+      autocommit statement too, so a process killed between the two columns
+      leaves exactly this shape — `_infer_format_version` only distinguishes
+      "has both" from "missing at least one," not which one, so it
+      dispatches the whole of `_up_v2` unconditionally; a bare pair of
+      `ALTER TABLE ADD COLUMN`s can't tolerate that (reproduced: `duplicate
+      column name: issued_by`).
     """
+    if not _table_exists(cursor, "principal_credential"):
+        return
     columns = _columns_of(cursor, "principal_credential")
     if "issued_by" not in columns:
         cursor.execute("ALTER TABLE principal_credential ADD COLUMN issued_by TEXT")
@@ -112,21 +129,29 @@ def _down_v2(cursor: sqlite3.Cursor) -> None:
 def _up_v3(cursor: sqlite3.Cursor) -> None:
     """KI-078: proposal gains reviewers.
 
-    Checks column existence first, same reasoning as `_up_v2` — round-3
-    review found the previous version of this docstring's own claim
-    ("inference already reports version 3 if `reviewers` exists, so this
-    is never dispatched against a file that already has it") false:
-    `_infer_format_version` reports the *minimum* version implied across
-    its two independent per-table checks, not a per-migration one, so a
-    file needing v2 (`principal_credential` still short a column) but
-    already v3-shaped on `proposal` is inferred as version 1 regardless —
-    `_up_v3` then runs unconditionally right after `_up_v2`, against a
-    table that already has `reviewers`. Reproduced: exactly the same
-    `duplicate column name` failure round 2 fixed for `_up_v2`, one version
-    later. Every registered `up()` must tolerate its own change already
-    being present, not just the one motivating case that happened to be
-    reproduced first — `_up_v2`'s fix generalizes here.
+    Checks the table's own existence first, then column existence, same
+    shape as `_up_v2`'s own two guards — but see `_up_v2`'s docstring for
+    why the *reachability* of its own absent-table case differs from this
+    one:
+
+    - **Table absent entirely**: round-4 review found this reachable
+      through ordinary column-based inference alone (unlike `_up_v2`'s
+      equivalent case) — `_infer_format_version` reports the *minimum*
+      version across its two independent per-table checks, so a file
+      needing v2 (`principal_credential` still short a column) but with
+      `proposal` missing entirely is *also* inferred as version 1,
+      dispatching `_up_v3` right after `_up_v2` against a table that
+      doesn't exist (reproduced: `no such table: proposal`). Skipped the
+      same way — `_create_schema()` creates `proposal` fresh, at the
+      current shape, on the next real connect.
+    - **Column already present** (round-3 review, still needed): a file
+      needing v2 but already v3-shaped on `proposal` is inferred as version
+      1 regardless of `proposal`'s own state, dispatching `_up_v3`
+      unconditionally against a table that already has `reviewers`
+      (reproduced: `duplicate column name: reviewers`).
     """
+    if not _table_exists(cursor, "proposal"):
+        return
     if "reviewers" not in _columns_of(cursor, "proposal"):
         cursor.execute("ALTER TABLE proposal ADD COLUMN reviewers TEXT NOT NULL DEFAULT '[]'")
 
@@ -330,7 +355,15 @@ def migrate_file(path: str | Path, *, dry_run: bool = False) -> MigrationReport:
             "the current format.",
             detail={"path": str(file_path)},
         )
-    conn = sqlite3.connect(str(file_path))
+    # sqlite3.connect() opens the file handle eagerly, unlike its lazy
+    # content validation (caught below by wrapping read_current_version) —
+    # round-4 review found a directory or a permission-denied path raised
+    # a raw sqlite3.OperationalError right here, missed by round 3's fix,
+    # which only wrapped the read that follows a successful connect().
+    try:
+        conn = sqlite3.connect(str(file_path))
+    except sqlite3.Error as e:
+        raise StorageError(f"Could not open {file_path} as a SQLite database: {e}") from e
     try:
         cursor = conn.cursor()
         # round-3 review: a corrupt/non-database file raised a raw

@@ -42,9 +42,33 @@ def _up_v2(conn: duckdb.DuckDBPyConnection) -> None:
     partial-v2 file (one column present, the other not — round-2 review
     found this shape reachable and genuinely un-migratable on SQLite, whose
     bare `ALTER TABLE ADD COLUMN` has no such guard; see the SQLite
-    module's own `_up_v2` docstring for the fix there). No equivalent fix
-    needed here — this was already correct.
+    module's own `_up_v2` docstring for the fix there). No fix needed for
+    that specific case here — already correct.
+
+    An explicit table-existence check IS needed, though (round-4 review):
+    `IF NOT EXISTS` only guards the *column*, not the table itself. Note
+    the *reachability* here differs from `_up_v3`'s own equivalent guard:
+    `_infer_format_version` can only report a version low enough to
+    dispatch `_up_v2` (i.e. 1) when `principal_credential` already exists
+    (`needs_v2` is gated on the table's own existence first, see
+    `_infer_format_version`), so ordinary column-based inference alone
+    never reaches this branch the way it naturally does for `_up_v3`'s
+    absent-`proposal` case. What does reach it: `read_current_version`
+    trusts a stored `format_version` row over inference by design — a
+    stale/tampered row claiming version 1 against a file where
+    `principal_credential` has since been dropped (or never existed under
+    that stamp) dispatches `_up_v2` against a table that isn't there —
+    reproduced: `Catalog Error: Table with name principal_credential does
+    not exist!`. Skipped the same way `_up_v3` skips itself:
+    `_create_schema()` creates the table fresh, at the current shape, on
+    the next real connect, so no `up()` of its own is needed for this
+    case. Also closes the same gap for a view named `principal_credential`
+    (round 2's detection fix already treats a view as "table absent" —
+    this makes the application side agree, instead of attempting `ALTER
+    TABLE` on it).
     """
+    if not _table_exists(conn, "principal_credential"):
+        return
     conn.execute("ALTER TABLE principal_credential ADD COLUMN IF NOT EXISTS issued_by TEXT")
     conn.execute("ALTER TABLE principal_credential ADD COLUMN IF NOT EXISTS revoked_by TEXT")
 
@@ -88,7 +112,18 @@ def _up_v3(conn: duckdb.DuckDBPyConnection) -> None:
     leaves no row NULL — a migrated database ends up with a slightly weaker
     constraint on this one column than a fresh one gets, a pre-existing
     limitation of the DDL this migration formalizes, not a new one.
+
+    Table-existence check needed for the same reason as `_up_v2`'s own
+    (round-4 review): `IF NOT EXISTS` only guards the column, and
+    `_infer_format_version`'s minimum-across-tables inference can dispatch
+    this against a file where `proposal` doesn't exist at all yet
+    (reproduced: `Catalog Error: Table with name proposal does not
+    exist!`) or is a view (round 2's own scenario, reproduced: `Can only
+    modify view with ALTER VIEW statement`). Skipped the same way — the
+    table is created fresh, at the current shape, on the next real connect.
     """
+    if not _table_exists(conn, "proposal"):
+        return
     conn.execute("ALTER TABLE proposal ADD COLUMN IF NOT EXISTS reviewers TEXT DEFAULT '[]'")
 
 
@@ -199,11 +234,22 @@ def _ensure_format_version_table(conn: duckdb.DuckDBPyConnection) -> None:
 def read_current_version(conn: duckdb.DuckDBPyConnection) -> int:
     """See `store.sqlite.migrations.read_current_version` — identical
     contract (keyed off whether any table at all exists, not file
-    existence — a pre-created zero-byte placeholder path is the same
-    "nothing to migrate from" case as a path that didn't exist at all;
-    "any table" rather than one specific table matters for the same reason
-    named in `_infer_format_version`'s docstring), DuckDB introspection.
-    Safe to call in a dry run (no writes)."""
+    existence; "any table" rather than one specific table matters for the
+    same reason named in `_infer_format_version`'s docstring), DuckDB
+    introspection. Safe to call in a dry run (no writes).
+
+    Unlike SQLite, a *zero-byte placeholder* path (e.g.
+    `tempfile.NamedTemporaryFile(delete=False)`) is NOT the same
+    "nothing to migrate from" case here — round-4 review found
+    `duckdb.connect()` itself refuses to open a pre-existing empty file at
+    all (`IO Error: ... exists, but it is not a valid DuckDB database
+    file!`), a pre-existing DuckDB limitation this module doesn't change
+    (`DuckDBBackend`'s own `temp_db` test fixture already reserves a path
+    without creating the file for exactly this reason). This function is
+    never actually reached for that shape — the failure happens at
+    `conn = duckdb.connect(...)`, before any caller gets as far as calling
+    this.
+    """
     if not _any_table_exists(conn):
         return CURRENT_FORMAT_VERSION
     if _table_exists(conn, "format_version"):
