@@ -125,7 +125,12 @@ surface entirely. `PluginRegistry.register()` takes a string entry-point name, n
 is no by-class-name loading path a subclass of a reference plugin would need pinned, and with
 `isolate=True` (the default) `LoadedPlugin.instance` is a proxy for which `isinstance` against the
 real class doesn't hold anyway (ADR-0051) — the subclassing scenario that would argue for pinning
-these doesn't actually arise.
+these doesn't actually arise. Same conclusion, same reasoning, for `ontolith.plugins.sandbox`'s
+~30-symbol `__all__` (`enforcement.py`/`protocol.py`/`remote_view.py`/`runner.py`/`wire.py`) — never
+addressed by name in this ADR before this Update, but already documented at the code level in that
+package's own `__init__.py` docstring ("`plugins/registry.py` is this package's only intended
+caller... Deliberately no re-exports here"), predating this branch; confirmed `registry.py` is
+indeed the only importer anywhere in `src/`.
 
 **Also found and fixed**: `ontolith.core`'s package docstring still listed "Future: meta-model, IR,
 validation" — stale since M1/M3; that work shipped as `ontolith.schema`, not `ontolith.core`.

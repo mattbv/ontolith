@@ -123,7 +123,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record. Filed **KI-104** as a maintainability follow-up (not a bug) for centralizing that
   defensiveness into a declarative registry once a third migration is added.
 - Public API surface audit and 1.0 freeze declaration (Implementation Plan §14 open question #6,
-  ADR-0019's Update section) — seven real exports added across four packages (found across two
+  ADR-0019's Update section) — nine real exports added across four packages (found across two
   review rounds), closing gaps where a symbol was already public in spirit (declared in a module's
   own `__all__`, or directly needed to use a pinned method/attribute) but never reachable from the
   package it belongs to: `AsOfView` (from `ontolith`, alongside `Ontology` — the return type of
