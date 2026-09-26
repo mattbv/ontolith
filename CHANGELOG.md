@@ -122,6 +122,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every reachable table/column-state combination. See ADR-0052's own Update section for the full
   record. Filed **KI-104** as a maintainability follow-up (not a bug) for centralizing that
   defensiveness into a declarative registry once a third migration is added.
+- Public API surface audit and 1.0 freeze declaration (Implementation Plan §14 open question #6,
+  ADR-0019's Update section) — nine real exports added across four packages (found across two
+  review rounds), closing gaps where a symbol was already public in spirit (declared in a module's
+  own `__all__`, or directly needed to use a pinned method/attribute) but never reachable from the
+  package it belongs to: `AsOfView` (from `ontolith`, alongside `Ontology` — the return type of
+  `Ontology.as_of()`/`ReadOnlyView.as_of()`, previously importable only via `ontolith.ontology`),
+  `AuthProvider`/`TokenAuthProvider`/`hash_token` (from `ontolith.identity` — the abstract port every
+  `create_rest_app`/`create_graphql_app`/`create_mcp_server` factory takes, plus its one concrete
+  implementation and the token-hashing helper it uses; `TokenAuthProvider`'s own re-export needs a
+  specific import order in `identity/__init__.py` — round-1 review found the original "hard circular
+  import, can't export it" justification was false, only order-dependent, and already protected by
+  `ruff`'s own CI-blocking isort rule — see that file's own docstring), `VECTOR_SCOPES`/
+  `DEFAULT_NAMESPACE` (from `ontolith.store` **and now also `store.base`'s own `__all__`**, alongside
+  `StorageBackend` — both relevant to a third-party backend implementer), `ProposalState`/
+  `ContradictionState`/`safe_rationale_history` (from `ontolith.govern`, round-1 review's own find —
+  the first two are the `Literal` types annotating `Proposal.state`/`Contradiction.state`, both
+  pinned attributes of pinned classes; the third is the defensive coercion every reader of
+  `Contradiction.metadata`'s open `rationale_history` blob needs). `ontolith.interfaces.rest`/
+  `ontolith.interfaces.graphql` are now pinned too (round-1 review found ADR-0019's own exclusion list
+  had never addressed them) — same treatment as `ontolith.store.duckdb`: part of the tested surface,
+  exempt from the "importable with no optional extra" guarantee, since both need their own extra.
+  Declares the resulting, now-audited thirteen-package surface the 1.0 API-freeze candidate. New
+  regression test (`test_pinned_packages_import_cleanly_without_any_optional_extra`, subprocess-
+  isolated, its import list derived from the pinned-module set itself after round 1 found the first
+  version hardcoded a separate, driftable list) catches a package eagerly importing an optional-extra
+  dependency (`pyyaml`/`rdflib`/`duckdb`/etc.) — added after the audit's own first pass briefly
+  reintroduced exactly that mistake (re-exporting
+  `schema.linkml`'s `from_yaml`/`to_yaml`, verified broken, reverted before merge). See ADR-0019's
+  own Update section for the full record.
 
 ### M3 - Extensible (0.3)
 

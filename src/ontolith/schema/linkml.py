@@ -4,6 +4,14 @@
 subset of the LinkML schema dialect — hand-rolled against PyYAML directly,
 not the real `linkml`/`linkml-runtime` packages (see ADR-0013 for why).
 
+Not re-exported from `schema/__init__.py`: `pyyaml` is gated behind the
+optional `interop` extra, so eagerly importing this module from the package
+root would make plain `import ontolith`/`import ontolith.schema` fail with
+`ModuleNotFoundError` for anyone who hasn't installed `ontolith[interop]` —
+the same reasoning `schema/rdf.py`'s own docstring already states for
+`rdflib`. Import directly: `from ontolith.schema.linkml import from_yaml,
+to_yaml`.
+
 v1 dialect coverage (ADR-0013):
     - Only inline `attributes:` per class — no shared top-level `slots:` dict.
     - Scalar ranges map to Ontolith value types via a fixed table.

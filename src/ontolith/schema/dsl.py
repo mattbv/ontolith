@@ -185,6 +185,16 @@ class ConceptMeta(type):
 
     No concept inheritance in v1: only the concept's own class body is walked,
     matching the current flat (non-inheriting) ConceptDef shape in the IR.
+
+    An implementation detail of how `Concept` subclasses get compiled at
+    class-definition time, not something a caller ever names directly — the
+    natural annotation need (a class object that's a `Concept` subclass) is
+    already covered by `type[Concept]`. Not in this module's own `__all__`
+    (found in review during the M4 API-surface-freeze audit, ADR-0019's
+    Update: it had been listed there with no external consumer anywhere in
+    the codebase, the only such case that audit's sweep found across two
+    rounds — removed rather than left ambiguous between "public" and
+    "internal").
     """
 
     def __new__(mcs, name: str, bases: tuple[type, ...], namespace: dict[str, Any]) -> ConceptMeta:
@@ -399,7 +409,6 @@ def generate_class_stubs(schema: SchemaIR) -> str:
 
 __all__ = [
     "Concept",
-    "ConceptMeta",
     "Relation",
     "Property",
     "Ref",

@@ -923,4 +923,4 @@ class StorageBackend(Protocol):
         ...
 
 
-__all__ = ["StorageBackend"]
+__all__ = ["StorageBackend", "VECTOR_SCOPES", "DEFAULT_NAMESPACE"]
