@@ -114,13 +114,22 @@ class PluginRegistry:
                 `filesystem=False` is enforced, not just declared, had no
                 way to ask for one; the registration-time warning
                 (`_warn_if_unenforced_capabilities_requested`) is the only
-                signal, and it's advisory. Even with `require_enforcement=
-                False`, every isolated *call* still fails the same way if
+                signal otherwise, and it's advisory only. This same flag is
+                also threaded through to every isolated *call*
+                (`sandbox.runner.run_isolated`'s own `require_enforcement`
+                parameter): with `require_enforcement=True`, a call whose
                 enforcement was available in principle at registration but
-                a specific attempt to install it fails at call time (e.g. a
-                container's own outer seccomp profile blocks it) — see
-                `sandbox.runner.run_isolated`'s own `require_enforcement`
-                parameter, threaded through from here.
+                whose specific attempt to install the filter fails at call
+                time (e.g. a container's own outer seccomp profile blocks
+                it) also refuses, rather than merely warning as it does
+                with the default `False` — this call-time check is the
+                narrower residual registration alone can't predict, not a
+                second, independent guarantee (round-2 review finding: an
+                earlier version of this docstring wrongly implied the
+                call-time check fires even with `require_enforcement=
+                False`, which the registered behavior — and this flag's own
+                default-preserves-today's-behavior framing above — both
+                contradict).
 
         Returns:
             LoadedPlugin bound to a capability-scoped view.

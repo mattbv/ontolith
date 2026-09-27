@@ -462,7 +462,7 @@ class TestReRegistration:
     def test_reregistration_under_a_different_entry_point_with_same_name_raises_plugin_error(
         self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Security review finding, M4 Workstream 7 (KI-106): manifest.name
+        """Security review finding, M4 Workstream 7: manifest.name
         is self-declared by the plugin author, not a unique identifier this
         project controls - a second, distinct entry point whose plugin
         class happens to declare the same manifest.name (same computed

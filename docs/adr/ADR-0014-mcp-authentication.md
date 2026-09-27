@@ -202,7 +202,7 @@ A stdio-facing principal's token still has to be configured wherever the client 
 process (an environment variable or client config file, not a live tool-call argument the model
 itself emits) — a materially smaller exposure than a value the model repeats into every tool call
 and every transcript, but still not zero. Deployments running MCP over stdio should rotate and
-revoke those principals' tokens proactively (`revoke_credential`/re-`issue_token`), since there's no
+revoke those principals' tokens proactively (`revoke_token`/re-`issue_token`), since there's no
 way to keep the token out of the client's own process environment the way the header keeps it out
 of the *model's* context.
 

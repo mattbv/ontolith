@@ -2245,7 +2245,7 @@ Not started. (a) Add a golden-schema regression test per backend alongside `Test
 
 `PluginRegistry.register()`'s `granted_capability` parameter caps what storage capability (`read`/`propose`/`write`) a plugin's `view` argument can exercise, and read-only plugin kinds are further hard-capped to `read`. But this ceiling only restricts the *proxied view object* the plugin is handed — it does nothing to stop a plugin with `capabilities.filesystem=True` from bypassing the view entirely: `filesystem=True` means the OS-level filter (`sandbox/enforcement.py`) never denies `open`/`openat`/etc., so the plugin's own code can `sqlite3.connect(<the KB's own db path>)` directly and execute arbitrary DDL/DML against it — `UPDATE assertion SET value_lit=..., status='active'`, say — with no proposal, no policy evaluation, and no `assertion_event`/`admin_event` audit row. `granted_capability="read"` is not a real limit on such a plugin.
 
-All three shipped reference plugins (`csv-importer`, `json-exporter`, `rdf-owl-exporter`) declare `filesystem=True` today, so this is the common case, not an edge case. The registration-time warning (`registry.py`'s `_warn_if_unenforced_capabilities_requested`) now explicitly discloses this (fixed alongside this filing, M4 Workstream 7) — an operator registering a `filesystem=True` plugin sees a warning naming the bypass, rather than the capability's declared storage ceiling reading as a real guarantee it isn't.
+Three of the four shipped reference plugins (`csv-importer`, `json-exporter`, `rdf-owl-exporter`) declare `filesystem=True` today — only `required-fields-validator` doesn't (it declares no capabilities at all, i.e. every default, which is `filesystem=False`) — so this is the common case, not an edge case. The registration-time warning (`registry.py`'s `_warn_if_unenforced_capabilities_requested`) now explicitly discloses this (fixed alongside this filing, M4 Workstream 7) — an operator registering a `filesystem=True` plugin sees a warning naming the bypass, rather than the capability's declared storage ceiling reading as a real guarantee it isn't.
 
 ### Fix
 
@@ -2281,7 +2281,61 @@ Not started. Add an optional `expires_at: datetime | None` to `PrincipalCredenti
 
 ### Fix
 
-Not started. (a) Have `db migrate` optionally accept an `--author` (or read the same env var the rest of the CLI already supports) and, after a successful migration, write an admin-event-shaped record — this needs its own storage path since `migrate_file` runs before/outside a normal `Ontology`-backed connection, so it can't reuse `record_admin_event` as-is without some restructuring. (b) Add `ontolith db migrate --to N` (or a dedicated `db rollback`) that calls the appropriate migrations' `down()` in reverse order, with the same dry-run support `db migrate` already has going forward. Neither started now — both need a design decision (how to attribute an action that by definition runs before the normal principal/capability system is even reachable) this filing doesn't make.
+Not started. (a) Have `db migrate` optionally accept an `--author` (no existing env var to fall back to — `ONTOLITH_DB` is the only one the CLI currently supports, and it's unrelated) and, after a successful migration, write an admin-event-shaped record — this needs its own storage path since `migrate_file` runs before/outside a normal `Ontology`-backed connection, so it can't reuse `record_admin_event` as-is without some restructuring. (b) Add `ontolith db migrate --to N` (or a dedicated `db rollback`) that calls the appropriate migrations' `down()` in reverse order, with the same dry-run support `db migrate` already has going forward. Neither started now — both need a design decision (how to attribute an action that by definition runs before the normal principal/capability system is even reachable) this filing doesn't make.
+
+---
+
+## KI-109 — A sandboxed plugin's own module import/constructor still runs with only network/process-isolation enforcement, not filesystem — even when `capabilities.filesystem=False`
+
+**Severity:** Architecture gap — a real, disclosed residual, not fixed this pass
+**Milestone target:** Backlog — filed during M4 Workstream 7's security review, round 2
+**SPEC reference:** SPEC §17 (Security model — "MUST deny undeclared access")
+
+### Description
+
+Round 1 of this review's own remediation attempted to close this by installing the *full* enforcement filter (network + filesystem + process-isolation floor) before `_load_plugin_instance` ran at all. That broke every `filesystem=False` plugin's own loading on Linux+libseccomp: `entry_points()`'s metadata scan and `EntryPoint.load()`'s module import both need real filesystem reads regardless of what the plugin's own manifest declares, and `filesystem=False` is this project's own default (`required-fields-validator`, the one shipped reference plugin with default capabilities, failed to load in CI with `PluginError: Plugin entry point not found`). Reverted and replaced with `enforcement.apply_preimport_enforcement`, a narrower pre-import filter that only denies network (if declared `False`) and the always-on process-isolation floor — deliberately not filesystem, at any point before the plugin's own protocol method is called.
+
+The residual: a plugin's own module-level code and `__init__` can still read and write the filesystem freely during loading, even with `capabilities.filesystem=False` declared, on every platform including Linux. Filesystem enforcement remains exactly where it was before this whole review (installed in full immediately before the plugin's own protocol method is invoked) — this is not a new regression, but the review's own original goal (no plugin code runs with an unenforced capability, from its very first line) is only achieved for network and the process-isolation floor, not filesystem.
+
+### Fix
+
+Not started. The real fix needs argument-filtered seccomp rules: allow `open`/`openat` in read-only mode (masking the flags argument against `O_WRONLY`/`O_RDWR`/`O_CREAT`) during the pre-import phase, while still denying every filesystem-mutation syscall (`unlink`, `rename`, `mkdir`, `chmod`, etc.) and write-mode opens outright — then the existing full filter, installed after loading, tightens further to deny reads too. This needs real Linux-specific seccomp argument-filter work this review deliberately didn't attempt, given the risk of another CI-breaking regression and the inability to test seccomp behavior at all on a non-Linux development machine (confirmed the hard way once this review). `openat2`'s flags sit in a struct seccomp can't inspect via a simple argument comparator, so it likely needs to stay fully denied in the pre-import phase regardless of read/write intent.
+
+---
+
+## KI-110 — `require_enforcement`'s guarantee can be satisfied by a partially-installed filter; an unresolved syscall name is silently treated as "still applied"
+
+**Severity:** Architecture gap — narrows what `require_enforcement=True` actually guarantees
+**Milestone target:** Backlog — filed during M4 Workstream 7's security review, round 2
+**SPEC reference:** SPEC §17 (Security model — "MUST deny undeclared access")
+
+### Description
+
+`enforcement.py`'s filter-install loop deliberately skips any syscall name libseccomp/the running kernel doesn't recognize, and still returns `applied=True` as long as the overall `SyscallFilter.load()` call itself succeeds — this is a documented, deliberate "best-effort denial of everything resolvable beats aborting the whole filter over one unresolvable name" choice, reasonable for the *default* (`require_enforcement=False`) advisory posture. But it means `require_enforcement=True`'s "refuse the call rather than proceed unenforced" guarantee is weaker than it reads: if the installed libseccomp/kernel doesn't recognize one of the newer syscall names this floor denies (`pidfd_getfd`, `process_mrelease`, etc. — recent kernel additions an older libseccomp build may predate), that specific syscall is silently left allowed (`defaction=ALLOW` is the filter's own default action) while `EnforcementResult.applied` still reports `True`, satisfying `require_enforcement` without actually denying everything the caller believed was denied.
+
+### Fix
+
+Not started. Have `_install_seccomp_filter` collect which requested names it had to skip (not just swallow the exception) and surface them in `EnforcementResult` (a new field, e.g. `skipped: tuple[str, ...]`). Under `require_enforcement`, treat any skipped name from the *process-isolation floor* specifically (the always-on part, not the plugin-declared network/filesystem lists, where "the plugin explicitly asked for less than full denial" is a different, already-accepted risk) as `applied=False` — that floor's own denial list is not something the caller opted out of, so a silent partial application of it shouldn't count as success. Longer term, moving from a default-`ALLOW` deny-list to a default-`ERRNO`/allowlist model would remove this class of gap for every future kernel addition at once, not just the ones this project remembers to add by name — a substantially larger redesign, not attempted here.
+
+---
+
+## KI-111 — Process-isolation floor still has real gaps: the kill syscall family, inherited-environment secrets, and several other cross-process-capable syscalls
+
+**Severity:** Architecture gap — found reviewing round 2's own pidfd fix; pre-existing, not introduced by it
+**Milestone target:** Backlog — filed during M4 Workstream 7's security review, round 2
+**SPEC reference:** SPEC §17 (Security model — "MUST deny undeclared access")
+
+### Description
+
+Reviewing round 2's `pidfd_*`/`kcmp`/`process_madvise`/`process_mrelease` additions to `_PROCESS_ISOLATION_SYSCALLS` surfaced further, pre-existing gaps in the same "deny more than strictly necessary" floor, none closed by this pass:
+
+- **The kill syscall family is entirely unrestricted.** `kill`/`tkill`/`tgkill`/`rt_sigqueueinfo` are not in any deny list — a sandboxed plugin can signal its own parent process (`os.kill(os.getppid(), signal.SIGKILL)` or `SIGSTOP`) or any other process owned by the same user, regardless of declared capabilities. Denying `pidfd_send_signal` alone (round 2's own addition) achieves nothing against this, since the plain, older signaling syscalls remain fully available.
+- **The child inherits the parent's entire environment.** `multiprocessing.get_context("spawn")` passes `os.environ` through unmodified; any secret the parent process holds in an environment variable is readable by every sandboxed plugin regardless of `capabilities.network`/`.filesystem` — reproduced directly (a synthetic env var was readable from inside a `network=False`/`filesystem=False` plugin call). A plugin could return it via its own result value, or exfiltrate it over the network if `network=True`. Not mentioned anywhere in ADR-0051.
+- **Other allowed calls with cross-process or kernel-level reach**: `keyctl`/`add_key`/`request_key` (kernel keyring), `bpf`, `userfaultfd`, `perf_event_open`, `unshare`/`setns` (namespace manipulation) — none currently denied, none currently used by any reference plugin, but all are exactly the kind of syscall a deny-more-than-necessary floor should probably cover.
+
+### Fix
+
+Not started. (a) Add the kill family to `_PROCESS_ISOLATION_SYSCALLS`, ideally argument-filtered to the plugin's own process group rather than denied outright (a plugin legitimately signaling its own child subprocess, if it spawns one, shouldn't need `filesystem`/`network` capabilities to do so) — the parent's own PID is knowable when the filter is built, so an argument comparator on the target PID is feasible. (b) Scrub the child's environment before `exec`, passing through only an explicit allowlist the sandbox itself needs (or nothing, if the plugin protocol doesn't require any inherited env var — needs checking). (c) Add the remaining named syscalls to the floor once confirmed unused by any reference plugin and confirmed not to break `pytest`/CI (same caution KI-109 names). None started now — each needs its own verification pass this review round didn't have time for, and (a)/(b) in particular touch behavior this project can't fully verify without a Linux host, the same limitation KI-109 names.
 
 ---
 

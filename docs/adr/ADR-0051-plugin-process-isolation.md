@@ -576,53 +576,95 @@ fixed in the same commit as this record, no code touched.
   list above for the precise blocking call.
 
 ## Update (2026-09-27): security review found a real bypass of the Linux enforcement itself (M4
-Workstream 7) — fixed; two related gaps disclosed/filed, not fixed
+Workstream 7) — fixed across two rounds, round 1's own fix having broken CI; further gaps
+disclosed/filed, not fixed
+
+**Round 1 found, and attempted to fix, two HIGH issues — round 1's own fix for the first one broke
+Linux CI and had to be redesigned in round 2 (below); described here in its final, corrected form.**
 
 **HIGH — the child installed its seccomp filter too late, after the plugin's own module import and
-constructor already ran unsandboxed inside the child process.** `_child_main` previously called
+constructor already ran unsandboxed inside the child process.** `_child_main` called
 `_load_plugin_instance` (imports the plugin's module, constructs it) *before*
 `enforcement.apply_capability_enforcement`. A `network=False`/`filesystem=False` plugin could open a
 socket or file at import time or in `__init__` — before any filter existed to deny it — then use
 already-open-descriptor syscalls (`read`/`write`, which the filter must always allow for the
 sandbox's own IPC pipe; see `enforcement.py`'s own `_FILESYSTEM_SYSCALLS` comment) on that
 already-opened handle afterward, bypassing the declared capabilities entirely on the one platform
-this ADR's own headline claim is about. Fixed: `apply_capability_enforcement` now runs first, before
-`_load_plugin_instance` — none of `runner.py`'s own trusted imports needed to happen inside
-`_child_main` first (they already ran when the child interpreter loaded this module), so nothing
-about `apply_capability_enforcement`'s own "after every import the sandbox's own runner
-infrastructure needs" constraint is violated by reordering. This also closes a smaller, related gap:
-since the ENFORCEMENT message the child reports back is now sent before any plugin code has run at
-all, it's no longer even theoretically tamperable by that call's own plugin code (round-3's original
-"a malicious child could forge applied=True" concern was about a *later*, second ENFORCEMENT message
-a plugin could still send after its own code starts running — that defense, unchanged, still matters
-for exactly that later-message case).
+this ADR's own headline claim is about.
+
+Round 1's own fix — installing the *full* filter (network + filesystem + floor) before
+`_load_plugin_instance` — broke every `filesystem=False` plugin's own loading on Linux+libseccomp:
+`entry_points()`'s metadata scan and `EntryPoint.load()`'s module import both need real filesystem
+reads regardless of what the plugin itself declares, and `filesystem=False` is this project's own
+default. Reproduced as a genuine CI failure (`required-fields-validator`, the one shipped reference
+plugin with default capabilities, raised `PluginError: Plugin entry point not found` on every Linux
+job) — round 2 caught this and reverted the ordering.
+
+**Fixed, round 2's corrected design**: a new, narrower `enforcement.apply_preimport_enforcement`
+runs before `_load_plugin_instance` — denying only network (if declared `False`) and the always-on
+process-isolation floor, never filesystem. Neither has any legitimate reason to fire during plugin
+loading, so denying them this early costs nothing and closes the network-exfiltration-during-import
+vector fully. The existing `apply_capability_enforcement` (full filter, including filesystem) stays
+exactly where it always was: installed immediately before the plugin's own protocol method is
+invoked, after loading — unchanged timing, so no regression risk there. Multiple seccomp filters
+installed in the same process stack (each `load()` call only ever adds restriction, standard Linux
+seccomp-BPF semantics), so having both filters active is safe. **Residual, disclosed, filed as
+KI-109**: a plugin's own module import/constructor still runs with filesystem fully unenforced, even
+when `capabilities.filesystem=False` — closing that needs argument-filtered seccomp rules (allow
+read-only opens, deny writes, during the pre-import phase) this round deliberately didn't attempt,
+given the risk of another CI-breaking regression and the inability to test seccomp behavior on this
+project's own (non-Linux) development machines.
 
 **HIGH — no operator lever existed to demand real enforcement rather than silently degrade to
 advisory.** The registration-time warning (`_warn_if_unenforced_capabilities_requested`) was, and
 remains by default, the only signal when OS-level enforcement can't be attempted or a specific
-attempt fails — advisory, not a guarantee, and self-reported by the (previously actually untrusted,
-now-fixed-above) child in the call-time case. Added `require_enforcement: bool = False` on
+attempt fails — advisory, not a guarantee. Added `require_enforcement: bool = False` on
 `PluginRegistry.register()` (default preserves today's behavior — flipping the default would refuse
 every registration on macOS/Windows outright): `True` refuses registration outright when enforcement
 can't even be attempted (`isolate=False`, or `enforcement.enforcement_available()` is `False` for
-this host/platform), and separately makes every isolated *call* refuse (raise `PluginError`,
-terminate the child before its own code ever runs) if that call's own specific attempt to install the
-filter fails despite being available in principle (e.g. a container's own outer seccomp profile
-blocks it) — a narrower case registration-time alone can't predict.
+this host/platform).
+
+Round 1's own call-time version of this fix was itself broken, caught in round 2: the refusal lived
+only in the parent's own message handler, which can make the *caller's* `run_isolated()` raise
+promptly but cannot stop the already-running, separate-OS-process child from continuing on its own to
+load and call the plugin regardless — reproduced directly, over 3 seconds of fully unenforced plugin
+execution (import, `__init__`, and the protocol method itself) before `run_isolated`'s own
+`process.join(timeout=5)`/`terminate()` eventually caught up. **Fixed, round 2**: the child itself now
+checks `require_enforcement` right after its own real, call-time enforcement attempt, and refuses to
+invoke the plugin's protocol method at all if it was required but didn't apply — the parent's own
+copy of the check remains too, as a second, faster-to-observe layer, but the child-side check is what
+actually stops the untrusted code from running. This guarantee is still narrower than "the plugin
+never runs at all": the plugin's module import/constructor still ran first, under only the
+pre-import filter's network/floor-only protection — same KI-109 residual named above, not a new one.
 
 **MEDIUM — the always-on process-isolation floor missed the `pidfd_*` syscall family.**
 `_PROCESS_ISOLATION_SYSCALLS` denied `ptrace`/`process_vm_readv`/`process_vm_writev` but not
-`pidfd_open`/`pidfd_getfd` (Linux 5.6+, gated by the identical `__ptrace_may_access` kernel check as
-`ptrace` itself) — on exactly the `ptrace_scope=0` hosts this floor exists to defend, a child could
-`pidfd_open(getppid())` then `pidfd_getfd` to duplicate one of the parent's own open file descriptors
-(the SQLite connection, a live REST/MCP client socket) into itself, then read/write it directly,
-reaching past the process boundary without ever calling `ptrace`/`process_vm_*` at all. Added
-`pidfd_open`, `pidfd_getfd`, `pidfd_send_signal`, `kcmp`, `process_madvise`, `process_mrelease` to the
-floor — all gated by the same permission check or capable of the same class of cross-process reach.
+`pidfd_getfd` (Linux 5.6+, requiring the same `PTRACE_MODE_ATTACH` permission `ptrace(PTRACE_ATTACH,
+...)` itself requires) — on exactly the `ptrace_scope=0` hosts this floor exists to defend, a child
+could `pidfd_open(getppid())` (no permission check of its own) then `pidfd_getfd` to duplicate one of
+the parent's own open file descriptors (the SQLite connection, a live REST/MCP client socket) into
+itself, then read/write it directly, reaching past the process boundary without ever calling
+`ptrace`/`process_vm_*` at all. Added `pidfd_open`, `pidfd_getfd`, `pidfd_send_signal`, `kcmp`,
+`process_madvise`, `process_mrelease` to the floor as the same family of cross-process
+introspection/tampering primitive — not all gated by an identical permission check (`kcmp`/
+`process_madvise` use the weaker `PTRACE_MODE_READ`, not restricted by YAMA's `ptrace_scope` the way
+`ATTACH` is; `process_mrelease`'s exact model wasn't independently verified), but all denied on the
+same "cross-process, no legitimate use inside a plugin call" basis. Round 2 found and fixed an
+overstated claim in round 1's own comment here (that all of these share `pidfd_getfd`'s exact
+permission check) and added a platform-independent regression test pinning the floor's contents
+(`TestProcessIsolationFloorContents` — round 1 shipped this addition with no test pinning it at all).
+Further, pre-existing gaps in this same floor (the kill syscall family entirely unrestricted;
+secrets in the parent's environment fully inherited by every sandboxed child regardless of declared
+capabilities; several other cross-process-capable syscalls not yet considered) found while reviewing
+this fix, not introduced by it — filed as **KI-111**, not fixed this pass.
+
+**Also filed, round 2: KI-110** — `require_enforcement`'s guarantee can be satisfied by a partially-
+installed filter, since an unresolved syscall name is silently skipped while `EnforcementResult.
+applied` still reports `True`. Not fixed this pass.
 
 **Disclosed, not fixed — filed as KI-106: `capabilities.filesystem=True` subsumes
-`granted_capability`'s own storage ceiling entirely.** A plugin with `filesystem=True` (all three
-shipped reference plugins declare it) can open the KB's own on-disk file directly and write to it,
+`granted_capability`'s own storage ceiling entirely.** A plugin with `filesystem=True` (three of the
+four shipped reference plugins declare it) can open the KB's own on-disk file directly and write to it,
 bypassing proposal/policy/audit regardless of how low its granted storage capability is —
 `granted_capability="read"` was never a real limit on such a plugin. The registration-time warning
 now discloses this explicitly. The structural fix (a parent-opened, capability-scoped readable proxy
@@ -634,8 +676,10 @@ reach `view._kb`... at all... regardless" claim read as covering the plugin's wh
 scoped it explicitly to the isolated call, cross-referencing the adjacent Negative bullet that
 already, correctly, documents the registration-time module-import/constructor phase as unsandboxed.
 
-Both CRITICALs from the 2026-09-20 Update were re-verified still closed before this review began
-(reproduced both attacks directly against the fixed code, as every prior round has).
+Both CRITICALs from the 2026-09-20 Update were re-verified still closed at the start of this
+security review, before either remediation round above (reproduced both attacks directly against
+the fixed code — `restricted_loads` refuses a `__reduce__`-based RCE payload, and `_handle_one_
+message`'s allow-list refuses every non-allowlisted CALL on a real view, including `__setattr__`).
 
 ## References
 
@@ -643,8 +687,12 @@ Both CRITICALs from the 2026-09-20 Update were re-verified still closed before t
   open per this ADR's own scoping), **KI-101** (new, the `.query()`/`.as_of()` follow-up above),
   **KI-102** (new, the no-timeout follow-up above), **KI-103** (new, unrelated to plugin
   isolation itself — the `anyio`/`httpx2`/`httpcore2` `pip-audit` fix found while reviewing this ADR),
-  and **KI-106** (new, M4 Workstream 7's security review — `filesystem=True` subsumes the storage
-  capability ceiling, see this ADR's own 2026-09-27 Update)
+  **KI-106** (new, M4 Workstream 7's security review round 1 — `filesystem=True` subsumes the storage
+  capability ceiling), **KI-109** (new, round 2 — filesystem enforcement doesn't cover a plugin's own
+  import/construction phase), **KI-110** (new, round 2 — `require_enforcement` can be satisfied by a
+  partially-installed filter), and **KI-111** (new, round 2 — further pre-existing process-isolation
+  floor gaps: the kill syscall family, inherited environment secrets, other unconsidered syscalls) —
+  see this ADR's own 2026-09-27 Update for all of the above
 - ADR-0015 (Plugin Capability Isolation — the storage-capability half this ADR doesn't change, and
   the "Python has no true encapsulation" gap this ADR closes structurally)
 - ADR-0044 (Observability — `kb.observability` is how this ADR's enforcement-degradation warning is

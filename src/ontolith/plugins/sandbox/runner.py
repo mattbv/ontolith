@@ -209,9 +209,10 @@ def run_isolated(
             principle but failed to install for this call) — the
             registration-time warning (`registry.py`) can only predict
             this, not guarantee it.
-        require_enforcement: When True, fail this call (raise `PluginError`,
-            terminate the child) rather than merely warn if the child's own
-            `ENFORCEMENT` message reports `applied=False` — security review
+        require_enforcement: When True, fail this call (raise `PluginError`)
+            rather than merely warn if the child's own real, call-time
+            attempt to install the full (network+filesystem+process-
+            isolation) filter reports `applied=False` — security review
             finding, M4 Workstream 7: `registry.py`'s registration-time
             warning is otherwise the only signal, and it's advisory only.
             `PluginRegistry.register(..., require_enforcement=True)` already
@@ -222,9 +223,15 @@ def run_isolated(
             registration couldn't predict — enforcement is available in
             principle but this specific attempt to install the filter
             failed (e.g. a container's own outer seccomp profile blocks it).
-            Because the ENFORCEMENT message is now sent before the plugin's
-            own code ever runs (see `_child_main`'s docstring), failing here
-            means the untrusted plugin never executes at all for this call.
+            The child itself refuses to invoke the plugin's protocol method
+            when this fires (round-2 review finding — round 1's version of
+            this check only lived on the parent side, which couldn't
+            actually stop an already-running child from calling the method
+            anyway). This does NOT mean the plugin never executes at all
+            for this call: its module import and `__init__` still ran
+            first, under only the narrower network/floor-only filter
+            `_child_main` installs before loading — see that function's own
+            docstring and KI-109 for that residual.
 
     Returns:
         Whatever the plugin's real method returned, as decoded by
@@ -255,7 +262,15 @@ def run_isolated(
     parent_conn, child_conn = ctx.Pipe(duplex=True)
     process = ctx.Process(
         target=_child_main,
-        args=(child_conn, entry_point_name, method_name, capabilities, wired_args, wired_kwargs),
+        args=(
+            child_conn,
+            entry_point_name,
+            method_name,
+            capabilities,
+            wired_args,
+            wired_kwargs,
+            require_enforcement,
+        ),
     )
     process.start()
     child_conn.close()  # only the child's copy is used inside the child
@@ -574,34 +589,61 @@ def _child_main(
     capabilities: PluginCapabilities,
     wired_args: tuple[object, ...],
     wired_kwargs: dict[str, object],
+    require_enforcement: bool,
 ) -> None:
     """Entry point for the sandboxed child process.
 
-    Enforcement is applied FIRST, before `_load_plugin_instance` (security
-    review finding, M4 Workstream 7): the plugin's own module-level code and
-    `__init__` are untrusted and were previously running with no seccomp
-    filter installed at all, since the filter used to be installed only
-    right before the protocol method call. A `network=False`/
-    `filesystem=False` plugin could open a socket or a file at import time
-    or in its constructor — before any filter existed to deny it — then use
-    already-open-descriptor syscalls (`read`/`write`, which the filter must
-    always allow for the sandbox's own IPC pipe to keep working; see
-    `enforcement.py`'s own `_FILESYSTEM_SYSCALLS` comment) on that
-    already-opened socket/file afterward, bypassing the declared
-    capabilities entirely. Installing the filter before `_load_plugin_
-    instance` closes this: at the point the plugin's own code first runs,
-    the filter (when `enforcement_available()`) is already active, so the
-    open/connect that would have set up the exfiltration channel is denied
-    at the syscall level from the plugin's very first line.
+    `enforcement.apply_preimport_enforcement` is applied FIRST, before
+    `_load_plugin_instance` (security review round 2, M4 Workstream 7,
+    correcting round 1's own attempt at this — see that function's own
+    docstring for the full story, including the CI failure round 1's
+    version caused). It only closes network/the process-isolation floor —
+    deliberately not filesystem, which `_load_plugin_instance` itself needs
+    real access to regardless of what the plugin declares. Filesystem
+    enforcement, along with a second, unconditional pass over network/the
+    floor, is applied by `enforcement.apply_capability_enforcement` in its
+    original position: immediately before the plugin's own protocol method
+    is invoked, after loading.
 
-    `enforcement.apply_capability_enforcement`'s own docstring constraint
-    ("after every import the sandbox's own runner infrastructure needs")
-    is still satisfied: `runner.py`'s own module-level imports (this
-    module, `enforcement`, `protocol`, `wire`, `remote_view`) already ran
-    before `_child_main` was ever called, when the child process's
-    interpreter first loaded this file — none of that infrastructure's own
-    imports happen inside this function.
+    `require_enforcement` (from `PluginRegistry.register()`, threaded
+    through `run_isolated`) is checked HERE, inside the child, right after
+    `apply_capability_enforcement`'s real result comes back — which is
+    necessarily *after* `_load_plugin_instance`, since knowing whether the
+    full (filesystem-inclusive) filter actually installs requires
+    attempting the install, and attempting it any earlier is exactly what
+    broke loading above. **The guarantee this gives is narrower than "the
+    plugin never runs at all": it guarantees the plugin's own protocol
+    method (`import_`/`export`/etc. — the operation the capability model is
+    actually about) never runs without a genuinely-installed full filter.
+    The plugin's module import and `__init__` still run first, under only
+    `apply_preimport_enforcement`'s narrower network/floor-only filter —
+    same residual (KI-109) as the non-required case.** Round-1 review
+    found and fixed a real bug in a naive version of this idea: putting the
+    check only in the parent's `_handle_one_message` can make the caller's
+    `run_isolated()` raise promptly, but doesn't stop this already-running
+    child process from continuing on its own to call the plugin's protocol
+    method regardless — reproduced taking over 3 seconds of fully
+    unenforced execution before `run_isolated`'s own
+    `process.join(timeout=5)`/`terminate()` eventually caught up. This
+    child-side check closes that: the child itself refuses to invoke the
+    protocol method when required enforcement didn't apply, rather than
+    relying on the parent to notice and terminate it after the fact. The
+    parent's own copy of this check, unchanged, still exists as a second
+    layer that also gives the caller a fast, unambiguous failure without
+    waiting on this child to report FAILED and exit on its own.
     """
+    enforcement.apply_preimport_enforcement(capabilities)
+
+    try:
+        plugin_instance = _load_plugin_instance(entry_point_name)
+        resolved_args = tuple(_resolve_wired(value, child_conn) for value in wired_args)
+        resolved_kwargs = {
+            name: _resolve_wired(value, child_conn) for name, value in wired_kwargs.items()
+        }
+    except Exception as exc:  # noqa: BLE001 - reported to the parent, not raised here
+        _safe_send_failed(child_conn, exc)
+        return
+
     # Best-effort, never raises - see enforcement.py's own docstring for why
     # a failure to enforce degrades to "not enforced," not a hard error.
     # Reported to the parent unconditionally (security review finding: the
@@ -614,14 +656,16 @@ def _child_main(
     except Exception:  # noqa: BLE001 - the pipe itself is gone; nothing left to report to
         return
 
-    try:
-        plugin_instance = _load_plugin_instance(entry_point_name)
-        resolved_args = tuple(_resolve_wired(value, child_conn) for value in wired_args)
-        resolved_kwargs = {
-            name: _resolve_wired(value, child_conn) for name, value in wired_kwargs.items()
-        }
-    except Exception as exc:  # noqa: BLE001 - reported to the parent, not raised here
-        _safe_send_failed(child_conn, exc)
+    if require_enforcement and not enforcement_result.applied:
+        _safe_send_failed(
+            child_conn,
+            PluginError(
+                f"OS-level capability enforcement was required but did not apply for this "
+                f"call to {method_name!r}: {enforcement_result.reason}. Refusing to run the "
+                "plugin (require_enforcement=True) rather than proceed with "
+                "capabilities.network/.filesystem unenforced (ADR-0051)."
+            ),
+        )
         return
 
     try:

@@ -251,6 +251,28 @@ class TestRemoteViewQueryAsOfUnsupported:
             view.query("Person")
 
 
+class TestProcessIsolationFloorContents:
+    """Pins the always-on floor's exact syscall set - platform-independent
+    (a plain tuple comparison, no filter installed), so it runs everywhere,
+    unlike TestRealSeccompEnforcementOnLinux below. Security review found
+    this floor had no test at all pinning its contents: removing any of the
+    round-2 pidfd/kcmp/process_madvise/process_mrelease additions passed
+    the whole suite silently on a non-Linux dev machine."""
+
+    def test_floor_denies_the_full_cross_process_introspection_family(self) -> None:
+        assert set(enforcement._PROCESS_ISOLATION_SYSCALLS) == {
+            "ptrace",
+            "process_vm_readv",
+            "process_vm_writev",
+            "pidfd_open",
+            "pidfd_getfd",
+            "pidfd_send_signal",
+            "kcmp",
+            "process_madvise",
+            "process_mrelease",
+        }
+
+
 class TestEnforcementAvailability:
     """Platform-conditional, no subprocess needed for the negative case."""
 
@@ -783,6 +805,93 @@ class TestRequireEnforcement:
             "json-exporter", author=ADMIN, isolate=True, require_enforcement=True
         )
         assert isinstance(loaded.instance, IsolatedPluginProxy)
+
+    def test_run_isolated_raises_and_leaves_the_remote_target_unwritten(self, kb: Ontology) -> None:
+        """End-to-end: run_isolated raises PluginError naming
+        require_enforcement, and `buf` (a RemoteWritable-proxied target)
+        never receives any partial/garbage write. NOT a proof that
+        export() itself never ran - it can't be, for this class of target:
+        `buf.write(...)` inside the child sends a CALL message and blocks
+        for the parent's reply, and the parent's dispatch loop stops
+        reading messages the moment it raises (on the very first
+        ENFORCEMENT(applied=False) message, whether or not the child-side
+        require_enforcement check exists) - so a proxied write can never
+        land in `buf` once the parent has decided to raise, regardless of
+        whether the child went on to call export() or not. Verified by
+        mutation: removing the child-side check (round 1's own bug) still
+        leaves this exact assertion passing. See
+        `test_child_main_checks_require_enforcement_before_calling_the_
+        plugins_protocol_method` below for the actual proof that the
+        protocol method call is structurally unreachable when required
+        enforcement doesn't apply."""
+        if enforcement.enforcement_available():
+            pytest.skip("this needs a platform where enforcement is NOT available")
+        loaded = PluginRegistry(kb).register("json-exporter", author=ADMIN, isolate=True)
+        buf = io.StringIO()
+        with pytest.raises(PluginError, match="require_enforcement"):
+            run_isolated(
+                "json-exporter",
+                "export",
+                loaded.manifest.capabilities,
+                (loaded.view, buf),
+                {},
+                NullObservabilitySink(),
+                require_enforcement=True,
+            )
+        assert buf.getvalue() == ""
+
+    def test_child_main_checks_require_enforcement_before_calling_the_plugins_protocol_method(
+        self,
+    ) -> None:
+        """Structural proof the black-box test above can't provide (see its
+        own docstring for why): _child_main's own source must check
+        require_enforcement strictly BEFORE the line that calls the
+        plugin's protocol method (`getattr(plugin_instance, method_name)
+        (...)`), not merely raise a PluginError somewhere in the function.
+        Round-1 review's own bug shipped exactly this shape backwards: the
+        equivalent check lived only in the PARENT's message handler, with
+        nothing in `_child_main` itself gating the method call at all -
+        this test pins the child's own control flow directly, via AST
+        inspection, the same verification method used to confirm the
+        HIGH-1 reordering fix during this review."""
+        import ast
+        import inspect
+
+        source = inspect.getsource(runner._child_main)
+        tree = ast.parse(source)
+        func = tree.body[0]
+        assert isinstance(func, ast.FunctionDef)
+
+        require_enforcement_check_line: int | None = None
+        protocol_method_call_line: int | None = None
+        for node in ast.walk(func):
+            if (
+                isinstance(node, ast.If)
+                and isinstance(node.test, ast.BoolOp)
+                and any(
+                    isinstance(v, ast.Name) and v.id == "require_enforcement"
+                    for v in node.test.values
+                )
+            ):
+                require_enforcement_check_line = node.lineno
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Call)
+                and isinstance(node.func.func, ast.Name)
+                and node.func.func.id == "getattr"
+            ):
+                protocol_method_call_line = node.lineno
+
+        assert require_enforcement_check_line is not None, (
+            "no 'if require_enforcement ...' check found in _child_main"
+        )
+        assert protocol_method_call_line is not None, (
+            "no getattr(plugin_instance, method_name)(...) call found in _child_main"
+        )
+        assert require_enforcement_check_line < protocol_method_call_line, (
+            "require_enforcement is checked AFTER the plugin's protocol method is already "
+            "called - the check must come first for it to mean anything"
+        )
 
 
 class TestPluginsOwnExceptionsPropagateCorrectly:
