@@ -27,6 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `== 100` regardless of pytest-benchmark's own round count.
 
 #### Added
+- CodeQL code scanning (new `codeql.yml`, ADR-0026 Update): `python` analysis on every PR and
+  push to `main`, plus weekly. The `main` branch ruleset already requires a CodeQL result before
+  merge, but no workflow uploaded one, so PRs sat at "Waiting for Code Scanning results".
 - Plugin process isolation (ADR-0051, closes KI-014's still-open half on Linux; **Breaking**) —
   `PluginRegistry.register()` gains `isolate: bool = True`: a plugin's one protocol entrypoint
   (`import_`/`export`/`derive`/`validate`/`sync`) now runs in a freshly spawned child process
