@@ -26,6 +26,7 @@ import ontolith.query
 import ontolith.schema
 import ontolith.store
 import ontolith.store.duckdb
+import ontolith.store.migrations
 import ontolith.store.sqlite
 
 _EXPECTED: dict[str, frozenset[str]] = {
@@ -88,8 +89,9 @@ _EXPECTED: dict[str, frozenset[str]] = {
         {"AdminAction", "AdminEvent", "Principal", "PrincipalCredential", "min_capability"}
     ),
     "ontolith.store": frozenset({"StorageBackend"}),
-    "ontolith.store.sqlite": frozenset({"SQLiteBackend"}),
-    "ontolith.store.duckdb": frozenset({"DuckDBBackend"}),
+    "ontolith.store.migrations": frozenset({"MigrationReport", "MigrationStep"}),
+    "ontolith.store.sqlite": frozenset({"SQLiteBackend", "migrations"}),
+    "ontolith.store.duckdb": frozenset({"DuckDBBackend", "migrations"}),
     "ontolith.govern": frozenset(
         {
             "Proposal",
@@ -163,6 +165,7 @@ _MODULES = {
     "ontolith.core": ontolith.core,
     "ontolith.identity": ontolith.identity,
     "ontolith.store": ontolith.store,
+    "ontolith.store.migrations": ontolith.store.migrations,
     "ontolith.store.sqlite": ontolith.store.sqlite,
     "ontolith.store.duckdb": ontolith.store.duckdb,
     "ontolith.govern": ontolith.govern,

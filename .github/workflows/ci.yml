@@ -101,6 +101,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install libseccomp (Linux only — ADR-0051 plugin sandbox enforcement)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libseccomp2
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
@@ -115,10 +119,15 @@ jobs:
       - name: Run tests + conformance (combined coverage)
         env:
           HYPOTHESIS_PROFILE: ci
-        run: |
-          uv run pytest tests/ conformance/ \
-            --cov=src/ontolith --cov-report=xml --cov-report=term \
-            --cov-fail-under=90
+        # Folded scalar (`>-`), not a `\`-continued literal block: this step
+        # runs on windows-latest too, whose default shell is PowerShell, which
+        # doesn't treat a trailing backslash as a line continuation and fails
+        # to parse the command (`Missing expression after unary operator
+        # '--'`). A folded scalar collapses to one line, valid in every shell.
+        run: >-
+          uv run pytest tests/ conformance/
+          --cov=src/ontolith --cov-report=xml --cov-report=term
+          --cov-fail-under=90
 
       - name: Upload coverage
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'

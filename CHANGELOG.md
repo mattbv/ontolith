@@ -27,6 +27,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `== 100` regardless of pytest-benchmark's own round count.
 
 #### Added
+- Plugin process isolation (ADR-0051, closes KI-014's still-open half on Linux; **Breaking**) —
+  `PluginRegistry.register()` gains `isolate: bool = True`: a plugin's one protocol entrypoint
+  (`import_`/`export`/`derive`/`validate`/`sync`) now runs in a freshly spawned child process
+  (`plugins/sandbox/`), with its `kb` view and any other live argument (e.g. an `io.StringIO`
+  export target) proxied back to the parent over one IPC pipe — `LoadedPlugin.instance` is an
+  `IsolatedPluginProxy`, not the real plugin object, so `isinstance(instance, SomePluginClass)` no
+  longer holds (`instance.plugin_class` is the replacement check), and a `@dataclass`-shaped return
+  value (e.g. a reference plugin's `ImportReport`) crosses as a plain `dict`, not its original type;
+  `isolate=False` restores exactly the pre-ADR-0051 behavior for both. Closes ADR-0015's "Python has
+  no true encapsulation" gap structurally, on every platform — a plugin's own code can no longer
+  reach `view._kb` or any other live object graph, since only picklable messages cross the boundary
+  at all, decoded by a restricted unpickler that only ever reconstructs this project's own exception
+  hierarchy plus a short list of ordinary builtin exceptions as a class instance (everything else
+  must arrive as `None`/`bool`/`int`/`float`/`str`/
+  `bytes`/`list`/`dict`/`tuple`), and every proxied method call is checked against an explicit
+  allow-list before dispatch. Two review rounds found the first version of this design didn't
+  actually have those two properties — a plugin's own message to the parent was unpickled with plain
+  `pickle.loads()` (reproduced: arbitrary code execution in the parent via a hostile `__reduce__`)
+  and the dispatch loop invoked any method name the child asked for on the real, unproxied view with
+  no allow-list (reproduced: `__setattr__("_principal_id", ...)` forged the acting principal on
+  every later write through that view, from a read-only registration, no pickle trickery needed) —
+  both fixed and independently re-verified by reproducing both attacks against the fixed code before
+  merge. Five review rounds total; the second, third, and fourth each found a real regression in the
+  prior round's own fix (most notably: a plugin's own documented `ValueError`/`TypeError` was briefly
+  mislabelled as a protocol violation instead of propagating normally, round 3; round 4 then closed
+  an unguarded send-side `BrokenPipeError` path round 3's own refactor had left open) — all fixed,
+  all re-verified; a fifth round found no further code-level issues. See ADR-0051's own Update
+  section for the full record. On Linux, with a working
+  `pyseccomp`/libseccomp install (new Linux-only dependency, `sys_platform` marker, exact-pinned
+  like `sqlite-vec`), a plugin's declared `capabilities.network=False`/`.filesystem=False` are now
+  genuinely enforced at the OS syscall level (seccomp, `ERRNO(EPERM)` — a denied syscall surfaces as
+  an ordinary caught exception, not a killed process; the deny-lists cover `io_uring`/`ptrace`/
+  `process_vm_*` and non-native-architecture syscalls too, per the same review); macOS/Windows get no
+  OS-level enforcement in this pass, honestly documented rather than approximated, and the
+  registration-time warning now covers that case too (previously it only warned when a capability
+  was declared `True`). `.query()`/`.as_of()` raise a clear `PluginError` from inside an isolated
+  call — no shipped reference plugin needs either; filed as **KI-101**.
 - SPEC §18 observability port, tier (a) — structured, correlated logs (ADR-0044) — new
   `core/observability.py`: `ObservabilitySink` (the ABC — `log`/`record_event`/`record_metric`,
   exactly the shape ADR-0044 already decided), `StdlibLoggingSink` (the production-safe default,
@@ -63,6 +100,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test_bench_write_assert_literal` used to accidentally exercise (see `#### Fixed` above) has a
   real, measured, unbounded-with-size per-write cost and no benchmark of its own at all now that
   this fix moved every write off it — filed as **KI-100**.
+- On-disk storage-format migrations (SPEC §15, ADR-0052; **Breaking**) — new `format_version`
+  single-row table, tracked independently per backend (`store/sqlite/migrations.py`,
+  `store/duckdb/migrations.py`; both currently at `CURRENT_FORMAT_VERSION = 3`). Formalizes the two
+  historical, previously ad hoc `PRAGMA table_info` + `ALTER TABLE` fixups
+  (`principal_credential.issued_by`/`.revoked_by`, KI-060; `proposal.reviewers`, KI-078) as
+  registered migrations (v2, v3), each declaring `reversible: bool` and a `down()`.
+  `SQLiteBackend`/`DuckDBBackend` now **refuse** (`SchemaError`) to open an existing file below
+  `CURRENT_FORMAT_VERSION` instead of silently upgrading it on connect — a fresh, empty file is
+  unaffected (created directly at the current format). `migrate_file(path, *, dry_run=False)` is
+  the explicit, standalone action that applies pending migrations (or, dry-run, only reports them,
+  writing nothing at all) — new CLI commands `ontolith db status`/`ontolith db migrate [--dry-run]`
+  (SQLite only, matching `Ontology.connect()`'s own scope; DuckDB's `migrate_file` is reached
+  programmatically). Any existing database file below the current format_version now needs an
+  explicit `ontolith db migrate` before it opens again. Data migration/backfill for a renamed or
+  retyped *domain* predicate against already-stored assertion data (ADR-0034's own "scope (b)")
+  remains a distinct, still-open problem this does not solve. Five review rounds — rounds 2 through 4
+  each found a real bug in the same narrow area (a registered migration's `up()` needing to tolerate
+  one more state of its own target table/column than the previous round anticipated: already applied,
+  absent entirely, shadowed by a view); round 5 found none, backed by an exhaustive empirical sweep of
+  every reachable table/column-state combination. See ADR-0052's own Update section for the full
+  record. Filed **KI-104** as a maintainability follow-up (not a bug) for centralizing that
+  defensiveness into a declarative registry once a third migration is added.
 
 ### M3 - Extensible (0.3)
 

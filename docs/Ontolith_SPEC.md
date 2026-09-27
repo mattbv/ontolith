@@ -579,6 +579,17 @@ Entity:
 ### 14.2 CLI
 `ontolith init` · `ontolith schema {show|migrate}` · `ontolith import|export` · `ontolith principal {add|list}` · `ontolith proposal {list|review}` · `ontolith history <entity>` · `ontolith query`.
 
+> **Implementation deviations.** Abbreviated and drifted from the shipped command set in places not
+> yet reconciled row-by-row, the same as §14.4's own note below — `interfaces/cli.py` is current.
+> Notably: `ontolith init` doesn't exist as its own command (a database file is created implicitly on
+> first connect, via `--db`/`ONTOLITH_DB`); `principal {add|list}` shipped as `principal
+> {create|list}`; `entity`/`contradiction`/`namespace`/`admin-event` command groups exist with no
+> mention above; `import|export` and `history` as named here were never implemented (plugin
+> import/export is reached via `Ontology`/the plugin registry directly, not a CLI verb; `history`'s
+> equivalent is `ontolith assertions --subject`). `ontolith db {status|migrate}` (SPEC §15,
+> ADR-0052) was added 2026-09-20 for on-disk format-version migrations — a distinct thing from
+> `schema migrate`'s domain-schema versioning (ADR-0034) despite the similar name.
+
 ### 14.3 REST + GraphQL
 REST resources (auth required; capability-checked):
 `/namespaces` · `/entities` · `/assertions` · `/proposals` (`POST` to create, `/{id}/accept|reject|review`) · `/contradictions/{id}/resolve` · `/principals` · `/query` · `/provenance/{assertion_id}`.

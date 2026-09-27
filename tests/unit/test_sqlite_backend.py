@@ -12,12 +12,12 @@ from pathlib import Path
 import pytest
 
 from ontolith.core import Assertion, AssertionEvent, Entity, FixedClock
-from ontolith.core.errors import StorageError
+from ontolith.core.errors import SchemaError, StorageError
 from ontolith.govern.contradiction import Contradiction
 from ontolith.govern.proposal import Proposal, ProposalEvent
 from ontolith.identity import AdminEvent, Principal, PrincipalCredential
 from ontolith.schema import ConceptDef, PropertyDef, SchemaIR
-from ontolith.store.sqlite import SQLiteBackend
+from ontolith.store.sqlite import SQLiteBackend, migrations
 
 
 @pytest.fixture
@@ -942,11 +942,19 @@ class TestSQLiteBackend:
     def test_principal_credential_migration_adds_new_columns_to_existing_db(
         self, temp_db: Path
     ) -> None:
-        """A database file created before issued_by/revoked_by existed
-        gets them added on next open, without touching existing rows
-        (KI-060) — simulates that by building the table in its pre-KI-060
-        shape directly, bypassing SQLiteBackend's own (already-migrated)
-        schema setup."""
+        """A database file created before issued_by/revoked_by existed is
+        refused on open (ADR-0052: format_version 1 < CURRENT_FORMAT_VERSION
+        3) rather than silently altered — `migrations.migrate_file()` adds
+        them explicitly, without touching existing rows (KI-060). Simulates
+        a true v1 file: `proposal` also predates `reviewers` (KI-078), same
+        as `principal_credential` predates issued_by/revoked_by here — a
+        real legacy file always has every table `_create_schema()` creates,
+        just some missing later columns, so both migrations apply, in
+        order. (`_up_v3` no longer strictly needs `proposal` to already
+        exist to run correctly, round 4's own review — it no-ops instead
+        of failing when the table is absent — but this fixture still
+        includes it: it's the realistic legacy shape, not merely a
+        prerequisite for this test to pass.)"""
         raw = sqlite3.connect(temp_db)
         raw.execute(
             "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, "
@@ -956,8 +964,20 @@ class TestSQLiteBackend:
             "INSERT INTO principal_credential (id, principal_id, token_hash, created_at) "
             "VALUES ('old-cred', 'alice@test.com', 'oldhash', '2025-01-01T00:00:00+00:00')"
         )
+        raw.execute(
+            "CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT NOT NULL, "
+            "author TEXT NOT NULL, acting_as TEXT, state TEXT NOT NULL DEFAULT 'draft', "
+            "created_at TEXT NOT NULL, decided_at TEXT, policy_reason TEXT, "
+            "payload TEXT NOT NULL DEFAULT '{}', metadata TEXT NOT NULL DEFAULT '{}')"
+        )
         raw.commit()
         raw.close()
+
+        with pytest.raises(SchemaError, match="format_version"):
+            SQLiteBackend(temp_db)
+
+        report = migrations.migrate_file(temp_db)
+        assert [step.version for step in report.steps] == [2, 3]
 
         backend = SQLiteBackend(temp_db)
         try:
@@ -976,11 +996,20 @@ class TestSQLiteBackend:
     def test_proposal_reviewers_migration_adds_new_column_to_existing_db(
         self, temp_db: Path
     ) -> None:
-        """A database file created before `reviewers` existed gets it added
-        on next open (KI-078) — simulates that by building the table in its
-        pre-KI-078 shape directly, bypassing SQLiteBackend's own
-        (already-migrated) schema setup."""
+        """A database file created before `reviewers` existed is refused on
+        open (ADR-0052) rather than silently altered —
+        `migrations.migrate_file()` adds it explicitly (KI-078). Simulates
+        a v2 file — `principal_credential` already has issued_by/revoked_by
+        (that migration already applied), only `proposal.reviewers` is
+        still missing — the version inference (`_infer_format_version`)
+        keys off both tables, so a realistic v2 fixture needs the first
+        already in its current shape, not just the second in its old one."""
         raw = sqlite3.connect(temp_db)
+        raw.execute(
+            "CREATE TABLE principal_credential (id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, "
+            "token_hash TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, revoked_at TEXT, "
+            "issued_by TEXT, revoked_by TEXT)"
+        )
         raw.execute(
             "CREATE TABLE proposal (id TEXT PRIMARY KEY, namespace TEXT NOT NULL, "
             "author TEXT NOT NULL, acting_as TEXT, state TEXT NOT NULL DEFAULT 'draft', "
@@ -995,6 +1024,11 @@ class TestSQLiteBackend:
         raw.commit()
         raw.close()
 
+        with pytest.raises(SchemaError, match="format_version"):
+            SQLiteBackend(temp_db)
+
+        migrations.migrate_file(temp_db)
+
         backend = SQLiteBackend(temp_db)
         try:
             columns = {row[1] for row in backend.conn.execute("PRAGMA table_info(proposal)")}
@@ -1006,9 +1040,13 @@ class TestSQLiteBackend:
         finally:
             backend.close()
 
-        # Migration must be idempotent - a second open of the now-migrated
-        # file must not error (re-adding an already-present column) or
-        # disturb an assignment made in between.
+        # migrate_file must be idempotent - calling it again on an
+        # already-current file reports nothing pending and doesn't disturb
+        # an assignment made in between; SQLiteBackend can reopen it freely
+        # too, since it's already current.
+        empty_report = migrations.migrate_file(temp_db)
+        assert empty_report.up_to_date
+
         backend2 = SQLiteBackend(temp_db)
         try:
             backend2.update_proposal_reviewers("old-prop", ["bob@test.com"])
