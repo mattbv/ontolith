@@ -874,7 +874,14 @@ def assertion_scenarios(draw: st.DrawFn) -> tuple[list[dict[str, object]], int]:
 
 @given(scenario=assertion_scenarios())
 @settings(
-    max_examples=100, deadline=5000, suppress_health_check=[HealthCheck.function_scoped_fixture]
+    max_examples=100,
+    # Per-example setup (tempdir + backend connect + entity/assertion writes)
+    # is real I/O, not CPU work the deadline is meant to catch — same reason
+    # the other DuckDB-heavy property tests below disable it. A slower CI
+    # runner (observed: windows-latest taking 6.3-6.5s on one example) isn't
+    # a regression in the code under test.
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
 )
 def test_as_of_reconstruction_matches_theoretical_filter(
     scenario: tuple[list[dict[str, object]], int],
