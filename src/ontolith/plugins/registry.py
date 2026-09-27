@@ -22,6 +22,11 @@ from ontolith.plugins.views import ReadOnlyView, WriteView
 
 _ENTRY_POINT_GROUP = "ontolith.plugins"
 _PLUGIN_METADATA_MARKER = "ontolith_plugin"
+# Recorded on a plugin principal's own metadata so a later register() call
+# under the same manifest.name but a DIFFERENT entry point is refused
+# rather than silently rebinding to the existing principal's identity
+# (security review finding, M4 Workstream 7) — see _ensure_principal.
+_ENTRY_POINT_METADATA_KEY = "ontolith_plugin_entry_point"
 
 # Write-capable kinds are the explicit, authoritative allow-list — a new
 # PluginKind not added here defaults to read-only (the safe direction for a
@@ -71,6 +76,7 @@ class PluginRegistry:
         author: str,
         granted_capability: str = "propose",
         isolate: bool = True,
+        require_enforcement: bool = False,
     ) -> LoadedPlugin:
         """Discover, load, and sandbox a plugin by entry-point name.
 
@@ -95,6 +101,26 @@ class PluginRegistry:
                 isn't worth paying — this restores the pre-ADR-0051
                 behavior exactly: the real, unsandboxed plugin instance,
                 network/filesystem fully unenforced regardless of platform.
+            require_enforcement: Refuse to register (`PluginError`) rather
+                than merely warn if OS-level capability enforcement can't
+                even be attempted for this registration — `isolate=False`,
+                or `enforcement.enforcement_available()` is False on this
+                host/platform (currently: not Linux, or `pyseccomp`/
+                libseccomp missing). Defaults to `False` (today's behavior:
+                warn and proceed) since flipping the default would refuse
+                every registration on macOS/Windows outright — security
+                review finding, M4 Workstream 7: an operator who needs a
+                real guarantee that `capabilities.network=False`/
+                `filesystem=False` is enforced, not just declared, had no
+                way to ask for one; the registration-time warning
+                (`_warn_if_unenforced_capabilities_requested`) is the only
+                signal, and it's advisory. Even with `require_enforcement=
+                False`, every isolated *call* still fails the same way if
+                enforcement was available in principle at registration but
+                a specific attempt to install it fails at call time (e.g. a
+                container's own outer seccomp profile blocks it) — see
+                `sandbox.runner.run_isolated`'s own `require_enforcement`
+                parameter, threaded through from here.
 
         Returns:
             LoadedPlugin bound to a capability-scoped view.
@@ -105,8 +131,10 @@ class PluginRegistry:
             ValidationError: granted_capability is not a known capability level
             PluginError: entry point not found or ambiguous, manifest
                 missing/invalid, a write-capable plugin's effective
-                capability resolved to "read", or the plugin's name is
-                already occupied by an unrelated principal
+                capability resolved to "read", the plugin's name is
+                already occupied by an unrelated principal, or
+                require_enforcement=True but OS-level enforcement can't be
+                attempted for this registration at all
 
         Note:
             Logs a `logging.WARNING` (KI-014) if the plugin's manifest
@@ -128,6 +156,20 @@ class PluginRegistry:
         """
         self._kb.require_admin(author)
 
+        if require_enforcement and (not isolate or not enforcement.enforcement_available()):
+            reason = (
+                "isolate=False was passed for this registration"
+                if not isolate
+                else "no OS-level enforcement is available on this host/platform "
+                "(not Linux, or pyseccomp/libseccomp is missing)"
+            )
+            raise PluginError(
+                f"require_enforcement=True but OS-level capability enforcement cannot be "
+                f"attempted for this registration ({reason}) — refusing to register rather "
+                "than silently proceed with capabilities.network/.filesystem unenforced "
+                "(ADR-0051)."
+            )
+
         plugin_obj = self._load_entry_point(entry_point_name)
         manifest = self._load_manifest(plugin_obj, entry_point_name)
         effective_capability = self._effective_capability(manifest, granted_capability)
@@ -141,7 +183,9 @@ class PluginRegistry:
                 "manifest or the granted_capability passed to register()."
             )
 
-        principal_id = self._ensure_principal(manifest, effective_capability, author)
+        principal_id = self._ensure_principal(
+            manifest, effective_capability, author, entry_point_name
+        )
         view = self._build_view(principal_id, effective_capability)
         # Warn/record only once registration actually succeeds (review
         # finding for the warning, same reasoning extends to the audit
@@ -155,7 +199,11 @@ class PluginRegistry:
 
         instance: object = (
             IsolatedPluginProxy(
-                entry_point_name, manifest, type(plugin_obj), self._kb.observability
+                entry_point_name,
+                manifest,
+                type(plugin_obj),
+                self._kb.observability,
+                require_enforcement=require_enforcement,
             )
             if isolate
             else plugin_obj
@@ -212,10 +260,20 @@ class PluginRegistry:
            declared-`True` capability, on any platform, with or without
            `isolate` — network syscalls stay allowed if `network=True`,
            filesystem syscalls stay allowed if `filesystem=True` (a
-           `ptrace`/`process_vm_*` denial is installed unconditionally
-           regardless of either declaration, but that's an unrelated,
-           always-on floor, not a consequence of what's declared here —
-           see `enforcement.py`'s own comment). Always warn.
+           `ptrace`/`process_vm_*`/`pidfd_*` denial is installed
+           unconditionally regardless of either declaration, but that's an
+           unrelated, always-on floor, not a consequence of what's declared
+           here — see `enforcement.py`'s own comment). Always warn.
+           `filesystem=True` specifically also subsumes `granted_capability`
+           itself, not just network/filesystem's own advisory posture: a
+           plugin that can touch the filesystem can open the KB's on-disk
+           file directly and write to it, bypassing proposal/policy/audit
+           entirely, regardless of how low its granted storage capability
+           is (security review finding, M4 Workstream 7 — filed as KI-106,
+           the structural fix — parent-opened handles for import sources
+           too, mirroring `RemoteWritable`'s existing treatment of export
+           targets — is out of scope for this pass; disclosed in the
+           warning below instead).
         2. **Declared `False` (the default — requesting denial)** *and* this
            registration won't actually get it: `isolate=False` was passed,
            or no OS-level enforcement is available on this host/platform
@@ -247,12 +305,22 @@ class PluginRegistry:
         ]
         if declared_true:
             verb = "is" if len(declared_true) == 1 else "are"
+            filesystem_note = (
+                " filesystem=True also subsumes capabilities.storage's own ceiling: a plugin "
+                "that can touch the filesystem can open the KB's own on-disk file directly "
+                "(e.g. sqlite3.connect(path)) and write to it with no proposal, no policy "
+                "evaluation, and no audit event — storage='read'/'propose' is not a real limit "
+                "on a plugin that also has filesystem=True (security review finding, M4 "
+                "Workstream 7; see KI-106)."
+                if "filesystem" in declared_true
+                else ""
+            )
             self._kb.observability.log(
                 logging.WARNING,
                 f"Plugin {manifest.name!r} declares capabilities.{'/'.join(declared_true)}=True "
                 f"— {verb} an allow, never enforced as a ceiling: this plugin can make network "
                 "calls / touch the filesystem regardless of isolate or platform "
-                "(ADR-0015, ADR-0051, KI-014).",
+                f"(ADR-0015, ADR-0051, KI-014).{filesystem_note}",
                 plugin=manifest.name,
                 declared_true=declared_true,
                 isolate=isolate,
@@ -300,7 +368,11 @@ class PluginRegistry:
         return capped
 
     def _ensure_principal(
-        self, manifest: PluginManifest, effective_capability: str, author: str
+        self,
+        manifest: PluginManifest,
+        effective_capability: str,
+        author: str,
+        entry_point_name: str,
     ) -> str:
         """Get or create the service principal bound to this plugin, and return its ID."""
         existing = self._kb.get_principal(manifest.name)
@@ -310,7 +382,10 @@ class PluginRegistry:
                 kind="service",
                 auth_method="workload",
                 default_capability=effective_capability,
-                metadata={_PLUGIN_METADATA_MARKER: True},
+                metadata={
+                    _PLUGIN_METADATA_MARKER: True,
+                    _ENTRY_POINT_METADATA_KEY: entry_point_name,
+                },
                 author=author,
             )
             return principal.id
@@ -320,6 +395,27 @@ class PluginRegistry:
                 f"Principal {manifest.name!r} already exists and is not a plugin "
                 "principal registered by PluginRegistry — refusing to bind to it, "
                 "to avoid conflating two unrelated identities under one name"
+            )
+        existing_entry_point = existing.metadata.get(_ENTRY_POINT_METADATA_KEY)
+        # Security review finding, M4 Workstream 7: manifest.name is
+        # self-declared by the plugin author, not a unique identifier this
+        # project controls. Without this check, a newly registered plugin
+        # under a DIFFERENT entry point that happens to declare the same
+        # `manifest.name` (and the same computed effective_capability) was
+        # silently bound to the existing principal — inheriting its
+        # trust_level and attributing its writes under another plugin's
+        # identity in the audit trail, with no error at all. A plugin
+        # principal created before this fix has no recorded entry point
+        # (existing_entry_point is None) and is grandfathered rather than
+        # refused, matching this project's existing precedent for a
+        # pre-fix shape (e.g. KI-060/KI-078's own migrations).
+        if existing_entry_point is not None and existing_entry_point != entry_point_name:
+            raise PluginError(
+                f"Principal {manifest.name!r} is already bound to entry point "
+                f"{existing_entry_point!r}, which differs from {entry_point_name!r} — "
+                "refusing to rebind a plugin's identity to a different distribution's "
+                "entry point under the same declared name. Choose a distinct "
+                "manifest.name for this plugin, or revoke the existing principal first."
             )
         if existing.default_capability != effective_capability:
             raise PluginError(

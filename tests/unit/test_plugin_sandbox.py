@@ -533,6 +533,19 @@ def _child_floods_genuine_enforcement_false(child_conn: object) -> None:
     child_conn.send_bytes(pickle.dumps((protocol.DONE, "ok")))  # type: ignore[attr-defined]
 
 
+def _child_sends_genuine_enforcement_false_then_done(child_conn: object) -> None:
+    """A well-behaved (non-adversarial) child whose real enforcement
+    attempt genuinely failed - used to test require_enforcement's
+    call-time refusal directly against `_dispatch_loop`, without needing
+    a real platform/host where enforcement actually fails."""
+    import pickle
+
+    child_conn.send_bytes(  # type: ignore[attr-defined]
+        pickle.dumps((protocol.ENFORCEMENT, False, "simulated failure"))
+    )
+    child_conn.send_bytes(pickle.dumps((protocol.DONE, "ok")))  # type: ignore[attr-defined]
+
+
 def _child_sends_empty_message_then_sleeps(child_conn: object) -> None:
     """restricted_loads(b"") raises EOFError - indistinguishable from a
     closed pipe at that layer - but a child that sends empty bytes and
@@ -678,6 +691,98 @@ class TestEnforcementWarningReachesObservability:
             level, message, fields = enforcement_logs[0]
             assert level == logging.WARNING
             assert fields["method"] == "export"
+
+
+class TestRequireEnforcement:
+    """Security review finding, M4 Workstream 7: the registration-time
+    warning (TestEnforcementWarningReachesObservability above) is the only
+    signal an operator gets when OS-level enforcement doesn't apply - it's
+    advisory, not a guarantee. `require_enforcement` gives a real lever:
+    refuse at registration when enforcement can't even be attempted
+    (isolate=False, or unavailable on this host/platform), and refuse each
+    isolated call when a specific attempt to install it fails, rather than
+    silently proceeding with capabilities.network/.filesystem unenforced.
+    """
+
+    def test_dispatch_loop_raises_when_call_time_enforcement_genuinely_fails(
+        self, kb: Ontology
+    ) -> None:
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
+        process = ctx.Process(
+            target=_child_sends_genuine_enforcement_false_then_done, args=(child_conn,)
+        )
+        process.start()
+        child_conn.close()
+        try:
+            with pytest.raises(PluginError, match="require_enforcement"):
+                runner._dispatch_loop(
+                    parent_conn,
+                    process,
+                    {},
+                    "import_",
+                    NullObservabilitySink(),
+                    require_enforcement=True,
+                )
+        finally:
+            parent_conn.close()
+            process.join(timeout=5)
+
+    def test_dispatch_loop_still_only_warns_when_require_enforcement_is_false(
+        self, kb: Ontology
+    ) -> None:
+        """The default (require_enforcement=False) preserves today's
+        behavior exactly - this is the same scenario as the raising test
+        above, differing only in this one flag."""
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
+        process = ctx.Process(
+            target=_child_sends_genuine_enforcement_false_then_done, args=(child_conn,)
+        )
+        process.start()
+        child_conn.close()
+        sink = RecordingObservabilitySink()
+        try:
+            result = runner._dispatch_loop(
+                parent_conn, process, {}, "import_", sink, require_enforcement=False
+            )
+        finally:
+            parent_conn.close()
+            process.join(timeout=5)
+
+        assert result == "ok"
+        assert len(sink.logs) == 1
+
+    def test_register_with_require_enforcement_raises_when_isolate_false(
+        self, kb: Ontology
+    ) -> None:
+        with pytest.raises(PluginError, match="require_enforcement"):
+            PluginRegistry(kb).register(
+                "json-exporter", author=ADMIN, isolate=False, require_enforcement=True
+            )
+
+    def test_register_with_require_enforcement_raises_when_enforcement_unavailable(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(enforcement, "enforcement_available", lambda: False)
+        with pytest.raises(PluginError, match="require_enforcement"):
+            PluginRegistry(kb).register(
+                "json-exporter", author=ADMIN, isolate=True, require_enforcement=True
+            )
+
+    def test_register_with_require_enforcement_succeeds_when_enforcement_available(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Registration-time check only - whether this specific call later
+        succeeds under the real filter is the dispatch-loop tests' own
+        concern, exercised for real on Linux+libseccomp by
+        TestEnforcementWarningReachesObservability and
+        TestRealSeccompEnforcementOnLinux above."""
+        monkeypatch.setattr(enforcement, "enforcement_available", lambda: True)
+        loaded = PluginRegistry(kb).register(
+            "json-exporter", author=ADMIN, isolate=True, require_enforcement=True
+        )
+        assert isinstance(loaded.instance, IsolatedPluginProxy)
 
 
 class TestPluginsOwnExceptionsPropagateCorrectly:

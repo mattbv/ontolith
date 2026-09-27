@@ -136,9 +136,10 @@ _FILESYSTEM_SYSCALLS: tuple[str, ...] = (
 # Always denied whenever a filter is installed at all (unconditional on
 # either capability's own value - see apply_capability_enforcement's own
 # comment) - these have nothing to do with network or filesystem access;
-# they read/write another process's memory directly, which would let a
-# plugin reach past the process boundary ADR-0051's structural isolation
-# otherwise relies on (security review finding).
+# they read/write another process's memory directly, or duplicate another
+# process's file descriptors, either of which would let a plugin reach past
+# the process boundary ADR-0051's structural isolation otherwise relies on
+# (security review finding).
 #
 # Attack direction here is child -> parent (the child tracing/reading its
 # own ancestor). YAMA's ptrace_scope=1 (a distro default on Ubuntu/Debian,
@@ -150,10 +151,32 @@ _FILESYSTEM_SYSCALLS: tuple[str, ...] = (
 # it. Note filesystem=True still leaves an equivalent route open via
 # /proc/<ppid>/mem (open/pread, not ptrace/process_vm_* at all) - see
 # ADR-0051's own Update section.
+#
+# pidfd_getfd (Linux 5.6+) uses the exact same ptrace-attach permission
+# check as ptrace/process_vm_* (kernel's __ptrace_may_access), but is a
+# distinct syscall family this floor originally missed (security review
+# finding, M4 Workstream 7): on a ptrace_scope=0 host, a child could
+# pidfd_open(getppid()) then pidfd_getfd to duplicate one of the parent's
+# own open file descriptors (e.g. the SQLite connection's fd, or a live
+# REST/MCP client socket) into itself, then use the already-open-descriptor
+# syscalls this filter must always allow (read/write, for the sandbox's own
+# IPC pipe) on the stolen fd - reaching past the process boundary without
+# ever calling ptrace or process_vm_* at all. kcmp (compare two processes'
+# fds/resources, useful for locating which fd to steal) and
+# process_madvise/process_mrelease (also gated by the same ptrace-attach
+# check, and capable of corrupting another process's memory mappings) are
+# denied alongside it for the same reason - none of the three named
+# syscalls' ancestors is a substitute for having all of this family closed.
 _PROCESS_ISOLATION_SYSCALLS: tuple[str, ...] = (
     "ptrace",
     "process_vm_readv",
     "process_vm_writev",
+    "pidfd_open",
+    "pidfd_getfd",
+    "pidfd_send_signal",
+    "kcmp",
+    "process_madvise",
+    "process_mrelease",
 )
 
 

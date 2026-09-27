@@ -102,11 +102,13 @@ class IsolatedPluginProxy:
         manifest: PluginManifest,
         plugin_class: type,
         observability: ObservabilitySink,
+        require_enforcement: bool = False,
     ) -> None:
         self._entry_point_name = entry_point_name
         self._manifest = manifest
         self.plugin_class = plugin_class
         self._observability = observability
+        self._require_enforcement = require_enforcement
         try:
             method_name = _ENTRYPOINT_METHOD_BY_KIND[manifest.kind]
         except KeyError as exc:
@@ -136,6 +138,7 @@ class IsolatedPluginProxy:
                 args,
                 kwargs,
                 self._observability,
+                require_enforcement=self._require_enforcement,
             )
 
         _invoke.__name__ = method_name
@@ -184,6 +187,8 @@ def run_isolated(
     args: tuple[object, ...],
     kwargs: dict[str, object],
     observability: ObservabilitySink,
+    *,
+    require_enforcement: bool = False,
 ) -> object:
     """Run `method_name(*args, **kwargs)` on a fresh instance of the plugin
     registered under `entry_point_name`, in a sandboxed child process.
@@ -204,6 +209,22 @@ def run_isolated(
             principle but failed to install for this call) — the
             registration-time warning (`registry.py`) can only predict
             this, not guarantee it.
+        require_enforcement: When True, fail this call (raise `PluginError`,
+            terminate the child) rather than merely warn if the child's own
+            `ENFORCEMENT` message reports `applied=False` — security review
+            finding, M4 Workstream 7: `registry.py`'s registration-time
+            warning is otherwise the only signal, and it's advisory only.
+            `PluginRegistry.register(..., require_enforcement=True)` already
+            refuses registration outright when enforcement can't even be
+            attempted (`isolate=False`, or `enforcement.
+            enforcement_available()` is False for this host/platform); this
+            call-time check additionally catches the narrower case
+            registration couldn't predict — enforcement is available in
+            principle but this specific attempt to install the filter
+            failed (e.g. a container's own outer seccomp profile blocks it).
+            Because the ENFORCEMENT message is now sent before the plugin's
+            own code ever runs (see `_child_main`'s docstring), failing here
+            means the untrusted plugin never executes at all for this call.
 
     Returns:
         Whatever the plugin's real method returned, as decoded by
@@ -240,7 +261,14 @@ def run_isolated(
     child_conn.close()  # only the child's copy is used inside the child
 
     try:
-        return _dispatch_loop(parent_conn, process, real_objects, method_name, observability)
+        return _dispatch_loop(
+            parent_conn,
+            process,
+            real_objects,
+            method_name,
+            observability,
+            require_enforcement=require_enforcement,
+        )
     finally:
         parent_conn.close()
         process.join(timeout=5)
@@ -277,6 +305,8 @@ def _dispatch_loop(
     real_objects: dict[str, object],
     method_name: str,
     observability: ObservabilitySink,
+    *,
+    require_enforcement: bool = False,
 ) -> object:
     """Service CALL messages against `real_objects` until DONE/FAILED.
 
@@ -333,7 +363,13 @@ def _dispatch_loop(
 
         try:
             outcome = _handle_one_message(
-                message, parent_conn, real_objects, method_name, observability, enforcement_reported
+                message,
+                parent_conn,
+                real_objects,
+                method_name,
+                observability,
+                enforcement_reported,
+                require_enforcement=require_enforcement,
             )
         except (ValueError, TypeError, IndexError, KeyError, OSError, PluginError) as exc:
             # Two distinct failure classes land here, both meaning "the
@@ -395,6 +431,8 @@ def _handle_one_message(
     method_name: str,
     observability: ObservabilitySink,
     enforcement_reported: list[bool],
+    *,
+    require_enforcement: bool = False,
 ) -> object:
     """Handle exactly one already-decoded message. Returns `_CONTINUE` to
     keep looping, the isolated call's final result (from a DONE message),
@@ -408,7 +446,7 @@ def _handle_one_message(
     kind = message[0]
     if kind == protocol.ENFORCEMENT:
         _, applied, reason = message
-        # Only warn the first time a genuine "did not apply" is reported -
+        # Only act on the first time a genuine "did not apply" is reported -
         # not the first ENFORCEMENT message received, regardless of its
         # content. The child is untrusted and could send a forged
         # applied=True first specifically to suppress a real applied=False
@@ -416,9 +454,29 @@ def _handle_one_message(
         # before consulting/setting enforcement_reported means a forged
         # True is simply ignored (no state change), never spent as the
         # "already reported" slot a genuine False would otherwise need.
-        # A flood of genuine applied=False messages still only warns once.
+        # A flood of genuine applied=False messages still only acts once.
+        #
+        # This first, genuine ENFORCEMENT message is trustworthy in a way a
+        # later one from the same child is not: `_child_main` sends it
+        # before `_load_plugin_instance` ever runs (security review
+        # finding, M4 Workstream 7 - see that function's own docstring), so
+        # at the point THIS message was constructed, no plugin code had
+        # executed yet - only this project's own runner/enforcement/
+        # protocol modules had. A plugin could still import `protocol`
+        # itself afterward and send a forged second ENFORCEMENT message
+        # (that's exactly the round-3 concern above), but it cannot have
+        # tampered with or fabricated this first one.
         if not applied and not enforcement_reported[0]:
             enforcement_reported[0] = True
+            if require_enforcement:
+                return _Failed(
+                    PluginError(
+                        f"OS-level capability enforcement was required but did not apply "
+                        f"for this call to {method_name!r}: {reason}. Refusing to run the "
+                        "plugin (require_enforcement=True) rather than proceed with "
+                        "capabilities.network/.filesystem unenforced (ADR-0051)."
+                    )
+                )
             observability.log(
                 logging.WARNING,
                 f"OS-level capability enforcement did not apply for this call to "
@@ -517,17 +575,33 @@ def _child_main(
     wired_args: tuple[object, ...],
     wired_kwargs: dict[str, object],
 ) -> None:
-    """Entry point for the sandboxed child process."""
-    try:
-        plugin_instance = _load_plugin_instance(entry_point_name)
-        resolved_args = tuple(_resolve_wired(value, child_conn) for value in wired_args)
-        resolved_kwargs = {
-            name: _resolve_wired(value, child_conn) for name, value in wired_kwargs.items()
-        }
-    except Exception as exc:  # noqa: BLE001 - reported to the parent, not raised here
-        _safe_send_failed(child_conn, exc)
-        return
+    """Entry point for the sandboxed child process.
 
+    Enforcement is applied FIRST, before `_load_plugin_instance` (security
+    review finding, M4 Workstream 7): the plugin's own module-level code and
+    `__init__` are untrusted and were previously running with no seccomp
+    filter installed at all, since the filter used to be installed only
+    right before the protocol method call. A `network=False`/
+    `filesystem=False` plugin could open a socket or a file at import time
+    or in its constructor — before any filter existed to deny it — then use
+    already-open-descriptor syscalls (`read`/`write`, which the filter must
+    always allow for the sandbox's own IPC pipe to keep working; see
+    `enforcement.py`'s own `_FILESYSTEM_SYSCALLS` comment) on that
+    already-opened socket/file afterward, bypassing the declared
+    capabilities entirely. Installing the filter before `_load_plugin_
+    instance` closes this: at the point the plugin's own code first runs,
+    the filter (when `enforcement_available()`) is already active, so the
+    open/connect that would have set up the exfiltration channel is denied
+    at the syscall level from the plugin's very first line.
+
+    `enforcement.apply_capability_enforcement`'s own docstring constraint
+    ("after every import the sandbox's own runner infrastructure needs")
+    is still satisfied: `runner.py`'s own module-level imports (this
+    module, `enforcement`, `protocol`, `wire`, `remote_view`) already ran
+    before `_child_main` was ever called, when the child process's
+    interpreter first loaded this file — none of that infrastructure's own
+    imports happen inside this function.
+    """
     # Best-effort, never raises - see enforcement.py's own docstring for why
     # a failure to enforce degrades to "not enforced," not a hard error.
     # Reported to the parent unconditionally (security review finding: the
@@ -538,6 +612,16 @@ def _child_main(
     try:
         protocol.send_enforcement(child_conn, enforcement_result.applied, enforcement_result.reason)
     except Exception:  # noqa: BLE001 - the pipe itself is gone; nothing left to report to
+        return
+
+    try:
+        plugin_instance = _load_plugin_instance(entry_point_name)
+        resolved_args = tuple(_resolve_wired(value, child_conn) for value in wired_args)
+        resolved_kwargs = {
+            name: _resolve_wired(value, child_conn) for name, value in wired_kwargs.items()
+        }
+    except Exception as exc:  # noqa: BLE001 - reported to the parent, not raised here
+        _safe_send_failed(child_conn, exc)
         return
 
     try:

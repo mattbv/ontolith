@@ -6,6 +6,15 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege (security review finding, M4 Workstream 7): none of this
+# workflow's jobs write to the repo, comment on PRs, or otherwise need more
+# than read access — checkout, running tests/lint/benchmarks, and uploading
+# to codecov.io (no token; codecov-action doesn't need repo write access to
+# do that) all only need contents: read. security.yml already scopes itself
+# the same way, for the same reason.
+permissions:
+  contents: read
+
 jobs:
   quality:
     name: Code Quality

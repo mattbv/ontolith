@@ -207,11 +207,17 @@ covers both "the plugin raised on purpose" and "the sandbox denied a syscall," r
 ## Consequences
 
 **Positive:**
-- ✅ Closes the "Python has no true encapsulation" gap ADR-0015 named as unclosed: a plugin's own
-  code, isolated in a separate OS process with only a picklable-message IPC channel to the parent,
-  cannot reach `view._kb` or any other live object graph at all — there is no longer an object to
-  reach past, on any platform, regardless of seccomp availability. This is real, structural value
-  independent of the network/filesystem enforcement question.
+- ✅ Closes the "Python has no true encapsulation" gap ADR-0015 named as unclosed **for the isolated
+  call itself**: a plugin's own protocol-method code, running in a separate OS process with only a
+  picklable-message IPC channel to the parent, cannot reach `view._kb` or any other live object
+  graph at all during that call — there is no longer an object to reach past, on any platform,
+  regardless of seccomp availability. This is real, structural value independent of the
+  network/filesystem enforcement question. (Security review, M4 Workstream 7: scoped this bullet's
+  claim explicitly to the isolated call, not the plugin's whole lifecycle — the registration-time
+  module import/constructor, covered by this section's own Negative bullet below, runs unsandboxed
+  in the parent process and is not protected by anything this bullet describes; an earlier version
+  of this bullet's unqualified "at all… regardless" wording read as covering that phase too, which
+  was never true.)
 - ✅ On Linux, `capabilities.network=False`/`capabilities.filesystem=False` are now genuinely
   enforced at the OS syscall level, closing SPEC §17's "MUST deny undeclared access" for the
   platform this project can actually verify it on.
@@ -569,12 +575,76 @@ fixed in the same commit as this record, no code touched.
   blocks the calling host thread indefinitely; see this Update section's own "Deliberately not fixed"
   list above for the precise blocking call.
 
+## Update (2026-09-27): security review found a real bypass of the Linux enforcement itself (M4
+Workstream 7) — fixed; two related gaps disclosed/filed, not fixed
+
+**HIGH — the child installed its seccomp filter too late, after the plugin's own module import and
+constructor already ran unsandboxed inside the child process.** `_child_main` previously called
+`_load_plugin_instance` (imports the plugin's module, constructs it) *before*
+`enforcement.apply_capability_enforcement`. A `network=False`/`filesystem=False` plugin could open a
+socket or file at import time or in `__init__` — before any filter existed to deny it — then use
+already-open-descriptor syscalls (`read`/`write`, which the filter must always allow for the
+sandbox's own IPC pipe; see `enforcement.py`'s own `_FILESYSTEM_SYSCALLS` comment) on that
+already-opened handle afterward, bypassing the declared capabilities entirely on the one platform
+this ADR's own headline claim is about. Fixed: `apply_capability_enforcement` now runs first, before
+`_load_plugin_instance` — none of `runner.py`'s own trusted imports needed to happen inside
+`_child_main` first (they already ran when the child interpreter loaded this module), so nothing
+about `apply_capability_enforcement`'s own "after every import the sandbox's own runner
+infrastructure needs" constraint is violated by reordering. This also closes a smaller, related gap:
+since the ENFORCEMENT message the child reports back is now sent before any plugin code has run at
+all, it's no longer even theoretically tamperable by that call's own plugin code (round-3's original
+"a malicious child could forge applied=True" concern was about a *later*, second ENFORCEMENT message
+a plugin could still send after its own code starts running — that defense, unchanged, still matters
+for exactly that later-message case).
+
+**HIGH — no operator lever existed to demand real enforcement rather than silently degrade to
+advisory.** The registration-time warning (`_warn_if_unenforced_capabilities_requested`) was, and
+remains by default, the only signal when OS-level enforcement can't be attempted or a specific
+attempt fails — advisory, not a guarantee, and self-reported by the (previously actually untrusted,
+now-fixed-above) child in the call-time case. Added `require_enforcement: bool = False` on
+`PluginRegistry.register()` (default preserves today's behavior — flipping the default would refuse
+every registration on macOS/Windows outright): `True` refuses registration outright when enforcement
+can't even be attempted (`isolate=False`, or `enforcement.enforcement_available()` is `False` for
+this host/platform), and separately makes every isolated *call* refuse (raise `PluginError`,
+terminate the child before its own code ever runs) if that call's own specific attempt to install the
+filter fails despite being available in principle (e.g. a container's own outer seccomp profile
+blocks it) — a narrower case registration-time alone can't predict.
+
+**MEDIUM — the always-on process-isolation floor missed the `pidfd_*` syscall family.**
+`_PROCESS_ISOLATION_SYSCALLS` denied `ptrace`/`process_vm_readv`/`process_vm_writev` but not
+`pidfd_open`/`pidfd_getfd` (Linux 5.6+, gated by the identical `__ptrace_may_access` kernel check as
+`ptrace` itself) — on exactly the `ptrace_scope=0` hosts this floor exists to defend, a child could
+`pidfd_open(getppid())` then `pidfd_getfd` to duplicate one of the parent's own open file descriptors
+(the SQLite connection, a live REST/MCP client socket) into itself, then read/write it directly,
+reaching past the process boundary without ever calling `ptrace`/`process_vm_*` at all. Added
+`pidfd_open`, `pidfd_getfd`, `pidfd_send_signal`, `kcmp`, `process_madvise`, `process_mrelease` to the
+floor — all gated by the same permission check or capable of the same class of cross-process reach.
+
+**Disclosed, not fixed — filed as KI-106: `capabilities.filesystem=True` subsumes
+`granted_capability`'s own storage ceiling entirely.** A plugin with `filesystem=True` (all three
+shipped reference plugins declare it) can open the KB's own on-disk file directly and write to it,
+bypassing proposal/policy/audit regardless of how low its granted storage capability is —
+`granted_capability="read"` was never a real limit on such a plugin. The registration-time warning
+now discloses this explicitly. The structural fix (a parent-opened, capability-scoped readable proxy
+for an importer's source, mirroring `RemoteWritable`'s existing treatment of an exporter's target) is
+real design/implementation work, not bundled into this pass — see KI-106's own Fix section.
+
+**Wording fix, not a functional change:** the Consequences section's Positive #1 bullet's "cannot
+reach `view._kb`... at all... regardless" claim read as covering the plugin's whole lifecycle;
+scoped it explicitly to the isolated call, cross-referencing the adjacent Negative bullet that
+already, correctly, documents the registration-time module-import/constructor phase as unsandboxed.
+
+Both CRITICALs from the 2026-09-20 Update were re-verified still closed before this review began
+(reproduced both attacks directly against the fixed code, as every prior round has).
+
 ## References
 
 - `docs/known-issues.md` KI-014 (network/filesystem half; Linux now resolved, macOS/Windows remain
   open per this ADR's own scoping), **KI-101** (new, the `.query()`/`.as_of()` follow-up above),
-  **KI-102** (new, the no-timeout follow-up above), and **KI-103** (new, unrelated to plugin
-  isolation itself — the `anyio`/`httpx2`/`httpcore2` `pip-audit` fix found while reviewing this ADR)
+  **KI-102** (new, the no-timeout follow-up above), **KI-103** (new, unrelated to plugin
+  isolation itself — the `anyio`/`httpx2`/`httpcore2` `pip-audit` fix found while reviewing this ADR),
+  and **KI-106** (new, M4 Workstream 7's security review — `filesystem=True` subsumes the storage
+  capability ceiling, see this ADR's own 2026-09-27 Update)
 - ADR-0015 (Plugin Capability Isolation — the storage-capability half this ADR doesn't change, and
   the "Python has no true encapsulation" gap this ADR closes structurally)
 - ADR-0044 (Observability — `kb.observability` is how this ADR's enforcement-degradation warning is

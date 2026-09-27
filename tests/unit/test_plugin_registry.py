@@ -268,6 +268,10 @@ class TestUnenforcedCapabilityWarning:
         assert "capabilities.network=True" not in true_message
         assert "never enforced as a ceiling" in true_message
         assert true_fields["declared_true"] == ["filesystem"]
+        # Security review finding, M4 Workstream 7 (KI-106): filesystem=True
+        # subsumes granted_capability's own storage ceiling - the warning
+        # must say so, not just repeat the generic network/filesystem text.
+        assert "subsumes capabilities.storage" in true_message
 
         assert "capabilities.network=False" in false_message
         assert "capabilities.filesystem=False" not in false_message
@@ -295,6 +299,9 @@ class TestUnenforcedCapabilityWarning:
         assert "capabilities.filesystem=True" not in true_message
         assert "never enforced as a ceiling" in true_message
         assert true_fields["declared_true"] == ["network"]
+        # KI-106's storage-ceiling-subsumption note is filesystem-specific -
+        # network=True alone must not trigger it.
+        assert "subsumes capabilities.storage" not in true_message
 
         assert "capabilities.filesystem=False" in false_message
         assert "capabilities.network=False" not in false_message
@@ -451,6 +458,58 @@ class TestReRegistration:
         first = registry.register("trivial-importer", author=ADMIN, granted_capability="propose")
         second = registry.register("trivial-importer", author=ADMIN, granted_capability="propose")
         assert first.principal_id == second.principal_id
+
+    def test_reregistration_under_a_different_entry_point_with_same_name_raises_plugin_error(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Security review finding, M4 Workstream 7 (KI-106): manifest.name
+        is self-declared by the plugin author, not a unique identifier this
+        project controls - a second, distinct entry point whose plugin
+        class happens to declare the same manifest.name (same computed
+        effective_capability too, the one case that previously slipped
+        through) must not silently rebind to the first registration's
+        principal, inheriting its trust_level and attributing writes under
+        the wrong identity in the audit trail."""
+        _patch_entry_points(
+            monkeypatch,
+            _entry_point(
+                "trivial-importer", "tests.fixtures.plugins.trivial_importer", "TrivialImporter"
+            ),
+            _entry_point(
+                "trivial-importer-alias",
+                "tests.fixtures.plugins.trivial_importer",
+                "TrivialImporter",
+            ),
+        )
+        registry = PluginRegistry(kb)
+        registry.register("trivial-importer", author=ADMIN, granted_capability="propose")
+        with pytest.raises(PluginError, match="already bound to entry point"):
+            registry.register("trivial-importer-alias", author=ADMIN, granted_capability="propose")
+
+    def test_preexisting_principal_with_no_recorded_entry_point_is_grandfathered(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A plugin principal created before this check shipped has no
+        entry-point metadata recorded at all - grandfathered rather than
+        retroactively refused."""
+        from ontolith.plugins.registry import _PLUGIN_METADATA_MARKER
+
+        kb.create_principal(
+            "trivial-importer",
+            kind="service",
+            auth_method="workload",
+            default_capability="propose",
+            metadata={_PLUGIN_METADATA_MARKER: True},
+        )
+        _patch_entry_points(
+            monkeypatch,
+            _entry_point(
+                "trivial-importer", "tests.fixtures.plugins.trivial_importer", "TrivialImporter"
+            ),
+        )
+        registry = PluginRegistry(kb)
+        loaded = registry.register("trivial-importer", author=ADMIN, granted_capability="propose")
+        assert loaded.principal_id == "trivial-importer"
 
     def test_reregistration_with_different_capability_raises_plugin_error(
         self, kb: Ontology, monkeypatch: pytest.MonkeyPatch

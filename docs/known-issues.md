@@ -1427,7 +1427,7 @@ Every MCP tool (`interfaces/mcp.py`) took `token: str` as a required parameter r
 
 ### Fix
 
-`token` became optional (`str | None = None`) on all 8 tools. A new `_bearer_token()` helper reads `mcp.get_context().request_context.request` — the raw Starlette request the mcp SDK's own transport wiring already threads through to every tool call under SSE/streamable-HTTP — and prefers its `Authorization: Bearer <token>` header over the `token` argument, falling back to the argument only when no header is present at all (including stdio, which has no HTTP request at all). A header that IS present but malformed (wrong scheme, or a blank value) fails the call closed rather than falling back — silently accepting the argument on a misconfigured header would reopen the exact exposure this fix removes. Not adopted: the mcp SDK's built-in OAuth-shaped bearer-auth stack (`FastMCP(auth=..., token_verifier=...)`) — it models a full OAuth 2.1 resource server (requires an `issuer_url`, advertises RFC 9728 metadata) with nothing real behind it in Ontolith's per-principal API-key model, so reading the header directly instead keeps `AuthProvider.resolve()` unchanged. stdio's exposure isn't closed by this fix (no header channel exists there) — documented in ADR-0014 as a residual, smaller-but-nonzero risk, with short-lived tokens recommended for stdio-facing principals. Also documented as a residual: an HTTP deployment cannot yet *require* the header — `token` remains an accepted argument, so the exposure is made avoidable, not eliminated.
+`token` became optional (`str | None = None`) on all 8 tools. A new `_bearer_token()` helper reads `mcp.get_context().request_context.request` — the raw Starlette request the mcp SDK's own transport wiring already threads through to every tool call under SSE/streamable-HTTP — and prefers its `Authorization: Bearer <token>` header over the `token` argument, falling back to the argument only when no header is present at all (including stdio, which has no HTTP request at all). A header that IS present but malformed (wrong scheme, or a blank value) fails the call closed rather than falling back — silently accepting the argument on a misconfigured header would reopen the exact exposure this fix removes. Not adopted: the mcp SDK's built-in OAuth-shaped bearer-auth stack (`FastMCP(auth=..., token_verifier=...)`) — it models a full OAuth 2.1 resource server (requires an `issuer_url`, advertises RFC 9728 metadata) with nothing real behind it in Ontolith's per-principal API-key model, so reading the header directly instead keeps `AuthProvider.resolve()` unchanged. stdio's exposure isn't closed by this fix (no header channel exists there) — documented in ADR-0014 as a residual, smaller-but-nonzero risk, with proactive rotation/revocation recommended for stdio-facing principals (corrected by security review, M4 Workstream 7: `PrincipalCredential` has no `expires_at`/automatic-expiry mechanism at all, so "short-lived tokens" — this entry's original wording — wasn't actually achievable; see KI-107). Also documented as a residual: an HTTP deployment cannot yet *require* the header — `token` remains an accepted argument, so the exposure is made avoidable, not eliminated.
 
 ---
 
@@ -2232,6 +2232,56 @@ Two related gaps found while declaring `format_version=3` frozen for 1.0 (M4 Wor
 ### Fix
 
 Not started. (a) Add a golden-schema regression test per backend alongside `TestFormatVersionFrozen` — a snapshot of every base table's definition for a freshly-created database (SQLite: `sqlite_master.sql`, which covers table DDL, indexes, and constraints in one text blob; DuckDB needs the equivalent breadth, not just `information_schema.columns` alone — column-only coverage would miss the non-column-shaped changes KI-104 itself already names as a future migration category, e.g. a widened `CHECK` or an index change), so an edited `CREATE TABLE` with no matching migration+version bump fails immediately instead of silently. (b) Add one explicit sentence to ADR-0052 scoping `format_version` to Ontolith-owned tables only, cross-referencing the `sqlite-vec` pin's own "breaking changes possible" comment as the (pinning, not migration) mechanism that currently guards `vec0`'s format. Neither started now — filed as a known gap in the freeze's own coverage, not a design decision that needs making today.
+
+---
+
+## KI-106 — `capabilities.filesystem=True` subsumes `granted_capability`'s own storage ceiling entirely
+
+**Severity:** Architecture gap — a real governance bypass for any plugin with `filesystem=True`, not a hypothetical
+**Milestone target:** Backlog — filed during M4 Workstream 7's security review (ADR-0051/ADR-0015)
+**SPEC reference:** SPEC §17 (Security model — "MUST deny undeclared access (storage, network, filesystem)"); ADR-0015 (capability ceilings)
+
+### Description
+
+`PluginRegistry.register()`'s `granted_capability` parameter caps what storage capability (`read`/`propose`/`write`) a plugin's `view` argument can exercise, and read-only plugin kinds are further hard-capped to `read`. But this ceiling only restricts the *proxied view object* the plugin is handed — it does nothing to stop a plugin with `capabilities.filesystem=True` from bypassing the view entirely: `filesystem=True` means the OS-level filter (`sandbox/enforcement.py`) never denies `open`/`openat`/etc., so the plugin's own code can `sqlite3.connect(<the KB's own db path>)` directly and execute arbitrary DDL/DML against it — `UPDATE assertion SET value_lit=..., status='active'`, say — with no proposal, no policy evaluation, and no `assertion_event`/`admin_event` audit row. `granted_capability="read"` is not a real limit on such a plugin.
+
+All three shipped reference plugins (`csv-importer`, `json-exporter`, `rdf-owl-exporter`) declare `filesystem=True` today, so this is the common case, not an edge case. The registration-time warning (`registry.py`'s `_warn_if_unenforced_capabilities_requested`) now explicitly discloses this (fixed alongside this filing, M4 Workstream 7) — an operator registering a `filesystem=True` plugin sees a warning naming the bypass, rather than the capability's declared storage ceiling reading as a real guarantee it isn't.
+
+### Fix
+
+Not started (the disclosure above is the only part of this filing that shipped). The structural fix: give an importer a parent-opened, capability-scoped readable proxy for its *source* argument, mirroring `RemoteWritable`'s existing treatment of an exporter's *target* — the plugin would then need `filesystem=True` only for genuinely-plugin-owned files (a temp scratch directory, say), never for the KB's own storage file, and the reference importers/exporters would only need `filesystem=True` when they actually take a filesystem path (as opposed to an open, already-provided handle). Longer term, path-scoped OS-level grants (Landlock on Linux ≥5.13) that always exclude the KB file and its `-wal`/`-shm` siblings would close this even for a plugin that insists on `filesystem=True` for an unrelated reason. Neither started now — this is real design/implementation work (a new `RemoteReadable` proxy shape, updating the reference importers to use it, deciding whether `filesystem=True` still means what it currently does for a plugin that only ever touches its own scratch files), not a small fix bundled into this review pass.
+
+---
+
+## KI-107 — `PrincipalCredential` has no expiry — a stdio MCP token authenticates indefinitely until manually revoked
+
+**Severity:** Architecture gap — ADR-0014 recommended a mitigation the credential model can't actually provide
+**Milestone target:** Backlog — filed during M4 Workstream 7's security review, correcting ADR-0014
+**SPEC reference:** ADR-0014 (MCP authentication); SPEC §17 (Security model)
+
+### Description
+
+ADR-0014's stdio-residual-exposure paragraph recommended "short-lived tokens" for stdio-facing principals, since stdio has no header channel and a token must live in the client's own process environment. `PrincipalCredential` (`identity/credential.py`) has no `expires_at` field and `get_principal_by_token_hash` performs no expiry check at all — only `issued_by`/`revoked_by` for manual, admin-initiated revocation. A stdio token, once issued, authenticates indefinitely regardless of age; "short-lived" was never actually achievable, only immediate manual revocation was. Corrected in ADR-0014's own text and this entry (KI-067) to recommend proactive rotation/revocation instead, the mitigation the current model actually supports.
+
+### Fix
+
+Not started. Add an optional `expires_at: datetime | None` to `PrincipalCredential`, set at issuance (`issue_token(..., expires_at=...)` or a fixed default TTL), and check it in `get_principal_by_token_hash`/wherever a token is resolved to a principal, treating an expired credential the same as a revoked one (`AuthError`). Needs a design decision this filing doesn't make: whether expiry is opt-in per issuance (a caller-supplied `expires_at`) or has a project-wide default, and whether an expired-but-not-revoked credential should still show up distinctly in `list_credentials`-shaped output for audit purposes. Not urgent enough to block 1.0 — the existing `revoked_by` mechanism already lets an admin close the gap immediately once aware, and no exploit path was found beyond "the token keeps working for longer than 'short-lived' would imply."
+
+---
+
+## KI-108 — `ontolith db migrate` changes on-disk DDL with no actor and no audit event; a `reversible=True` migration has no way to actually be reversed
+
+**Severity:** Test gap / Architecture gap — not a security bypass, an audit/observability gap
+**Milestone target:** Backlog — filed during M4 Workstream 7's security review
+**SPEC reference:** SPEC §18 (Observability — "Events: … schema migration"); SPEC §15 (reversibility)
+
+### Description
+
+`migrate_file`/`ontolith db migrate` operates directly on a file path, deliberately outside `Ontology.connect()` (which would refuse to open the very file this function exists to unblock) — so it has no `Principal`, no `author`, and never calls `record_admin_event`. A DDL-changing operation this consequential leaves no record of who ran it or when, unlike every other admin-shaped action in this project (`register_plugin`, credential issuance/revocation, etc.), which SPEC §18 names schema migration alongside as an event this project should emit. Separately: every migration's `down()` (`_MIGRATIONS`) is fully implemented and exercised directly by tests (`test_each_migration_reversal_restores_the_prior_shape`), but nothing in `src/` ever calls it — there is no CLI command or API to actually reverse a migration, despite SPEC §15's "reversible" designation implying one should exist.
+
+### Fix
+
+Not started. (a) Have `db migrate` optionally accept an `--author` (or read the same env var the rest of the CLI already supports) and, after a successful migration, write an admin-event-shaped record — this needs its own storage path since `migrate_file` runs before/outside a normal `Ontology`-backed connection, so it can't reuse `record_admin_event` as-is without some restructuring. (b) Add `ontolith db migrate --to N` (or a dedicated `db rollback`) that calls the appropriate migrations' `down()` in reverse order, with the same dry-run support `db migrate` already has going forward. Neither started now — both need a design decision (how to attribute an action that by definition runs before the normal principal/capability system is even reachable) this filing doesn't make.
 
 ---
 
