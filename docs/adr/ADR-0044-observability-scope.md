@@ -161,10 +161,10 @@ that happens by nobody having planned for it.
 
 - **Implement a minimal version now (e.g., just the structured-logging piece) rather than only
   writing an ADR:** rejected for this PR — would be scope creep ahead of M4's own turn (M4 "Not
-  started"), the same milestone-discipline CLAUDE.md's own Definition of Done names ("does not
-  introduce scope creep beyond milestone goals"). Structured logging is deliberately named first in
-  this ADR's priority order specifically so it's the obvious starting point once M4 begins, not
-  lost among the larger metrics/events surface.
+  started"), the same milestone-discipline the Implementation Plan's own exit criteria enforce at
+  every milestone boundary. Structured logging is deliberately named first in this ADR's priority
+  order specifically so it's the obvious starting point once M4 begins, not lost among the larger
+  metrics/events surface.
 - **Explicitly declare observability out of scope through 1.0:** rejected — SPEC §18 exists for
   exactly the production-readiness need M4 itself represents ("Production (1.0)"); declaring it
   out of scope through the 1.0 milestone that is *named* production would need a stronger
