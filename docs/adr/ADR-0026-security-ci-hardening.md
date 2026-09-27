@@ -160,20 +160,6 @@ extra's ~20 tooling dependencies (`ruff`, `mypy`, `pytest`, etc.) remain deliber
 out of KI-070's own stated scope, and lock-pinned in practice since CI installs from the committed
 `uv.lock`, not a fresh resolve.
 
-**Update (2026-09-26): CodeQL code scanning added (`codeql.yml`).** The `main` branch ruleset carries
-a `code_scanning` rule (tool `CodeQL`, alerts threshold `errors`, security threshold
-`high_or_higher`), but nothing in `.github/workflows/` ever produced a CodeQL result, so every PR
-sat at "Merging is blocked — Waiting for Code Scanning results". `codeql.yml` closes that: a single
-`python` job (`build-mode: none`, no build step for an interpreted language) on every PR and push
-to `main`, plus a weekly schedule that re-analyzes already-merged code against updated queries,
-matching `security.yml`'s own cadence rationale. It is deliberately a separate workflow rather than
-another `security.yml` job: CodeQL needs `security-events: write`, and `security.yml` is scoped to
-`contents: read` on purpose. CodeQL complements rather than replaces `bandit` — it does
-inter-procedural data-flow analysis, `bandit` is a single-file AST pattern check — so both stay.
-Whether code scanning is available on this repository's plan is a GitHub-side setting this
-workflow can't verify from inside the repo; if the upload is rejected, the job fails visibly rather
-than silently leaving the ruleset unsatisfied.
-
 ## References
 
 - Implementation Plan §5 (quality gates table), §7.1 (CI pipeline)
