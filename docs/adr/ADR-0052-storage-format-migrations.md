@@ -396,6 +396,14 @@ half-finished schema change that should land, and bump the version, *before* fre
 found (KI-104, the only open follow-up from this ADR's own review arc, is about the migration
 registry's internal shape, not a pending schema change).
 
+**On `format_version` being "independent of SDK version" (Implementation Plan §7.2) while still
+following the SDK's own release-timing discipline**: these aren't in tension. "Independent" means
+`format_version`'s own number doesn't move in lockstep with the SDK's SemVer number — 3 today, at
+SDK version `0.0.1`, staying 3 across many future SDK releases until a migration actually changes the
+on-disk shape. "Follows the same `**Breaking:**`-marker discipline" means *when* a `format_version`
+bump does happen, it's announced and versioned the same way any other breaking change is, not that
+the two numbers are coupled.
+
 **Declaration: `format_version = 3` is the frozen 1.0 baseline.** Same meaning as ADR-0019's own
 API-surface freeze declaration: pre-1.0 (the project is at `0.0.1`), a `format_version` bump is
 still allowed on a minor version, but it now unconditionally requires everything SPEC §15 and this
@@ -403,19 +411,41 @@ ADR's own mechanism already demand — a registered migration on both backends, 
 with a working `down()` or an explicit, documented `reversible=False`, and a CHANGELOG
 `**Breaking:**` marker (a format_version bump breaks the on-disk contract even on releases where the
 Python API doesn't move, so it earns the marker independently of ADR-0019's own SemVer policy, not
-as a side effect of it). Post-1.0 the same `**Breaking:**`-on-a-major discipline SPEC §15/ADR-0019
-already establish for the Python surface applies here too — not re-litigated by this Update.
+as a side effect of it). Post-1.0 the same `**Breaking:**`-on-a-major discipline Implementation Plan
+§7.2/ADR-0019 already establish for the Python surface applies here too (SPEC §15 itself states only
+that the on-disk format carries a `format_version` and that migrations must be reversible-or-marked;
+it says nothing about major-only bumps — that discipline is §7.2/ADR-0019's, not SPEC §15's) — not
+re-litigated by this Update.
 
-**New regression test**: `tests/unit/test_storage_migrations.py::TestFormatVersionFrozen` pins the
-literal value `3` on both backends (not merely comparing each backend's `CURRENT_FORMAT_VERSION`
-against the other, which every pre-existing test in that file already does symbolically and which
-would keep passing unchanged against a silently-bumped shared value) — the same tripwire role
-`test_public_api_surface.py`'s `_EXPECTED` dict plays for ADR-0019's own frozen surface. Also pins
-the reversible-implies-has-a-`down()` invariant SPEC §15 requires, across every currently-registered
-migration on both backends, mutation-tested by constructing a `reversible=True, down=None` migration
-via `dataclasses.replace` and confirming the new test catches it (and by bumping each backend's
-`CURRENT_FORMAT_VERSION` independently at runtime and confirming both the per-backend pin and the
-cross-backend agreement test each catch their own case).
+**New regression test — a single, explicit, purpose-built pin, not a newly-closed coverage gap**:
+`tests/unit/test_storage_migrations.py::TestFormatVersionFrozen` pins the literal value `3` on both
+backends. This does **not** close a real gap the way `test_public_api_surface.py`'s `_EXPECTED` dict
+does for ADR-0019's surface — round 1 of this Update's own review found and reproduced that an
+accidental bump is *already* caught two other ways: `_MIGRATIONS`'s own dense/contiguous assert
+(module level, both backends) fails at import time if `CURRENT_FORMAT_VERSION` is bumped with no
+matching migration registered, and several pre-existing tests in the same file already pin the
+literal version inside their own assertions (e.g. `assert [s.version for s in report.steps] == [2,
+3]`) — 9 of them fail if a bump is made *with* a matching, even no-op, migration registered, verified
+by reproducing exactly that scenario. What the new test actually adds is one explicit, single-place
+failure with a clear message naming what to do next, not a bystander test failing for an unrelated-
+looking reason. It also pins the reversible-implies-has-a-`down()` invariant SPEC §15 requires
+(narrower than, and redundant with, `test_each_migration_reversal_restores_the_prior_shape`'s own
+already-existing check, which additionally runs `down()` for real — kept for a cheaper, backend-
+agnostic version of the same assertion grouped with the freeze's other pins). Mutation-tested:
+constructing a `reversible=True, down=None` migration via `dataclasses.replace` and confirming the
+new test catches it; bumping each backend's `CURRENT_FORMAT_VERSION` independently at runtime (a
+monkeypatch, which bypasses the import-time dense/contiguous check a real source edit would hit) and
+confirming both the per-backend pin and the cross-backend agreement test each catch their own case.
+
+**Known scope gap, not covered by this freeze — see KI-105.** `format_version` pins a single tracked
+integer, not a snapshot of the actual on-disk shape: an edited `CREATE TABLE` with no matching
+migration and no version bump goes fully undetected by every existing test (reproduced — adding a
+column to `proposal` in both backends' fresh-create DDL, version left at 3, leaves the entire
+migration + backend test suite, 155 tests, green). Separately, `sqlite-vec`'s own `vec0` virtual
+tables are laid out by that extension, not tracked by `format_version` at all — a future `sqlite-vec`
+bump changing its on-disk format would not be caught here either. Filed as KI-105 rather than fixed
+in this Update: a golden-schema snapshot test is a real, scoped fix, but building it isn't a
+prerequisite for declaring the number 3 itself frozen, which is this Update's own, narrower scope.
 
 ## References
 
@@ -429,7 +459,9 @@ cross-backend agreement test each catch their own case).
 - `docs/known-issues.md` KI-060 (`principal_credential.issued_by`/`.revoked_by`, the v2 migration),
   KI-078 (`proposal.reviewers`, the v3 migration) — both retroactively formalized here; KI-104 (new,
   filed in round-5 review — a declarative, centrally-applied migration registry as a follow-up once a
-  third migration is added, replacing the current per-`up()` hand-written defensiveness)
+  third migration is added, replacing the current per-`up()` hand-written defensiveness); KI-105
+  (new, filed reviewing this Update — no golden-schema test of the actual on-disk shape, and
+  `sqlite-vec`'s own on-disk format is outside `format_version`'s scope entirely)
 - `docs/Ontolith_Implementation_Plan.md` §2 (M4 milestone table — "migration tooling," this ADR's
   original workstream, which gave `format_version` something to freeze, and the separate "on-disk
   `format_version` frozen" exit criterion, closed by this ADR's own 2026-09-27 Update above) and §7.2
