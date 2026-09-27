@@ -1111,3 +1111,92 @@ class TestRoundFourReviewFindings:
 
         with pytest.raises(StorageError, match="Could not open"):
             sqlite_migrations.migrate_file(path)
+
+
+class TestFormatVersionFrozen:
+    """Pins `CURRENT_FORMAT_VERSION` at 3 on both backends — the SPEC §15 /
+    ADR-0052 "format_version frozen" M4 exit criterion (Implementation Plan
+    §2), declared in ADR-0052's own Update section.
+
+    This does NOT close a real coverage gap the way `test_public_api_
+    surface.py`'s `_EXPECTED` dict does for the public API surface: an
+    accidental bump is *already* caught two other ways — `_MIGRATIONS`'s own
+    dense/contiguous assert (`sqlite_migrations.py`/`duckdb_migrations.py`,
+    module level) fails at import time if either backend's
+    `CURRENT_FORMAT_VERSION` is bumped with no matching migration registered,
+    and several pre-existing tests in this file already pin the literal
+    version in their own assertions (e.g. `assert [s.version for s in
+    report.steps] == [2, 3]`) — 18 of them (9 per backend) fail together if a
+    *realistic* bump is made (both backends' `CURRENT_FORMAT_VERSION` raised,
+    each with its own matching, even no-op, migration registered), confirmed
+    by reproducing exactly that. What this class actually adds: a dedicated
+    assertion message on each test (`_BUMP_MESSAGE`) pointing straight at
+    this docstring and ADR-0052, rather than the pre-existing tests' own
+    assertion failures, whose messages describe *their* subject (e.g. dry-run
+    step counts), not the version freeze. See KI-105 for what a
+    `format_version` freeze does NOT cover: a `CREATE TABLE` edited with no
+    version bump at all (no golden-schema snapshot exists) and the
+    `sqlite-vec` extension's own on-disk vector format (outside
+    `format_version`'s scope entirely).
+
+    If this class fails because format_version is intentionally bumping:
+    update `_FROZEN_FORMAT_VERSION` below, register the new migration in
+    both backends' `_MIGRATIONS` (reversible=True with a working `down()`,
+    or an explicit reversible=False with a documented reason — SPEC §15),
+    and record the bump in CHANGELOG.md under a `**Breaking:**` marker
+    (a format_version bump breaks the on-disk contract even when the
+    Python API is untouched, so it gets the same marker ADR-0019's SemVer
+    policy requires for any other break).
+    """
+
+    _FROZEN_FORMAT_VERSION = 3
+
+    _BUMP_MESSAGE = (
+        "format_version is frozen at 3 (ADR-0052's Update section) - see "
+        "TestFormatVersionFrozen's own class docstring before bumping "
+        "_FROZEN_FORMAT_VERSION here"
+    )
+
+    def test_sqlite_format_version_matches_frozen_value(self) -> None:
+        assert sqlite_migrations.CURRENT_FORMAT_VERSION == self._FROZEN_FORMAT_VERSION, (
+            self._BUMP_MESSAGE
+        )
+
+    def test_duckdb_format_version_matches_frozen_value(self) -> None:
+        assert duckdb_migrations.CURRENT_FORMAT_VERSION == self._FROZEN_FORMAT_VERSION, (
+            self._BUMP_MESSAGE
+        )
+
+    def test_both_backends_agree_on_current_format_version(self) -> None:
+        """Independent of the frozen literal above: a bump landing on one
+        backend's CURRENT_FORMAT_VERSION but not the other's would silently
+        break the "format_version means the same thing on every backend"
+        assumption without either test above catching it, since each only
+        compares its own backend against the same shared literal."""
+        assert (
+            sqlite_migrations.CURRENT_FORMAT_VERSION == duckdb_migrations.CURRENT_FORMAT_VERSION
+        ), self._BUMP_MESSAGE
+
+    def test_every_registered_migration_declaring_reversible_has_a_down(self) -> None:
+        """SPEC §15: migrations MUST be reversible or explicitly marked
+        irreversible - `reversible=True` must never be paired with
+        `down=None`, which would make the declaration a claim nothing backs.
+        `TestSQLiteMigrations`/`TestDuckDBMigrations`'s own
+        `test_each_migration_reversal_restores_the_prior_shape` already
+        asserts this same pair for every migration AND actually runs
+        `down()` against a real backend to confirm it restores the prior
+        shape - a strictly stronger check. This test adds only a narrower,
+        cheaper, backend-agnostic version of the same invariant (no real
+        `SQLiteBackend`/`DuckDBBackend` needed), grouped here with the rest
+        of the freeze's own pins rather than relying on a reader finding the
+        equivalent assertion inside a differently-named backend test.
+        Doesn't hardcode reversible=True as the only outcome (a future
+        irreversible migration is a legitimate, SPEC-sanctioned choice) -
+        only the one combination SPEC §15 rules out."""
+        for migration in (*sqlite_migrations._MIGRATIONS, *duckdb_migrations._MIGRATIONS):
+            if migration.reversible:
+                assert migration.down is not None, (
+                    f"migration {migration.version} ({migration.description}) declares "
+                    "reversible=True but has no down() - SPEC §15 requires reversible "
+                    "migrations to actually be reversible, not just labeled so"
+                )

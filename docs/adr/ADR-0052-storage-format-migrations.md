@@ -378,6 +378,78 @@ documentation/test-accuracy items, all fixed here:
 Every claim in this Update section was independently re-verified against source and by direct
 execution before being written, not carried forward from any review round's own report.
 
+## Update (2026-09-27): `format_version` frozen at 3, closing the Implementation Plan's separate
+"on-disk `format_version` frozen" M4 exit criterion (M4 Workstream 6)
+
+This ADR's original scope (above) built the *mechanism* — a tracked `format_version`, refusal to
+open a stale file, `migrate_file`/`db migrate`/`db status`, reversible-or-explicit-irreversible
+migrations. It never itself declared a number frozen; that declaration is a separate Implementation
+Plan §2 M4 exit criterion (distinct from "migration tooling," the same relationship Workstream 5 had
+to ADR-0019's own, earlier-shipped SemVer *mechanism*). This Update makes that declaration.
+
+**Audit, before declaring:** both backends' `CURRENT_FORMAT_VERSION` were confirmed to still agree
+(3, unchanged since this ADR's original merge); every registered migration on both backends (v2,
+KI-060; v3, KI-078) was confirmed `reversible=True` with a real, working `down()` — SPEC §15's
+"MUST be reversible or explicitly marked irreversible" is satisfied trivially today (nothing is yet
+irreversible), not left ambiguous; `docs/known-issues.md` and the codebase were checked for any
+half-finished schema change that should land, and bump the version, *before* freezing it — none
+found (KI-104, the only open follow-up from this ADR's own review arc, is about the migration
+registry's internal shape, not a pending schema change).
+
+**On `format_version` being "independent of SDK version" (Implementation Plan §7.2) while still
+following the SDK's own release-timing discipline**: these aren't in tension. "Independent" means
+`format_version`'s own number doesn't move in lockstep with the SDK's SemVer number — 3 today, at
+SDK version `0.0.1`, staying 3 across many future SDK releases until a migration actually changes the
+on-disk shape. "Follows the same `**Breaking:**`-marker discipline" means *when* a `format_version`
+bump does happen, it's announced and versioned the same way any other breaking change is, not that
+the two numbers are coupled.
+
+**Declaration: `format_version = 3` is the frozen 1.0 baseline.** Same meaning as ADR-0019's own
+API-surface freeze declaration: pre-1.0 (the project is at `0.0.1`), a `format_version` bump is
+still allowed on a minor version, but it now unconditionally requires everything SPEC §15 and this
+ADR's own mechanism already demand — a registered migration on both backends, `reversible=True`
+with a working `down()` or an explicit, documented `reversible=False`, and a CHANGELOG
+`**Breaking:**` marker (a format_version bump breaks the on-disk contract even on releases where the
+Python API doesn't move, so it earns the marker independently of ADR-0019's own SemVer policy, not
+as a side effect of it). Post-1.0 the same `**Breaking:**`-on-a-major discipline Implementation Plan
+§7.2/ADR-0019 already establish for the Python surface applies here too (SPEC §15 itself states only
+that the on-disk format carries a `format_version` and that migrations must be reversible-or-marked;
+it says nothing about major-only bumps — that discipline is §7.2/ADR-0019's, not SPEC §15's) — not
+re-litigated by this Update.
+
+**New regression test — a dedicated assertion message, not a newly-closed coverage gap**:
+`tests/unit/test_storage_migrations.py::TestFormatVersionFrozen` pins the literal value `3` on both
+backends. This does **not** close a real gap the way `test_public_api_surface.py`'s `_EXPECTED` dict
+does for ADR-0019's surface — round 1 of this Update's own review found and reproduced that an
+accidental bump is *already* caught two other ways: `_MIGRATIONS`'s own dense/contiguous assert
+(module level, both backends) fails at import time if either backend's `CURRENT_FORMAT_VERSION` is
+bumped with no matching migration registered, and several pre-existing tests in the same file already
+pin the literal version inside their own assertions (e.g. `assert [s.version for s in report.steps]
+== [2, 3]`) — round 2 caught that round 1's own reproduction of the "bump with a matching migration"
+case had only touched one backend (9 failures); the realistic case — both backends' version raised,
+each with its own matching, even no-op, migration registered — fails 18 (9 per backend), reproduced
+directly. What the new test actually adds is a dedicated assertion message on each of its three
+`assert`s (`_BUMP_MESSAGE`, pointing at this section and the test class's own docstring), since the
+pre-existing tests' own failure messages describe their own subject (e.g. dry-run step counts), not
+the version freeze. It also pins the reversible-implies-has-a-`down()` invariant SPEC §15 requires
+(narrower than, and redundant with, `test_each_migration_reversal_restores_the_prior_shape`'s own
+already-existing check, which additionally runs `down()` for real — kept for a cheaper, backend-
+agnostic version of the same assertion grouped with the freeze's other pins). Mutation-tested:
+constructing a `reversible=True, down=None` migration via `dataclasses.replace` and confirming the
+new test catches it; bumping each backend's `CURRENT_FORMAT_VERSION` independently at runtime (a
+monkeypatch, which bypasses the import-time dense/contiguous check a real source edit would hit) and
+confirming both the per-backend pin and the cross-backend agreement test each catch their own case.
+
+**Known scope gap, not covered by this freeze — see KI-105.** `format_version` pins a single tracked
+integer, not a snapshot of the actual on-disk shape: an edited `CREATE TABLE` with no matching
+migration and no version bump goes fully undetected by every existing test (reproduced — adding a
+column to `proposal` in both backends' fresh-create DDL, version left at 3, leaves the entire unit +
+conformance suite, 2423 tests, green). Separately, `sqlite-vec`'s own `vec0` virtual tables are laid
+out by that extension, not tracked by `format_version` at all — a future `sqlite-vec` bump changing
+its on-disk format would not be caught here either. Filed as KI-105 rather than fixed in this Update:
+a golden-schema snapshot test is a real, scoped fix, but building it isn't a
+prerequisite for declaring the number 3 itself frozen, which is this Update's own, narrower scope.
+
 ## References
 
 - SPEC §15 (Versioning & migration — the three requirements this ADR implements)
@@ -390,8 +462,12 @@ execution before being written, not carried forward from any review round's own 
 - `docs/known-issues.md` KI-060 (`principal_credential.issued_by`/`.revoked_by`, the v2 migration),
   KI-078 (`proposal.reviewers`, the v3 migration) — both retroactively formalized here; KI-104 (new,
   filed in round-5 review — a declarative, centrally-applied migration registry as a follow-up once a
-  third migration is added, replacing the current per-`up()` hand-written defensiveness)
+  third migration is added, replacing the current per-`up()` hand-written defensiveness); KI-105
+  (new, filed reviewing this Update — no golden-schema test of the actual on-disk shape, and
+  `sqlite-vec`'s own on-disk format is outside `format_version`'s scope entirely)
 - `docs/Ontolith_Implementation_Plan.md` §2 (M4 milestone table — "migration tooling," this ADR's
-  workstream, and its "on-disk `format_version` frozen" exit criterion, which this ADR makes
-  meaningful for the first time by giving `format_version` something to freeze) and §7.2 (Branching
-  & releases, the same `format_version`-frozen-at-1.0 commitment stated again there)
+  original workstream, which gave `format_version` something to freeze, and the separate "on-disk
+  `format_version` frozen" exit criterion, closed by this ADR's own 2026-09-27 Update above) and §7.2
+  (Branching & releases, the same `format_version`-frozen-at-1.0 commitment stated again there)
+- ADR-0019 (Public API Stability Policy — this Update's declaration mirrors that ADR's own
+  mechanism-then-freeze-declaration shape and its `**Breaking:**` CHANGELOG discipline)

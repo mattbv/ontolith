@@ -2215,6 +2215,26 @@ Not started; no design decision needed beyond confirming the shape. When a third
 
 ---
 
+## KI-105 — `format_version` freeze pins the version number, not the actual on-disk shape or the sqlite-vec extension's own format
+
+**Severity:** Test gap / Architecture gap — no reachable bug today, a real coverage gap in what the freeze actually guards
+**Milestone target:** Backlog — filed during M4 Workstream 6's `format_version` freeze declaration (ADR-0052)
+**SPEC reference:** SPEC §15 (Versioning & migration); ADR-0052 (on-disk storage-format migrations)
+
+### Description
+
+Two related gaps found while declaring `format_version=3` frozen for 1.0 (M4 Workstream 6), both confirmed by direct reproduction, neither a bug in code shipped today:
+
+**(a) No golden-schema test — an edited `CREATE TABLE` with no matching migration goes undetected.** `format_version` is a single tracked integer; nothing snapshots the actual DDL each backend's fresh-connect path creates. Reproduced: adding a new column to `proposal`'s `CREATE TABLE` in both `store/sqlite/backend.py` and `store/duckdb/backend.py`, with `CURRENT_FORMAT_VERSION` left unchanged at 3, leaves the entire unit + conformance suite (2423 tests, including the new `TestFormatVersionFrozen` class) entirely green. Every migration test creates a brand-new file matching whatever the current `CREATE TABLE` statements say, so none of them can notice that those statements changed underneath a fixed version number. In practice: an engineer edits a `CREATE TABLE` without registering a migration and bumping `format_version`; an old on-disk file still opens successfully (still reports `format_version=3`) and then fails at query time on the missing/extra column — the exact "side effect nobody noticed" `TestFormatVersionFrozen` exists to prevent for the version *number*, with no equivalent guard for the *shape* the number is supposed to track.
+
+**(b) sqlite-vec's own on-disk format is outside `format_version`'s scope, undocumented.** `SQLiteBackend._ensure_vector_table` creates `vec0` virtual tables via the `sqlite-vec` extension, pinned pre-1.0 in `pyproject.toml` with its own "breaking changes possible" comment. Their on-disk layout is owned by that extension, not by anything `format_version` tracks — a future `sqlite-vec` version bump that changes `vec0`'s storage format would not be caught by `format_version`, `migrate_file`, or `TestFormatVersionFrozen` at all. ADR-0052 never names sqlite-vec or vec0.
+
+### Fix
+
+Not started. (a) Add a golden-schema regression test per backend alongside `TestFormatVersionFrozen` — a snapshot of every base table's definition for a freshly-created database (SQLite: `sqlite_master.sql`, which covers table DDL, indexes, and constraints in one text blob; DuckDB needs the equivalent breadth, not just `information_schema.columns` alone — column-only coverage would miss the non-column-shaped changes KI-104 itself already names as a future migration category, e.g. a widened `CHECK` or an index change), so an edited `CREATE TABLE` with no matching migration+version bump fails immediately instead of silently. (b) Add one explicit sentence to ADR-0052 scoping `format_version` to Ontolith-owned tables only, cross-referencing the `sqlite-vec` pin's own "breaking changes possible" comment as the (pinning, not migration) mechanism that currently guards `vec0`'s format. Neither started now — filed as a known gap in the freeze's own coverage, not a design decision that needs making today.
+
+---
+
 ## Format
 
 Each entry follows this structure:

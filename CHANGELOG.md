@@ -151,6 +151,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reintroduced exactly that mistake (re-exporting
   `schema.linkml`'s `from_yaml`/`to_yaml`, verified broken, reverted before merge). See ADR-0019's
   own Update section for the full record.
+- On-disk `format_version` declared frozen at `3` for the 1.0 baseline (M4 Workstream 6, ADR-0052's
+  own Update section) — closes the Implementation Plan's separate "`format_version` frozen" M4 exit
+  criterion (distinct from Workstream 4's own migration-tooling *mechanism*, the same relationship
+  Workstream 5 above had to ADR-0019's earlier-shipped SemVer mechanism). Audited both backends'
+  `CURRENT_FORMAT_VERSION` (still agree, still 3) and confirmed both registered migrations are
+  genuinely `reversible=True` with a working `down()` before declaring; a future bump, pre- or
+  post-1.0, now unconditionally requires a registered migration and a `**Breaking:**` CHANGELOG
+  entry, mirroring ADR-0019's own discipline. New `tests/unit/test_storage_migrations.py::
+  TestFormatVersionFrozen` pins the literal value on both backends (review found a real bump was
+  already caught two other ways — an import-time dense/contiguous assert, and 18 pre-existing tests'
+  own hardcoded version literals, 9 per backend — so this test's value is a dedicated assertion
+  message pointing at the freeze, not a newly closed gap) plus the reversible-implies-has-a-`down()`
+  invariant SPEC §15 requires, mutation-tested. Filed **KI-105**: the freeze pins the version number, not a snapshot of the
+  actual on-disk shape (an edited `CREATE TABLE` with no matching migration goes undetected) or the
+  `sqlite-vec` extension's own on-disk vector format (outside `format_version`'s scope entirely).
 
 ### M3 - Extensible (0.3)
 
