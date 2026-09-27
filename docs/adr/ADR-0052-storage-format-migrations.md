@@ -417,18 +417,21 @@ that the on-disk format carries a `format_version` and that migrations must be r
 it says nothing about major-only bumps — that discipline is §7.2/ADR-0019's, not SPEC §15's) — not
 re-litigated by this Update.
 
-**New regression test — a single, explicit, purpose-built pin, not a newly-closed coverage gap**:
+**New regression test — a dedicated assertion message, not a newly-closed coverage gap**:
 `tests/unit/test_storage_migrations.py::TestFormatVersionFrozen` pins the literal value `3` on both
 backends. This does **not** close a real gap the way `test_public_api_surface.py`'s `_EXPECTED` dict
 does for ADR-0019's surface — round 1 of this Update's own review found and reproduced that an
 accidental bump is *already* caught two other ways: `_MIGRATIONS`'s own dense/contiguous assert
-(module level, both backends) fails at import time if `CURRENT_FORMAT_VERSION` is bumped with no
-matching migration registered, and several pre-existing tests in the same file already pin the
-literal version inside their own assertions (e.g. `assert [s.version for s in report.steps] == [2,
-3]`) — 9 of them fail if a bump is made *with* a matching, even no-op, migration registered, verified
-by reproducing exactly that scenario. What the new test actually adds is one explicit, single-place
-failure with a clear message naming what to do next, not a bystander test failing for an unrelated-
-looking reason. It also pins the reversible-implies-has-a-`down()` invariant SPEC §15 requires
+(module level, both backends) fails at import time if either backend's `CURRENT_FORMAT_VERSION` is
+bumped with no matching migration registered, and several pre-existing tests in the same file already
+pin the literal version inside their own assertions (e.g. `assert [s.version for s in report.steps]
+== [2, 3]`) — round 2 caught that round 1's own reproduction of the "bump with a matching migration"
+case had only touched one backend (9 failures); the realistic case — both backends' version raised,
+each with its own matching, even no-op, migration registered — fails 18 (9 per backend), reproduced
+directly. What the new test actually adds is a dedicated assertion message on each of its three
+`assert`s (`_BUMP_MESSAGE`, pointing at this section and the test class's own docstring), since the
+pre-existing tests' own failure messages describe their own subject (e.g. dry-run step counts), not
+the version freeze. It also pins the reversible-implies-has-a-`down()` invariant SPEC §15 requires
 (narrower than, and redundant with, `test_each_migration_reversal_restores_the_prior_shape`'s own
 already-existing check, which additionally runs `down()` for real — kept for a cheaper, backend-
 agnostic version of the same assertion grouped with the freeze's other pins). Mutation-tested:
@@ -440,11 +443,11 @@ confirming both the per-backend pin and the cross-backend agreement test each ca
 **Known scope gap, not covered by this freeze — see KI-105.** `format_version` pins a single tracked
 integer, not a snapshot of the actual on-disk shape: an edited `CREATE TABLE` with no matching
 migration and no version bump goes fully undetected by every existing test (reproduced — adding a
-column to `proposal` in both backends' fresh-create DDL, version left at 3, leaves the entire
-migration + backend test suite, 155 tests, green). Separately, `sqlite-vec`'s own `vec0` virtual
-tables are laid out by that extension, not tracked by `format_version` at all — a future `sqlite-vec`
-bump changing its on-disk format would not be caught here either. Filed as KI-105 rather than fixed
-in this Update: a golden-schema snapshot test is a real, scoped fix, but building it isn't a
+column to `proposal` in both backends' fresh-create DDL, version left at 3, leaves the entire unit +
+conformance suite, 2423 tests, green). Separately, `sqlite-vec`'s own `vec0` virtual tables are laid
+out by that extension, not tracked by `format_version` at all — a future `sqlite-vec` bump changing
+its on-disk format would not be caught here either. Filed as KI-105 rather than fixed in this Update:
+a golden-schema snapshot test is a real, scoped fix, but building it isn't a
 prerequisite for declaring the number 3 itself frozen, which is this Update's own, narrower scope.
 
 ## References

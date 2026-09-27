@@ -1122,18 +1122,22 @@ class TestFormatVersionFrozen:
     surface.py`'s `_EXPECTED` dict does for the public API surface: an
     accidental bump is *already* caught two other ways — `_MIGRATIONS`'s own
     dense/contiguous assert (`sqlite_migrations.py`/`duckdb_migrations.py`,
-    module level) fails at import time if `CURRENT_FORMAT_VERSION` is bumped
-    with no matching migration registered, and several pre-existing tests in
-    this file already pin the literal version in their own assertions (e.g.
-    `assert [s.version for s in report.steps] == [2, 3]`) — 9 of them fail if
-    a bump is made *with* a matching (even no-op) migration registered,
-    confirmed by reproducing exactly that. What this class actually adds:
-    one explicit, purpose-built, single-place failure with a message that
-    says what to do next, rather than a bystander test failing for an
-    unrelated-looking reason. See KI-105 for what a `format_version` freeze
-    does NOT cover: a `CREATE TABLE` edited with no version bump at all (no
-    golden-schema snapshot exists) and the `sqlite-vec` extension's own
-    on-disk vector format (outside `format_version`'s scope entirely).
+    module level) fails at import time if either backend's
+    `CURRENT_FORMAT_VERSION` is bumped with no matching migration registered,
+    and several pre-existing tests in this file already pin the literal
+    version in their own assertions (e.g. `assert [s.version for s in
+    report.steps] == [2, 3]`) — 18 of them (9 per backend) fail together if a
+    *realistic* bump is made (both backends' `CURRENT_FORMAT_VERSION` raised,
+    each with its own matching, even no-op, migration registered), confirmed
+    by reproducing exactly that. What this class actually adds: a dedicated
+    assertion message on each test (`_BUMP_MESSAGE`) pointing straight at
+    this docstring and ADR-0052, rather than the pre-existing tests' own
+    assertion failures, whose messages describe *their* subject (e.g. dry-run
+    step counts), not the version freeze. See KI-105 for what a
+    `format_version` freeze does NOT cover: a `CREATE TABLE` edited with no
+    version bump at all (no golden-schema snapshot exists) and the
+    `sqlite-vec` extension's own on-disk vector format (outside
+    `format_version`'s scope entirely).
 
     If this class fails because format_version is intentionally bumping:
     update `_FROZEN_FORMAT_VERSION` below, register the new migration in
@@ -1147,11 +1151,21 @@ class TestFormatVersionFrozen:
 
     _FROZEN_FORMAT_VERSION = 3
 
+    _BUMP_MESSAGE = (
+        "format_version is frozen at 3 (ADR-0052's Update section) - see "
+        "TestFormatVersionFrozen's own class docstring before bumping "
+        "_FROZEN_FORMAT_VERSION here"
+    )
+
     def test_sqlite_format_version_matches_frozen_value(self) -> None:
-        assert sqlite_migrations.CURRENT_FORMAT_VERSION == self._FROZEN_FORMAT_VERSION
+        assert sqlite_migrations.CURRENT_FORMAT_VERSION == self._FROZEN_FORMAT_VERSION, (
+            self._BUMP_MESSAGE
+        )
 
     def test_duckdb_format_version_matches_frozen_value(self) -> None:
-        assert duckdb_migrations.CURRENT_FORMAT_VERSION == self._FROZEN_FORMAT_VERSION
+        assert duckdb_migrations.CURRENT_FORMAT_VERSION == self._FROZEN_FORMAT_VERSION, (
+            self._BUMP_MESSAGE
+        )
 
     def test_both_backends_agree_on_current_format_version(self) -> None:
         """Independent of the frozen literal above: a bump landing on one
@@ -1159,7 +1173,9 @@ class TestFormatVersionFrozen:
         break the "format_version means the same thing on every backend"
         assumption without either test above catching it, since each only
         compares its own backend against the same shared literal."""
-        assert sqlite_migrations.CURRENT_FORMAT_VERSION == duckdb_migrations.CURRENT_FORMAT_VERSION
+        assert (
+            sqlite_migrations.CURRENT_FORMAT_VERSION == duckdb_migrations.CURRENT_FORMAT_VERSION
+        ), self._BUMP_MESSAGE
 
     def test_every_registered_migration_declaring_reversible_has_a_down(self) -> None:
         """SPEC §15: migrations MUST be reversible or explicitly marked

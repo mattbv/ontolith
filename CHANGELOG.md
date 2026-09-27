@@ -159,12 +159,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   genuinely `reversible=True` with a working `down()` before declaring; a future bump, pre- or
   post-1.0, now unconditionally requires a registered migration and a `**Breaking:**` CHANGELOG
   entry, mirroring ADR-0019's own discipline. New `tests/unit/test_storage_migrations.py::
-  TestFormatVersionFrozen` pins the literal value on both backends as one explicit, purpose-built
-  tripwire (round-1 review found and reproduced that a real bump was already caught two other
-  ways — an import-time dense/contiguous assert, and several pre-existing tests' own hardcoded
-  version literals — so this test's value is a clear, single-place failure message, not a newly
-  closed gap) plus the reversible-implies-has-a-`down()` invariant SPEC §15 requires,
-  mutation-tested. Filed **KI-105**: the freeze pins the version number, not a snapshot of the
+  TestFormatVersionFrozen` pins the literal value on both backends (review found a real bump was
+  already caught two other ways — an import-time dense/contiguous assert, and 18 pre-existing tests'
+  own hardcoded version literals, 9 per backend — so this test's value is a dedicated assertion
+  message pointing at the freeze, not a newly closed gap) plus the reversible-implies-has-a-`down()`
+  invariant SPEC §15 requires, mutation-tested. Filed **KI-105**: the freeze pins the version number, not a snapshot of the
   actual on-disk shape (an edited `CREATE TABLE` with no matching migration goes undetected) or the
   `sqlite-vec` extension's own on-disk vector format (outside `format_version`'s scope entirely).
 
