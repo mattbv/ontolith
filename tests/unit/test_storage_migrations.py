@@ -1111,3 +1111,60 @@ class TestRoundFourReviewFindings:
 
         with pytest.raises(StorageError, match="Could not open"):
             sqlite_migrations.migrate_file(path)
+
+
+class TestFormatVersionFrozen:
+    """Pins `CURRENT_FORMAT_VERSION` at 3 on both backends — the SPEC §15 /
+    ADR-0052 "format_version frozen" M4 exit criterion (Implementation Plan
+    §2), declared in ADR-0052's own Update section.
+
+    This is a different guarantee from every test above: those read
+    `CURRENT_FORMAT_VERSION` symbolically and would keep passing unchanged
+    against a silently bumped value. This class pins the literal number —
+    the same role `test_public_api_surface.py`'s `_EXPECTED` dict plays for
+    the public API surface (ADR-0019): a bump is expected to happen
+    eventually, but it must be a conscious, reviewed act with its own
+    migration and CHANGELOG entry, never a side effect nobody noticed.
+
+    If this class fails because format_version is intentionally bumping:
+    update `_FROZEN_FORMAT_VERSION` below, register the new migration in
+    both backends' `_MIGRATIONS` (reversible=True with a working `down()`,
+    or an explicit reversible=False with a documented reason — SPEC §15),
+    and record the bump in CHANGELOG.md under a `**Breaking:**` marker
+    (a format_version bump breaks the on-disk contract even when the
+    Python API is untouched, so it gets the same marker ADR-0019's SemVer
+    policy requires for any other break).
+    """
+
+    _FROZEN_FORMAT_VERSION = 3
+
+    def test_sqlite_format_version_matches_frozen_value(self) -> None:
+        assert sqlite_migrations.CURRENT_FORMAT_VERSION == self._FROZEN_FORMAT_VERSION
+
+    def test_duckdb_format_version_matches_frozen_value(self) -> None:
+        assert duckdb_migrations.CURRENT_FORMAT_VERSION == self._FROZEN_FORMAT_VERSION
+
+    def test_both_backends_agree_on_current_format_version(self) -> None:
+        """Independent of the frozen literal above: a bump landing on one
+        backend's CURRENT_FORMAT_VERSION but not the other's would silently
+        break the "format_version means the same thing on every backend"
+        assumption without either test above catching it, since each only
+        compares its own backend against the same shared literal."""
+        assert sqlite_migrations.CURRENT_FORMAT_VERSION == duckdb_migrations.CURRENT_FORMAT_VERSION
+
+    def test_every_registered_migration_declaring_reversible_has_a_down(self) -> None:
+        """SPEC §15: migrations MUST be reversible or explicitly marked
+        irreversible - `reversible` must never be true by default while
+        `down` sits at `None`, which would make the declaration a claim
+        nothing backs. Both currently-registered migrations, on both
+        backends, declare reversible=True; this doesn't hardcode that
+        specific outcome (a future irreversible migration is a legitimate,
+        SPEC-sanctioned choice) - it only enforces the one combination SPEC
+        §15 rules out: reversible=True with no down() to make it true."""
+        for migration in (*sqlite_migrations._MIGRATIONS, *duckdb_migrations._MIGRATIONS):
+            if migration.reversible:
+                assert migration.down is not None, (
+                    f"migration {migration.version} ({migration.description}) declares "
+                    "reversible=True but has no down() - SPEC §15 requires reversible "
+                    "migrations to actually be reversible, not just labeled so"
+                )

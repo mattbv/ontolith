@@ -378,6 +378,45 @@ documentation/test-accuracy items, all fixed here:
 Every claim in this Update section was independently re-verified against source and by direct
 execution before being written, not carried forward from any review round's own report.
 
+## Update (2026-09-27): `format_version` frozen at 3, closing the Implementation Plan's separate
+"on-disk `format_version` frozen" M4 exit criterion (M4 Workstream 6)
+
+This ADR's original scope (above) built the *mechanism* — a tracked `format_version`, refusal to
+open a stale file, `migrate_file`/`db migrate`/`db status`, reversible-or-explicit-irreversible
+migrations. It never itself declared a number frozen; that declaration is a separate Implementation
+Plan §2 M4 exit criterion (distinct from "migration tooling," the same relationship Workstream 5 had
+to ADR-0019's own, earlier-shipped SemVer *mechanism*). This Update makes that declaration.
+
+**Audit, before declaring:** both backends' `CURRENT_FORMAT_VERSION` were confirmed to still agree
+(3, unchanged since this ADR's original merge); every registered migration on both backends (v2,
+KI-060; v3, KI-078) was confirmed `reversible=True` with a real, working `down()` — SPEC §15's
+"MUST be reversible or explicitly marked irreversible" is satisfied trivially today (nothing is yet
+irreversible), not left ambiguous; `docs/known-issues.md` and the codebase were checked for any
+half-finished schema change that should land, and bump the version, *before* freezing it — none
+found (KI-104, the only open follow-up from this ADR's own review arc, is about the migration
+registry's internal shape, not a pending schema change).
+
+**Declaration: `format_version = 3` is the frozen 1.0 baseline.** Same meaning as ADR-0019's own
+API-surface freeze declaration: pre-1.0 (the project is at `0.0.1`), a `format_version` bump is
+still allowed on a minor version, but it now unconditionally requires everything SPEC §15 and this
+ADR's own mechanism already demand — a registered migration on both backends, `reversible=True`
+with a working `down()` or an explicit, documented `reversible=False`, and a CHANGELOG
+`**Breaking:**` marker (a format_version bump breaks the on-disk contract even on releases where the
+Python API doesn't move, so it earns the marker independently of ADR-0019's own SemVer policy, not
+as a side effect of it). Post-1.0 the same `**Breaking:**`-on-a-major discipline SPEC §15/ADR-0019
+already establish for the Python surface applies here too — not re-litigated by this Update.
+
+**New regression test**: `tests/unit/test_storage_migrations.py::TestFormatVersionFrozen` pins the
+literal value `3` on both backends (not merely comparing each backend's `CURRENT_FORMAT_VERSION`
+against the other, which every pre-existing test in that file already does symbolically and which
+would keep passing unchanged against a silently-bumped shared value) — the same tripwire role
+`test_public_api_surface.py`'s `_EXPECTED` dict plays for ADR-0019's own frozen surface. Also pins
+the reversible-implies-has-a-`down()` invariant SPEC §15 requires, across every currently-registered
+migration on both backends, mutation-tested by constructing a `reversible=True, down=None` migration
+via `dataclasses.replace` and confirming the new test catches it (and by bumping each backend's
+`CURRENT_FORMAT_VERSION` independently at runtime and confirming both the per-backend pin and the
+cross-backend agreement test each catch their own case).
+
 ## References
 
 - SPEC §15 (Versioning & migration — the three requirements this ADR implements)
@@ -392,6 +431,8 @@ execution before being written, not carried forward from any review round's own 
   filed in round-5 review — a declarative, centrally-applied migration registry as a follow-up once a
   third migration is added, replacing the current per-`up()` hand-written defensiveness)
 - `docs/Ontolith_Implementation_Plan.md` §2 (M4 milestone table — "migration tooling," this ADR's
-  workstream, and its "on-disk `format_version` frozen" exit criterion, which this ADR makes
-  meaningful for the first time by giving `format_version` something to freeze) and §7.2 (Branching
-  & releases, the same `format_version`-frozen-at-1.0 commitment stated again there)
+  original workstream, which gave `format_version` something to freeze, and the separate "on-disk
+  `format_version` frozen" exit criterion, closed by this ADR's own 2026-09-27 Update above) and §7.2
+  (Branching & releases, the same `format_version`-frozen-at-1.0 commitment stated again there)
+- ADR-0019 (Public API Stability Policy — this Update's declaration mirrors that ADR's own
+  mechanism-then-freeze-declaration shape and its `**Breaking:**` CHANGELOG discipline)
