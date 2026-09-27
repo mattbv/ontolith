@@ -247,16 +247,30 @@ class TestResolverConcurrency:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Before KI-052, every resolver ran inline on the event loop, so
-        three concurrent 0.3s-resolver requests took ~0.9s (serialized).
-        After converting resolvers to async + run_in_threadpool, they
-        overlap - this must take closer to 0.3s than 0.9s.
+        three concurrent requests serialized instead of overlapping. After
+        converting resolvers to async + run_in_threadpool, they overlap.
+
+        Uses a `threading.Barrier(3)` rather than a wall-clock threshold: a
+        wall-clock assertion (an earlier version of this test used
+        `elapsed < 0.6`, a generous midpoint between the ~0.3s overlapping
+        case and the ~0.9s serialized one) is exactly the sensitive-to-
+        runner-speed shape this repo's own bitemporal property tests already
+        avoid (`deadline=None` on the DuckDB-heavy ones, for the identical
+        reason) - it failed on a real CI runner (0.74s, then 0.67s on a
+        rerun) despite the resolvers genuinely overlapping. A barrier proves
+        the same property directly: if all three resolver calls are running
+        concurrently, all three reach `barrier.wait()` and it releases
+        immediately regardless of runner speed; if they're serialized, only
+        one call is ever inside the resolver at a time, so the barrier never
+        fills and every waiter times out - deterministic either way, with no
+        timing threshold to tune.
 
         Asserts the slowed path actually ran (not just that responses came
         back 200) - a resolver that stopped reaching get_schema entirely
         (e.g. a future schema cache) would otherwise still return 200 fast
         and pass vacuously without exercising the offload at all."""
         import asyncio
-        import time
+        import threading
 
         kb = _kb(tmp_path)
         auth_provider = TokenAuthProvider(kb.backend)
@@ -266,26 +280,23 @@ class TestResolverConcurrency:
 
         original_get_schema = kb.backend.get_schema
         call_count = 0
+        barrier = threading.Barrier(3, timeout=5.0)
 
         def _slow_get_schema(*args: object, **kwargs: object) -> object:
             nonlocal call_count
             call_count += 1
-            time.sleep(0.3)
+            barrier.wait()  # all 3 must arrive concurrently, or this times out
             return original_get_schema(*args, **kwargs)
 
         monkeypatch.setattr(kb.backend, "get_schema", _slow_get_schema)
 
-        statuses, bodies, elapsed = asyncio.run(
+        statuses, bodies, _elapsed = asyncio.run(
             _post_concurrently(app, headers, "{ schema { version } }", 3)
         )
         assert statuses == [200, 200, 200]
         assert all("errors" not in b for b in bodies), bodies
         assert all(b["data"]["schema"] is not None for b in bodies), bodies
         assert call_count == 3
-        # Serialized would be ~0.9s (3 x 0.3s); overlapping is ~0.3s. 0.6s
-        # is a generous midpoint that tolerates test-machine jitter while
-        # still failing if resolvers regress to blocking the event loop.
-        assert elapsed < 0.6, f"expected overlapping concurrent requests, took {elapsed:.2f}s"
 
     def test_context_auth_resolution_does_not_block_event_loop(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -293,9 +304,13 @@ class TestResolverConcurrency:
         """create_graphql_app's _get_context offloads auth_provider.resolve()
         too, not just the resolver body - a regression here would re-block
         the event loop on *every* authenticated request, not just one
-        field, since every request resolves its token first."""
+        field, since every request resolves its token first.
+
+        Uses a `threading.Barrier(3)`, not a wall-clock threshold - see
+        `test_concurrent_requests_overlap_instead_of_serializing`'s own
+        docstring for why."""
         import asyncio
-        import time
+        import threading
 
         kb = _kb(tmp_path)
         auth_provider = TokenAuthProvider(kb.backend)
@@ -305,23 +320,23 @@ class TestResolverConcurrency:
 
         original_resolve = auth_provider.resolve
         call_count = 0
+        barrier = threading.Barrier(3, timeout=5.0)
 
         def _slow_resolve(*args: object, **kwargs: object) -> object:
             nonlocal call_count
             call_count += 1
-            time.sleep(0.3)
+            barrier.wait()  # all 3 must arrive concurrently, or this times out
             return original_resolve(*args, **kwargs)
 
         monkeypatch.setattr(auth_provider, "resolve", _slow_resolve)
 
-        statuses, bodies, elapsed = asyncio.run(
+        statuses, bodies, _elapsed = asyncio.run(
             _post_concurrently(app, headers, "{ schema { version } }", 3)
         )
         assert statuses == [200, 200, 200]
         assert all("errors" not in b for b in bodies), bodies
         assert all(b["data"]["schema"] is not None for b in bodies), bodies
         assert call_count == 3
-        assert elapsed < 0.6, f"expected overlapping concurrent requests, took {elapsed:.2f}s"
 
 
 # ---------------------------------------------------------------------------
