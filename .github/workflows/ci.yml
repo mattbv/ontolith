@@ -177,7 +177,9 @@ jobs:
         run: uv run pytest tests/benchmarks/ --benchmark-only --benchmark-json=benchmark-results.json -q
 
       - name: Upload benchmark results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
           path: benchmark-results.json
+          overwrite: true

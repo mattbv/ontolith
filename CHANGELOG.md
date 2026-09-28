@@ -264,21 +264,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keys, ADR-0014; observability tiers (b)/(c) were never built, only tier (a) structured logs).
 
 #### Changed
-- M4 exit-criteria review (2026-09-28): the perf-regression Quality Gate's own "informational →
-  blocking by M4" commitment, deferred since Workstream 1 and never picked up by a later workstream, is
-  now fulfilled. Each of the 5 SPEC §9 budget rows carries a hard per-test ceiling
-  (`tests/benchmarks/conftest.py::assert_within_budget`, `assert benchmark.stats.stats.max < budget` —
-  a conservative reading of "p95 < budget," since p95 can never exceed the maximum, and one that needs no
-  percentile estimate from the small number of rounds pytest-benchmark calibrates for the slower rows);
-  the CI `benchmarks` job now runs on every PR instead of only on pushes to `main`. Deliberately an
-  absolute per-row ceiling, not the Quality Gate's originally-sketched relative "no > 15% regression vs a
-  stored baseline": a relative check needs a committed baseline this repo's CI jobs can't write
-  themselves (`contents: read` only, a Workstream 7 security-review fix) and would be exposed to the same
-  CI-runner-speed flakiness already fixed twice in this project (PR #138), for little benefit given how
-  wide the existing §9 margins already are. Also corrected a pre-existing mislabeling in
-  `test_traversal.py`: `test_bench_symbolic_query_concept_filter`'s docstring previously implied it was
-  the SPEC §9 "hybrid query" budget row: it measures a different, non-vector query shape, and the real
-  row-4 test (`test_bench_hybrid_semantic_query_k10`) lives in `test_hybrid_query.py`.
+- M4 exit-criteria review (2026-09-28, PR #144): the perf-regression Quality Gate's own
+  "informational → blocking by M4" commitment, deferred since Workstream 1 and never picked up by a
+  later workstream, is now fulfilled. Each of the 5 SPEC §9 budget rows carries a hard per-test p95
+  ceiling (`tests/benchmarks/conftest.py::assert_within_budget`, computed from pytest-benchmark's raw
+  per-round data via `statistics.quantiles`); the CI `benchmarks` job now runs on every PR instead of
+  only on pushes to `main`. Deliberately an absolute per-row ceiling, not the Quality Gate's
+  originally-sketched relative "no > 15% regression vs a stored baseline" — an honest trade-off, not
+  a strictly superior choice: at today's margins a relative 15% check would catch a real regression
+  far earlier than this loose an absolute ceiling ever would, deliberately left for later scope
+  rather than adding a second new mechanism in the same review.
+  **The PR's own review found a real flaw in the first version of this gate**: it checked
+  `benchmark.stats.stats.max` (the single slowest observed round), reasoning `max < budget` is a
+  stricter implication of "p95 < budget" and that pytest-benchmark "calibrates to a handful of
+  rounds" for the slower rows — both claims checked against real CI data and found wrong. Round
+  counts on the 5 gated rows range from roughly 270 to 8,000 on real CI runs, easily enough for a
+  genuine percentile; and `max` proved *more* sensitive to CI-runner noise than p95, not less — a
+  real CI run of `test_bench_propose_auto_accept` (budget 50 ms) recorded a `max` of 53.6 ms from one
+  stalled SQLite-commit round, while that same run's real p95 was 0.62 ms. Fixed before merge by
+  computing a genuine p95, re-verified against 6 downloaded real CI benchmark artifacts (including
+  the one that had exceeded the `max`-based budget) — all 5 rows pass comfortably on every one.
+  Also fixed: the CI `benchmarks` job's result-upload step now runs with `if: always()` (previously
+  skipped on a failing run, losing exactly the data needed to diagnose it) and `overwrite: true`;
+  guarded `assert_within_budget` against `benchmark.stats is None` (`--benchmark-disable` mode,
+  unused in CI but reachable locally); and corrected leftover pre-existing mislabelings in
+  `test_traversal.py`/`test_hybrid_query.py` — `test_bench_symbolic_query_concept_filter`,
+  `test_bench_write_assert_literal`, and `test_bench_hybrid_semantic_query_intersected_with_where`
+  each previously carried a "p95 target" docstring number implying it was a SPEC §9 budget row; none
+  of the three is gated (the real rows are `test_bench_propose_auto_accept` and
+  `test_bench_hybrid_semantic_query_k10`).
 
 ### M3 - Extensible (0.3)
 

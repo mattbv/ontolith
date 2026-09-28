@@ -10,12 +10,15 @@ ceiling since M4 Workstream 1's own perf-budget gate closeout — see
 
 The fifth SPEC §9 row (hybrid query, k=10, p95 < 150 ms) is measured in
 test_hybrid_query.py's own separate, smaller dataset, not here.
-`test_bench_single_entity_get` and `test_bench_symbolic_query_concept_filter`
-below are NOT SPEC §9 budget rows despite carrying similar-looking "p95
-target" docstring numbers — a pre-existing mislabeling in this file (the
-latter's docstring previously listed itself as if it were the "Hybrid
-query"/"Symbolic query" row; it measures a different, non-vector query
-shape than the real hybrid-query row does) corrected here, not gated.
+`test_bench_single_entity_get`, `test_bench_symbolic_query_concept_filter`,
+and `test_bench_write_assert_literal` below are NOT SPEC §9 budget rows
+despite carrying similar-looking "p95 target" docstring numbers — a
+pre-existing mislabeling in this file (the middle one's docstring previously
+listed itself as if it were the "Hybrid query"/"Symbolic query" row; it
+measures a different, non-vector query shape than the real hybrid-query row
+does; `test_bench_write_assert_literal` measures `assert_literal`, not the
+budget row's own named `propose()` path — see the M4 note below) corrected
+here, not gated.
 
 Run with: uv run pytest tests/benchmarks/ --benchmark-only
 
@@ -228,7 +231,10 @@ def test_bench_single_entity_provenance(benchmark, seeded_kb: Ontology) -> None:
 
 @pytest.mark.benchmark
 def test_bench_write_assert_literal(benchmark, seeded_kb: Ontology) -> None:
-    """p95 target: < 50 ms — Write path: assert_literal (standalone commit).
+    """Write path: assert_literal (standalone commit).
+
+    Not a SPEC §9 budget row (that's `test_bench_propose_auto_accept`,
+    below) — informational only, no budget ceiling enforced here.
 
     Each round gets its own (subject, predicate) — cycling through the
     dedicated write-bench entity pool (never the read-benchmarked Person
@@ -351,7 +357,14 @@ def test_bench_assertions_by_subject(benchmark, seeded_backend: SQLiteBackend) -
 def test_bench_as_of_reconstruction(benchmark, seeded_kb: Ontology) -> None:
     """p95 target: < 300 ms — as_of(t) point-in-time reconstruction over a
     100k-assertion KB (all assertions predate t, so this exercises full
-    bitemporal filtering rather than an empty-result fast path)."""
+    bitemporal filtering rather than an empty-result fast path).
+
+    Pre-existing scope note (not revisited by the M4 budget-gate change):
+    measures one subject's 100 assertions filtered against the 100k-assertion
+    store, not a reconstruction spanning the whole store — the "100k" in the
+    budget row's own name refers to the store's size, not the result set
+    this benchmark reconstructs.
+    """
     t = datetime(2025, 6, 1, tzinfo=UTC)
 
     def query() -> list:
