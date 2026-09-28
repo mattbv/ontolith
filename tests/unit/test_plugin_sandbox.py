@@ -967,22 +967,41 @@ class TestRequireEnforcement:
         plugin_instance`, closing the specific module-attribute version of
         this attack: reassigning the module's own attribute during load no
         longer matters once `_child_main` already holds a reference to the
-        original function object. This test simulates the attack directly
-        (the malicious reassignment happens inside the monkeypatched `_load
-        _plugin_instance`, standing in for a plugin's own module import)
-        and asserts the captured reference still reports the true,
-        unenforced (`applied=False` on this non-Linux test machine) result,
-        not the plugin's forged `applied=True` - i.e. `require_enforcement`
-        still fires correctly despite the plugin's own attempt to suppress
-        it."""
-        real_apply_capability_enforcement = enforcement.apply_capability_enforcement
+        original function object.
+
+        The module attribute is monkeypatched to a SAFE, no-op fake
+        ("genuine" result: applied=False, side-effect-free on every
+        platform) before `_child_main` ever runs - standing in for the real
+        `apply_capability_enforcement` without this test ever calling the
+        real one, which on a real Linux+libseccomp host would genuinely
+        install a restrictive seccomp filter directly in the pytest worker
+        process itself. A loaded filter only ever gets MORE restrictive and
+        can never be removed (standard Linux seccomp-BPF semantics; see
+        `TestRealSeccompEnforcementOnLinux`'s own docstring above, which
+        runs each of its own probes in a dedicated subprocess for exactly
+        this reason) - permanently sandboxing the shared worker process for
+        the rest of the test session would corrupt every later test, not
+        just fail this one. An earlier version of this test called the real
+        function via this same capture-based reasoning and reproduced
+        exactly that corruption on real Linux CI (`PermissionError:
+        Operation not permitted` from pytest's own tmp-dir/capture
+        machinery, in every test after this one in the same worker)."""
+
+        def _genuine_apply_capability_enforcement(
+            caps: PluginCapabilities,
+        ) -> enforcement.EnforcementResult:
+            return enforcement.EnforcementResult(applied=False, reason="genuine, pre-attack result")
+
+        def _forged_apply_capability_enforcement(
+            caps: PluginCapabilities,
+        ) -> enforcement.EnforcementResult:
+            return enforcement.EnforcementResult(applied=True, reason=None)
 
         def _malicious_load(name: str) -> object:
             # Simulates a plugin's own module-level code reassigning the
-            # module attribute during its own import/construction.
-            enforcement.apply_capability_enforcement = lambda caps: enforcement.EnforcementResult(
-                applied=True, reason=None
-            )
+            # module attribute during its own import/construction - never
+            # touches the real, OS-level enforcement functions.
+            enforcement.apply_capability_enforcement = _forged_apply_capability_enforcement
 
             class _EvilPlugin:
                 def export(self, *args: object, **kwargs: object) -> str:
@@ -997,31 +1016,32 @@ class TestRequireEnforcement:
             def send(self, message: tuple[Any, ...]) -> None:
                 self.sent.append(message)
 
+        monkeypatch.setattr(
+            enforcement, "apply_capability_enforcement", _genuine_apply_capability_enforcement
+        )
         monkeypatch.setattr(runner, "_load_plugin_instance", _malicious_load)
         monkeypatch.setattr(
             enforcement,
             "apply_preimport_enforcement",
             lambda caps: enforcement.EnforcementResult(applied=True, reason=None),
         )
-        try:
-            conn = _FakeConn()
-            runner._child_main(
-                conn,
-                "irrelevant-entry-point",
-                "export",
-                PluginCapabilities(),
-                (),
-                {},
-                require_enforcement=True,
-            )
-            kinds = [message[0] for message in conn.sent]
-            assert protocol.FAILED in kinds, (
-                "the captured function reference should still report the real, "
-                f"unenforced result on this platform, not the plugin's forged one - got {kinds}"
-            )
-            assert protocol.DONE not in kinds, f"a DONE message means the attack succeeded: {kinds}"
-        finally:
-            enforcement.apply_capability_enforcement = real_apply_capability_enforcement
+
+        conn = _FakeConn()
+        runner._child_main(
+            conn,
+            "irrelevant-entry-point",
+            "export",
+            PluginCapabilities(),
+            (),
+            {},
+            require_enforcement=True,
+        )
+        kinds = [message[0] for message in conn.sent]
+        assert protocol.FAILED in kinds, (
+            "the captured function reference should still report the genuine, pre-attack "
+            f"result, not the plugin's forged one - got {kinds}"
+        )
+        assert protocol.DONE not in kinds, f"a DONE message means the attack succeeded: {kinds}"
 
     def test_require_enforcement_refuses_before_loading_when_the_preimport_filter_fails(
         self, monkeypatch: pytest.MonkeyPatch
