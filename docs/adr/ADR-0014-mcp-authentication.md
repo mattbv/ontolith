@@ -201,9 +201,18 @@ of any kind, so `token` remains the only channel there, unchanged from this ADR'
 A stdio-facing principal's token still has to be configured wherever the client launches the server
 process (an environment variable or client config file, not a live tool-call argument the model
 itself emits) — a materially smaller exposure than a value the model repeats into every tool call
-and every transcript, but still not zero. Deployments running MCP over stdio should prefer
-short-lived tokens for those principals precisely because there's no way to keep the token out of
-the client's own process environment the way the header keeps it out of the *model's* context.
+and every transcript, but still not zero. Deployments running MCP over stdio should rotate and
+revoke those principals' tokens proactively (`revoke_token`/re-`issue_token`), since there's no
+way to keep the token out of the client's own process environment the way the header keeps it out
+of the *model's* context.
+
+**Correction (security review, M4 Workstream 7): this ADR previously recommended "short-lived
+tokens" here, which `PrincipalCredential` (`identity/credential.py`) cannot actually provide —
+it has `issued_by`/`revoked_by` for manual revocation, but no `expires_at` field or any automatic
+expiry check in `get_principal_by_token_hash`. A stdio token, once issued, authenticates
+indefinitely until an admin explicitly revokes it. Reworded above to recommend proactive rotation/
+revocation, the mitigation the current credential model actually supports; adding real short-lived
+expiry is filed as **KI-107**, not implied to already exist by this ADR's own wording.
 
 **Residual (at the time of this 2026-09-01 Update — closed below, KI-073) — the argument still
 works even when a header is available, so the exposure is made avoidable, not eliminated:** an

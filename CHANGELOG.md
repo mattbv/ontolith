@@ -10,6 +10,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### M4 - Production (1.0)
 
 #### Fixed
+- Plugin sandbox (ADR-0051): a `network=False`/`filesystem=False` plugin's own module import and
+  `__init__` ran with no seccomp filter installed at all — found by M4 Workstream 7's security
+  review. Round 1's own fix (install the full filter before loading) broke every `filesystem=False`
+  plugin's own loading on Linux (`entry_points()`/module import need real filesystem reads
+  regardless of what the plugin declares — reproduced as a genuine CI failure on
+  `required-fields-validator`, the one shipped reference plugin with default, i.e. `filesystem=
+  False`, capabilities); round 2 corrected it with a narrower pre-import filter
+  (`apply_preimport_enforcement`) denying only network and the process-isolation floor before
+  loading, leaving filesystem enforcement exactly where it always was (immediately before the
+  plugin's own protocol method call) — closes the network-exfiltration-during-import vector fully;
+  filesystem-during-import remains a disclosed residual (**KI-109**). Also added `PluginRegistry.
+  register(..., require_enforcement: bool = False)`: `True` refuses registration when OS-level
+  enforcement can't even be attempted, and makes the isolated child itself refuse to invoke the
+  plugin's protocol method if a specific call-time attempt to install the filter fails — round 1's
+  own version of this check lived only in the parent process, which couldn't stop an
+  already-spawned child from running the plugin regardless (reproduced: over 3 seconds of fully
+  unenforced execution before the parent's timeout-based cleanup caught up); round 2 moved the
+  check into the child itself. The always-on process-isolation floor also gained `pidfd_open`/
+  `pidfd_getfd`/`pidfd_send_signal`/`kcmp`/`process_madvise`/`process_mrelease` (`pidfd_getfd`'s own
+  duplicate-fd attack requires the same permission check `ptrace` itself does, but wasn't denied).
+  Filed **KI-106**
+  (`filesystem=True` subsumes the storage capability ceiling entirely), **KI-107** (no credential
+  expiry), **KI-108** (migration audit trail / reversal), **KI-110** (`require_enforcement` can be
+  satisfied by a partially-installed filter), **KI-111** (further floor gaps: the kill syscall
+  family, inherited environment secrets, other unconsidered syscalls) — none fixed this pass.
 - `tests/benchmarks/test_traversal.py`'s `propose` + policy eval + commit budget row (SPEC §9,
   Implementation Plan §9, p95 < 50 ms) had no valid benchmark. `test_bench_write_assert_literal`
   stood in for it, but repeated `assert_literal` calls on the *same* `(subject, predicate)` with a

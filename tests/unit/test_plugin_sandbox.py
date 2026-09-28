@@ -251,6 +251,28 @@ class TestRemoteViewQueryAsOfUnsupported:
             view.query("Person")
 
 
+class TestProcessIsolationFloorContents:
+    """Pins the always-on floor's exact syscall set - platform-independent
+    (a plain tuple comparison, no filter installed), so it runs everywhere,
+    unlike TestRealSeccompEnforcementOnLinux below. Security review found
+    this floor had no test at all pinning its contents: removing any of the
+    round-2 pidfd/kcmp/process_madvise/process_mrelease additions passed
+    the whole suite silently on a non-Linux dev machine."""
+
+    def test_floor_denies_the_full_cross_process_introspection_family(self) -> None:
+        assert set(enforcement._PROCESS_ISOLATION_SYSCALLS) == {
+            "ptrace",
+            "process_vm_readv",
+            "process_vm_writev",
+            "pidfd_open",
+            "pidfd_getfd",
+            "pidfd_send_signal",
+            "kcmp",
+            "process_madvise",
+            "process_mrelease",
+        }
+
+
 class TestEnforcementAvailability:
     """Platform-conditional, no subprocess needed for the negative case."""
 
@@ -533,6 +555,19 @@ def _child_floods_genuine_enforcement_false(child_conn: object) -> None:
     child_conn.send_bytes(pickle.dumps((protocol.DONE, "ok")))  # type: ignore[attr-defined]
 
 
+def _child_sends_genuine_enforcement_false_then_done(child_conn: object) -> None:
+    """A well-behaved (non-adversarial) child whose real enforcement
+    attempt genuinely failed - used to test require_enforcement's
+    call-time refusal directly against `_dispatch_loop`, without needing
+    a real platform/host where enforcement actually fails."""
+    import pickle
+
+    child_conn.send_bytes(  # type: ignore[attr-defined]
+        pickle.dumps((protocol.ENFORCEMENT, False, "simulated failure"))
+    )
+    child_conn.send_bytes(pickle.dumps((protocol.DONE, "ok")))  # type: ignore[attr-defined]
+
+
 def _child_sends_empty_message_then_sleeps(child_conn: object) -> None:
     """restricted_loads(b"") raises EOFError - indistinguishable from a
     closed pipe at that layer - but a child that sends empty bytes and
@@ -678,6 +713,185 @@ class TestEnforcementWarningReachesObservability:
             level, message, fields = enforcement_logs[0]
             assert level == logging.WARNING
             assert fields["method"] == "export"
+
+
+class TestRequireEnforcement:
+    """Security review finding, M4 Workstream 7: the registration-time
+    warning (TestEnforcementWarningReachesObservability above) is the only
+    signal an operator gets when OS-level enforcement doesn't apply - it's
+    advisory, not a guarantee. `require_enforcement` gives a real lever:
+    refuse at registration when enforcement can't even be attempted
+    (isolate=False, or unavailable on this host/platform), and refuse each
+    isolated call when a specific attempt to install it fails, rather than
+    silently proceeding with capabilities.network/.filesystem unenforced.
+    """
+
+    def test_dispatch_loop_raises_when_call_time_enforcement_genuinely_fails(
+        self, kb: Ontology
+    ) -> None:
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
+        process = ctx.Process(
+            target=_child_sends_genuine_enforcement_false_then_done, args=(child_conn,)
+        )
+        process.start()
+        child_conn.close()
+        try:
+            with pytest.raises(PluginError, match="require_enforcement"):
+                runner._dispatch_loop(
+                    parent_conn,
+                    process,
+                    {},
+                    "import_",
+                    NullObservabilitySink(),
+                    require_enforcement=True,
+                )
+        finally:
+            parent_conn.close()
+            process.join(timeout=5)
+
+    def test_dispatch_loop_still_only_warns_when_require_enforcement_is_false(
+        self, kb: Ontology
+    ) -> None:
+        """The default (require_enforcement=False) preserves today's
+        behavior exactly - this is the same scenario as the raising test
+        above, differing only in this one flag."""
+        ctx = multiprocessing.get_context("spawn")
+        parent_conn, child_conn = ctx.Pipe(duplex=True)
+        process = ctx.Process(
+            target=_child_sends_genuine_enforcement_false_then_done, args=(child_conn,)
+        )
+        process.start()
+        child_conn.close()
+        sink = RecordingObservabilitySink()
+        try:
+            result = runner._dispatch_loop(
+                parent_conn, process, {}, "import_", sink, require_enforcement=False
+            )
+        finally:
+            parent_conn.close()
+            process.join(timeout=5)
+
+        assert result == "ok"
+        assert len(sink.logs) == 1
+
+    def test_register_with_require_enforcement_raises_when_isolate_false(
+        self, kb: Ontology
+    ) -> None:
+        with pytest.raises(PluginError, match="require_enforcement"):
+            PluginRegistry(kb).register(
+                "json-exporter", author=ADMIN, isolate=False, require_enforcement=True
+            )
+
+    def test_register_with_require_enforcement_raises_when_enforcement_unavailable(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(enforcement, "enforcement_available", lambda: False)
+        with pytest.raises(PluginError, match="require_enforcement"):
+            PluginRegistry(kb).register(
+                "json-exporter", author=ADMIN, isolate=True, require_enforcement=True
+            )
+
+    def test_register_with_require_enforcement_succeeds_when_enforcement_available(
+        self, kb: Ontology, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Registration-time check only - whether this specific call later
+        succeeds under the real filter is the dispatch-loop tests' own
+        concern, exercised for real on Linux+libseccomp by
+        TestEnforcementWarningReachesObservability and
+        TestRealSeccompEnforcementOnLinux above."""
+        monkeypatch.setattr(enforcement, "enforcement_available", lambda: True)
+        loaded = PluginRegistry(kb).register(
+            "json-exporter", author=ADMIN, isolate=True, require_enforcement=True
+        )
+        assert isinstance(loaded.instance, IsolatedPluginProxy)
+
+    def test_run_isolated_raises_and_leaves_the_remote_target_unwritten(self, kb: Ontology) -> None:
+        """End-to-end: run_isolated raises PluginError naming
+        require_enforcement, and `buf` (a RemoteWritable-proxied target)
+        never receives any partial/garbage write. NOT a proof that
+        export() itself never ran - it can't be, for this class of target:
+        `buf.write(...)` inside the child sends a CALL message and blocks
+        for the parent's reply, and the parent's dispatch loop stops
+        reading messages the moment it raises (on the very first
+        ENFORCEMENT(applied=False) message, whether or not the child-side
+        require_enforcement check exists) - so a proxied write can never
+        land in `buf` once the parent has decided to raise, regardless of
+        whether the child went on to call export() or not. Verified by
+        mutation: removing the child-side check (round 1's own bug) still
+        leaves this exact assertion passing. See
+        `test_child_main_checks_require_enforcement_before_calling_the_
+        plugins_protocol_method` below for the actual proof that the
+        protocol method call is structurally unreachable when required
+        enforcement doesn't apply."""
+        if enforcement.enforcement_available():
+            pytest.skip("this needs a platform where enforcement is NOT available")
+        loaded = PluginRegistry(kb).register("json-exporter", author=ADMIN, isolate=True)
+        buf = io.StringIO()
+        with pytest.raises(PluginError, match="require_enforcement"):
+            run_isolated(
+                "json-exporter",
+                "export",
+                loaded.manifest.capabilities,
+                (loaded.view, buf),
+                {},
+                NullObservabilitySink(),
+                require_enforcement=True,
+            )
+        assert buf.getvalue() == ""
+
+    def test_child_main_checks_require_enforcement_before_calling_the_plugins_protocol_method(
+        self,
+    ) -> None:
+        """Structural proof the black-box test above can't provide (see its
+        own docstring for why): _child_main's own source must check
+        require_enforcement strictly BEFORE the line that calls the
+        plugin's protocol method (`getattr(plugin_instance, method_name)
+        (...)`), not merely raise a PluginError somewhere in the function.
+        Round-1 review's own bug shipped exactly this shape backwards: the
+        equivalent check lived only in the PARENT's message handler, with
+        nothing in `_child_main` itself gating the method call at all -
+        this test pins the child's own control flow directly, via AST
+        inspection, the same verification method used to confirm the
+        HIGH-1 reordering fix during this review."""
+        import ast
+        import inspect
+
+        source = inspect.getsource(runner._child_main)
+        tree = ast.parse(source)
+        func = tree.body[0]
+        assert isinstance(func, ast.FunctionDef)
+
+        require_enforcement_check_line: int | None = None
+        protocol_method_call_line: int | None = None
+        for node in ast.walk(func):
+            if (
+                isinstance(node, ast.If)
+                and isinstance(node.test, ast.BoolOp)
+                and any(
+                    isinstance(v, ast.Name) and v.id == "require_enforcement"
+                    for v in node.test.values
+                )
+            ):
+                require_enforcement_check_line = node.lineno
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Call)
+                and isinstance(node.func.func, ast.Name)
+                and node.func.func.id == "getattr"
+            ):
+                protocol_method_call_line = node.lineno
+
+        assert require_enforcement_check_line is not None, (
+            "no 'if require_enforcement ...' check found in _child_main"
+        )
+        assert protocol_method_call_line is not None, (
+            "no getattr(plugin_instance, method_name)(...) call found in _child_main"
+        )
+        assert require_enforcement_check_line < protocol_method_call_line, (
+            "require_enforcement is checked AFTER the plugin's protocol method is already "
+            "called - the check must come first for it to mean anything"
+        )
 
 
 class TestPluginsOwnExceptionsPropagateCorrectly:

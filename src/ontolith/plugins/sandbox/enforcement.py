@@ -136,9 +136,10 @@ _FILESYSTEM_SYSCALLS: tuple[str, ...] = (
 # Always denied whenever a filter is installed at all (unconditional on
 # either capability's own value - see apply_capability_enforcement's own
 # comment) - these have nothing to do with network or filesystem access;
-# they read/write another process's memory directly, which would let a
-# plugin reach past the process boundary ADR-0051's structural isolation
-# otherwise relies on (security review finding).
+# they read/write another process's memory directly, or duplicate another
+# process's file descriptors, either of which would let a plugin reach past
+# the process boundary ADR-0051's structural isolation otherwise relies on
+# (security review finding).
 #
 # Attack direction here is child -> parent (the child tracing/reading its
 # own ancestor). YAMA's ptrace_scope=1 (a distro default on Ubuntu/Debian,
@@ -150,10 +151,37 @@ _FILESYSTEM_SYSCALLS: tuple[str, ...] = (
 # it. Note filesystem=True still leaves an equivalent route open via
 # /proc/<ppid>/mem (open/pread, not ptrace/process_vm_* at all) - see
 # ADR-0051's own Update section.
+#
+# pidfd_getfd (Linux 5.6+) requires PTRACE_MODE_ATTACH permission on the
+# target - the same check ptrace(PTRACE_ATTACH, ...) itself requires - but
+# is a distinct syscall this floor originally missed (security review
+# finding, M4 Workstream 7): on a ptrace_scope=0 host, a child could
+# pidfd_open(getppid()) (no permission check of its own - any process can
+# open a pidfd for a visible pid) then pidfd_getfd to duplicate one of the
+# parent's own open file descriptors (e.g. the SQLite connection's fd, or a
+# live REST/MCP client socket) into itself, then use the already-open-
+# descriptor syscalls this filter must always allow (read/write, for the
+# sandbox's own IPC pipe) on the stolen fd - reaching past the process
+# boundary without ever calling ptrace or process_vm_* at all. kcmp and
+# process_madvise are denied alongside it as the same *family* of
+# cross-process introspection/tampering primitive, not because they share
+# an identical permission check: both actually require the weaker
+# PTRACE_MODE_READ (not YAMA ptrace_scope-restricted the way ATTACH is, so
+# reachable even on a ptrace_scope=1 host), and kcmp specifically is useful
+# for locating which fd to steal via pidfd_getfd, not for the theft itself.
+# process_mrelease's exact permission model wasn't independently verified
+# against kernel source; denied on the same "cross-process, no legitimate
+# use inside a plugin call" basis as the rest of this floor.
 _PROCESS_ISOLATION_SYSCALLS: tuple[str, ...] = (
     "ptrace",
     "process_vm_readv",
     "process_vm_writev",
+    "pidfd_open",
+    "pidfd_getfd",
+    "pidfd_send_signal",
+    "kcmp",
+    "process_madvise",
+    "process_mrelease",
 )
 
 
@@ -163,8 +191,9 @@ class EnforcementResult:
 
     Attributes:
         applied: True if a real syscall-level filter was installed. Always
-            denies at least `_PROCESS_ISOLATION_SYSCALLS`
-            (`ptrace`/`process_vm_*`) even when both `capabilities.network`
+            denies at least `_PROCESS_ISOLATION_SYSCALLS` (`ptrace`/
+            `process_vm_*`/`pidfd_*`/`kcmp`/`process_madvise`/
+            `process_mrelease`) even when both `capabilities.network`
             and `.filesystem` are declared `True` — those two only add to
             what's denied, they're never the sole reason a filter exists.
         reason: Human-readable explanation, always present when `applied`
@@ -194,25 +223,17 @@ def enforcement_available() -> bool:
     return True
 
 
-def apply_capability_enforcement(capabilities: PluginCapabilities) -> EnforcementResult:
-    """Best-effort install OS-level denial for capabilities.network/
-    .filesystem, if both this platform and this host support it.
-
-    Must be called from inside the sandboxed child process, after every
-    import the sandbox's own runner infrastructure needs (seccomp filters
-    apply going forward only - installing one before Python's own import
-    machinery finishes would break the interpreter itself) and immediately
-    before invoking the plugin's actual entrypoint method.
-
-    Args:
-        capabilities: The registering plugin's declared manifest capabilities.
-
-    Returns:
-        An EnforcementResult describing what happened. Never raises - a
-        failure to enforce degrades to the documented "not enforced on
-        this platform/host" state, the same posture ADR-0015 already
-        established, not a hard failure that would make declaring
-        network=False/filesystem=False riskier than not declaring it.
+def _install_seccomp_filter(denied: list[str]) -> EnforcementResult:
+    """Shared by `apply_preimport_enforcement` and `apply_capability_
+    enforcement` below - both attempt to install one seccomp filter
+    denying `denied`, differing only in which syscalls that list contains
+    and when each is called relative to `_load_plugin_instance`. Multiple
+    filters installed in the same process stack (each successive `load()`
+    call only ever adds restriction, never removes one already in force -
+    standard Linux seccomp-BPF semantics), so calling this twice in one
+    child process, with two different `denied` lists, is safe and is
+    exactly how `_child_main` uses it (round-2 review finding, M4
+    Workstream 7 - see `apply_preimport_enforcement`'s own docstring).
     """
     if sys.platform != "linux":
         return EnforcementResult(
@@ -227,20 +248,6 @@ def apply_capability_enforcement(capabilities: PluginCapabilities) -> Enforcemen
             applied=False,
             reason=f"pyseccomp unavailable ({type(exc).__name__}: {exc}) — is libseccomp installed?",
         )
-
-    # _PROCESS_ISOLATION_SYSCALLS is unconditional - included even when
-    # both capabilities are declared True (round-3 review finding: an
-    # earlier version returned early in that case, "no restriction
-    # needed," which skipped installing a filter at all and left
-    # ptrace/process_vm_* undenied for the single most-capable
-    # registration a manifest can declare - the network.../filesystem
-    # checks below are a ceiling on what a plugin may reach *through*,
-    # this is a floor on what it may reach *around*).
-    denied: list[str] = list(_PROCESS_ISOLATION_SYSCALLS)
-    if not capabilities.network:
-        denied.extend(_NETWORK_SYSCALLS)
-    if not capabilities.filesystem:
-        denied.extend(_FILESYSTEM_SYSCALLS)
 
     try:
         import errno
@@ -281,4 +288,100 @@ def apply_capability_enforcement(capabilities: PluginCapabilities) -> Enforcemen
     return EnforcementResult(applied=True, reason=None)
 
 
-__all__ = ["EnforcementResult", "apply_capability_enforcement", "enforcement_available"]
+def apply_preimport_enforcement(capabilities: PluginCapabilities) -> None:
+    """Best-effort install of a NARROW seccomp filter before
+    `_load_plugin_instance` ever runs — before the plugin's own module is
+    imported or constructed at all (round-2 review finding, M4 Workstream
+    7, correcting round 1's own attempt at this).
+
+    Denies the always-on process-isolation floor (`_PROCESS_ISOLATION_
+    SYSCALLS`) and, if `capabilities.network` is `False`, network syscalls
+    too — neither has any legitimate reason to fire during plugin loading
+    (`entry_points()`'s metadata scan and `EntryPoint.load()`'s module
+    import don't open sockets or ptrace anything), so denying them this
+    early costs nothing and closes the "exfiltrate over a socket opened at
+    import time, then read/write it after the filter installs" attack for
+    network specifically.
+
+    Deliberately does NOT touch filesystem syscalls here, regardless of
+    `capabilities.filesystem` — round 1's own version of this fix denied
+    filesystem unconditionally at this point too, which broke every
+    `filesystem=False` plugin's OWN loading: `entry_points()`/`EntryPoint.
+    load()` need real filesystem reads to find and import the plugin's
+    module, regardless of what the plugin itself declares about its own
+    filesystem usage, and `filesystem=False` is this project's own
+    default. Reproduced as a real CI failure (`required-fields-validator`,
+    the one shipped reference plugin with default — i.e. `filesystem=
+    False` — capabilities, failed to load on Linux+libseccomp with `Plugin
+    entry point not found`) before being caught and fixed here. Filesystem
+    enforcement stays exactly where it always was: installed in full,
+    unconditionally denying `_FILESYSTEM_SYSCALLS` when declared `False`,
+    immediately before the plugin's own protocol method is invoked, by
+    `apply_capability_enforcement` below — this narrower, earlier filter
+    does not change that timing at all. The corresponding gap (a
+    `filesystem=False` plugin's own malicious import-time code can still
+    read/write files during loading, same as before either fix) remains
+    open — see KI-109.
+
+    Never raises, and never reports its own `EnforcementResult` to the
+    parent — it's a strict subset of what `apply_capability_enforcement`'s
+    own result (for the same call) already reports; the parent only needs
+    one enforcement-status signal per call, not two overlapping ones.
+    """
+    denied = list(_PROCESS_ISOLATION_SYSCALLS)
+    if not capabilities.network:
+        denied.extend(_NETWORK_SYSCALLS)
+    _install_seccomp_filter(denied)
+
+
+def apply_capability_enforcement(capabilities: PluginCapabilities) -> EnforcementResult:
+    """Best-effort install OS-level denial for capabilities.network/
+    .filesystem, if both this platform and this host support it.
+
+    Must be called from inside the sandboxed child process, after every
+    import the sandbox's own runner infrastructure needs (seccomp filters
+    apply going forward only - installing one before Python's own import
+    machinery finishes would break the interpreter itself) and immediately
+    before invoking the plugin's actual entrypoint method. See
+    `apply_preimport_enforcement` above for a narrower filter this same
+    process also installs *before* the plugin is loaded at all — that one
+    only covers network/the process-isolation floor, deliberately not
+    filesystem, for the reason given in its own docstring.
+
+    Args:
+        capabilities: The registering plugin's declared manifest capabilities.
+
+    Returns:
+        An EnforcementResult describing what happened. Never raises - a
+        failure to enforce degrades to the documented "not enforced on
+        this platform/host" state, the same posture ADR-0015 already
+        established, not a hard failure that would make declaring
+        network=False/filesystem=False riskier than not declaring it.
+    """
+    # _PROCESS_ISOLATION_SYSCALLS is unconditional - included even when
+    # both capabilities are declared True (round-3 review finding: an
+    # earlier version returned early in that case, "no restriction
+    # needed," which skipped installing a filter at all and left
+    # ptrace/process_vm_* undenied for the single most-capable
+    # registration a manifest can declare - the network.../filesystem
+    # checks below are a ceiling on what a plugin may reach *through*,
+    # this is a floor on what it may reach *around*). Denying it again
+    # here, on top of apply_preimport_enforcement's own copy of the same
+    # floor, is redundant but harmless (a second loaded filter denying an
+    # already-denied syscall changes nothing) and keeps this function
+    # correct standing alone, regardless of whether the caller happened to
+    # call apply_preimport_enforcement first.
+    denied: list[str] = list(_PROCESS_ISOLATION_SYSCALLS)
+    if not capabilities.network:
+        denied.extend(_NETWORK_SYSCALLS)
+    if not capabilities.filesystem:
+        denied.extend(_FILESYSTEM_SYSCALLS)
+    return _install_seccomp_filter(denied)
+
+
+__all__ = [
+    "EnforcementResult",
+    "apply_capability_enforcement",
+    "apply_preimport_enforcement",
+    "enforcement_available",
+]
