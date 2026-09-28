@@ -471,16 +471,32 @@ def _handle_one_message(
         # "already reported" slot a genuine False would otherwise need.
         # A flood of genuine applied=False messages still only acts once.
         #
-        # This first, genuine ENFORCEMENT message is trustworthy in a way a
-        # later one from the same child is not: `_child_main` sends it
-        # before `_load_plugin_instance` ever runs (security review
-        # finding, M4 Workstream 7 - see that function's own docstring), so
-        # at the point THIS message was constructed, no plugin code had
-        # executed yet - only this project's own runner/enforcement/
-        # protocol modules had. A plugin could still import `protocol`
-        # itself afterward and send a forged second ENFORCEMENT message
-        # (that's exactly the round-3 concern above), but it cannot have
-        # tampered with or fabricated this first one.
+        # CORRECTED (round-3 review finding, M4 Workstream 7): an earlier
+        # version of this comment claimed the first ENFORCEMENT message is
+        # fully trustworthy because `_child_main` sends it before
+        # `_load_plugin_instance` ever runs - true under round 1's ordering,
+        # false under round 2's (this file's current ordering): the FULL
+        # (filesystem-inclusive) filter, and the ENFORCEMENT message
+        # reporting it, are both produced by `apply_capability_enforcement`
+        # AFTER loading, specifically because attempting the full filter any
+        # earlier is what broke plugin loading (see `apply_preimport_
+        # enforcement`'s own docstring). By the time this message is
+        # constructed, the plugin's own module-level code and `__init__`
+        # HAVE already run, and reproduced directly (round 3): that code can
+        # reassign `enforcement.apply_capability_enforcement` itself (or
+        # poison `sys.modules["pyseccomp"]`) before this call happens, so
+        # even this "first, genuine" message can report a fabricated
+        # `applied=True` with `require_enforcement=True` silently defeated -
+        # not via forging the *message*, but via corrupting what produces
+        # it. `_child_main` now captures a reference to `apply_capability_
+        # enforcement` before loading, which closes the specific
+        # module-attribute version of this (round 3's own mitigation), but
+        # not the deeper `sys.modules` version - see KI-109's own extended
+        # text. What THIS comment's own logic still correctly defends
+        # against is a *second*, independently-forged ENFORCEMENT message a
+        # plugin sends afterward via its own `import protocol` - that
+        # remains real and worth keeping, just narrower than originally
+        # claimed.
         if not applied and not enforcement_reported[0]:
             enforcement_reported[0] = True
             if require_enforcement:
@@ -606,33 +622,79 @@ def _child_main(
     is invoked, after loading.
 
     `require_enforcement` (from `PluginRegistry.register()`, threaded
-    through `run_isolated`) is checked HERE, inside the child, right after
-    `apply_capability_enforcement`'s real result comes back — which is
-    necessarily *after* `_load_plugin_instance`, since knowing whether the
-    full (filesystem-inclusive) filter actually installs requires
-    attempting the install, and attempting it any earlier is exactly what
-    broke loading above. **The guarantee this gives is narrower than "the
-    plugin never runs at all": it guarantees the plugin's own protocol
-    method (`import_`/`export`/etc. — the operation the capability model is
-    actually about) never runs without a genuinely-installed full filter.
-    The plugin's module import and `__init__` still run first, under only
-    `apply_preimport_enforcement`'s narrower network/floor-only filter —
-    same residual (KI-109) as the non-required case.** Round-1 review
-    found and fixed a real bug in a naive version of this idea: putting the
-    check only in the parent's `_handle_one_message` can make the caller's
-    `run_isolated()` raise promptly, but doesn't stop this already-running
-    child process from continuing on its own to call the plugin's protocol
-    method regardless — reproduced taking over 3 seconds of fully
-    unenforced execution before `run_isolated`'s own
+    through `run_isolated`) is checked twice: once right after
+    `apply_preimport_enforcement`, still before `_load_plugin_instance`
+    runs (round-3 review finding, M4 Workstream 7 — round 2's version only
+    checked after loading, missing the narrower pre-import filter's own
+    "did this even install" outcome entirely, per `apply_preimport_
+    enforcement`'s own then-`None` return), and again after
+    `apply_capability_enforcement`'s real result comes back, necessarily
+    *after* `_load_plugin_instance` since knowing whether the full
+    (filesystem-inclusive) filter actually installs requires attempting
+    the install, and attempting it any earlier is exactly what broke
+    loading (see `apply_preimport_enforcement`'s own docstring). **The
+    guarantee this gives is narrower than "the plugin never runs at all":
+    it guarantees the plugin's own protocol method (`import_`/`export`/etc.
+    — the operation the capability model is actually about) never runs
+    without a genuinely-installed full filter — AGAINST A NON-ADVERSARIAL
+    FAILURE to install it (a container's own outer seccomp profile
+    blocking the install, missing libseccomp, an unresolvable syscall
+    name). It is NOT a guarantee against a plugin whose own module-level
+    code or `__init__` actively tries to defeat this check — reproduced
+    directly (round 3): a plugin can reassign `enforcement.apply_
+    capability_enforcement` itself (or `sys.modules["pyseccomp"]`, or any
+    other process-global Python state this check depends on) during
+    `_load_plugin_instance`, before this function ever calls it, making a
+    completely unenforced call report `applied=True`. Capturing
+    `_apply_capability_enforcement` as a local variable BEFORE `_load_
+    plugin_instance` runs (below) closes the specific, easiest version of
+    this — reassigning the module attribute no longer matters once this
+    function holds its own reference to the original function object — but
+    NOT the deeper version (poisoning `sys.modules["pyseccomp"]` before
+    that captured function's own body does its own fresh `import
+    pyseccomp`), which needs a captured reference to the resolved *module*
+    too, not just the function — not done this round, see KI-109's own
+    extended text for why. The module import/constructor phase remaining
+    unenforced except for `apply_preimport_enforcement`'s own narrower
+    network/floor-only filter is the same disclosed residual (KI-109) as
+    the non-required case, now with this additional escalation folded in.
+    Round-1 review found and fixed a real bug in a naive version of this
+    idea: putting the check only in the parent's `_handle_one_message` can
+    make the caller's `run_isolated()` raise promptly, but doesn't stop
+    this already-running child process from continuing on its own to call
+    the plugin's protocol method regardless — reproduced taking over 3
+    seconds of fully unenforced execution before `run_isolated`'s own
     `process.join(timeout=5)`/`terminate()` eventually caught up. This
-    child-side check closes that: the child itself refuses to invoke the
-    protocol method when required enforcement didn't apply, rather than
-    relying on the parent to notice and terminate it after the fact. The
-    parent's own copy of this check, unchanged, still exists as a second
-    layer that also gives the caller a fast, unambiguous failure without
-    waiting on this child to report FAILED and exit on its own.
+    child-side check closes that (for the non-adversarial case): the child
+    itself refuses to invoke the protocol method when required enforcement
+    didn't apply, rather than relying on the parent to notice and
+    terminate it after the fact. The parent's own copy of this check,
+    unchanged, still exists as a second layer that also gives the caller a
+    fast, unambiguous failure without waiting on this child to report
+    FAILED and exit on its own.
     """
-    enforcement.apply_preimport_enforcement(capabilities)
+    # Captured BEFORE _load_plugin_instance runs (round-3 review finding):
+    # a plugin's own module-level code, once it starts running, could
+    # otherwise reassign enforcement.apply_capability_enforcement itself
+    # (a plain module attribute _child_main would then look up fresh) to
+    # fake a successful install - calling this captured reference instead
+    # closes that specific attack, since reassigning the module's own
+    # attribute afterward no longer affects a name already bound here.
+    _apply_capability_enforcement = enforcement.apply_capability_enforcement
+
+    preimport_result = enforcement.apply_preimport_enforcement(capabilities)
+    if require_enforcement and not preimport_result.applied:
+        _safe_send_failed(
+            child_conn,
+            PluginError(
+                f"OS-level capability enforcement was required but the pre-import filter "
+                f"did not apply: {preimport_result.reason}. Refusing to load the plugin "
+                "(require_enforcement=True) rather than proceed with network/the "
+                "process-isolation floor unenforced even before the plugin's own module "
+                "runs (ADR-0051)."
+            ),
+        )
+        return
 
     try:
         plugin_instance = _load_plugin_instance(entry_point_name)
@@ -650,7 +712,7 @@ def _child_main(
     # registration-time warning can only predict this, not guarantee it —
     # e.g. a container's own outer seccomp profile can block installing a
     # filter even when pyseccomp/libseccomp are both present).
-    enforcement_result = enforcement.apply_capability_enforcement(capabilities)
+    enforcement_result = _apply_capability_enforcement(capabilities)
     try:
         protocol.send_enforcement(child_conn, enforcement_result.applied, enforcement_result.reason)
     except Exception:  # noqa: BLE001 - the pipe itself is gone; nothing left to report to

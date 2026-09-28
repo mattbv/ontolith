@@ -253,6 +253,22 @@ def _install_seccomp_filter(denied: list[str]) -> EnforcementResult:
         import errno
 
         syscall_filter = seccomp.SyscallFilter(defaction=seccomp.ALLOW)
+        try:
+            # CTL_TSYNC: apply this filter to every thread in the process,
+            # not just the one that calls load() (security review round 3
+            # finding). libseccomp's own TSYNC default is off, and a filter
+            # with no TSYNC only binds the calling thread - a plugin's own
+            # module-level code could otherwise start a thread before this
+            # filter installs, and that thread would keep running under
+            # only whatever filter existed when IT started, unaffected by
+            # anything installed afterward on the main thread. Best-effort,
+            # same posture as everything else here: an older libseccomp
+            # build without TSYNC support fails this call, not the whole
+            # filter installation.
+            syscall_filter.set_attr(seccomp.Attr.CTL_TSYNC, 1)
+        except Exception:  # nosec B110 - TSYNC unsupported on this libseccomp build;
+            # the filter still applies to the calling thread either way.
+            pass
         # Rules are matched per-architecture; seccomp_init only registers
         # the running process's native one. On x86_64 (by far the common
         # case), a 32-bit compat syscall (int 0x80) or an x32 one
@@ -288,7 +304,7 @@ def _install_seccomp_filter(denied: list[str]) -> EnforcementResult:
     return EnforcementResult(applied=True, reason=None)
 
 
-def apply_preimport_enforcement(capabilities: PluginCapabilities) -> None:
+def apply_preimport_enforcement(capabilities: PluginCapabilities) -> EnforcementResult:
     """Best-effort install of a NARROW seccomp filter before
     `_load_plugin_instance` ever runs — before the plugin's own module is
     imported or constructed at all (round-2 review finding, M4 Workstream
@@ -321,17 +337,31 @@ def apply_preimport_enforcement(capabilities: PluginCapabilities) -> None:
     does not change that timing at all. The corresponding gap (a
     `filesystem=False` plugin's own malicious import-time code can still
     read/write files during loading, same as before either fix) remains
-    open — see KI-109.
+    open — see KI-109, extended (round 3) to cover a materially worse
+    escalation than "filesystem is merely unenforced during import": that
+    same window is also where a plugin's own code can tamper with the
+    Python-level state `apply_capability_enforcement` itself depends on
+    (reassigning it as a module attribute, or poisoning `sys.modules
+    ["pyseccomp"]`) to make the LATER, post-import call falsely report
+    success too — see `_child_main`'s own docstring for the concrete
+    reproduction and the partial mitigation (capturing a function
+    reference before load) this round adds.
 
-    Never raises, and never reports its own `EnforcementResult` to the
-    parent — it's a strict subset of what `apply_capability_enforcement`'s
-    own result (for the same call) already reports; the parent only needs
-    one enforcement-status signal per call, not two overlapping ones.
+    Returns its own `EnforcementResult` (round-3 review finding — this
+    used to return `None`): `_child_main` checks it under
+    `require_enforcement` before `_load_plugin_instance` ever runs, since
+    at that point no plugin code has executed yet and the result is fully
+    trustworthy. Not sent to the parent as a separate protocol message
+    either way — it's a strict subset of what `apply_capability_
+    enforcement`'s own result (for the same call) already reports there.
+
+    Never raises - degrades to `EnforcementResult(applied=False, ...)` the
+    same way `apply_capability_enforcement` does.
     """
     denied = list(_PROCESS_ISOLATION_SYSCALLS)
     if not capabilities.network:
         denied.extend(_NETWORK_SYSCALLS)
-    _install_seccomp_filter(denied)
+    return _install_seccomp_filter(denied)
 
 
 def apply_capability_enforcement(capabilities: PluginCapabilities) -> EnforcementResult:

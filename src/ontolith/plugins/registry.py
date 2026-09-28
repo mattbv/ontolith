@@ -131,6 +131,29 @@ class PluginRegistry:
                 default-preserves-today's-behavior framing above — both
                 contradict).
 
+                **What this flag does NOT guarantee (round-3 review
+                finding, M4 Workstream 7):** it protects against a
+                NON-ADVERSARIAL failure to install the filter — a
+                container's outer seccomp profile blocking it, an
+                unresolvable syscall name, missing libseccomp. It is NOT a
+                guarantee against a plugin whose own module-level code or
+                `__init__` actively tries to defeat it: reproduced directly
+                — a plugin's own code, which necessarily runs before the
+                full (filesystem-inclusive) filter is even attempted (see
+                `sandbox.runner._child_main`'s own docstring for why),
+                can reassign `sandbox.enforcement.apply_capability_
+                enforcement` itself, or poison `sys.modules["pyseccomp"]`,
+                to make a completely unenforced call report success. This
+                round captured a function reference before loading to
+                close the specific module-attribute version of that attack,
+                but not the deeper `sys.modules` version — see KI-109's own
+                extended text. Treat `require_enforcement=True` as hardening
+                against misconfiguration and infrastructure limits, not as
+                a security boundary against a hostile plugin — the process
+                isolation boundary itself (a picklable-message IPC channel,
+                no live object graph reachable) is what defends against
+                that, unchanged by this flag either way.
+
         Returns:
             LoadedPlugin bound to a capability-scoped view.
 

@@ -12,29 +12,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 #### Fixed
 - Plugin sandbox (ADR-0051): a `network=False`/`filesystem=False` plugin's own module import and
   `__init__` ran with no seccomp filter installed at all — found by M4 Workstream 7's security
-  review. Round 1's own fix (install the full filter before loading) broke every `filesystem=False`
-  plugin's own loading on Linux (`entry_points()`/module import need real filesystem reads
-  regardless of what the plugin declares — reproduced as a genuine CI failure on
-  `required-fields-validator`, the one shipped reference plugin with default, i.e. `filesystem=
-  False`, capabilities); round 2 corrected it with a narrower pre-import filter
-  (`apply_preimport_enforcement`) denying only network and the process-isolation floor before
-  loading, leaving filesystem enforcement exactly where it always was (immediately before the
-  plugin's own protocol method call) — closes the network-exfiltration-during-import vector fully;
-  filesystem-during-import remains a disclosed residual (**KI-109**). Also added `PluginRegistry.
-  register(..., require_enforcement: bool = False)`: `True` refuses registration when OS-level
-  enforcement can't even be attempted, and makes the isolated child itself refuse to invoke the
-  plugin's protocol method if a specific call-time attempt to install the filter fails — round 1's
-  own version of this check lived only in the parent process, which couldn't stop an
-  already-spawned child from running the plugin regardless (reproduced: over 3 seconds of fully
-  unenforced execution before the parent's timeout-based cleanup caught up); round 2 moved the
-  check into the child itself. The always-on process-isolation floor also gained `pidfd_open`/
-  `pidfd_getfd`/`pidfd_send_signal`/`kcmp`/`process_madvise`/`process_mrelease` (`pidfd_getfd`'s own
-  duplicate-fd attack requires the same permission check `ptrace` itself does, but wasn't denied).
-  Filed **KI-106**
-  (`filesystem=True` subsumes the storage capability ceiling entirely), **KI-107** (no credential
-  expiry), **KI-108** (migration audit trail / reversal), **KI-110** (`require_enforcement` can be
-  satisfied by a partially-installed filter), **KI-111** (further floor gaps: the kill syscall
-  family, inherited environment secrets, other unconsidered syscalls) — none fixed this pass.
+  review, fixed and corrected across three review rounds. Round 1's own fix (install the full
+  filter before loading) broke every `filesystem=False` plugin's own loading on Linux
+  (`entry_points()`/module import need real filesystem reads regardless of what the plugin
+  declares — reproduced as a genuine CI failure on `required-fields-validator`, the one shipped
+  reference plugin with default, i.e. `filesystem=False`, capabilities); round 2 corrected it with
+  a narrower pre-import filter (`apply_preimport_enforcement`) denying only network and the
+  process-isolation floor before loading, leaving filesystem enforcement exactly where it always
+  was (immediately before the plugin's own protocol method call) — closes the
+  network-exfiltration-during-import vector against a *non-adversarial* failure to enforce.
+  **Round 3 found and reproduced end to end that a plugin's own module-level code can defeat this
+  adversarially**: since that code necessarily runs before the full filter is even attempted, it
+  can reassign `enforcement.apply_capability_enforcement` itself (a plain module attribute) to
+  fake a successful install, completely silencing `require_enforcement=True` with no exception and
+  no warning — reproduced with a real installed entry point, no exception raised, a real file
+  written despite `filesystem=False`. Fixed the specific module-attribute variant: `_child_main`
+  now captures the real function as a local reference *before* calling `_load_plugin_instance`, so
+  reassigning the module's own attribute afterward no longer matters. A deeper variant (poisoning
+  `sys.modules["pyseccomp"]`, which the captured function's own body still re-imports fresh each
+  call) is **not** closed this pass — `require_enforcement` is now documented everywhere as
+  protection against a non-adversarial enforcement failure, not a security boundary against a
+  hostile plugin's own code; the process/IPC isolation boundary itself (no live object graph
+  reachable) is what defends against that, unchanged either way. Also added `CTL_TSYNC` to every
+  installed filter (a filter with no TSYNC only binds the thread that calls `load()`; a plugin
+  starting its own thread before the filter installs could otherwise keep running unfiltered on
+  it) and moved `apply_preimport_enforcement`'s own outcome check to before `_load_plugin_instance`
+  runs (it used to return `None` and go unchecked, meaning `require_enforcement` didn't catch a
+  failure of even the narrower pre-import filter). Extended **KI-109** with this full escalation.
+
+  Separately, added `PluginRegistry.register(..., require_enforcement: bool = False)`: `True`
+  refuses registration when OS-level enforcement can't even be attempted, and makes the isolated
+  child itself refuse to invoke the plugin's protocol method if a specific call-time attempt to
+  install the filter fails — round 1's own version of this check lived only in the parent process,
+  which couldn't stop an already-spawned child from running the plugin regardless (reproduced: over
+  3 seconds of fully unenforced execution before the parent's timeout-based cleanup caught up);
+  round 2 moved the check into the child itself, verified this round by a behavioral test after a
+  purely structural (AST line-order) test was shown to pass even with the fix's own `return`
+  statement removed.
+
+  The always-on process-isolation floor also gained `pidfd_open`/`pidfd_getfd`/`pidfd_send_signal`/
+  `kcmp`/`process_madvise`/`process_mrelease` (`pidfd_getfd`'s own duplicate-fd attack requires the
+  same permission check `ptrace` itself does, but wasn't denied), pinned by a new
+  platform-independent regression test.
+
+  A plugin's `manifest.name` is self-declared, not a unique identifier this project controls — a
+  second, distinct entry point declaring the same name (and the same computed
+  `effective_capability`) silently rebound to the existing principal, inheriting its `trust_level`
+  and misattributing writes in the audit trail. Now records the entry point on the principal's own
+  metadata and refuses a rebind when it differs — a bug fix closing a silent-rebind footgun, not a
+  documented contract change; a principal created before this fix is grandfathered.
+
+  `ci.yml` had no top-level `permissions:` block — added `contents: read` (least privilege; no job
+  needs more, matching `security.yml`'s own existing scoping).
+
+  Filed **KI-106** (`filesystem=True` subsumes the storage capability ceiling entirely), **KI-107**
+  (no credential expiry), **KI-108** (migration audit trail / reversal), **KI-110**
+  (`require_enforcement` can be satisfied by a partially-installed filter that silently skips an
+  unresolved syscall name), **KI-111** (further pre-existing floor gaps: the kill syscall family
+  entirely unrestricted, the child inheriting the parent's full environment including secrets,
+  other unconsidered syscalls) — none fixed this pass.
 - `tests/benchmarks/test_traversal.py`'s `propose` + policy eval + commit budget row (SPEC §9,
   Implementation Plan §9, p95 < 50 ms) had no valid benchmark. `test_bench_write_assert_literal`
   stood in for it, but repeated `assert_literal` calls on the *same* `(subject, predicate)` with a
