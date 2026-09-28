@@ -37,6 +37,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -891,6 +892,221 @@ class TestRequireEnforcement:
         assert require_enforcement_check_line < protocol_method_call_line, (
             "require_enforcement is checked AFTER the plugin's protocol method is already "
             "called - the check must come first for it to mean anything"
+        )
+
+    def test_child_main_never_invokes_the_protocol_method_when_required_enforcement_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Behavioral proof the AST test above can't provide (round-3
+        review finding): comparing line numbers only checks TEXTUAL order,
+        not actual control flow - reproduced directly: removing just the
+        `return` from _child_main's own require_enforcement branch (so the
+        function falls through to call the plugin anyway after sending
+        FAILED) left the AST-ordering test above passing unchanged, since
+        the `if` and the `getattr(...)` call are still in the same
+        relative source order. This test instead runs _child_main for
+        real, with every dependency it touches monkeypatched to a
+        controlled double, and asserts the plugin's own method was never
+        actually invoked - a `return`-less branch would fail this
+        immediately (mutation-tested: confirmed failing against the exact
+        no-return mutant described above before this test was added)."""
+        method_calls: list[str] = []
+
+        class _FakePlugin:
+            def export(self, *args: object, **kwargs: object) -> str:
+                method_calls.append("export")
+                return "ran"
+
+        class _FakeConn:
+            def __init__(self) -> None:
+                self.sent: list[tuple[Any, ...]] = []
+
+            def send(self, message: tuple[Any, ...]) -> None:
+                self.sent.append(message)
+
+        monkeypatch.setattr(runner, "_load_plugin_instance", lambda name: _FakePlugin())
+        monkeypatch.setattr(
+            enforcement,
+            "apply_preimport_enforcement",
+            lambda caps: enforcement.EnforcementResult(applied=True, reason=None),
+        )
+        monkeypatch.setattr(
+            enforcement,
+            "apply_capability_enforcement",
+            lambda caps: enforcement.EnforcementResult(applied=False, reason="simulated"),
+        )
+
+        conn = _FakeConn()
+        runner._child_main(
+            conn,
+            "irrelevant-entry-point",
+            "export",
+            PluginCapabilities(),
+            (),
+            {},
+            require_enforcement=True,
+        )
+
+        assert method_calls == [], "the plugin's own protocol method must never run"
+        kinds = [message[0] for message in conn.sent]
+        assert protocol.FAILED in kinds, f"expected a FAILED message, got {kinds}"
+        assert protocol.DONE not in kinds, f"a DONE message means the plugin actually ran: {kinds}"
+
+    def test_capturing_the_enforcement_function_before_load_defeats_the_attribute_attack(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Round-3 review finding, reproduced end to end in this session
+        against a real installed entry point before this fix, and again
+        after (confirming the fix): a plugin's own module-level code, which
+        necessarily runs before the full filter is ever attempted (see
+        `apply_preimport_enforcement`'s own docstring for why), could
+        reassign `enforcement.apply_capability_enforcement` itself to fake
+        a successful install - completely defeating `require_enforcement=
+        True` with no exception and no warning. `_child_main` now captures
+        the real function as a local variable BEFORE calling `_load_
+        plugin_instance`, closing the specific module-attribute version of
+        this attack: reassigning the module's own attribute during load no
+        longer matters once `_child_main` already holds a reference to the
+        original function object.
+
+        The module attribute is monkeypatched to a SAFE, no-op fake
+        ("genuine" result: applied=False, side-effect-free on every
+        platform) before `_child_main` ever runs - standing in for the real
+        `apply_capability_enforcement` without this test ever calling the
+        real one, which on a real Linux+libseccomp host would genuinely
+        install a restrictive seccomp filter directly in the pytest worker
+        process itself. A loaded filter only ever gets MORE restrictive and
+        can never be removed (standard Linux seccomp-BPF semantics; see
+        `TestRealSeccompEnforcementOnLinux`'s own docstring above, which
+        runs each of its own probes in a dedicated subprocess for exactly
+        this reason) - permanently sandboxing the shared worker process for
+        the rest of the test session would corrupt every later test, not
+        just fail this one. An earlier version of this test called the real
+        function via this same capture-based reasoning and reproduced
+        exactly that corruption on real Linux CI (`PermissionError:
+        Operation not permitted` from pytest's own tmp-dir/capture
+        machinery, in every test after this one in the same worker)."""
+
+        def _genuine_apply_capability_enforcement(
+            caps: PluginCapabilities,
+        ) -> enforcement.EnforcementResult:
+            return enforcement.EnforcementResult(applied=False, reason="genuine, pre-attack result")
+
+        def _forged_apply_capability_enforcement(
+            caps: PluginCapabilities,
+        ) -> enforcement.EnforcementResult:
+            return enforcement.EnforcementResult(applied=True, reason=None)
+
+        def _malicious_load(name: str) -> object:
+            # Simulates a plugin's own module-level code reassigning the
+            # module attribute during its own import/construction - never
+            # touches the real, OS-level enforcement functions.
+            enforcement.apply_capability_enforcement = _forged_apply_capability_enforcement
+
+            class _EvilPlugin:
+                def export(self, *args: object, **kwargs: object) -> str:
+                    return "ran despite filesystem=False"
+
+            return _EvilPlugin()
+
+        class _FakeConn:
+            def __init__(self) -> None:
+                self.sent: list[tuple[Any, ...]] = []
+
+            def send(self, message: tuple[Any, ...]) -> None:
+                self.sent.append(message)
+
+        monkeypatch.setattr(
+            enforcement, "apply_capability_enforcement", _genuine_apply_capability_enforcement
+        )
+        monkeypatch.setattr(runner, "_load_plugin_instance", _malicious_load)
+        monkeypatch.setattr(
+            enforcement,
+            "apply_preimport_enforcement",
+            lambda caps: enforcement.EnforcementResult(applied=True, reason=None),
+        )
+
+        conn = _FakeConn()
+        runner._child_main(
+            conn,
+            "irrelevant-entry-point",
+            "export",
+            PluginCapabilities(),
+            (),
+            {},
+            require_enforcement=True,
+        )
+        kinds = [message[0] for message in conn.sent]
+        assert protocol.FAILED in kinds, (
+            "the captured function reference should still report the genuine, pre-attack "
+            f"result, not the plugin's forged one - got {kinds}"
+        )
+        assert protocol.DONE not in kinds, f"a DONE message means the attack succeeded: {kinds}"
+
+    def test_require_enforcement_refuses_before_loading_when_the_preimport_filter_fails(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """MEDIUM-1 (round-3 review finding): apply_preimport_enforcement
+        used to return None, so its own outcome was never checked - a
+        container-profile-blocked install at THIS earlier point (the case
+        require_enforcement was built for) let the plugin's module import/
+        constructor run with no seccomp filter at all, undetected. Now
+        returns its own EnforcementResult, checked here before
+        _load_plugin_instance ever runs - the earliest point at which no
+        plugin code has executed and the result is fully trustworthy.
+
+        apply_capability_enforcement is ALSO explicitly mocked here (round-4
+        review finding), even though the code path under test never reaches
+        it - this test is safe today only because of the early `return`
+        right after the preimport check; without this mock, a regression of
+        that `return` would make this test silently call the REAL
+        apply_capability_enforcement in-process, which on real Linux CI
+        installs a genuine, permanent seccomp filter in the shared pytest
+        worker (the exact failure this file's own history already
+        includes). Mocking it here too means a future regression fails this
+        one test cleanly instead of corrupting the whole worker."""
+        load_calls: list[str] = []
+
+        class _FakeConn:
+            def __init__(self) -> None:
+                self.sent: list[tuple[Any, ...]] = []
+
+            def send(self, message: tuple[Any, ...]) -> None:
+                self.sent.append(message)
+
+        monkeypatch.setattr(
+            runner,
+            "_load_plugin_instance",
+            lambda name: load_calls.append(name) or object(),  # never expected to run
+        )
+        monkeypatch.setattr(
+            enforcement,
+            "apply_preimport_enforcement",
+            lambda caps: enforcement.EnforcementResult(applied=False, reason="simulated"),
+        )
+        monkeypatch.setattr(
+            enforcement,
+            "apply_capability_enforcement",
+            lambda caps: enforcement.EnforcementResult(applied=False, reason="should never run"),
+        )
+
+        conn = _FakeConn()
+        runner._child_main(
+            conn,
+            "irrelevant-entry-point",
+            "export",
+            PluginCapabilities(),
+            (),
+            {},
+            require_enforcement=True,
+        )
+
+        assert load_calls == [], "the plugin must never be loaded at all in this case"
+        kinds = [message[0] for message in conn.sent]
+        assert protocol.FAILED in kinds, f"expected a FAILED message, got {kinds}"
+        assert protocol.ENFORCEMENT not in kinds, (
+            "this refusal happens before the (post-load) ENFORCEMENT message would ever be "
+            f"sent - got {kinds}"
         )
 
 

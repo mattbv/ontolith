@@ -576,8 +576,8 @@ fixed in the same commit as this record, no code touched.
   list above for the precise blocking call.
 
 ## Update (2026-09-27): security review found a real bypass of the Linux enforcement itself (M4
-Workstream 7) — fixed across two rounds, round 1's own fix having broken CI; further gaps
-disclosed/filed, not fixed
+Workstream 7) — fixed across three rounds (round 1's own fix broke CI; round 2's own fix could
+itself be defeated by the plugin it guards against); further gaps disclosed/filed, not fixed
 
 **Round 1 found, and attempted to fix, two HIGH issues — round 1's own fix for the first one broke
 Linux CI and had to be redesigned in round 2 (below); described here in its final, corrected form.**
@@ -662,6 +662,126 @@ this fix, not introduced by it — filed as **KI-111**, not fixed this pass.
 installed filter, since an unresolved syscall name is silently skipped while `EnforcementResult.
 applied` still reports `True`. Not fixed this pass.
 
+**Round 3 found round 2's own `require_enforcement` fix could itself be defeated by the exact
+plugin it exists to guard against — reproduced end to end, partially fixed.**
+
+**HIGH — a plugin's own module-level code can reassign `enforcement.apply_capability_enforcement`
+itself, silently defeating `require_enforcement=True` with no exception and no warning.** Round 2's
+fix checked `apply_capability_enforcement`'s real, call-time result — genuinely correct reasoning
+for a *non-adversarial* failure (a container's outer seccomp blocking the install). But that result
+comes from a plain module-level function, looked up fresh (`enforcement.apply_capability_
+enforcement(capabilities)`) *after* `_load_plugin_instance` has already run the plugin's own
+untrusted module import and `__init__` — necessarily, since attempting the full filter any earlier
+is exactly what broke loading in round 1. A plugin's own code, once running, can do:
+```python
+import ontolith.plugins.sandbox.enforcement as enf
+enf.apply_capability_enforcement = lambda caps: enf.EnforcementResult(applied=True, reason=None)
+```
+and the subsequent lookup picks up the forged function instead of the real one. Reproduced directly
+with a real installed entry point: `run_isolated(..., require_enforcement=True)` returned
+successfully with no exception and no warning, and the plugin's own `export()` wrote a real file to
+disk despite `capabilities.filesystem=False` (the default). The stale trust comment in
+`_handle_one_message`'s own ENFORCEMENT-message handling — which claimed the first ENFORCEMENT
+message "cannot have tampered with or fabricated," true under round 1's ordering — was also
+corrected, since round 2's own reordering made that claim false without anyone noticing at the
+time.
+
+**Fixed, round 3, the single most literal reproduced variant** — **and round 4 found this fix
+doesn't meaningfully narrow the attack at all, correcting round 3's own overclaim that it did**:
+`_child_main` captures a reference to the real `apply_capability_enforcement` function into a local
+variable *before* calling `_load_plugin_instance` — reassigning the module's own
+`apply_capability_enforcement` attribute afterward no longer affects a name this function already
+bound to the original object. Round 3 described this as closing "the specific module-attribute
+version" of the attack. Round 4 reproduced directly that it doesn't: the captured function's own
+body still resolves every name it depends on (`_install_seccomp_filter`, `EnforcementResult`,
+`_FILESYSTEM_SYSCALLS`, `_NETWORK_SYSCALLS`, `_PROCESS_ISOLATION_SYSCALLS`) fresh from the same
+shared, mutable `enforcement` module namespace on every call — a plugin reassigning
+`enforcement._install_seccomp_filter` (verified: `enforcement._install_seccomp_filter = lambda
+denied: enforcement.EnforcementResult(applied=True, reason=None)`) defeats the *captured* reference
+exactly as completely as reassigning `apply_capability_enforcement` itself would have. Capturing the
+outer function object protects nothing about its inner dependencies, which live in the identical
+module `__dict__` regardless of which name a caller used to reach the function. **In practice, this
+capture defends only against the single most naive reproduction, not the underlying class of
+attack** — kept because it's free and harmless, not because it materially changes the threat model.
+Verified by a new regression test that reproduces the originally-found attack (a monkeypatched
+`_load_plugin_instance` standing in for a plugin's own malicious import, using safe fakes throughout
+— see this Update's own CI-corruption paragraph below) and confirms the captured reference still
+reports the intended result for *that one* reproduction; mutation-tested by reverting to the
+unprotected module-attribute lookup and confirming exactly that test fails. The test does not (and,
+given the finding above, cannot meaningfully) prove anything broader.
+
+**Not fixed — the real gap, unchanged by round 3's fix, folded into KI-109's own extended text**: no
+Python-level capture of any kind — the function itself, the `pyseccomp` module, or anything else
+resolvable via `sys.modules`/module attributes — can protect against code that already shares the
+same mutable process, module, and interpreter state. `require_enforcement` is now documented
+everywhere it's mentioned — `registry.py`, `runner.py`, this ADR — as protection against a
+non-adversarial enforcement failure, not a security boundary against a plugin actively trying to
+defeat it. The mitigating context, unchanged from round 3's own framing: a plugin capable of this
+already has full, unsandboxed access during its own registration-time `plugin_class()` call in the
+parent process (this ADR's own pre-existing Negative bullet) — a malicious plugin author already
+has more to work with there than this bypass adds; nothing here makes the actual security posture
+worse, only round 3's own documentation of what had changed was inaccurate, corrected here.
+
+**MEDIUM (round 3) — `apply_preimport_enforcement` used to return `None`, so its own outcome was
+never checked at all.** The narrower pre-import filter (network + floor, installed before loading)
+could itself silently fail to install — exactly the container-profile-blocked scenario
+`require_enforcement` exists for — and nothing would notice, since there was nothing to check.
+Fixed: it now returns its own `EnforcementResult`, checked in `_child_main` before `_load_plugin_
+instance` ever runs (the earliest point at which no plugin code has executed and the result is
+fully trustworthy) — `require_enforcement=True` now refuses before loading if even this narrower
+filter didn't apply, not only after the full filter's own later attempt.
+
+**MEDIUM (round 3) — the AST-based "structural proof" test from round 2 didn't actually prove
+anything about control flow.** It compared line numbers only: the `require_enforcement` check's
+line number came before the protocol-method call's line number in source, but nothing checked that
+the check's own branch actually returned. Reproduced: removing just the `return` statement from
+that branch (falling through to call the plugin anyway after sending FAILED) left the AST test
+passing unchanged. Replaced with a behavioral test that runs `_child_main` for real with every
+dependency monkeypatched to a controlled double, and asserts the plugin's own method was never
+actually invoked — confirmed this one fails against the exact no-return mutant that fooled the AST
+test.
+
+**Also added, round 3: `CTL_TSYNC`** on every installed filter. libseccomp's own TSYNC default is
+off, meaning a filter with no TSYNC only binds the thread that calls `load()` — a plugin's own code
+starting a thread before the filter installs could keep that thread running under whatever (weaker
+or absent) filter existed when it started, unaffected by anything installed on the main thread
+afterward. Verified the exact API (`pyseccomp.Attr.CTL_TSYNC`, `SyscallFilter.set_attr`) against
+the pinned `pyseccomp==0.1.2`'s own source before adding it, since this can't be tested on a
+non-Linux development machine either. Not independently reproduced as an attack this round (would
+need a real Linux host) — added as a genuine, verified-correct hardening step regardless.
+
+**Round 4 found round 3's own PR had itself shipped a CI-breaking regression, unrelated to the
+security substance, in its own new test.** `test_capturing_the_enforcement_function_before_load_
+defeats_the_attribute_attack` called the REAL, captured `apply_capability_enforcement` directly
+in-process (not through a spawned child) to prove the captured reference survives a later
+reassignment. On real Linux+libseccomp CI, calling the real function genuinely installs a
+restrictive seccomp filter — and a loaded filter only ever gets more restrictive and can never be
+removed (`TestRealSeccompEnforcementOnLinux`, a few classes above in the same test file, already
+documents exactly this hazard and runs each of its own probes in a dedicated subprocess for exactly
+this reason). This one bypassed that discipline, permanently sandboxing the shared pytest worker
+process for the rest of the test session — every test after it in the same worker started failing
+with `PermissionError: Operation not permitted` from pytest's own tmp-dir/capture machinery.
+**Fixed**: the module attribute is now monkeypatched to a safe, side-effect-free fake standing in
+for "the real function" before `_child_main` ever runs, so the test never touches actual OS-level
+enforcement on any platform. Every other `_child_main`-calling test in the file was re-checked by
+hand for the same class of risk and confirmed already safe (fully mocked, or a capture-without-
+calling that has no side effect regardless of what it captures).
+
+**Round 4 also found one of those now-safe tests is safe only by a coincidence of control flow, not
+by its own mocking — LOW.** `test_require_enforcement_refuses_before_loading_when_the_preimport_
+filter_fails` never mocks `apply_capability_enforcement` at all; it's safe today only because the
+function under test returns before ever reaching that call. If that early `return` ever regresses,
+this test would silently start installing a real filter in the pytest worker again — the exact
+failure mode above, recurring. Fixed by adding an explicit mock there too, so a future regression
+fails this one test cleanly instead of corrupting the whole worker.
+
+**Round 4 also found a real gap in `CTL_TSYNC`'s own reporting — folded into KI-110, not filed
+separately.** If `set_attr(CTL_TSYNC, ...)` itself raises (an older libseccomp build without TSYNC
+support), the filter still loads on the calling thread only, and `apply_capability_enforcement`
+still reports `applied=True` — a thread the plugin started before the filter installed stays
+unfiltered, invisible to `require_enforcement`. Same shape as KI-110's own existing scope (a
+partially-installed filter that still reports full success); not a new KI.
+
 **Disclosed, not fixed — filed as KI-106: `capabilities.filesystem=True` subsumes
 `granted_capability`'s own storage ceiling entirely.** A plugin with `filesystem=True` (three of the
 four shipped reference plugins declare it) can open the KB's own on-disk file directly and write to it,
@@ -677,8 +797,8 @@ scoped it explicitly to the isolated call, cross-referencing the adjacent Negati
 already, correctly, documents the registration-time module-import/constructor phase as unsandboxed.
 
 Both CRITICALs from the 2026-09-20 Update were re-verified still closed at the start of this
-security review, before either remediation round above (reproduced both attacks directly against
-the fixed code — `restricted_loads` refuses a `__reduce__`-based RCE payload, and `_handle_one_
+security review, before any of the three remediation rounds above (reproduced both attacks directly
+against the fixed code — `restricted_loads` refuses a `__reduce__`-based RCE payload, and `_handle_one_
 message`'s allow-list refuses every non-allowlisted CALL on a real view, including `__setattr__`).
 
 ## References
@@ -688,8 +808,9 @@ message`'s allow-list refuses every non-allowlisted CALL on a real view, includi
   **KI-102** (new, the no-timeout follow-up above), **KI-103** (new, unrelated to plugin
   isolation itself — the `anyio`/`httpx2`/`httpcore2` `pip-audit` fix found while reviewing this ADR),
   **KI-106** (new, M4 Workstream 7's security review round 1 — `filesystem=True` subsumes the storage
-  capability ceiling), **KI-109** (new, round 2 — filesystem enforcement doesn't cover a plugin's own
-  import/construction phase), **KI-110** (new, round 2 — `require_enforcement` can be satisfied by a
+  capability ceiling), **KI-109** (new, round 2, extended round 3 — a plugin's own import/construction
+  phase can defeat enforcement for the rest of the call too, not just leave filesystem open during
+  loading), **KI-110** (new, round 2 — `require_enforcement` can be satisfied by a
   partially-installed filter), and **KI-111** (new, round 2 — further pre-existing process-isolation
   floor gaps: the kill syscall family, inherited environment secrets, other unconsidered syscalls) —
   see this ADR's own 2026-09-27 Update for all of the above

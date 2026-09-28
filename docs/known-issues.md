@@ -2285,25 +2285,64 @@ Not started. (a) Have `db migrate` optionally accept an `--author` (no existing 
 
 ---
 
-## KI-109 — A sandboxed plugin's own module import/constructor still runs with only network/process-isolation enforcement, not filesystem — even when `capabilities.filesystem=False`
+## KI-109 — A sandboxed plugin's own module import/constructor can defeat enforcement for the rest of the call too, not just leave filesystem open during loading
 
-**Severity:** Architecture gap — a real, disclosed residual, not fixed this pass
-**Milestone target:** Backlog — filed during M4 Workstream 7's security review, round 2
+**Severity:** Architecture gap — a real, disclosed residual; round 3 found it's worse than round 2's own framing, round 4 found round 3's own mitigation attempt doesn't help
+**Milestone target:** Backlog — filed during M4 Workstream 7's security review, round 2; extended rounds 3 and 4
 **SPEC reference:** SPEC §17 (Security model — "MUST deny undeclared access")
 
 ### Description
 
 Round 1 of this review's own remediation attempted to close this by installing the *full* enforcement filter (network + filesystem + process-isolation floor) before `_load_plugin_instance` ran at all. That broke every `filesystem=False` plugin's own loading on Linux+libseccomp: `entry_points()`'s metadata scan and `EntryPoint.load()`'s module import both need real filesystem reads regardless of what the plugin's own manifest declares, and `filesystem=False` is this project's own default (`required-fields-validator`, the one shipped reference plugin with default capabilities, failed to load in CI with `PluginError: Plugin entry point not found`). Reverted and replaced with `enforcement.apply_preimport_enforcement`, a narrower pre-import filter that only denies network (if declared `False`) and the always-on process-isolation floor — deliberately not filesystem, at any point before the plugin's own protocol method is called.
 
-The residual: a plugin's own module-level code and `__init__` can still read and write the filesystem freely during loading, even with `capabilities.filesystem=False` declared, on every platform including Linux. Filesystem enforcement remains exactly where it was before this whole review (installed in full immediately before the plugin's own protocol method is invoked) — this is not a new regression, but the review's own original goal (no plugin code runs with an unenforced capability, from its very first line) is only achieved for network and the process-isolation floor, not filesystem.
+**Round 2's own framing of the residual understated it.** Round 2 described this as: a plugin's own module-level code and `__init__` can still read and write the filesystem freely during loading, but filesystem enforcement for the *rest* of the call (the protocol method itself) remains exactly where it was, unaffected. **Round 3 reproduced directly that this second half is false**: because the plugin's own module-level code runs in the same interpreter, before the full filter is ever attempted, it can tamper with the Python-level state that `apply_capability_enforcement` itself depends on — reassigning `enforcement.apply_capability_enforcement` as a plain module attribute, or (not reproduced, but the same class of gap) poisoning `sys.modules["pyseccomp"]`, which that function's own body re-imports fresh on every call. A plugin doing this makes even the *post-load* enforcement attempt falsely report success, silently defeating both the ordinary advisory warning and `require_enforcement=True` for the entire rest of the call, not just the loading phase. Reproduced end to end: an installed entry point whose module-level code reassigns `apply_capability_enforcement` to always return `applied=True` ran to completion (including a real filesystem write) with `require_enforcement=True`, no exception, no warning.
+
+**Attempted, round 3 — and round 4 found this attempt doesn't meaningfully help, correcting round
+3's own overclaim.** `_child_main` captures a reference to the real `apply_capability_enforcement`
+function *before* calling `_load_plugin_instance`, so reassigning the module's own
+`apply_capability_enforcement` attribute afterward no longer affects the captured reference. Round 3
+described this as closing "the specific, reproduced module-attribute variant." **Round 4 reproduced
+directly that it doesn't**: the captured function's own body still resolves every name it depends on
+(`_install_seccomp_filter`, `EnforcementResult`, `_FILESYSTEM_SYSCALLS`, `_NETWORK_SYSCALLS`,
+`_PROCESS_ISOLATION_SYSCALLS`) fresh from the same shared, mutable `enforcement` module namespace on
+every call — reassigning `enforcement._install_seccomp_filter` (verified:
+`enforcement._install_seccomp_filter = lambda denied: enforcement.EnforcementResult(applied=True,
+reason=None)`) defeats the *captured* reference exactly as completely as reassigning
+`apply_capability_enforcement` itself would have. Capturing the outer function object protects
+nothing about its inner dependencies, which live in the identical module `__dict__` regardless of
+which name a caller used to reach the function. **In practice, this capture defends only against the
+single most naive reproduction — kept because it's free and harmless, not because it materially
+narrows the attack.** The `sys.modules["pyseccomp"]` variant this entry originally named is one
+instance of the same underlying gap, not a separate, deeper one — any module-level name the function
+touches is equally reachable. `require_enforcement` is documented everywhere as protecting against a
+*non-adversarial* failure to enforce (a container's own outer seccomp blocking it, missing
+libseccomp, an unresolvable syscall name) — not as a security boundary against a plugin actively
+trying to defeat it.
 
 ### Fix
 
-Not started. The real fix needs argument-filtered seccomp rules: allow `open`/`openat` in read-only mode (masking the flags argument against `O_WRONLY`/`O_RDWR`/`O_CREAT`) during the pre-import phase, while still denying every filesystem-mutation syscall (`unlink`, `rename`, `mkdir`, `chmod`, etc.) and write-mode opens outright — then the existing full filter, installed after loading, tightens further to deny reads too. This needs real Linux-specific seccomp argument-filter work this review deliberately didn't attempt, given the risk of another CI-breaking regression and the inability to test seccomp behavior at all on a non-Linux development machine (confirmed the hard way once this review). `openat2`'s flags sit in a struct seccomp can't inspect via a simple argument comparator, so it likely needs to stay fully denied in the pre-import phase regardless of read/write intent.
+Not started (round 3's function-reference capture is kept as a harmless no-op-cost step, not counted
+as progress on this issue — see above). The only real fix needs argument-filtered seccomp rules:
+allow `open`/`openat` in read-only mode (masking the flags argument against `O_WRONLY`/`O_RDWR`/
+`O_CREAT`) during the pre-import phase, while still denying every filesystem-mutation syscall
+(`unlink`, `rename`, `mkdir`, `chmod`, etc.) and write-mode opens outright — then the existing full
+filter, installed after loading, tightens further to deny reads too. Because the filter would then
+be installed *before* any plugin code runs at all, no Python-level tampering of any kind — not the
+function, not `pyseccomp`, not `sys.modules`, nothing this entry or its own fix could ever capture a
+reference to — would have anything left to defeat: a real OS-level, kernel-enforced filter can't be
+undone by userspace code once loaded, no matter what runs afterward in the same process. This needs
+real Linux-specific seccomp argument-filter work this review deliberately didn't attempt, given the
+risk of another CI-breaking regression (round 1's own experience) and the inability to test seccomp
+behavior at all on a non-Linux development machine. `openat2`'s flags sit in a struct seccomp can't
+inspect via a simple argument comparator, so it likely needs to stay fully denied in the pre-import
+phase regardless of read/write intent. There is no smaller, partial hardening step worth doing
+instead — round 4 confirmed that capturing more references (even the `pyseccomp` module itself, not
+just `apply_capability_enforcement`) doesn't close this class of gap, only the full pre-load
+kernel-level filter does.
 
 ---
 
-## KI-110 — `require_enforcement`'s guarantee can be satisfied by a partially-installed filter; an unresolved syscall name is silently treated as "still applied"
+## KI-110 — `require_enforcement`'s guarantee can be satisfied by a partially-installed filter; an unresolved syscall name or a failed TSYNC is silently treated as "still applied"
 
 **Severity:** Architecture gap — narrows what `require_enforcement=True` actually guarantees
 **Milestone target:** Backlog — filed during M4 Workstream 7's security review, round 2
@@ -2313,9 +2352,11 @@ Not started. The real fix needs argument-filtered seccomp rules: allow `open`/`o
 
 `enforcement.py`'s filter-install loop deliberately skips any syscall name libseccomp/the running kernel doesn't recognize, and still returns `applied=True` as long as the overall `SyscallFilter.load()` call itself succeeds — this is a documented, deliberate "best-effort denial of everything resolvable beats aborting the whole filter over one unresolvable name" choice, reasonable for the *default* (`require_enforcement=False`) advisory posture. But it means `require_enforcement=True`'s "refuse the call rather than proceed unenforced" guarantee is weaker than it reads: if the installed libseccomp/kernel doesn't recognize one of the newer syscall names this floor denies (`pidfd_getfd`, `process_mrelease`, etc. — recent kernel additions an older libseccomp build may predate), that specific syscall is silently left allowed (`defaction=ALLOW` is the filter's own default action) while `EnforcementResult.applied` still reports `True`, satisfying `require_enforcement` without actually denying everything the caller believed was denied.
 
+**Round 4 found the same shape in `CTL_TSYNC` (added that round)**: if `SyscallFilter.set_attr(Attr.CTL_TSYNC, 1)` itself raises (an older libseccomp build without TSYNC support), the filter still loads — on the calling thread only — and `applied=True` is still reported exactly as if every thread were covered. A thread a plugin started before the filter installed stays unfiltered regardless, invisible to `require_enforcement` the same way an unresolved syscall name is.
+
 ### Fix
 
-Not started. Have `_install_seccomp_filter` collect which requested names it had to skip (not just swallow the exception) and surface them in `EnforcementResult` (a new field, e.g. `skipped: tuple[str, ...]`). Under `require_enforcement`, treat any skipped name from the *process-isolation floor* specifically (the always-on part, not the plugin-declared network/filesystem lists, where "the plugin explicitly asked for less than full denial" is a different, already-accepted risk) as `applied=False` — that floor's own denial list is not something the caller opted out of, so a silent partial application of it shouldn't count as success. Longer term, moving from a default-`ALLOW` deny-list to a default-`ERRNO`/allowlist model would remove this class of gap for every future kernel addition at once, not just the ones this project remembers to add by name — a substantially larger redesign, not attempted here.
+Not started. Have `_install_seccomp_filter` collect which requested names it had to skip (not just swallow the exception) and surface them in `EnforcementResult` (a new field, e.g. `skipped: tuple[str, ...]`). Under `require_enforcement`, treat any skipped name from the *process-isolation floor* specifically (the always-on part, not the plugin-declared network/filesystem lists, where "the plugin explicitly asked for less than full denial" is a different, already-accepted risk) as `applied=False` — that floor's own denial list is not something the caller opted out of, so a silent partial application of it shouldn't count as success. The same treatment applies to a `set_attr(CTL_TSYNC, ...)` failure — surface it the same way, since an unsynced filter is exactly this kind of partial application. Longer term, moving from a default-`ALLOW` deny-list to a default-`ERRNO`/allowlist model would remove this class of gap for every future kernel addition at once, not just the ones this project remembers to add by name — a substantially larger redesign, not attempted here.
 
 ---
 
