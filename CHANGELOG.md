@@ -250,6 +250,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actual on-disk shape (an edited `CREATE TABLE` with no matching migration goes undetected) or the
   `sqlite-vec` extension's own on-disk vector format (outside `format_version`'s scope entirely).
 
+#### Documented
+- M4 Workstream 8 (complete docs, PR #143, 2 review rounds, doc-only): fixed stale README.md content
+  (dev-status banner still said "M3 in progress"; missing links to `Ontolith_UseCases_and_Interfaces.md`/
+  `known-issues.md`; the Quick Start block never actually ran `examples/quickstart.py`) and CONTRIBUTING.md
+  (3× literal `yourusername` URL placeholder; a false `structlog` dependency claim; `gitleaks`/CodeQL
+  missing from the quality-gate table; a missing `uv run` prefix on the full-gate command; the Scopes
+  list missing `conformance`/`adr`/`ci`, already used in the file's own Examples; the `m<N>/<description>`
+  branch-naming convention missing entirely). Review round 1 found 2 more real issues the first pass
+  missed: a dead GitHub Discussions link (Discussions is disabled on this repo — verified via the GitHub
+  API) and SECURITY.md recommending "Use OIDC for authentication" and "Enable audit logging in
+  production," neither a shippable option today (the only implemented `AuthProvider` is per-principal API
+  keys, ADR-0014; observability tiers (b)/(c) were never built, only tier (a) structured logs).
+
+#### Changed
+- M4 exit-criteria review (2026-09-28): the perf-regression Quality Gate's own "informational →
+  blocking by M4" commitment, deferred since Workstream 1 and never picked up by a later workstream, is
+  now fulfilled. Each of the 5 SPEC §9 budget rows carries a hard per-test ceiling
+  (`tests/benchmarks/conftest.py::assert_within_budget`, `assert benchmark.stats.stats.max < budget` —
+  a conservative reading of "p95 < budget," since p95 can never exceed the maximum, and one that needs no
+  percentile estimate from the small number of rounds pytest-benchmark calibrates for the slower rows);
+  the CI `benchmarks` job now runs on every PR instead of only on pushes to `main`. Deliberately an
+  absolute per-row ceiling, not the Quality Gate's originally-sketched relative "no > 15% regression vs a
+  stored baseline": a relative check needs a committed baseline this repo's CI jobs can't write
+  themselves (`contents: read` only, a Workstream 7 security-review fix) and would be exposed to the same
+  CI-runner-speed flakiness already fixed twice in this project (PR #138), for little benefit given how
+  wide the existing §9 margins already are. Also corrected a pre-existing mislabeling in
+  `test_traversal.py`: `test_bench_symbolic_query_concept_filter`'s docstring previously implied it was
+  the SPEC §9 "hybrid query" budget row: it measures a different, non-vector query shape, and the real
+  row-4 test (`test_bench_hybrid_semantic_query_k10`) lives in `test_hybrid_query.py`.
+
 ### M3 - Extensible (0.3)
 
 #### Added
