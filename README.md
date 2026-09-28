@@ -31,20 +31,25 @@ uv run pytest
 # Run quality checks
 uv run ruff check
 uv run mypy --strict src conformance/conftest.py
+
+# Run the quickstart example
+uv run python examples/quickstart.py
 ```
 
 ## Development Status
 
-🚧 **Pre-Alpha** - M3 (Extensible) in progress — M1 substrate and M2 collaboration complete
+🚧 **Pre-1.0** - M0–M3 complete; M4 (Production 1.0) in progress
 
-See [docs/Ontolith_Implementation_Plan.md](docs/Ontolith_Implementation_Plan.md) for roadmap.
+See [docs/Ontolith_Implementation_Plan.md](docs/Ontolith_Implementation_Plan.md) for roadmap and current milestone status.
 
 ## Documentation
 
 - [Product Requirements](docs/Ontolith_PRD.md)
 - [Technical Specification](docs/Ontolith_SPEC.md)
+- [Use Cases & Interfaces](docs/Ontolith_UseCases_and_Interfaces.md)
 - [Implementation Plan](docs/Ontolith_Implementation_Plan.md)
 - [Architecture Decision Records](docs/adr/)
+- [Known Issues](docs/known-issues.md)
 
 ## Contributing
 

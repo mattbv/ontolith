@@ -28,7 +28,7 @@ This project adheres to a Code of Conduct that all contributors are expected to 
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/ontolith.git
+git clone https://github.com/mattbv/ontolith.git
 cd ontolith
 
 # Install dependencies
@@ -126,7 +126,7 @@ Ontolith follows a **ports & adapters (hexagonal)** architecture. Please familia
 **They may only import:**
 - Abstract ports: `StorageBackend`, `Embedder`, `AuthProvider`, `PolicyStrategy`, `Clock`, `IdProvider`
 - Standard library
-- Approved dependencies (pydantic, structlog, etc.)
+- Approved dependencies (pydantic, etc.)
 
 This rule is enforced by `import-linter` in CI.
 
@@ -194,7 +194,7 @@ All code must pass these gates before merge:
 | Coverage | `pytest-cov` | Meets thresholds |
 | Conformance | `pytest conformance/` | All vectors pass |
 | Dependency rule | `import-linter` | Contract holds |
-| Security | `bandit`, `pip-audit` | No high/critical issues |
+| Security | `bandit`, `pip-audit`, `gitleaks`, CodeQL | No high/critical issues |
 | Docstrings | `interrogate` | ≥95% on public API |
 
 ## Pull Request Process
@@ -284,8 +284,8 @@ chore(ci): add import-linter to quality gates
 
 ## Questions?
 
-- Open a [Discussion](https://github.com/yourusername/ontolith/discussions) for questions
-- Check existing [Issues](https://github.com/yourusername/ontolith/issues) before creating new ones
+- Open a [Discussion](https://github.com/mattbv/ontolith/discussions) for questions
+- Check existing [Issues](https://github.com/mattbv/ontolith/issues) before creating new ones
 - Review the [Technical Specification](docs/Ontolith_SPEC.md) for implementation details
 
 ## License
