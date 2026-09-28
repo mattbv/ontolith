@@ -213,6 +213,20 @@ export-set changes and, when made blocking, a subset of signature changes it can
 `__all__` test alone never did) remains a real, accepted residual either way — not resolved by this
 Update, not newly introduced by it either.
 
+**Update (2026-09-28, v1.0.0 tag):** the "separate, later release event" named above happened.
+`pyproject.toml`/`src/ontolith/__init__.py` bumped to `1.0.0`; `ci.yml`'s `griffe check` step dropped
+`continue-on-error: true` as planned — re-verified empirically before flipping it, rather than
+trusting the step's own pre-existing comment at face value (that comment claimed `griffe check`
+"exits 1 on any detected change, including non-breaking ones," itself marked "verified"; re-checking
+found this false against the installed `griffecli`: its `check()` function only returns 1 when
+`find_breaking_changes()` reports an actual breakage, confirmed with two live test diffs — a pure
+addition exits 0, only a real removal/rename exits 1). Blocking this gate therefore only fails a PR
+on a genuine breaking change, not on ordinary additive development, exactly as this ADR's Decision #4
+intended. Git tag + GitHub Release only — no `release.yml`/PyPI-publish automation exists yet (the
+Implementation Plan §7.1 pipeline sketch describing one was aspirational, never built), and the
+`ontolith` package name isn't registered on PyPI; publishing remains separate, future, user-driven
+work, not part of this tag.
+
 ## References
 
 - Implementation Plan §2 (M3 exit criteria), §5 (quality gates table), §7.2 (SemVer commitment), §14.6 (open question, now resolved — see Update above)

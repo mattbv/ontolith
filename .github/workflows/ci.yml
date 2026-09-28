@@ -56,18 +56,26 @@ jobs:
       - name: Docstring coverage
         run: uv run interrogate src/ontolith -c pyproject.toml
 
-      - name: Public API surface diff (informational, KI-020)
+      - name: Public API surface diff (KI-020)
         if: matrix.python-version == '3.12'
-        # warn-only pre-1.0 (Implementation Plan §5): `griffe check` exits 1
-        # on any detected change, including non-breaking ones (verified —
-        # do not remove continue-on-error without re-verifying this).
-        # continue-on-error is what actually makes this informational;
-        # blocking post-1.0 is a one-line removal of that flag, not a
-        # deeper redesign. Compares against the PR's base commit; on a
-        # push-to-main run (no PR context) compares against HEAD itself,
-        # i.e. a no-op — the meaningful comparison already happened during
-        # the PR's own run.
-        continue-on-error: true
+        # Blocking as of the 1.0 tag (Implementation Plan §5's "warn pre-1.0,
+        # block post-1.0"). The prior version of this comment claimed `griffe
+        # check` "exits 1 on any detected change, including non-breaking
+        # ones" and cited that as the reason to keep this informational via
+        # continue-on-error — re-verified directly (empirically, against the
+        # installed griffecli's own source and two live test diffs) while
+        # flipping this gate for 1.0, and found FALSE: `griffecli.check()`
+        # only returns 1 when `find_breaking_changes()` reports an actual
+        # breakage (griffecli/_internal/cli.py) — a pure addition exits 0,
+        # confirmed with a real test (added a new `__all__` export, ran
+        # `griffe check` against HEAD, got exit 0); only removing/renaming an
+        # existing public export triggers exit 1, confirmed the same way.
+        # Blocking here therefore only fails a PR on a genuine breaking
+        # change, not on ordinary additive development — this is safe to
+        # block, not merely permitted to. Compares against the PR's base
+        # commit; on a push-to-main run (no PR context) compares against
+        # HEAD itself, i.e. a no-op — the meaningful comparison already
+        # happened during the PR's own run.
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha || 'HEAD' }}
         run: uv run python -m griffe check ontolith -s src -a "$BASE_REF" -f github
