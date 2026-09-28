@@ -1,15 +1,19 @@
 """Hybrid retrieval (semantic search) and confidence/trust filter benchmarks — M3 baseline.
 
-Budget (informational, enforced M4, per implementation plan §9):
-  - Hybrid query (vector search, k=10): p95 < 150 ms
+Budget (CI-enforced as a hard ceiling since M4 Workstream 1's own
+perf-budget gate closeout, per implementation plan §9):
+  - Hybrid query (vector search, k=10): p95 < 150 ms — test_bench_hybrid_semantic_query_k10
+
+See test_traversal.py's own module docstring / `conftest.py`'s
+`assert_within_budget` for the enforcement mechanism and why it's an
+absolute per-row ceiling, not a relative regression-vs-baseline check.
 
 .min_confidence()/.trust_at_least() (KI-028) have no dedicated budget row in
 the implementation plan; benchmarked here anyway since they previously
 regressed into the same N+1 pattern KI-001 fixed for .where(), and the
-regression was invisible to CI precisely because nothing benchmarked them.
-
-This benchmark is informational in M3 (no budget gate), matching every
-other row in test_traversal.py. Run with:
+regression was invisible to CI precisely because nothing benchmarked them —
+these, and test_bench_hybrid_semantic_query_intersected_with_where, remain
+informational only, no budget ceiling enforced. Run with:
     uv run pytest tests/benchmarks/test_hybrid_query.py --benchmark-only
 """
 
@@ -25,6 +29,8 @@ from ontolith import Ontology
 from ontolith.core import Assertion, Entity
 from ontolith.identity import Principal
 from ontolith.store.sqlite import SQLiteBackend
+
+from .conftest import assert_within_budget
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -183,7 +189,15 @@ def seeded_confidence_trust_kb(seeded_confidence_trust_db_path: Path) -> Ontolog
 
 @pytest.mark.benchmark
 def test_bench_hybrid_semantic_query_k10(benchmark, seeded_hybrid_kb: Ontology) -> None:
-    """p95 target: < 150 ms — .semantic() vector search, k=10, over a 1k-entity index."""
+    """p95 target: < 150 ms — .semantic() vector search, k=10, over a 1k-entity index.
+
+    Pure semantic search, no `.where()` filter — established as the gated
+    SPEC §9 row-4 measurement since M4 Workstream 1's own baseline, though
+    the row's SPEC wording ("symbolic prefilter + vector rerank") describes
+    a query with a symbolic component too; `test_bench_hybrid_semantic_
+    query_intersected_with_where` below is closer to that fuller shape but
+    isn't the one gated here — not revisited by this budget-gate change.
+    """
 
     def query() -> list:
         return (
@@ -195,13 +209,22 @@ def test_bench_hybrid_semantic_query_k10(benchmark, seeded_hybrid_kb: Ontology) 
 
     results = benchmark(query)
     assert len(results) == 10
+    assert_within_budget(
+        benchmark,
+        0.150,
+        label="Hybrid query (symbolic prefilter + vector rerank), k=10 (p95 < 150 ms)",
+    )
 
 
 @pytest.mark.benchmark
 def test_bench_hybrid_semantic_query_intersected_with_where(
     benchmark, seeded_hybrid_kb: Ontology
 ) -> None:
-    """p95 target: < 150 ms — .semantic() + .where() intersection, k=10."""
+    """.semantic() + .where() intersection, k=10.
+
+    Not the gated SPEC §9 row-4 test (see `test_bench_hybrid_semantic_
+    query_k10` above) — informational only, no budget ceiling enforced.
+    """
 
     def query() -> list:
         return (

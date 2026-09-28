@@ -150,9 +150,14 @@ jobs:
         run: uv run python examples/quickstart.py
 
   benchmarks:
-    name: Benchmarks (baseline, informational)
+    # M4 Workstream 1 exit gate: the 5 SPEC §9 budget rows are enforced as
+    # hard per-test ceilings inside tests/benchmarks/ itself (see
+    # tests/benchmarks/conftest.py's assert_within_budget) — this job is
+    # blocking (no continue-on-error, runs on every PR, not just pushes to
+    # main) precisely because those assertions, not this job definition,
+    # are what fails a genuine regression.
+    name: Benchmarks (§9 budgets)
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/checkout@v4
@@ -172,7 +177,9 @@ jobs:
         run: uv run pytest tests/benchmarks/ --benchmark-only --benchmark-json=benchmark-results.json -q
 
       - name: Upload benchmark results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
           path: benchmark-results.json
+          overwrite: true

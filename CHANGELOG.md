@@ -250,6 +250,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actual on-disk shape (an edited `CREATE TABLE` with no matching migration goes undetected) or the
   `sqlite-vec` extension's own on-disk vector format (outside `format_version`'s scope entirely).
 
+#### Documented
+- M4 Workstream 8 (complete docs, PR #143, 2 review rounds, doc-only): fixed stale README.md content
+  (dev-status banner still said "M3 in progress"; missing links to `Ontolith_UseCases_and_Interfaces.md`/
+  `known-issues.md`; the Quick Start block never actually ran `examples/quickstart.py`) and CONTRIBUTING.md
+  (3× literal `yourusername` URL placeholder; a false `structlog` dependency claim; `gitleaks`/CodeQL
+  missing from the quality-gate table; a missing `uv run` prefix on the full-gate command; the Scopes
+  list missing `conformance`/`adr`/`ci`, already used in the file's own Examples; the `m<N>/<description>`
+  branch-naming convention missing entirely). Review round 1 found 2 more real issues the first pass
+  missed: a dead GitHub Discussions link (Discussions is disabled on this repo — verified via the GitHub
+  API) and SECURITY.md recommending "Use OIDC for authentication" and "Enable audit logging in
+  production," neither a shippable option today (the only implemented `AuthProvider` is per-principal API
+  keys, ADR-0014; observability tiers (b)/(c) were never built, only tier (a) structured logs).
+
+#### Changed
+- M4 exit-criteria review (2026-09-28, PR #144): the perf-regression Quality Gate's own
+  "informational → blocking by M4" commitment, deferred since Workstream 1 and never picked up by a
+  later workstream, is now fulfilled. Each of the 5 SPEC §9 budget rows carries a hard per-test p95
+  ceiling (`tests/benchmarks/conftest.py::assert_within_budget`, computed from pytest-benchmark's raw
+  per-round data via `statistics.quantiles`); the CI `benchmarks` job now runs on every PR instead of
+  only on pushes to `main`. Deliberately an absolute per-row ceiling, not the Quality Gate's
+  originally-sketched relative "no > 15% regression vs a stored baseline" — an honest trade-off, not
+  a strictly superior choice: at today's margins a relative 15% check would catch a real regression
+  far earlier than this loose an absolute ceiling ever would, deliberately left for later scope
+  rather than adding a second new mechanism in the same review.
+  **The PR's own review found a real flaw in the first version of this gate**: it checked
+  `benchmark.stats.stats.max` (the single slowest observed round), reasoning `max < budget` is a
+  stricter implication of "p95 < budget" and that pytest-benchmark "calibrates to a handful of
+  rounds" for the slower rows — both claims checked against real CI data and found wrong. Round
+  counts on the 5 gated rows range from roughly 270 to 8,000 on real CI runs, easily enough for a
+  genuine percentile; and `max` proved *more* sensitive to CI-runner noise than p95, not less — a
+  real CI run of `test_bench_propose_auto_accept` (budget 50 ms) recorded a `max` of 53.6 ms from one
+  stalled SQLite-commit round, while that same run's real p95 was 0.62 ms. Fixed before merge by
+  computing a genuine p95, re-verified against 6 downloaded real CI benchmark artifacts (including
+  the one that had exceeded the `max`-based budget) — all 5 rows pass comfortably on every one.
+  Also fixed: the CI `benchmarks` job's result-upload step now runs with `if: always()` (previously
+  skipped on a failing run, losing exactly the data needed to diagnose it) and `overwrite: true`;
+  guarded `assert_within_budget` against `benchmark.stats is None` (`--benchmark-disable` mode,
+  unused in CI but reachable locally); and corrected leftover pre-existing mislabelings in
+  `test_traversal.py`/`test_hybrid_query.py` — `test_bench_symbolic_query_concept_filter`,
+  `test_bench_write_assert_literal`, and `test_bench_hybrid_semantic_query_intersected_with_where`
+  each previously carried a "p95 target" docstring number implying it was a SPEC §9 budget row; none
+  of the three is gated (the real rows are `test_bench_propose_auto_accept` and
+  `test_bench_hybrid_semantic_query_k10`).
+
 ### M3 - Extensible (0.3)
 
 #### Added

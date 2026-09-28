@@ -1,13 +1,26 @@
 """Traversal and write performance benchmarks — M1 baseline, M4 write-path fix.
 
-Budgets (enforced M4, baselined here per implementation plan §9):
-  - Single-entity get with provenance:  p95 < 10 ms
-  - propose + policy eval + commit:     p95 < 50 ms
-  - 3-hop traversal, 100k-assertion KB: p95 < 200 ms
-  - Symbolic query (concept + filter):  p95 < 150 ms
-  - as_of(t) reconstruction, 100k-assertion KB: p95 < 300 ms
+Budgets (baselined here per implementation plan §9; CI-enforced as a hard
+ceiling since M4 Workstream 1's own perf-budget gate closeout — see
+`conftest.py`'s `assert_within_budget` for the enforcement mechanism):
+  - Single-entity get with provenance:  p95 < 10 ms  (test_bench_single_entity_provenance)
+  - propose + policy eval + commit:     p95 < 50 ms  (test_bench_propose_auto_accept)
+  - 3-hop traversal, 100k-assertion KB: p95 < 200 ms (test_bench_3hop_traversal)
+  - as_of(t) reconstruction, 100k-assertion KB: p95 < 300 ms (test_bench_as_of_reconstruction)
 
-These benchmarks are informational in M1 (no budget gate).
+The fifth SPEC §9 row (hybrid query, k=10, p95 < 150 ms) is measured in
+test_hybrid_query.py's own separate, smaller dataset, not here.
+`test_bench_single_entity_get`, `test_bench_symbolic_query_concept_filter`,
+and `test_bench_write_assert_literal` below are NOT SPEC §9 budget rows —
+the first still carries a "p95 target" docstring number coincidentally
+close to its neighboring budget row's own; the other two previously carried
+one too, a pre-existing mislabeling in this file (the middle one's docstring
+previously listed itself as if it were the "Hybrid query"/"Symbolic query"
+row; it measures a different, non-vector query shape than the real
+hybrid-query row does; `test_bench_write_assert_literal` measures
+`assert_literal`, not the budget row's own named `propose()` path — see the
+M4 note below), corrected on those two, not gated on any of the three.
+
 Run with: uv run pytest tests/benchmarks/ --benchmark-only
 
 M4 note: `test_bench_write_assert_literal` used to call `assert_literal` on the
@@ -41,6 +54,8 @@ from ontolith.core import Assertion, Entity
 from ontolith.govern import AutoAccept
 from ontolith.identity import Principal
 from ontolith.store.sqlite import SQLiteBackend
+
+from .conftest import assert_within_budget
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -212,11 +227,15 @@ def test_bench_single_entity_provenance(benchmark, seeded_kb: Ontology) -> None:
     assert result.assertion.id == "assertion-000500-050"
     assert result.review_events == ()
     assert result.superseded_ids == ()
+    assert_within_budget(benchmark, 0.010, label="Single-entity get with provenance (p95 < 10 ms)")
 
 
 @pytest.mark.benchmark
 def test_bench_write_assert_literal(benchmark, seeded_kb: Ontology) -> None:
-    """p95 target: < 50 ms — Write path: assert_literal (standalone commit).
+    """Write path: assert_literal (standalone commit).
+
+    Not a SPEC §9 budget row (that's `test_bench_propose_auto_accept`,
+    below) — informational only, no budget ceiling enforced here.
 
     Each round gets its own (subject, predicate) — cycling through the
     dedicated write-bench entity pool (never the read-benchmarked Person
@@ -270,11 +289,17 @@ def test_bench_propose_auto_accept(benchmark, seeded_kb: Ontology) -> None:
         assert isinstance(decision, AutoAccept)
 
     benchmark(propose_one)
+    assert_within_budget(benchmark, 0.050, label="propose + policy eval + commit (p95 < 50 ms)")
 
 
 @pytest.mark.benchmark
 def test_bench_symbolic_query_concept_filter(benchmark, seeded_kb: Ontology) -> None:
-    """p95 target: < 150 ms — Symbolic query: concept + attribute filter."""
+    """Symbolic query: concept + attribute filter.
+
+    Not a SPEC §9 budget row (the real "hybrid query" row is measured in
+    test_hybrid_query.py's own dataset) — informational only, no budget
+    ceiling enforced here.
+    """
 
     def query() -> list:
         return seeded_kb.query("Person").where(attr000="value-0-0").all()
@@ -317,6 +342,9 @@ def test_bench_3hop_traversal(benchmark, seeded_backend: SQLiteBackend) -> None:
 
     result = benchmark(traverse_3hop)
     assert result == ["entity-000001", "entity-000002", "entity-000003"]
+    assert_within_budget(
+        benchmark, 0.200, label="3-hop traversal, 100k-assertion KB (p95 < 200 ms)"
+    )
 
 
 @pytest.mark.benchmark
@@ -330,7 +358,14 @@ def test_bench_assertions_by_subject(benchmark, seeded_backend: SQLiteBackend) -
 def test_bench_as_of_reconstruction(benchmark, seeded_kb: Ontology) -> None:
     """p95 target: < 300 ms — as_of(t) point-in-time reconstruction over a
     100k-assertion KB (all assertions predate t, so this exercises full
-    bitemporal filtering rather than an empty-result fast path)."""
+    bitemporal filtering rather than an empty-result fast path).
+
+    Pre-existing scope note (not revisited by the M4 budget-gate change):
+    measures one subject's 100 assertions filtered against the 100k-assertion
+    store, not a reconstruction spanning the whole store — the "100k" in the
+    budget row's own name refers to the store's size, not the result set
+    this benchmark reconstructs.
+    """
     t = datetime(2025, 6, 1, tzinfo=UTC)
 
     def query() -> list:
@@ -338,3 +373,6 @@ def test_bench_as_of_reconstruction(benchmark, seeded_kb: Ontology) -> None:
 
     results = benchmark(query)
     assert len(results) == 100
+    assert_within_budget(
+        benchmark, 0.300, label="as_of(t) reconstruction, 100k-assertion KB (p95 < 300 ms)"
+    )
