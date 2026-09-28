@@ -1053,7 +1053,18 @@ class TestRequireEnforcement:
         constructor run with no seccomp filter at all, undetected. Now
         returns its own EnforcementResult, checked here before
         _load_plugin_instance ever runs - the earliest point at which no
-        plugin code has executed and the result is fully trustworthy."""
+        plugin code has executed and the result is fully trustworthy.
+
+        apply_capability_enforcement is ALSO explicitly mocked here (round-4
+        review finding), even though the code path under test never reaches
+        it - this test is safe today only because of the early `return`
+        right after the preimport check; without this mock, a regression of
+        that `return` would make this test silently call the REAL
+        apply_capability_enforcement in-process, which on real Linux CI
+        installs a genuine, permanent seccomp filter in the shared pytest
+        worker (the exact failure this file's own history already
+        includes). Mocking it here too means a future regression fails this
+        one test cleanly instead of corrupting the whole worker."""
         load_calls: list[str] = []
 
         class _FakeConn:
@@ -1072,6 +1083,11 @@ class TestRequireEnforcement:
             enforcement,
             "apply_preimport_enforcement",
             lambda caps: enforcement.EnforcementResult(applied=False, reason="simulated"),
+        )
+        monkeypatch.setattr(
+            enforcement,
+            "apply_capability_enforcement",
+            lambda caps: enforcement.EnforcementResult(applied=False, reason="should never run"),
         )
 
         conn = _FakeConn()

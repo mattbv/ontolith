@@ -642,22 +642,38 @@ def _child_main(
     name). It is NOT a guarantee against a plugin whose own module-level
     code or `__init__` actively tries to defeat this check — reproduced
     directly (round 3): a plugin can reassign `enforcement.apply_
-    capability_enforcement` itself (or `sys.modules["pyseccomp"]`, or any
-    other process-global Python state this check depends on) during
-    `_load_plugin_instance`, before this function ever calls it, making a
-    completely unenforced call report `applied=True`. Capturing
-    `_apply_capability_enforcement` as a local variable BEFORE `_load_
-    plugin_instance` runs (below) closes the specific, easiest version of
-    this — reassigning the module attribute no longer matters once this
-    function holds its own reference to the original function object — but
-    NOT the deeper version (poisoning `sys.modules["pyseccomp"]` before
-    that captured function's own body does its own fresh `import
-    pyseccomp`), which needs a captured reference to the resolved *module*
-    too, not just the function — not done this round, see KI-109's own
-    extended text for why. The module import/constructor phase remaining
-    unenforced except for `apply_preimport_enforcement`'s own narrower
-    network/floor-only filter is the same disclosed residual (KI-109) as
-    the non-required case, now with this additional escalation folded in.
+    capability_enforcement` itself during `_load_plugin_instance`, before
+    this function ever calls it, making a completely unenforced call
+    report `applied=True`. Capturing `_apply_capability_enforcement` as a
+    local variable BEFORE `_load_plugin_instance` runs (below) defeats
+    *that one, literal* reassignment — reassigning the module's own
+    `apply_capability_enforcement` name no longer matters once this
+    function already holds a reference to the original function object.
+
+    **CORRECTED (round 4): this does NOT meaningfully narrow the attack,
+    and an earlier version of this docstring overclaimed that it did.**
+    The captured function's own body still resolves every name it uses —
+    `_install_seccomp_filter`, `EnforcementResult`, `_FILESYSTEM_SYSCALLS`,
+    `_NETWORK_SYSCALLS`, `_PROCESS_ISOLATION_SYSCALLS` — fresh from the
+    `enforcement` module's shared, mutable namespace on every call,
+    regardless of which name a caller used to reach the function itself.
+    Reproduced directly: reassigning `enforcement._install_seccomp_filter`
+    to a fake that reports `applied=True` defeats the *captured* reference
+    exactly as completely as reassigning `apply_capability_enforcement`
+    itself would have — capturing the outer function object protects
+    nothing about its inner dependencies, which live in the identical
+    module `__dict__` either way. The same is true of `sys.modules
+    ["pyseccomp"]`, which the function's own body also still resolves
+    fresh. **In practice this capture defends only against the single most
+    naive reproduction, not the underlying class of attack** — the module
+    import/constructor phase remaining unenforced except for
+    `apply_preimport_enforcement`'s own narrower network/floor-only filter
+    is the same disclosed residual (KI-109) as the non-required case,
+    essentially unchanged by this round's own fix. See KI-109's own
+    extended text — a real fix needs a kernel-level filter installed
+    *before* any plugin code runs at all, since no Python-level capture of
+    any kind can protect against code that already shares the same mutable
+    process, module, and interpreter state.
     Round-1 review found and fixed a real bug in a naive version of this
     idea: putting the check only in the parent's `_handle_one_message` can
     make the caller's `run_isolated()` raise promptly, but doesn't stop
@@ -673,13 +689,15 @@ def _child_main(
     fast, unambiguous failure without waiting on this child to report
     FAILED and exit on its own.
     """
-    # Captured BEFORE _load_plugin_instance runs (round-3 review finding):
-    # a plugin's own module-level code, once it starts running, could
-    # otherwise reassign enforcement.apply_capability_enforcement itself
-    # (a plain module attribute _child_main would then look up fresh) to
-    # fake a successful install - calling this captured reference instead
-    # closes that specific attack, since reassigning the module's own
-    # attribute afterward no longer affects a name already bound here.
+    # Captured BEFORE _load_plugin_instance runs (round-3 review finding,
+    # corrected round 4 - see this function's own docstring): defeats only
+    # a literal reassignment of the apply_capability_enforcement name
+    # itself, since the captured function's own body still resolves every
+    # OTHER name it depends on (_install_seccomp_filter, EnforcementResult,
+    # the syscall lists) fresh from the same shared, mutable module
+    # namespace - a plugin reassigning any of THOSE defeats this capture
+    # exactly as completely. Kept anyway: it's free, harmless, and closes
+    # the single most naive reproduction - not a real security boundary.
     _apply_capability_enforcement = enforcement.apply_capability_enforcement
 
     preimport_result = enforcement.apply_preimport_enforcement(capabilities)
