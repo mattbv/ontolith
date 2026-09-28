@@ -16,14 +16,16 @@ reasoning that `max < budget` is a strictly more conservative implication of
 `p95 < budget` (true) and that pytest-benchmark "calibrates to a handful of
 rounds" for the slower budget rows (false — see above). That version was
 flaky in practice: a real CI run of `test_bench_propose_auto_accept` (budget
-50 ms) recorded a `max` of 53.6 ms from a single stalled round (SQLite
-fsync/WAL-checkpoint contention on a shared runner), while the SAME run's
-real p95 was 0.62 ms — about 80x under budget. `max` is maximally sensitive
-to exactly one outlier round out of a thousand-plus; that's a materially
-*worse* choice for CI-runner-noise robustness than a genuine percentile, not
-a safer one, despite being a logically stronger bound on paper. Found by
-review, independently reproduced against the real CI artifact before fixing
-(see `docs/known-issues.md`/the PR history for the exact numbers).
+50 ms) recorded a `max` of 53.6 ms from a single stalled round (likely
+SQLite fsync/WAL-checkpoint contention on a shared runner, though nothing in
+the data confirms the exact cause — only that it was one isolated outlier
+round out of 1,418), while the SAME run's real p95 was 0.62 ms — about 80x
+under budget. `max` is maximally sensitive to exactly one outlier round out
+of a thousand-plus; that's a materially *worse* choice for CI-runner-noise
+robustness than a genuine percentile, not a safer one, despite being a
+logically stronger bound on paper. Found by review, independently
+reproduced against the real CI artifact before fixing (see the CHANGELOG
+and Implementation Plan §9's own record for the full numbers).
 
 Not a relative "no > 15% regression vs baseline" check (the Implementation
 Plan's Quality Gates table originally sketched that mechanism) — no baseline
@@ -32,16 +34,18 @@ chosen instead because it directly enforces the actual named M4 exit
 criterion ("performance budgets met (§9)"), and needs no committed baseline
 file (`ci.yml` deliberately holds only `contents: read`, a Workstream 7
 security-review fix). This is a real, disclosed trade-off, not a strictly
-better choice: at today's margins (roughly 80x–3000x under budget on p95
-across the 5 rows, tightest on the hybrid-query row) a relative 15%
-regression check would catch a real slowdown far earlier than an absolute
-ceiling this loose ever would — the ceiling only fires on regressions of
-roughly two orders of magnitude or more. A relative check was not ruled out
-by any hard technical blocker (it could read a prior run's artifact via
-`actions/download-artifact` without needing repo write access); it was
-deliberately left for later, later-workstream scope, to close the named
-exit criterion now without introducing a second new mechanism at the same
-time.
+better choice: at today's margins (measured directly across 6 real CI runs:
+roughly 60x under budget on the tightest observed row/run down to nearly
+3,000x on the loosest — the hybrid-query and propose rows are consistently
+the tightest of the 5, trading places with each other run to run, not one
+row always beating the other) a relative 15% regression check would catch a
+real slowdown far earlier than an absolute ceiling this loose ever would —
+even the tightest observed margin is well over an order of magnitude. A
+relative check was not ruled out by any hard technical blocker (it could
+read a prior run's artifact via `actions/download-artifact` without needing
+repo write access); it was deliberately left for later, later-workstream
+scope, to close the named exit criterion now without introducing a second
+new mechanism at the same time.
 """
 
 from __future__ import annotations

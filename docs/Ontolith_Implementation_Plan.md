@@ -243,11 +243,13 @@ The 3-hop traversal budget is the canary for the SQLite-default decision; if rea
 in `tests/benchmarks/` (rows 1, 2, 3, and 5 in `test_traversal.py`'s 100k-assertion dataset; row 4,
 hybrid query, in `test_hybrid_query.py`'s own separate, smaller 1k-entity/1k-assertion dataset —
 see footnote [^1] below) and pass comfortably on their respective datasets on p95 — margins on real
-CI runs range roughly from tens-of-times under budget (the hybrid-query row, the tightest) to
-several-thousand-times under budget (3-hop traversal, the loosest); exact multiples aren't quoted
-precisely here since they vary run to run, though the actual observed range is wider on this
-measure than earlier drafts of this note estimated from central-tendency numbers alone (mean/median)
-rather than the row's own p95 — see the PR #144 correction below for why that distinction matters.
+CI runs range roughly from tens-of-times under budget (the hybrid-query and propose rows, the
+tightest of the 5 — the two trade places with each other run to run, not one consistently beating
+the other) to several-thousand-times under budget (3-hop traversal, the loosest); exact multiples
+aren't quoted precisely here since they vary run to run, though the actual observed range is wider
+on this measure than earlier drafts of this note estimated from central-tendency numbers alone
+(mean/median) rather than the row's own p95 — see the PR #144 correction below for why that
+distinction matters.
 **CI-blocking since M4's final exit-criteria review (2026-09-28):** each of the 5 rows now carries a
 hard per-test p95 ceiling (`tests/benchmarks/conftest.py::assert_within_budget`, computed from
 pytest-benchmark's raw per-round data via `statistics.quantiles`) and the CI `benchmarks` job

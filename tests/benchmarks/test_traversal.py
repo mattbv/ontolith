@@ -11,14 +11,15 @@ ceiling since M4 Workstream 1's own perf-budget gate closeout — see
 The fifth SPEC §9 row (hybrid query, k=10, p95 < 150 ms) is measured in
 test_hybrid_query.py's own separate, smaller dataset, not here.
 `test_bench_single_entity_get`, `test_bench_symbolic_query_concept_filter`,
-and `test_bench_write_assert_literal` below are NOT SPEC §9 budget rows
-despite carrying similar-looking "p95 target" docstring numbers — a
-pre-existing mislabeling in this file (the middle one's docstring previously
-listed itself as if it were the "Hybrid query"/"Symbolic query" row; it
-measures a different, non-vector query shape than the real hybrid-query row
-does; `test_bench_write_assert_literal` measures `assert_literal`, not the
-budget row's own named `propose()` path — see the M4 note below) corrected
-here, not gated.
+and `test_bench_write_assert_literal` below are NOT SPEC §9 budget rows —
+the first still carries a "p95 target" docstring number coincidentally
+close to its neighboring budget row's own; the other two previously carried
+one too, a pre-existing mislabeling in this file (the middle one's docstring
+previously listed itself as if it were the "Hybrid query"/"Symbolic query"
+row; it measures a different, non-vector query shape than the real
+hybrid-query row does; `test_bench_write_assert_literal` measures
+`assert_literal`, not the budget row's own named `propose()` path — see the
+M4 note below), corrected on those two, not gated on any of the three.
 
 Run with: uv run pytest tests/benchmarks/ --benchmark-only
 
