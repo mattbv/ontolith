@@ -28,7 +28,7 @@ This project adheres to a Code of Conduct that all contributors are expected to 
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/ontolith.git
+git clone https://github.com/mattbv/ontolith.git
 cd ontolith
 
 # Install dependencies
@@ -60,7 +60,7 @@ uv run pytest
 uv run pytest conformance/
 
 # Full quality gate (run before committing)
-uv run pytest && ruff check && mypy --strict src conformance/conftest.py
+uv run pytest && uv run ruff check && uv run mypy --strict src conformance/conftest.py
 ```
 
 ## Development Workflow
@@ -79,6 +79,7 @@ Branch naming conventions:
 - `docs/<description>` — Documentation changes
 - `test/<description>` — Test additions/fixes
 - `refactor/<description>` — Code refactoring
+- `m<N>/<description>` — Work scoped to a specific milestone (e.g. `m4/security-review-remediation`)
 
 ### 2. Make Your Changes
 
@@ -126,7 +127,7 @@ Ontolith follows a **ports & adapters (hexagonal)** architecture. Please familia
 **They may only import:**
 - Abstract ports: `StorageBackend`, `Embedder`, `AuthProvider`, `PolicyStrategy`, `Clock`, `IdProvider`
 - Standard library
-- Approved dependencies (pydantic, structlog, etc.)
+- Approved dependencies (pydantic, etc.)
 
 This rule is enforced by `import-linter` in CI.
 
@@ -191,10 +192,10 @@ All code must pass these gates before merge:
 | Lint | `ruff check` | Zero errors |
 | Types | `mypy --strict` | Zero errors on `src/` and `conformance/conftest.py` |
 | Tests | `pytest` | All pass |
-| Coverage | `pytest-cov` | Meets thresholds |
+| Coverage | `pytest-cov` | ≥90% package-wide, CI-enforced (`--cov-fail-under=90`); the ≥90%-domain/100%-`govern/conflict` targets above are project policy, not yet independently CI-checked |
 | Conformance | `pytest conformance/` | All vectors pass |
 | Dependency rule | `import-linter` | Contract holds |
-| Security | `bandit`, `pip-audit` | No high/critical issues |
+| Security | `bandit`, `pip-audit`, `gitleaks`, CodeQL (GitHub default setup, no workflow file) | No high/critical issues |
 | Docstrings | `interrogate` | ≥95% on public API |
 
 ## Pull Request Process
@@ -269,7 +270,7 @@ We use [Conventional Commits](https://www.conventionalcommits.org/) to automate 
 
 ### Scopes
 
-Use the module name: `core`, `schema`, `govern`, `store`, `query`, `identity`, `interfaces`, `plugins`, `observe`
+Use the module name: `core`, `schema`, `govern`, `store`, `query`, `identity`, `interfaces`, `plugins`, `observe`, `conformance`, `adr`, `ci`
 
 ### Examples
 
@@ -284,8 +285,7 @@ chore(ci): add import-linter to quality gates
 
 ## Questions?
 
-- Open a [Discussion](https://github.com/yourusername/ontolith/discussions) for questions
-- Check existing [Issues](https://github.com/yourusername/ontolith/issues) before creating new ones
+- Open an [Issue](https://github.com/mattbv/ontolith/issues) for questions or to check existing ones before creating a new one (GitHub Discussions isn't enabled on this repo)
 - Review the [Technical Specification](docs/Ontolith_SPEC.md) for implementation details
 
 ## License
