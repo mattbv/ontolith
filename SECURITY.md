@@ -30,7 +30,7 @@ Include:
 
 When using Ontolith:
 - Keep dependencies updated
-- Use OIDC for authentication (not API keys in production)
+- Rotate and revoke API-key tokens proactively — the only shipped `AuthProvider` today is per-principal API keys (ADR-0014); OIDC/workload-identity support is documented as future work, not yet implemented
 - Review AI-authored assertions before accepting
 - Configure appropriate policy thresholds
-- Enable audit logging in production
+- Structured logs are on by default (`kb.observability`, ADR-0044); correlate them with the `namespace`/`principal`/`proposal_id` fields they already carry for audit purposes in production
