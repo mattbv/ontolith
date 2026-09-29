@@ -24,7 +24,9 @@ from ontolith.schema import Concept, Property, Text, compile_schema
 
 def main() -> None:
     """Run the bitemporal queries example."""
-    db_path = Path(tempfile.mktemp(suffix=".db"))
+    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    db_path = Path(f.name)
+    f.close()
     print("⏳ Ontolith Bitemporal Queries Example\n")
 
     # An injected, controllable clock -- asserted_at is stamped from this,

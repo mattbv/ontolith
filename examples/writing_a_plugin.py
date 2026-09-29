@@ -22,7 +22,9 @@ from ontolith.plugins.registry import PluginRegistry
 
 def main() -> None:
     """Run the plugin registration example."""
-    db_path = Path(tempfile.mktemp(suffix=".db"))
+    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    db_path = Path(f.name)
+    f.close()
     print("🔌 Ontolith Plugin Example\n")
 
     kb = Ontology.connect(db_path)

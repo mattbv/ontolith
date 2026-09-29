@@ -21,7 +21,9 @@ from ontolith.schema import Concept, Text, compile_schema
 
 def main() -> None:
     """Run the governance & review example."""
-    db_path = Path(tempfile.mktemp(suffix=".db"))
+    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    db_path = Path(f.name)
+    f.close()
     print("🏛️  Ontolith Governance & Review Example\n")
 
     kb = Ontology.connect(db_path)

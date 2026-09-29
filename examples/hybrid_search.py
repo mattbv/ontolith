@@ -23,7 +23,9 @@ from ontolith.schema import Concept, Integer, Text, compile_schema
 
 def main() -> None:
     """Run the hybrid search example."""
-    db_path = Path(tempfile.mktemp(suffix=".db"))
+    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    db_path = Path(f.name)
+    f.close()
     print("🔍 Ontolith Hybrid Search Example\n")
 
     kb = Ontology.connect(db_path)  # embedder defaults to HashingEmbedder
