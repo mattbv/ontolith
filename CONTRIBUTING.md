@@ -63,6 +63,25 @@ uv run pytest conformance/
 uv run pytest && uv run ruff check && uv run mypy --strict src conformance/conftest.py
 ```
 
+### Building the Docs Site
+
+The documentation site (deployed to GitHub Pages via `.github/workflows/docs.yml`)
+is built from [`site_docs/`](site_docs/) by [`mkdocs.yml`](mkdocs.yml) — not
+to be confused with [`docs/`](docs/), which holds the project's internal
+planning/reference documents (SPEC, PRD, ADRs, the Implementation Plan).
+
+```bash
+# Live-reload preview at http://127.0.0.1:8000
+uv run mkdocs serve
+
+# Build once, failing on any broken link/nav reference (what CI runs)
+uv run mkdocs build --strict
+```
+
+The API Reference section is generated from the library's own docstrings
+via `mkdocstrings` — editing a docstring in `src/ontolith/` and rebuilding
+is usually all a reference-page change needs.
+
 ## Development Workflow
 
 ### 1. Create a Branch

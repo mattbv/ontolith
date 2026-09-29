@@ -44,6 +44,16 @@ Not yet published to PyPI — install from source (see Quick Start above). See [
 
 ## Documentation
 
+**[Full documentation site](https://mattbv.github.io/ontolith/)** — a Getting
+Started guide, conceptual overview, tutorials (governance & review,
+bitemporal queries, writing a plugin, hybrid search), and the auto-generated
+API reference. Built from [`site_docs/`](site_docs/) via
+[`mkdocs.yml`](mkdocs.yml); deployed by
+[`.github/workflows/docs.yml`](.github/workflows/docs.yml) on every push to
+`main`.
+
+Reference/planning documents:
+
 - [Product Requirements](docs/Ontolith_PRD.md)
 - [Technical Specification](docs/Ontolith_SPEC.md)
 - [Use Cases & Interfaces](docs/Ontolith_UseCases_and_Interfaces.md)

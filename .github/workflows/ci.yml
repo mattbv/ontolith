@@ -181,9 +181,14 @@ jobs:
           files: ./coverage.xml
           fail_ci_if_error: false
 
-      - name: Run quickstart example
+      - name: Run examples
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
-        run: uv run python examples/quickstart.py
+        run: |
+          uv run python examples/quickstart.py
+          uv run python examples/governance_and_review.py
+          uv run python examples/bitemporal_queries.py
+          uv run python examples/writing_a_plugin.py
+          uv run python examples/hybrid_search.py
 
   benchmarks:
     # M4 Workstream 1 exit gate: the 5 SPEC §9 budget rows are enforced as
