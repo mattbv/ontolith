@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Full documentation site (`mkdocs.yml` + `site_docs/`), deployed to GitHub
+  Pages: Getting Started, Concepts, four tutorials (Governance & Review,
+  Bitemporal Queries, Writing a Plugin, Hybrid Search), an Examples index,
+  and an mkdocstrings-generated API reference covering the ADR-0019-pinned
+  public surface.
+- Four new runnable example scripts under `examples/`
+  (`governance_and_review.py`, `bitemporal_queries.py`,
+  `writing_a_plugin.py`, `hybrid_search.py`), one per tutorial. All five
+  example scripts (including the pre-existing `quickstart.py`) now run in
+  `ci.yml`'s quality job on every push/PR to `main`.
+- Docstrings on 13 previously-undocumented type aliases
+  (`ontolith.schema.Text`/`Ref`/`Integer`/`Float`/`Boolean`/`Date`/
+  `DateTime`/`URI`/`JSON`, `ontolith.identity.AdminAction`,
+  `ontolith.govern.ProposalState`/`ContradictionState`/`ConflictResult`) so
+  they render on the new API reference — found missing while building it,
+  since mkdocstrings drops an undocumented `Literal`/`Annotated` alias
+  silently.
+
+### Fixed
+- `pyproject.toml`'s `Documentation` URL pointed at an unreachable
+  readthedocs.io page that was never deployed; now points at the new
+  GitHub Pages site.
+
 ## [1.0.0] - 2026-09-28
 
 ### M4 - Production (1.0)

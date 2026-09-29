@@ -25,8 +25,13 @@ not by convention.
 - **Conflict handling, not conflict-hiding** — a changing fact supersedes its
   predecessor; disagreeing sources produce an explicit, queryable
   contradiction, never a silent overwrite.
-- **Governed plugins** — importers, exporters, reasoners, and validators run
-  process-isolated, with capability-scoped filesystem/network access.
+- **Governed plugins** — importers, exporters, reasoners, connectors, and
+  validators loaded through `PluginRegistry` (third-party plugins,
+  discovered via entry points) run process-isolated by default, with
+  capability-scoped filesystem/network access. Validators/completeness
+  validators wired in directly via `Ontology.connect()` (first-party,
+  deployment-configured) run in-process instead — trusted the same way a
+  `PolicyStrategy` already is.
 
 ## Where to go next
 

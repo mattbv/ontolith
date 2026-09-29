@@ -53,6 +53,7 @@ class Contradict:
 
 
 ConflictResult = Activate | Supersede | Contradict
+"""What `route()` decided to do with an incoming assertion (SPEC §10)."""
 
 
 # ---------------------------------------------------------------------------

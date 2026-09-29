@@ -24,10 +24,20 @@ loaded = PluginRegistry(kb).register(
 ```
 
 `register()` creates a `service`-kind `Principal` for the plugin (least
-privilege by default — `granted_capability` caps what it can do regardless
-of what its own manifest requests), and returns a `LoadedPlugin` bundling
-that principal's id, a capability-scoped view (`ReadOnlyView`/`WriteView`),
-and the plugin instance itself.
+privilege by default — a plugin's effective *storage* capability is
+`min(granted_capability, the manifest's own requested capability)`,
+further capped to `read` for read-only plugin kinds), and returns a
+`LoadedPlugin` bundling that principal's id, a capability-scoped view
+(`ReadOnlyView`/`WriteView`), and the plugin instance itself.
+
+!!! warning "`granted_capability` is a ceiling on *storage*, not on filesystem/network"
+    `filesystem=True` is an allow, never enforced as a ceiling by
+    `granted_capability` — a plugin that declares it can touch the
+    filesystem could open the KB's own on-disk file directly and write to
+    it, bypassing `granted_capability`'s storage limit entirely (KI-106).
+    `granted_capability` genuinely limits what the plugin can do through
+    the `kb`/`WriteView` object it's handed; it says nothing about what a
+    filesystem- or network-capable plugin can do outside that object.
 
 ## Calling it — and the sandbox underneath
 
@@ -52,19 +62,21 @@ restricted set of types, not arbitrary pickled objects (a defense against a
 hostile plugin sending back a malicious `__reduce__` payload, found and
 fixed in the M4 security review).
 
-!!! warning "Registration-time warnings are expected, not errors"
+!!! warning "Registration-time AND call-time warnings are expected, not errors"
     Registering a plugin that declares `filesystem=True` or an unenforced
-    `network=False` logs real warnings about what actually is/isn't
-    enforced on your platform — this project deliberately surfaces gaps
-    rather than staying silent about them (see
+    `network=False` logs a real warning about what actually is/isn't
+    enforced on your platform (this project deliberately surfaces gaps
+    rather than staying silent about them — see
     [`docs/known-issues.md`](https://github.com/mattbv/ontolith/blob/main/docs/known-issues.md)
-    KI-014/KI-106 for the full detail). On macOS/Windows there's no
-    OS-level enforcement mechanism at all yet — that's an honestly
-    disclosed residual, not a bug in your setup.
+    KI-014/KI-106 for the full detail), and **every call** on a platform
+    with no OS-level enforcement mechanism (macOS/Windows today) logs a
+    second warning at call time ("OS-level capability enforcement did not
+    apply for this call to ..."). Both are honestly disclosed residuals,
+    not bugs in your setup.
 
 ## Writing your own
 
-A plugin is one of four protocols
+A plugin is one of five protocols
 ([`ontolith/plugins/ports.py`](https://github.com/mattbv/ontolith/blob/main/src/ontolith/plugins/ports.py)):
 
 | Protocol | Method | Given |
@@ -73,18 +85,34 @@ A plugin is one of four protocols
 | `Exporter` | `export(kb, target)` | a `ReadOnlyView` |
 | `Reasoner` | `derive(kb)` | a `WriteView` |
 | `Validator` | `validate(assertion, kb)` | a `ValidatorKbView` |
+| `Connector` | `sync(kb)` | a `WriteView` |
 
-Every plugin class needs a `manifest` class attribute:
+Every plugin class needs a `manifest` class attribute. `PluginCapabilities.storage`
+defaults to `"read"` — an `Importer`/`Reasoner`/`Connector` that writes
+needs at least `storage="propose"` declared explicitly, or registration
+refuses it outright:
 
 ```python
-from ontolith.plugins.manifest import PluginManifest
+from ontolith.plugins.manifest import PluginCapabilities, PluginManifest
 
 class MyImporter:
-    manifest = PluginManifest(name="my-importer", version="0.1.0", kind="importer")
+    manifest = PluginManifest(
+        name="my-importer",
+        version="0.1.0",
+        kind="importer",
+        capabilities=PluginCapabilities(storage="propose"),
+    )
 
     def import_(self, source, kb):
         ...
 ```
+
+`"propose"` is the minimum that lets registration succeed at all for a
+storage-writing kind; the shipped `csv-importer` reference plugin actually
+declares `storage="write"` instead, since `ThresholdPolicy` only
+auto-accepts a service principal at `write` — a bulk importer registered
+with `"propose"` would have every one of its rows sit in human review
+instead of committing.
 
 ...and a registered entry point in your own package's `pyproject.toml`:
 

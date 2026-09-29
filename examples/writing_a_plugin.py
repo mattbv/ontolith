@@ -83,10 +83,13 @@ def main() -> None:
     print("\n✅ Plugin example complete!")
     print(
         "\nTo write your own: implement the Importer/Exporter/Reasoner/"
-        "Validator protocol (src/ontolith/plugins/ports.py), give your "
-        "plugin class a `manifest = PluginManifest(name=..., version=..., "
-        "kind=...)` class attribute, and register an entry point under "
-        "the 'ontolith.plugins' group in your package's pyproject.toml."
+        "Validator/Connector protocol (src/ontolith/plugins/ports.py), "
+        "give your plugin class a manifest = PluginManifest(name=..., "
+        "version=..., kind=..., capabilities=PluginCapabilities(storage="
+        "'propose')) class attribute -- storage defaults to 'read', so a "
+        "writing plugin must declare at least 'propose' or registration "
+        "refuses it -- and register an entry point under the "
+        "'ontolith.plugins' group in your package's pyproject.toml."
     )
 
 

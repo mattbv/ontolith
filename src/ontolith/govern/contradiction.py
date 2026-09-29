@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 # could silently drift if this Literal ever gains or loses a state — same
 # pattern ``plugins/registry.py`` already uses for ``PluginKind``.
 ContradictionState = Literal["open", "resolved"]
+"""A `Contradiction`'s lifecycle state — `open` until explicitly resolved."""
 
 
 class Contradiction(BaseModel):

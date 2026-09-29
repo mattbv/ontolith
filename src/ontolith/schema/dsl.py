@@ -149,15 +149,31 @@ class _RefAlias:
 
 
 Ref = _RefAlias
+"""Relation target type: `Ref["ConceptName"]`. See `_RefAlias` above."""
 
 Text = Annotated[str, _ScalarMarker("Text")]
+"""A scalar string-valued property/attribute type in the class DSL."""
+
 Integer = Annotated[int, _ScalarMarker("Integer")]
+"""A scalar integer-valued property/attribute type in the class DSL."""
+
 Float = Annotated[float, _ScalarMarker("Float")]
+"""A scalar float-valued property/attribute type in the class DSL."""
+
 Boolean = Annotated[bool, _ScalarMarker("Boolean")]
+"""A scalar boolean-valued property/attribute type in the class DSL."""
+
 Date = Annotated[str, _ScalarMarker("Date")]
+"""A scalar ISO-8601 date-valued property/attribute type in the class DSL."""
+
 DateTime = Annotated[str, _ScalarMarker("DateTime")]
+"""A scalar ISO-8601 datetime-valued property/attribute type in the class DSL."""
+
 URI = Annotated[str, _ScalarMarker("URI")]
+"""A scalar URI-valued property/attribute type in the class DSL."""
+
 JSON = Annotated[dict[str, Any], _ScalarMarker("JSON")]
+"""A scalar free-form JSON-object-valued property/attribute type in the class DSL."""
 
 
 def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:

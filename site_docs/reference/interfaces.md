@@ -6,12 +6,12 @@ from this pinned surface by ADR-0019 Decision #1).
 
 ::: ontolith.interfaces.rest
     options:
-      filters:
-        - "!^_"
+      members:
+        - create_rest_app
 
 ## ontolith.interfaces.graphql
 
 ::: ontolith.interfaces.graphql
     options:
-      filters:
-        - "!^_"
+      members:
+        - create_graphql_app

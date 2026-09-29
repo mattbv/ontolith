@@ -183,12 +183,16 @@ jobs:
 
       - name: Run examples
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        # -u: unbuffered stdout/stderr, so writing_a_plugin.py's real
+        # kb.observability warning output (logged to stderr) interleaves
+        # with its own print() narration in the right order in CI logs,
+        # instead of all arriving after stdout's buffer finally flushes.
         run: |
-          uv run python examples/quickstart.py
-          uv run python examples/governance_and_review.py
-          uv run python examples/bitemporal_queries.py
-          uv run python examples/writing_a_plugin.py
-          uv run python examples/hybrid_search.py
+          uv run python -u examples/quickstart.py
+          uv run python -u examples/governance_and_review.py
+          uv run python -u examples/bitemporal_queries.py
+          uv run python -u examples/writing_a_plugin.py
+          uv run python -u examples/hybrid_search.py
 
   benchmarks:
     # M4 Workstream 1 exit gate: the 5 SPEC §9 budget rows are enforced as

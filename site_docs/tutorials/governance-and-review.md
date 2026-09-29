@@ -52,7 +52,7 @@ AI-authored assertion — SPEC §7.4.
 
 ## The review lifecycle
 
-A pending proposal can go three ways. This tutorial exercises two of them:
+A pending proposal can go three ways. This tutorial exercises all three:
 
 ```python
 # A reviewer isn't convinced by the source and asks for a better one.
@@ -72,9 +72,14 @@ proposal = kb.accept_proposal(proposal.id, reviewer=reviewer.id)
 # proposal.state == "accepted"
 ```
 
-The third path, `reject_proposal(proposal_id, reviewer, reason=...)`, ends
-the proposal terminally with no assertion ever written — useful when a
-proposal shouldn't just be revised, it should be refused outright.
+The third path ends a proposal terminally with no assertion ever written —
+useful when a proposal shouldn't just be revised, it should be refused
+outright:
+
+```python
+proposal = kb.reject_proposal(proposal.id, reviewer=reviewer.id, reason="Not a credible source.")
+# proposal.state == "rejected"
+```
 
 ## What happens to the assertion itself
 
@@ -97,6 +102,13 @@ assertions are deliberately excluded from the default result set (SPEC
 §10.3: "MUST be excluded from default retrieval unless explicitly
 requested"). A `review`-or-above, non-AI principal resolves the dispute
 explicitly with `resolve_contradiction()`; nothing here auto-resolves.
+
+!!! note "Who can resolve this specific contradiction"
+    Not `reviewer` in this example, despite being `admin` capability —
+    `reviewer` authored one of the two contradicting values
+    (`"Springfield"`), and a party to a contradiction can never resolve it
+    themselves, regardless of capability (KI-033). Resolving this one
+    needs a *different*, uninvolved `review`-or-above, non-AI principal.
 
 If `Company.headquarters` had instead been declared `temporality=
 "time_varying"` (see the [Bitemporal Queries tutorial](bitemporal-queries.md)),

@@ -28,8 +28,8 @@ def main() -> None:
     print("⏳ Ontolith Bitemporal Queries Example\n")
 
     # An injected, controllable clock -- asserted_at is stamped from this,
-    # never from wall-clock time (CLAUDE.md's determinism-by-construction
-    # rule). Starting "now" at 2023-01-01.
+    # never from wall-clock time (determinism by construction). Starting
+    # "now" at 2023-01-01.
     clock = FixedClock("2023-01-01T00:00:00Z")
     kb = Ontology.connect(db_path, clock=clock)
     hr = kb.create_principal("hr@example.com", kind="human", default_capability="admin")

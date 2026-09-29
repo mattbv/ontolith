@@ -33,7 +33,7 @@ happens inside one namespace (`"default"` unless you say otherwise).
 
 Every assertion in Ontolith is made *by* someone — a human or an AI, each a
 [`Principal`](reference/identity.md). AI principals must declare an
-accountable owner (SPEC §7.2) and have their capability capped at `propose`
+accountable owner (SPEC §8.1) and have their capability capped at `propose`
 by default: they can suggest facts, never write them directly.
 
 ```python
@@ -90,7 +90,9 @@ kb.assert_literal(
 ```
 
 `assert_literal`/`assert_ref` are the direct-write path — available to
-`write`-capability-and-above principals. An AI principal (`propose`
+`write` or `admin` capability principals (not `review` — that capability is
+for accepting/rejecting others' proposals, not for direct writes of your
+own). An AI principal (`propose`
 capability) uses `propose`/`propose_ref` instead, which routes through the
 governed review workflow covered in the
 [Governance & Review tutorial](tutorials/governance-and-review.md):

@@ -13,9 +13,12 @@ latter for registered plugins). Every principal has a
 `read < propose < write < review < admin` — and a **trust level**.
 
 AI principals are structurally different, not just policy-different: they
-**must** declare an accountable human/team **owner**, and every AI-authored
-assertion captures the model family+version that made it. This is enforced
-in code and by a database CHECK constraint, not just convention.
+**must** declare an accountable human/team **owner** — enforced both in
+code and by a real database `CHECK` constraint (`CHECK (kind <> 'ai' OR
+owner IS NOT NULL)`), not just convention — and every AI-authored
+assertion captures the model family+version that made it (enforced in
+code; no equivalent DB-level constraint exists for this second
+requirement).
 
 ## Assertions are append-only
 
@@ -66,19 +69,35 @@ action.
 
 ## Conflict handling
 
-Routing is entirely determined by the predicate's declared temporality — a
-caller never chooses "supersede vs. contradict" directly:
+Routing is determined by the predicate's declared temporality first, then
+its cardinality — a caller never chooses "supersede vs. contradict"
+directly, and the check is purely on the *value*, not on who authored it
+(the same principal contradicting themselves routes exactly like two
+different principals disagreeing):
 
 ```
 existing := active assertions on (subject, predicate) whose validity overlaps
-t := schema.temporality(predicate)
+t := schema.temporality(predicate)          # "static" (default) | "time_varying"
+c := schema.cardinality(predicate)          # "single" (default) | "many"
 
-if t == "time_varying":
-    supersede(existing, new_assertion)   # expected change, no review
-elif t == "static":
-    if any existing.value != new_assertion.value:
+if t == "static":
+    if c == "many":
+        activate(new_assertion)   # legitimately multi-valued (e.g. phone numbers); no dispute possible
+    elif any existing.value != new_assertion.value:
         contradict(existing + [new_assertion])   # disputed, routed to review
+elif t == "time_varying":
+    if c == "many" and no explicit supersedes-hint was given:
+        activate(new_assertion)   # a new concurrent value, not a replacement (e.g. concurrent job titles)
+    else:
+        supersede(existing, new_assertion)   # expected change, no review
 ```
+
+`cardinality="many"` (ADR-0017, extended to `time_varying` by ADR-0050)
+changes what a differing, window-overlapping value means: for `static`, it
+opts out of contradiction entirely (legitimately multi-valued, e.g. phone
+numbers); for `time_varying`, it defaults to coexistence too (concurrent
+values, e.g. two simultaneous job titles) unless the caller explicitly
+names which specific existing assertion the new one replaces.
 
 Flagged (contradicting) assertions are retained and queryable, but excluded
 from default query results — you have to ask for them explicitly
@@ -125,8 +144,12 @@ no plugin bypasses governance. See the
 
 ## The MCP surface has no write tool
 
-The Model Context Protocol server Ontolith ships exposes only
-`read`/`query`/`propose`/`flag_contradiction`/`provenance` tools — by
-design, there is no direct-write tool reachable over MCP. An AI agent
+The Model Context Protocol server Ontolith ships exposes ten tools
+(`schema`, `get`, `create_entity`, `query`, `provenance`,
+`list_contradictions`, `propose`, `retract`, `flag_contradiction`,
+`resubmit`) — but **none of them is a direct-write tool**. Every
+write-shaped one (`create_entity`, `propose`, `retract`, `resubmit`) goes
+through the same governed proposal/policy path any other write does; there
+is no MCP tool that commits a value assertion unconditionally. An AI agent
 talking to a knowledge base through MCP can never bypass governance, full
 stop.

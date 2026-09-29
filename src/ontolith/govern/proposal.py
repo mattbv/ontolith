@@ -26,6 +26,7 @@ ProposalState = Literal[
     "rejected",
     "changes_requested",
 ]
+"""A `Proposal`'s state-machine state (SPEC §9.1)."""
 
 
 class Proposal(BaseModel):

@@ -9,8 +9,9 @@ This example demonstrates:
 - `reindex()`: the only way vectors enter the index (no write path
   auto-embeds)
 - `.semantic()` intersected with a symbolic `.where()` filter
-- `.min_confidence()`/`.trust_at_least()`: filtering by provenance
-  signals, not just content
+- `.min_confidence()`: filtering by provenance signals, not just content
+  (`.trust_at_least()` filters the same way on the asserting principal's
+  trust level instead -- see the Hybrid Search tutorial on the docs site)
 """
 
 import tempfile

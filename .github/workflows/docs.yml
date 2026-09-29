@@ -8,6 +8,18 @@ on:
       - "site_docs/**"
       - "src/ontolith/**"
       - "examples/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "mkdocs.yml"
+      - "site_docs/**"
+      - "src/ontolith/**"
+      - "examples/**"
+      - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/docs.yml"
   workflow_dispatch: {}
 
@@ -17,6 +29,14 @@ on:
 # requires, and only that scope.
 permissions:
   contents: read
+
+# Avoid two concurrent pushes to main racing in deploy-pages (the official
+# Pages starter workflow's own convention) -- let an in-flight deploy
+# finish rather than cancelling it, since a cancelled deploy could leave
+# Pages serving a half-updated build.
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -36,10 +56,15 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras
 
+      # --strict fails on any broken link, missing nav entry, or orphaned
+      # page -- this is what actually catches a docstring/doc change
+      # breaking the site, on every PR, not just after it's already merged
+      # to main (the deploy job below only ever runs post-merge).
       - name: Build site
         run: uv run mkdocs build --strict
 
       - name: Upload Pages artifact
+        if: github.event_name == 'push'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
@@ -47,6 +72,7 @@ jobs:
   deploy:
     name: Deploy to GitHub Pages
     needs: build
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       pages: write

@@ -27,7 +27,7 @@ def main() -> None:
     kb = Ontology.connect(db_path)
 
     # A human reviewer with write capability, and an AI principal that
-    # only ever proposes (SPEC §8.1's capability lattice: read < propose
+    # only ever proposes (SPEC §8.3's capability lattice: read < propose
     # < write < review < admin).
     reviewer = kb.create_principal(
         "reviewer@example.com", kind="human", default_capability="admin", trust_level=8
@@ -116,6 +116,26 @@ def main() -> None:
     flagged = kb.assertions(subject=acme.id, predicate="Company.headquarters", status="flagged")
     print(f"Active headquarters assertions:  {[f.value for f in active]}")
     print(f"Flagged (contradicting) values:  {[f.value for f in flagged]}")
+
+    # --- Rejecting a proposal outright ---
+    # A separate proposal, unrelated to headquarters, that a reviewer
+    # decides isn't worth revising -- reject_proposal() ends it terminally
+    # with no assertion ever written, unlike request_changes() above.
+    proposal, decision = kb.propose(
+        subject=acme.id,
+        predicate="Company.name",
+        value="Extremely Legitimate Business Inc",
+        value_type="Text",
+        author=researcher_bot.id,
+        source="an anonymous forum post",
+        confidence=0.2,
+        model="claude-sonnet-4-20250101",
+    )
+    proposal = kb.reject_proposal(
+        proposal.id, reviewer=reviewer.id, reason="Not a credible source."
+    )
+    print(f"reject_proposal():  proposal is now {proposal.state!r} -- no assertion was written")
+    print()
 
     kb.close()
     db_path.unlink()
