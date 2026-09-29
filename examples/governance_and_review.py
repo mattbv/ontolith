@@ -26,9 +26,10 @@ def main() -> None:
 
     kb = Ontology.connect(db_path)
 
-    # A human reviewer with write capability, and an AI principal that
-    # only ever proposes (SPEC §8.3's capability lattice: read < propose
-    # < write < review < admin).
+    # A human reviewer with admin capability (needed below for
+    # apply_schema; admin subsumes write), and an AI principal that only
+    # ever proposes (SPEC §8.3's capability lattice: read < propose <
+    # write < review < admin).
     reviewer = kb.create_principal(
         "reviewer@example.com", kind="human", default_capability="admin", trust_level=8
     )
@@ -135,7 +136,6 @@ def main() -> None:
         proposal.id, reviewer=reviewer.id, reason="Not a credible source."
     )
     print(f"reject_proposal():  proposal is now {proposal.state!r} -- no assertion was written")
-    print()
 
     kb.close()
     db_path.unlink()

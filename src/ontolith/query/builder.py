@@ -12,11 +12,15 @@ from ontolith.core.errors import ValidationError
 from ontolith.store.base import StorageBackend
 
 # Ranking algorithm (ADR-0020 amendment): vector-search-first, symbolic-intersect.
-# .semantic() overfetches this many candidates by default (or 10x the caller's
-# .limit(), whichever is larger) before intersecting with .where() and applying
-# confidence/trust filters — bounded cost beats exactness for a p95 budget, at
-# the cost of a true symbolic match ranked below the overfetch window in the
-# global vector ranking being missed.
+# .semantic() overfetches 10x the caller's .limit() (or 10x this default if no
+# .limit() was set), capped at _MAX_OVERFETCH, before intersecting with
+# .where() and applying confidence/trust filters — bounded cost beats
+# exactness for a p95 budget, at the cost of a true symbolic match ranked
+# below the overfetch window in the global vector ranking being missed.
+# Corrected (docs site review): this previously said "this many by default,
+# OR 10x .limit(), whichever is larger" — wrong on both counts, since 10x is
+# applied unconditionally and the no-.limit() case is 10x this default (200),
+# not this default itself (20).
 _DEFAULT_OVERFETCH = 20
 _OVERFETCH_MULTIPLIER = 10
 _MAX_OVERFETCH = 1000

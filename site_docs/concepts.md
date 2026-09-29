@@ -54,9 +54,9 @@ or `time_varying`. This one setting decides how Ontolith reacts when a
 differing value arrives for the same subject+predicate:
 
 - **`static`** — the property doesn't change over time (a person's date of
-  birth). A differing value from a *different* source is a genuine
-  disagreement: it's flagged as a **contradiction**, not silently
-  overwritten.
+  birth). A differing value is a genuine disagreement — the check is on
+  the value alone, not on who asserted it — so it's flagged as a
+  **contradiction**, not silently overwritten.
 - **`time_varying`** — the property changes over time as a matter of course
   (a person's job title). A differing value **supersedes** the prior one,
   closing its validity window — no dispute, no review needed, because change

@@ -30,12 +30,17 @@ on:
 permissions:
   contents: read
 
-# Avoid two concurrent pushes to main racing in deploy-pages (the official
-# Pages starter workflow's own convention) -- let an in-flight deploy
-# finish rather than cancelling it, since a cancelled deploy could leave
-# Pages serving a half-updated build.
+# Avoid two concurrent pushes-to-main (or workflow_dispatch runs) racing in
+# deploy-pages (the official Pages starter workflow's own convention) --
+# let an in-flight deploy finish rather than cancelling it, since a
+# cancelled deploy could leave Pages serving a half-updated build. Scoped
+# OFF of pull_request events entirely: sharing one group across PRs and
+# main would let a newly queued PR build cancel an already-pending main
+# deploy (GitHub allows only one pending run per group), leaving Pages
+# stale until the next push -- PR runs never deploy, so they don't need a
+# shared group with pushes at all, and each PR gets its own via `github.ref`.
 concurrency:
-  group: pages
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.ref) || 'pages' }}
   cancel-in-progress: false
 
 jobs:
@@ -64,7 +69,7 @@ jobs:
         run: uv run mkdocs build --strict
 
       - name: Upload Pages artifact
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
@@ -72,7 +77,11 @@ jobs:
   deploy:
     name: Deploy to GitHub Pages
     needs: build
-    if: github.event_name == 'push'
+    # Deploys on a push to main AND on a manual workflow_dispatch run (the
+    # latter is the usual way to trigger the first deploy right after
+    # enabling Pages, or to redeploy without a new push) -- only a
+    # pull_request build should ever skip this.
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       pages: write

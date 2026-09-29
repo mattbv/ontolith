@@ -74,9 +74,16 @@ proposal = kb.accept_proposal(proposal.id, reviewer=reviewer.id)
 
 The third path ends a proposal terminally with no assertion ever written —
 useful when a proposal shouldn't just be revised, it should be refused
-outright:
+outright. It needs a fresh, still-pending proposal (the one above is
+already `accepted` by now — `reject_proposal()` only works on a proposal
+still awaiting review):
 
 ```python
+proposal, decision = kb.propose(
+    subject=acme.id, predicate="Company.name", value="Extremely Legitimate Business Inc",
+    value_type="Text", author=researcher_bot.id, source="an anonymous forum post",
+    confidence=0.2, model="claude-sonnet-4-20250101",
+)
 proposal = kb.reject_proposal(proposal.id, reviewer=reviewer.id, reason="Not a credible source.")
 # proposal.state == "rejected"
 ```

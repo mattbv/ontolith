@@ -63,9 +63,11 @@ hostile plugin sending back a malicious `__reduce__` payload, found and
 fixed in the M4 security review).
 
 !!! warning "Registration-time AND call-time warnings are expected, not errors"
-    Registering a plugin that declares `filesystem=True` or an unenforced
-    `network=False` logs a real warning about what actually is/isn't
-    enforced on your platform (this project deliberately surfaces gaps
+    Registering a plugin that declares `filesystem=True`, or whose
+    `network=False`/`filesystem=False` can't actually be enforced on your
+    platform (true for every plugin on macOS/Windows today, including one
+    with the all-`False` default manifest), logs a real warning about what
+    actually is/isn't enforced (this project deliberately surfaces gaps
     rather than staying silent about them — see
     [`docs/known-issues.md`](https://github.com/mattbv/ontolith/blob/main/docs/known-issues.md)
     KI-014/KI-106 for the full detail), and **every call** on a platform

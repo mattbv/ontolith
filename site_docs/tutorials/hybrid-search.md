@@ -43,9 +43,9 @@ vector distance. The practical effect: `.limit(n)` bounds the *final*,
 post-intersection result count, not the number of candidates considered.
 
 This is a deliberate bounded-cost tradeoff, not free: the overfetch window
-is capped (20 candidates by default, or 10× your own `.limit()`, whichever
-is larger, up to a hard ceiling), so a genuine symbolic match ranked
-*below* that window in the global vector ranking is silently missed —
+is 10× your own `.limit()` (200 if you set none), capped at 1000 candidates,
+so a genuine symbolic match ranked *below* that window in the global
+vector ranking is silently missed —
 exactness is traded for a predictable p95 query cost.
 
 ## Filtering by provenance, not just content
