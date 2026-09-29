@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-28
+
 ### M4 - Production (1.0)
+
+All 8 of M4's named workstreams (performance budgets, SPEC §18 observability tier (a), plugin
+process isolation, migration tooling, SemVer 1.0 API-surface freeze, `format_version` freeze,
+security review, complete docs) plus a final exit-criteria review are complete — see
+`docs/Ontolith_Implementation_Plan.md` §2's milestone table and its long-form status paragraph for
+the full per-workstream record. The public API surface (ADR-0019, 13 packages), the on-disk
+`format_version` (ADR-0052, frozen at `3`), and the SPEC §9 performance budgets (now CI-blocking) are
+the three concrete things this tag freezes; `ci.yml`'s `griffe check` gate is blocking from this tag
+onward (previously warn-only pre-1.0).
 
 #### Fixed
 - Plugin sandbox (ADR-0051): a `network=False`/`filesystem=False` plugin's own module import and
@@ -1741,4 +1752,5 @@ new HIGH regressions, closed in a sixth PR.
 - Contribution guidelines and community health files
 - import-linter configuration for dependency rule enforcement
 
-[Unreleased]: https://github.com/mattbv/ontolith/compare/v0.0.1...HEAD
+[Unreleased]: https://github.com/mattbv/ontolith/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/mattbv/ontolith/releases/tag/v1.0.0

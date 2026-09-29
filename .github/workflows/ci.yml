@@ -56,18 +56,54 @@ jobs:
       - name: Docstring coverage
         run: uv run interrogate src/ontolith -c pyproject.toml
 
-      - name: Public API surface diff (informational, KI-020)
+      - name: Public API surface diff (KI-020)
         if: matrix.python-version == '3.12'
-        # warn-only pre-1.0 (Implementation Plan §5): `griffe check` exits 1
-        # on any detected change, including non-breaking ones (verified —
-        # do not remove continue-on-error without re-verifying this).
-        # continue-on-error is what actually makes this informational;
-        # blocking post-1.0 is a one-line removal of that flag, not a
-        # deeper redesign. Compares against the PR's base commit; on a
-        # push-to-main run (no PR context) compares against HEAD itself,
-        # i.e. a no-op — the meaningful comparison already happened during
-        # the PR's own run.
-        continue-on-error: true
+        # Blocking as of the 1.0 tag (Implementation Plan §5's "warn pre-1.0,
+        # block post-1.0"). This is NOT a required status check in the repo's
+        # branch ruleset (checked directly: only deletion, non_fast_forward,
+        # pull_request, code_quality, and code_scanning rules exist — no
+        # required_status_checks rule) — "blocking" here means a visible red
+        # CI failure a reviewer sees and must knowingly merge past, the same
+        # as any other job in this workflow, not a structural merge block.
+        #
+        # Griffe checks a module's `__all__` members if it has one, else its
+        # non-underscore/non-imported names — NOT "every non-underscore
+        # module-level function" (an earlier version of this comment claimed
+        # that; wrong, see below). A pure addition to `__all__` exits 0
+        # (confirmed). But it does NOT follow that only a genuine breaking
+        # change exits 1 — a still-earlier draft claimed that too, also
+        # wrong: griffe's breakage detector (`find_breaking_changes`) flags
+        # a public attribute's value TEXT changing even when semantically
+        # identical (confirmed: reordering `frozenset({"entity",
+        # "assertion"})` to `frozenset({"assertion", "entity"})` in
+        # store/base.py — same set, exit 1, "Attribute value was changed"),
+        # and a signature change on any name actually listed in its own
+        # module's `__all__` (or re-exported via another module's `__all__`
+        # — griffe follows the alias), even one this project's own ADR-0019
+        # doesn't consider part of the 13-package public surface (confirmed:
+        # adding a required parameter to plugins/sandbox/wire.py's
+        # restricted_loads, listed in that module's own `__all__` but not
+        # ADR-0019's — exit 1). A signature change on a name NOT listed in
+        # its own (or any re-exporting) module's `__all__` does NOT trip it
+        # (confirmed: same edit on cli.py's db_status, absent from cli.py's
+        # own `__all__ = ["app"]` and never re-exported — exit 0) — nothing
+        # catches this case, which is intended: `ontolith.interfaces.cli` is
+        # deliberately outside ADR-0019's SDK surface, and
+        # `test_public_api_surface.py`'s own docstring says plainly it does
+        # NOT catch signature-level changes at all, only export
+        # additions/removals/renames within the 13 packages it pins.
+        # Removing something from `__all__` alone, with the import kept,
+        # also doesn't trip this step (confirmed: exit 0) — for one of the
+        # 13 ADR-0019-pinned packages, `test_public_api_surface.py`'s own
+        # pinned `_EXPECTED` dict catches that instead; for `wire.py` or any
+        # other unpinned module, nothing catches it, same as the
+        # signature-change case above. Expect this gate to occasionally flag
+        # a cosmetic or internal-but-`__all__`-listed change as a false
+        # positive; that's a known, accepted cost of blocking it, not a bug
+        # in this workflow.
+        # Compares against the PR's base commit; on a push-to-main run (no
+        # PR context) compares against HEAD itself, i.e. a no-op — the
+        # meaningful comparison already happened during the PR's own run.
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha || 'HEAD' }}
         run: uv run python -m griffe check ontolith -s src -a "$BASE_REF" -f github

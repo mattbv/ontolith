@@ -1,6 +1,6 @@
 [project]
 name = "ontolith"
-version = "0.0.1"
+version = "1.0.0"
 description = "A Python framework for collaborative knowledge bases where humans and AI agents are co-equal authors"
 authors = [{ name = "Matheus B. Vicari", email = "matheus.boni.vicari@gmail.com" }]
 readme = "README.md"
@@ -8,7 +8,7 @@ license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 keywords = ["knowledge-graph", "ontology", "ai", "collaboration", "governance"]
 classifiers = [
-	"Development Status :: 2 - Pre-Alpha",
+	"Development Status :: 5 - Production/Stable",
 	"Intended Audience :: Developers",
 	"License :: OSI Approved :: Apache Software License",
 	"Programming Language :: Python :: 3",

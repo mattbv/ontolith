@@ -213,6 +213,50 @@ export-set changes and, when made blocking, a subset of signature changes it can
 `__all__` test alone never did) remains a real, accepted residual either way — not resolved by this
 Update, not newly introduced by it either.
 
+**Update (2026-09-28, v1.0.0 tag):** the "separate, later release event" named above happened.
+`pyproject.toml`/`src/ontolith/__init__.py` bumped to `1.0.0`; `ci.yml`'s `griffe check` step dropped
+`continue-on-error: true` as planned — re-verified empirically before flipping it, rather than
+trusting the step's own pre-existing comment at face value. That comment claimed `griffe check`
+"exits 1 on any detected change, including non-breaking ones," itself marked "verified." Re-checking
+found the *first* pass at correcting this (this Update's own initial draft) swung too far the other
+way, claiming the gate "only fails a PR on a genuine breaking change" — a subsequent review round
+disproved that too, and its own replacement text ("any non-underscore module-level function")
+introduced a second, narrower inaccuracy caught by a *third* round: `griffecli.check()` does only
+return 1 via `find_breaking_changes()` (`griffecli/_internal/cli.py`), and that detector only
+inspects the names a module's own `is_public` (`griffe/_internal/mixins.py`) considers public — for
+a module that defines its own `__all__`, that means exactly the names listed there (underscore-prefix
+has no separate bearing once `__all__` exists), unless another module's own `__all__` re-exports the
+same name — griffe follows that alias to its real target, so the re-exporting module's listing is
+what actually decides visibility in that case, not the defining module's own; for a module with no
+`__all__` at all, `is_public` falls back to non-underscore, non-imported names. No name in
+`src/ontolith` is re-exported this way today (checked directly), so every concrete case named in this
+Update holds regardless — this qualifier is about the general rule, not a currently-live exception.
+That detector's own idea of "breaking"
+is broader than "an existing public export was removed or renamed" — it also flags a public
+attribute's value *text* changing even when semantically identical (confirmed: reordering
+`frozenset({"entity", "assertion"})` to `frozenset({"assertion", "entity"})` in `store/base.py` —
+same set, exit 1) and a signature change on any name listed in its own module's `__all__`, even one
+outside this ADR's own 13-package public surface entirely (confirmed: a required parameter added to
+`plugins/sandbox/wire.py`'s `restricted_loads`, listed in that module's own `__all__` but not this
+ADR's pinned surface — exit 1). The same edit on a name *absent* from its module's own `__all__`
+does NOT trip it (confirmed: a required parameter added to `interfaces/cli.py`'s `db_status`, which
+`cli.py`'s own `__all__ = ["app"]` never lists — exit 0). This gate is a strictly *narrower* net than
+ADR-0019's own Decision #1 public-surface scope in one direction (it can't see an `__all__`-only
+removal that keeps the underlying binding — confirmed exit 0; `test_public_api_surface.py`'s pinned
+`_EXPECTED` dict is what catches that case) and a *wider* one in another (it inspects every name any
+module's own `__all__` lists, public-surface-pinned or not — 47 non-`__init__` modules under
+`src/ontolith` define one). Blocking it is still the right call — see `ci.yml`'s own comment for the
+accepted-cost framing — but each of the two prior attempts at describing its real scope overclaimed
+in a different direction, both within the same review arc; corrected here rather than left standing.
+This gate is also not a required status check in the repo's branch ruleset (no
+`required_status_checks` rule exists), so a flagged-but-intentional or false-positive failure is a
+visible red CI check a reviewer merges past knowingly, the same as any other job here, not a
+structural block needing a special override. Git tag + GitHub Release only — no
+`release.yml`/PyPI-publish automation exists yet (the Implementation Plan §7.1 pipeline sketch
+describing one was aspirational, never built), and the `ontolith` package name isn't registered on
+PyPI; publishing remains separate, future, user-driven work, not part of
+this tag.
+
 ## References
 
 - Implementation Plan §2 (M3 exit criteria), §5 (quality gates table), §7.2 (SemVer commitment), §14.6 (open question, now resolved — see Update above)

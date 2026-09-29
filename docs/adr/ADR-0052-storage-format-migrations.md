@@ -450,6 +450,14 @@ its on-disk format would not be caught here either. Filed as KI-105 rather than 
 a golden-schema snapshot test is a real, scoped fix, but building it isn't a
 prerequisite for declaring the number 3 itself frozen, which is this Update's own, narrower scope.
 
+## Update (2026-09-28, v1.0.0 tag)
+
+The project is no longer at `0.0.1` — the SDK was tagged `1.0.0` the day after the Update above was
+written, with no `format_version` change of its own (still `3`). The "pre-1.0" framing throughout
+the Update above is accurate as of when it was written, not a live claim; the freeze declaration and
+every discipline it describes are unaffected by the tag itself, since a `format_version` bump was
+never coupled to the SDK's own version number (see the "independent of SDK version" paragraph above).
+
 ## References
 
 - SPEC §15 (Versioning & migration — the three requirements this ADR implements)

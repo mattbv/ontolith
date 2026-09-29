@@ -419,6 +419,21 @@ More fundamentally, this gate was one piece of a CI-hardening pass (alongside `b
 
 New `.github/workflows/security.yml` (ADR-0026): `pip-audit`, `bandit`, `gitleaks`, CycloneDX SBOM generation — triggered on PR + weekly, matching Implementation Plan §7.1 exactly. Building it surfaced two real, previously-undetected issues that had to be fixed before the gates could actually be blocking: `pip-audit` found `mcp==1.28.0`/`sqlite-vec==0.1.1` had disclosed CVEs (both bumped to fixed versions), and `bandit` found 7 medium `B608` false-positive findings across two call-site shapes — 5 in the vector-search code (table names/an IN-clause arity string built from a validated closed set, not caller-controlled) and 2 in `entities_where()` (a `flagged_clause` local always one of two hardcoded literals) — each closed with a targeted `# nosec B608` and an explanatory comment rather than a blanket suppression. `griffecli` added as a dev dependency; a new `griffe check` step in `ci.yml`'s `quality` job diffs the public API against the PR's base commit and reports via native GitHub Actions annotations (`-f github`). This step is informational only because of `continue-on-error: true` on the CI step itself — `griffe check` exits `1` on any detected change, including non-breaking ones, not `0` as an earlier draft of this text claimed (a verification bug: piping the command through `head` before checking the exit code captured `head`'s exit code, not `griffe`'s; caught in review). `nightly.yml` (needs a benchmark-trend hosting decision) and `release.yml` (needs PyPI Trusted Publishing registration and a docs site, neither of which exist yet) remain deliberately out of scope — see ADR-0026 for why.
 
+**Update (2026-09-28, v1.0.0 tag):** `continue-on-error: true` was removed from this step, per this
+entry's own "warn pre-1.0, block post-1.0" reference and ADR-0026's Decision #3. This entry's "exits
+`1` on any detected change, including non-breaking ones" is imprecise: it's specifically
+`find_breaking_changes()`'s own breakage set, scoped to whatever a module's own `is_public` considers
+public (for a module with its own `__all__`, exactly the names listed there, unless re-exported via
+another module's own `__all__` — no name in `src/ontolith` is today) — a pure addition exits 0,
+removing a name from `__all__` alone (keeping the import) also exits 0, and a signature/attribute
+change on a name absent from its own module's `__all__` exits 0 too (confirmed on
+`interfaces/cli.py`'s `db_status`, not listed in `cli.py`'s own `__all__ = ["app"]`) — most everyday
+edits don't trip this gate at all, not "almost always" as an earlier draft of this Update claimed.
+See ADR-0026's own 2026-09-28 Update and ADR-0019's 2026-09-28 Update for the corrected,
+empirically-reproduced account (two successive re-verification attempts each overcorrected in a
+different direction — one claiming only genuine breaking changes trip it, the other claiming any
+non-underscore module-level function does — both wrong, both fixed there).
+
 ---
 
 ## KI-021 — MCP read tools accept unauthenticated calls, contradicting SPEC §8.3 ✓ RESOLVED

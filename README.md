@@ -38,9 +38,9 @@ uv run python examples/quickstart.py
 
 ## Development Status
 
-🚧 **Pre-1.0** - M0–M3 complete; M4 (Production 1.0) in progress
+✅ **v1.0.0** - M0–M4 complete; tagged 2026-09-28
 
-See [docs/Ontolith_Implementation_Plan.md](docs/Ontolith_Implementation_Plan.md) for roadmap and current milestone status.
+Not yet published to PyPI — install from source (see Quick Start above). See [docs/Ontolith_Implementation_Plan.md](docs/Ontolith_Implementation_Plan.md) for the full milestone history and [vNext](docs/Ontolith_Implementation_Plan.md) plans.
 
 ## Documentation
 
