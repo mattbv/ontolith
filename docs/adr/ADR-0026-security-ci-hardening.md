@@ -160,6 +160,36 @@ extra's ~20 tooling dependencies (`ruff`, `mypy`, `pytest`, etc.) remain deliber
 out of KI-070's own stated scope, and lock-pinned in practice since CI installs from the committed
 `uv.lock`, not a fresh resolve.
 
+## Update (2026-09-28, v1.0.0 tag, `griffe check` flipped to blocking)
+
+The `griffe check` gate described above lost its `continue-on-error: true` at the 1.0 tag, per this
+ADR's own §Decision #1 framing ("Blocking post-1.0 is then a one-line removal of
+`continue-on-error`") and Implementation Plan §5's "warn pre-1.0, block post-1.0." Re-verifying the
+gate's actual behavior while flipping it (PR #145's review round) found two things worth correcting
+here, since they touch exactly this ADR's own claims:
+
+1. **§Context's "and exits `1` when it does, including for changes that aren't actually breaking"
+   is accurate** and reconfirmed (the `Ontology.namespace` case it describes — a literal extracted
+   to a same-valued constant — is the same class of result a fresh test reproduces: reordering a
+   `frozenset` literal to the identical set still exits 1, "Attribute value was changed"). The
+   phrase "exits `1` on any detected change" (repeated in §Decision #1) is imprecise, though: it's
+   specifically `find_breaking_changes()`'s own idea of a breakage, which is broader than "an export
+   was removed or renamed" (attribute-value-text changes, any non-underscore module's signature
+   changes) but does *not* include a pure addition (exits 0) or removing a name from `__all__` alone
+   while keeping the underlying binding (also exits 0 — `test_public_api_surface.py`'s pinned
+   `_EXPECTED` dict is what catches that case, not `griffe check`).
+2. **§Rationale's "Why `griffe check`'s own default (always exit 0) is trusted"** heading directly
+   contradicts §Context's own finding two sections above it (which established `griffe check` does
+   *not* always exit 0) — a stale leftover from an earlier draft this ADR's own Context paragraph
+   already retracted, never corrected before now. `continue-on-error: true` was in fact doing real
+   work (making a genuinely-can-exit-1 step informational), not redundant defensive noise over an
+   already-warn-only tool.
+
+Neither correction changes this ADR's own Decision or Consequences — the gate was always going to
+flip to blocking at 1.0, and now has. See ADR-0019's own 2026-09-28 Update and KI-020's resolution
+note for the fuller, once-more-corrected account (a first re-verification pass overclaimed the
+opposite error, that only a "genuine breaking change" trips it — also wrong, fixed there).
+
 ## References
 
 - Implementation Plan §5 (quality gates table), §7.1 (CI pipeline)

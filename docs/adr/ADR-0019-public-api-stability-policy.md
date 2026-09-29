@@ -216,16 +216,32 @@ Update, not newly introduced by it either.
 **Update (2026-09-28, v1.0.0 tag):** the "separate, later release event" named above happened.
 `pyproject.toml`/`src/ontolith/__init__.py` bumped to `1.0.0`; `ci.yml`'s `griffe check` step dropped
 `continue-on-error: true` as planned — re-verified empirically before flipping it, rather than
-trusting the step's own pre-existing comment at face value (that comment claimed `griffe check`
-"exits 1 on any detected change, including non-breaking ones," itself marked "verified"; re-checking
-found this false against the installed `griffecli`: its `check()` function only returns 1 when
-`find_breaking_changes()` reports an actual breakage, confirmed with two live test diffs — a pure
-addition exits 0, only a real removal/rename exits 1). Blocking this gate therefore only fails a PR
-on a genuine breaking change, not on ordinary additive development, exactly as this ADR's Decision #4
-intended. Git tag + GitHub Release only — no `release.yml`/PyPI-publish automation exists yet (the
-Implementation Plan §7.1 pipeline sketch describing one was aspirational, never built), and the
-`ontolith` package name isn't registered on PyPI; publishing remains separate, future, user-driven
-work, not part of this tag.
+trusting the step's own pre-existing comment at face value. That comment claimed `griffe check`
+"exits 1 on any detected change, including non-breaking ones," itself marked "verified." Re-checking
+found the *first* pass at correcting this (this Update's own initial draft) swung too far the other
+way, claiming the gate "only fails a PR on a genuine breaking change" — a subsequent review round
+disproved that too: `griffecli.check()` does only return 1 via `find_breaking_changes()`
+(`griffecli/_internal/cli.py`), but that detector's own idea of "breaking" is broader than "an
+existing public export was removed or renamed" — it also flags a public attribute's value *text*
+changing even when semantically identical (confirmed: reordering
+`frozenset({"entity", "assertion"})` to `frozenset({"assertion", "entity"})` in `store/base.py` —
+same set, exit 1) and a signature change on *any* non-underscore module-level function, including
+ones outside this ADR's own 13-package public surface entirely (confirmed: a required parameter
+added to `plugins/sandbox/wire.py`'s `restricted_loads`, an internal helper never exported — exit
+1). This gate is a strictly *narrower* net than ADR-0019's own Decision #1 public-surface scope in
+one direction (it can't see an `__all__`-only removal that keeps the underlying binding — confirmed
+exit 0; `test_public_api_surface.py`'s pinned `_EXPECTED` dict is what catches that case) and a
+*wider* one in another (it inspects every non-underscore name in every module, public-surface-pinned
+or not). Blocking it is still the right call — see `ci.yml`'s own comment for the accepted-cost
+framing — but "only fails on a genuine breaking change" overclaimed what it actually enforces, twice
+in a row within the same review arc; corrected here rather than left standing. This gate is also not
+a required status check in the repo's branch ruleset (no `required_status_checks` rule exists), so a
+flagged-but-intentional or false-positive failure is a visible red CI check a reviewer merges past
+knowingly, the same as any other job here, not a structural block needing a special override. Git
+tag + GitHub Release only — no `release.yml`/PyPI-publish automation exists yet (the Implementation
+Plan §7.1 pipeline sketch describing one was aspirational, never built), and the `ontolith` package
+name isn't registered on PyPI; publishing remains separate, future, user-driven work, not part of
+this tag.
 
 ## References
 

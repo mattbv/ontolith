@@ -417,13 +417,6 @@ that the on-disk format carries a `format_version` and that migrations must be r
 it says nothing about major-only bumps — that discipline is §7.2/ADR-0019's, not SPEC §15's) — not
 re-litigated by this Update.
 
-**Update (2026-09-28, v1.0.0 tag):** the project is no longer at `0.0.1` — the SDK was tagged
-`1.0.0` the day after this ADR's Update above was written, with no `format_version` change of its
-own (still `3`). The "pre-1.0" framing throughout this Update section is accurate as of when it was
-written, not a live claim; the freeze declaration and every discipline it describes are unaffected by
-the tag itself, since a `format_version` bump was never coupled to the SDK's own version number (see
-the "independent of SDK version" paragraph above).
-
 **New regression test — a dedicated assertion message, not a newly-closed coverage gap**:
 `tests/unit/test_storage_migrations.py::TestFormatVersionFrozen` pins the literal value `3` on both
 backends. This does **not** close a real gap the way `test_public_api_surface.py`'s `_EXPECTED` dict
@@ -456,6 +449,14 @@ out by that extension, not tracked by `format_version` at all — a future `sqli
 its on-disk format would not be caught here either. Filed as KI-105 rather than fixed in this Update:
 a golden-schema snapshot test is a real, scoped fix, but building it isn't a
 prerequisite for declaring the number 3 itself frozen, which is this Update's own, narrower scope.
+
+## Update (2026-09-28, v1.0.0 tag)
+
+The project is no longer at `0.0.1` — the SDK was tagged `1.0.0` the day after the Update above was
+written, with no `format_version` change of its own (still `3`). The "pre-1.0" framing throughout
+the Update above is accurate as of when it was written, not a live claim; the freeze declaration and
+every discipline it describes are unaffected by the tag itself, since a `format_version` bump was
+never coupled to the SDK's own version number (see the "independent of SDK version" paragraph above).
 
 ## References
 

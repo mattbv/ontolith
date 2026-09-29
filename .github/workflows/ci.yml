@@ -59,23 +59,35 @@ jobs:
       - name: Public API surface diff (KI-020)
         if: matrix.python-version == '3.12'
         # Blocking as of the 1.0 tag (Implementation Plan §5's "warn pre-1.0,
-        # block post-1.0"). The prior version of this comment claimed `griffe
-        # check` "exits 1 on any detected change, including non-breaking
-        # ones" and cited that as the reason to keep this informational via
-        # continue-on-error — re-verified directly (empirically, against the
-        # installed griffecli's own source and two live test diffs) while
-        # flipping this gate for 1.0, and found FALSE: `griffecli.check()`
-        # only returns 1 when `find_breaking_changes()` reports an actual
-        # breakage (griffecli/_internal/cli.py) — a pure addition exits 0,
-        # confirmed with a real test (added a new `__all__` export, ran
-        # `griffe check` against HEAD, got exit 0); only removing/renaming an
-        # existing public export triggers exit 1, confirmed the same way.
-        # Blocking here therefore only fails a PR on a genuine breaking
-        # change, not on ordinary additive development — this is safe to
-        # block, not merely permitted to. Compares against the PR's base
-        # commit; on a push-to-main run (no PR context) compares against
-        # HEAD itself, i.e. a no-op — the meaningful comparison already
-        # happened during the PR's own run.
+        # block post-1.0"). This is NOT a required status check in the repo's
+        # branch ruleset (checked directly: only deletion, non_fast_forward,
+        # pull_request, code_quality, and code_scanning rules exist — no
+        # required_status_checks rule) — "blocking" here means a visible red
+        # CI failure a reviewer sees and must knowingly merge past, the same
+        # as any other job in this workflow, not a structural merge block.
+        #
+        # A pure addition exits 0 (confirmed: added a new `__all__` export,
+        # ran `griffe check` against HEAD). But this does NOT mean it exits 1
+        # only for a genuine breaking change — an earlier version of this
+        # comment claimed that, and it's wrong: griffe's breakage detector
+        # (`find_breaking_changes`) also flags a public attribute's value
+        # TEXT changing even when the value is semantically identical
+        # (confirmed: reordering `frozenset({"entity", "assertion"})` to
+        # `frozenset({"assertion", "entity"})` in store/base.py — same set,
+        # exit 1, "Attribute value was changed"), and a signature change on
+        # ANY non-underscore module-level function, including ones this
+        # project's own ADR-0019 doesn't consider part of the public surface
+        # at all (confirmed: adding a required parameter to
+        # plugins/sandbox/wire.py's restricted_loads, an internal helper —
+        # exit 1). Removing something from `__all__` alone, with the import
+        # kept, does NOT trip it (confirmed: exit 0) — `test_public_api_
+        # surface.py`'s own pinned `_EXPECTED` dict is what catches that
+        # case, not this step. Expect this gate to occasionally flag a
+        # cosmetic or internal-only change as a false positive; that's a
+        # known, accepted cost of blocking it, not a bug in this workflow.
+        # Compares against the PR's base commit; on a push-to-main run (no
+        # PR context) compares against HEAD itself, i.e. a no-op — the
+        # meaningful comparison already happened during the PR's own run.
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha || 'HEAD' }}
         run: uv run python -m griffe check ontolith -s src -a "$BASE_REF" -f github
