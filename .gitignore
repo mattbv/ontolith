@@ -49,3 +49,6 @@ Thumbs.db
 *.db
 *.sqlite
 *.sqlite3
+
+# mkdocs build output (site_docs/ is the source, this is the built site)
+/site/

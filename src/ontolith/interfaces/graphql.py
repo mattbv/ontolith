@@ -61,6 +61,7 @@ just database-bound ones) for its full duration — measured directly during
 review, closed here.
 
 Usage:
+    ```python
     from ontolith.identity.token_auth import TokenAuthProvider
     from ontolith.interfaces.graphql import create_graphql_app
     app = create_graphql_app(kb, TokenAuthProvider(kb.backend))
@@ -68,6 +69,7 @@ Usage:
     # introspection is off by default (KI-056) so it can't load a schema —
     # pass introspection=True for a working interactive dev experience:
     # app = create_graphql_app(kb, TokenAuthProvider(kb.backend), introspection=True)
+    ```
 """
 
 from __future__ import annotations

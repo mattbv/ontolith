@@ -20,8 +20,14 @@ from ontolith.schema import Concept, Date, Ref, Relation, Text, compile_schema
 
 def main() -> None:
     """Run the quickstart example."""
-    # Create a temporary database for this example
-    db_path = Path(tempfile.mktemp(suffix=".db"))
+    # Create a temporary database for this example. NamedTemporaryFile
+    # actually creates the file (unlike the deprecated tempfile.mktemp,
+    # which only returns a name and leaves a race window before the
+    # caller creates it) -- close it immediately so Ontology.connect()
+    # can open the same path itself.
+    f = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    db_path = Path(f.name)
+    f.close()
 
     print("🚀 Ontolith Quickstart Example\n")
     print(f"Database: {db_path}\n")

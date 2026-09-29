@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 AdminAction = Literal["create_principal", "apply_schema", "register_plugin"]
+"""The admin-capability-gated action kinds an `AdminEvent` records."""
 
 
 class AdminEvent(BaseModel):

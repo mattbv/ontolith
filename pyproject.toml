@@ -121,7 +121,7 @@ dev = [
 
 [project.urls]
 Homepage = "https://github.com/mattbv/ontolith"
-Documentation = "https://ontolith.readthedocs.io"
+Documentation = "https://mattbv.github.io/ontolith/"
 Repository = "https://github.com/mattbv/ontolith"
 Issues = "https://github.com/mattbv/ontolith/issues"
 

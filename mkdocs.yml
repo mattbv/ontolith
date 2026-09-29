@@ -1,0 +1,92 @@
+site_name: Ontolith
+site_description: >-
+  A Python framework/SDK for building collaborative knowledge bases where
+  humans and AI agents are co-equal authors of a shared, governed ontology.
+site_url: https://mattbv.github.io/ontolith/
+repo_url: https://github.com/mattbv/ontolith
+repo_name: mattbv/ontolith
+edit_uri: edit/main/site_docs/
+
+docs_dir: site_docs
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - content.code.copy
+    - content.tabs.link
+    - toc.follow
+
+markdown_extensions:
+  - attr_list
+  - md_in_html
+  - admonition
+  - def_list
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.tabbed:
+      alternate_style: true
+  - toc:
+      permalink: true
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          options:
+            show_source: true
+            show_root_heading: true
+            show_signature_annotations: true
+            separate_signature: true
+            merge_init_into_class: true
+            docstring_style: google
+            members_order: source
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Concepts: concepts.md
+  - Tutorials:
+      - tutorials/index.md
+      - Governance & Review: tutorials/governance-and-review.md
+      - Bitemporal Queries: tutorials/bitemporal-queries.md
+      - Writing a Plugin: tutorials/writing-a-plugin.md
+      - Hybrid Search: tutorials/hybrid-search.md
+  - Examples: examples.md
+  - API Reference:
+      - reference/index.md
+      - ontolith: reference/ontolith.md
+      - ontolith.core: reference/core.md
+      - ontolith.identity: reference/identity.md
+      - ontolith.store: reference/store.md
+      - ontolith.govern: reference/govern.md
+      - ontolith.query: reference/query.md
+      - ontolith.schema: reference/schema.md
+      - ontolith.plugins: reference/plugins.md
+      - ontolith.interfaces: reference/interfaces.md
+  - Project:
+      - Known Issues: https://github.com/mattbv/ontolith/blob/main/docs/known-issues.md
+      - Architecture Decisions: https://github.com/mattbv/ontolith/tree/main/docs/adr
+      - Specification: https://github.com/mattbv/ontolith/blob/main/docs/Ontolith_SPEC.md
+      - Implementation Plan: https://github.com/mattbv/ontolith/blob/main/docs/Ontolith_Implementation_Plan.md
+      - Changelog: https://github.com/mattbv/ontolith/blob/main/CHANGELOG.md

@@ -149,15 +149,37 @@ class _RefAlias:
 
 
 Ref = _RefAlias
+"""Relation target type: `Ref["ConceptName"]`, e.g. `employer: Ref["Organization"] = Relation()`."""
 
 Text = Annotated[str, _ScalarMarker("Text")]
+"""A scalar string-valued property/attribute type in the class DSL."""
+
 Integer = Annotated[int, _ScalarMarker("Integer")]
+"""A scalar integer-valued property/attribute type in the class DSL."""
+
 Float = Annotated[float, _ScalarMarker("Float")]
+"""A scalar float-valued property/attribute type in the class DSL."""
+
 Boolean = Annotated[bool, _ScalarMarker("Boolean")]
+"""A scalar boolean-valued property/attribute type in the class DSL."""
+
 Date = Annotated[str, _ScalarMarker("Date")]
+"""A scalar ISO-8601 date-valued property/attribute type in the class DSL."""
+
 DateTime = Annotated[str, _ScalarMarker("DateTime")]
+"""A scalar ISO-8601 datetime-valued property/attribute type in the class DSL."""
+
 URI = Annotated[str, _ScalarMarker("URI")]
+"""A scalar URI-or-CURIE-valued property/attribute type in the class DSL
+(LinkML's `uriorcurie`, ADR-0013 — a full `scheme:...` URI or a
+`prefix:local-name` CURIE, either is accepted)."""
+
 JSON = Annotated[dict[str, Any], _ScalarMarker("JSON")]
+"""A scalar JSON-valued property/attribute type in the class DSL — any
+value `json.loads` accepts (object, array, string, number, bool, or
+null), not only a JSON object despite the DSL annotation's `dict[str,
+Any]` typing (a caller-facing convenience, not what storage actually
+validates against)."""
 
 
 def _unwrap_optional(annotation: Any) -> tuple[Any, bool]:

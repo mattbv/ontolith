@@ -1,0 +1,97 @@
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "mkdocs.yml"
+      - "site_docs/**"
+      - "src/ontolith/**"
+      - "examples/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "mkdocs.yml"
+      - "site_docs/**"
+      - "src/ontolith/**"
+      - "examples/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch: {}
+
+# Least privilege (matches ci.yml/security.yml's own posture, M4 Workstream
+# 7): the build job only reads the repo; only the deploy job needs the
+# id-token/pages write access the official actions/deploy-pages action
+# requires, and only that scope.
+permissions:
+  contents: read
+
+# Avoid two concurrent pushes-to-main (or workflow_dispatch runs) racing in
+# deploy-pages (the official Pages starter workflow's own convention) --
+# let an in-flight deploy finish rather than cancelling it, since a
+# cancelled deploy could leave Pages serving a half-updated build. Scoped
+# OFF of pull_request events entirely: sharing one group across PRs and
+# main would let a newly queued PR build cancel an already-pending main
+# deploy (GitHub allows only one pending run per group), leaving Pages
+# stale until the next push -- PR runs never deploy, so they don't need a
+# shared group with pushes at all, and each PR gets its own via `github.ref`.
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.ref) || 'pages' }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      # --strict fails on any broken link, missing nav entry, or orphaned
+      # page -- this is what actually catches a docstring/doc change
+      # breaking the site, on every PR, not just after it's already merged
+      # to main (the deploy job below only ever runs post-merge).
+      - name: Build site
+        run: uv run mkdocs build --strict
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    # Deploys on a push to main AND on a manual workflow_dispatch run
+    # against main (the latter is the usual way to trigger the first
+    # deploy right after enabling Pages, or to redeploy without a new
+    # push) -- explicitly pinned to main rather than relying only on
+    # excluding pull_request, so a workflow_dispatch run against some
+    # other branch doesn't reach this job either.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

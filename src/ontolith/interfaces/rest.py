@@ -27,10 +27,12 @@ forwards those three straight to ``FastAPI(...)``, defaulting to
 FastAPI's own (docs-enabled) behavior when omitted.
 
 Usage:
+    ```python
     from ontolith.identity.token_auth import TokenAuthProvider
     from ontolith.interfaces.rest import create_rest_app
     app = create_rest_app(kb, TokenAuthProvider(kb.backend))
     # uvicorn.run(app) to serve
+    ```
 """
 
 from __future__ import annotations
