@@ -175,10 +175,12 @@ fixing here, since they touch exactly this ADR's own claims:
    `frozenset` literal to the identical set still exits 1, "Attribute value was changed"). The
    phrase "exits `1` on any detected change" (repeated in §Decision #3) is imprecise, though: it's
    specifically `find_breaking_changes()`'s own idea of a breakage, scoped to whatever a module's own
-   `is_public` considers public — for a module with its own `__all__`, exactly the names listed
-   there (confirmed: a required-parameter change on `interfaces/cli.py`'s `db_status`, absent from
-   `cli.py`'s own `__all__ = ["app"]`, exits 0; the same change on a name that IS listed in its own
-   module's `__all__`, even one outside this project's ADR-0019 public surface, exits 1). It does
+   `is_public` considers public — for a module with its own `__all__`, exactly the names listed there
+   (unless re-exported via another module's own `__all__`, which griffe follows instead — no name in
+   `src/ontolith` does this today) (confirmed: a required-parameter change on `interfaces/cli.py`'s
+   `db_status`, absent from `cli.py`'s own `__all__ = ["app"]`, exits 0; the same change on a name
+   that IS listed in its own module's `__all__`, even one outside this project's ADR-0019 public
+   surface, exits 1). It does
    *not* include a pure addition (exits 0) or removing a name from `__all__` alone while keeping the
    underlying binding (also exits 0 — `test_public_api_surface.py`'s pinned `_EXPECTED` dict is what
    catches that case, not `griffe check`).

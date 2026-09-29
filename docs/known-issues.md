@@ -423,8 +423,9 @@ New `.github/workflows/security.yml` (ADR-0026): `pip-audit`, `bandit`, `gitleak
 entry's own "warn pre-1.0, block post-1.0" reference and ADR-0026's Decision #3. This entry's "exits
 `1` on any detected change, including non-breaking ones" is imprecise: it's specifically
 `find_breaking_changes()`'s own breakage set, scoped to whatever a module's own `is_public` considers
-public (for a module with its own `__all__`, exactly the names listed there) — a pure addition exits
-0, removing a name from `__all__` alone (keeping the import) also exits 0, and a signature/attribute
+public (for a module with its own `__all__`, exactly the names listed there, unless re-exported via
+another module's own `__all__` — no name in `src/ontolith` is today) — a pure addition exits 0,
+removing a name from `__all__` alone (keeping the import) also exits 0, and a signature/attribute
 change on a name absent from its own module's `__all__` exits 0 too (confirmed on
 `interfaces/cli.py`'s `db_status`, not listed in `cli.py`'s own `__all__ = ["app"]`) — most everyday
 edits don't trip this gate at all, not "almost always" as an earlier draft of this Update claimed.

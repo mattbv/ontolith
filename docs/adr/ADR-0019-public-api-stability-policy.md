@@ -224,9 +224,14 @@ disproved that too, and its own replacement text ("any non-underscore module-lev
 introduced a second, narrower inaccuracy caught by a *third* round: `griffecli.check()` does only
 return 1 via `find_breaking_changes()` (`griffecli/_internal/cli.py`), and that detector only
 inspects the names a module's own `is_public` (`griffe/_internal/mixins.py`) considers public — for
-a module that defines its own `__all__`, that means exactly the names listed there, nothing else
-(underscore-prefix has no separate bearing once `__all__` exists); for a module with no `__all__`
-at all, it falls back to non-underscore, non-imported names. That detector's own idea of "breaking"
+a module that defines its own `__all__`, that means exactly the names listed there (underscore-prefix
+has no separate bearing once `__all__` exists), unless another module's own `__all__` re-exports the
+same name — griffe follows that alias to its real target, so the re-exporting module's listing is
+what actually decides visibility in that case, not the defining module's own; for a module with no
+`__all__` at all, `is_public` falls back to non-underscore, non-imported names. No name in
+`src/ontolith` is re-exported this way today (checked directly), so every concrete case named in this
+Update holds regardless — this qualifier is about the general rule, not a currently-live exception.
+That detector's own idea of "breaking"
 is broader than "an existing public export was removed or renamed" — it also flags a public
 attribute's value *text* changing even when semantically identical (confirmed: reordering
 `frozenset({"entity", "assertion"})` to `frozenset({"assertion", "entity"})` in `store/base.py` —

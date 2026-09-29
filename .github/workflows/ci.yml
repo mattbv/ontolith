@@ -78,19 +78,29 @@ jobs:
         # "assertion"})` to `frozenset({"assertion", "entity"})` in
         # store/base.py — same set, exit 1, "Attribute value was changed"),
         # and a signature change on any name actually listed in its own
-        # module's `__all__`, even one this project's own ADR-0019 doesn't
-        # consider part of the 13-package public surface (confirmed: adding
-        # a required parameter to plugins/sandbox/wire.py's
+        # module's `__all__` (or re-exported via another module's `__all__`
+        # — griffe follows the alias), even one this project's own ADR-0019
+        # doesn't consider part of the 13-package public surface (confirmed:
+        # adding a required parameter to plugins/sandbox/wire.py's
         # restricted_loads, listed in that module's own `__all__` but not
         # ADR-0019's — exit 1). A signature change on a name NOT listed in
-        # its module's `__all__` does NOT trip it (confirmed: same edit on
-        # cli.py's db_status, absent from cli.py's own `__all__` — exit 0),
-        # and removing something from `__all__` alone, with the import kept,
-        # doesn't either (confirmed: exit 0) — `test_public_api_surface.py`'s
-        # own pinned `_EXPECTED` dict is what catches both of those cases,
-        # not this step. Expect this gate to occasionally flag a cosmetic or
-        # internal-but-`__all__`-listed change as a false positive; that's a
-        # known, accepted cost of blocking it, not a bug in this workflow.
+        # its own (or any re-exporting) module's `__all__` does NOT trip it
+        # (confirmed: same edit on cli.py's db_status, absent from cli.py's
+        # own `__all__ = ["app"]` and never re-exported — exit 0) — nothing
+        # catches this case, which is intended: `ontolith.interfaces.cli` is
+        # deliberately outside ADR-0019's SDK surface, and
+        # `test_public_api_surface.py`'s own docstring says plainly it does
+        # NOT catch signature-level changes at all, only export
+        # additions/removals/renames within the 13 packages it pins.
+        # Removing something from `__all__` alone, with the import kept,
+        # also doesn't trip this step (confirmed: exit 0) — for one of the
+        # 13 ADR-0019-pinned packages, `test_public_api_surface.py`'s own
+        # pinned `_EXPECTED` dict catches that instead; for `wire.py` or any
+        # other unpinned module, nothing catches it, same as the
+        # signature-change case above. Expect this gate to occasionally flag
+        # a cosmetic or internal-but-`__all__`-listed change as a false
+        # positive; that's a known, accepted cost of blocking it, not a bug
+        # in this workflow.
         # Compares against the PR's base commit; on a push-to-main run (no
         # PR context) compares against HEAD itself, i.e. a no-op — the
         # meaningful comparison already happened during the PR's own run.
