@@ -114,7 +114,7 @@ explicitly with `resolve_contradiction()`; nothing here auto-resolves.
     Not `reviewer` in this example, despite being `admin` capability —
     `reviewer` authored one of the two contradicting values
     (`"Springfield"`), and a party to a contradiction can never resolve it
-    themselves, regardless of capability (KI-033). Resolving this one
+    themselves, regardless of capability (KI-026). Resolving this one
     needs a *different*, uninvolved `review`-or-above, non-AI principal.
 
 If `Company.headquarters` had instead been declared `temporality=

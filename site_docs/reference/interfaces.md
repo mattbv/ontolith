@@ -9,8 +9,6 @@ from this pinned surface by ADR-0019 Decision #1).
       members:
         - create_rest_app
 
-## ontolith.interfaces.graphql
-
 ::: ontolith.interfaces.graphql
     options:
       members:

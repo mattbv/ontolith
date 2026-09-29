@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`governance_and_review.py`, `bitemporal_queries.py`,
   `writing_a_plugin.py`, `hybrid_search.py`), one per tutorial. All five
   example scripts (including the pre-existing `quickstart.py`) now run in
-  `ci.yml`'s quality job on every push/PR to `main`.
+  `ci.yml`'s "Tests" job on every push/PR to `main`.
 - Docstrings on 13 previously-undocumented type aliases
   (`ontolith.schema.Text`/`Ref`/`Integer`/`Float`/`Boolean`/`Date`/
   `DateTime`/`URI`/`JSON`, `ontolith.identity.AdminAction`,

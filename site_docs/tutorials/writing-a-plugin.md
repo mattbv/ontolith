@@ -111,10 +111,13 @@ class MyImporter:
 
 `"propose"` is the minimum that lets registration succeed at all for a
 storage-writing kind; the shipped `csv-importer` reference plugin actually
-declares `storage="write"` instead, since `ThresholdPolicy` only
-auto-accepts a service principal at `write` — a bulk importer registered
-with `"propose"` would have every one of its rows sit in human review
-instead of committing.
+declares `storage="write"` instead. `ThresholdPolicy` *can* auto-accept a
+`propose`-capability principal too, but only above a trust-level floor —
+and `PluginRegistry` always creates a plugin's service principal at
+`trust_level=0`, below that floor — so in practice a `"propose"`-capability
+plugin's every proposal sits in human review; `"write"` (or `"admin"`)
+auto-accepts regardless of trust level, which is what a bulk importer
+actually needs.
 
 ...and a registered entry point in your own package's `pyproject.toml`:
 

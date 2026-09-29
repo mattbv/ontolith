@@ -132,9 +132,12 @@ trust level — see the
 
 ## Plugins run governed and sandboxed
 
-Importers, exporters, reasoners, and validators are discovered via Python
-entry points and registered with a capped storage capability (least
-privilege — `propose` by default, never more than the registrar grants).
+Importers, exporters, reasoners, connectors, and validators are discovered
+via Python entry points and registered with a capped storage capability —
+the *lower* of what the plugin's own manifest requests (`read` by default;
+a plugin that writes must explicitly declare at least `propose`) and what
+the registrar grants at registration time (`propose` by default). Neither
+side alone decides the outcome; least privilege applies to both.
 Since ADR-0051, a plugin's one protocol entrypoint runs in a **sandboxed
 child process** by default, with `capabilities.network`/`.filesystem`
 enforced at the OS syscall level on Linux (seccomp). A reasoner's derived

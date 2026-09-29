@@ -22,6 +22,6 @@ uv run python examples/hybrid_search.py
 | [`writing_a_plugin.py`](https://github.com/mattbv/ontolith/blob/main/examples/writing_a_plugin.py) | Registering & calling a real reference plugin through the process-isolated sandbox | [Writing a Plugin](tutorials/writing-a-plugin.md) |
 | [`hybrid_search.py`](https://github.com/mattbv/ontolith/blob/main/examples/hybrid_search.py) | `.semantic()`, symbolic `.where()` intersection, `.min_confidence()` | [Hybrid Search](tutorials/hybrid-search.md) |
 
-These same scripts are run in CI (`ci.yml`'s quality job) against every
+These same scripts are run in CI (`ci.yml`'s "Tests" job) against every
 push to `main`, so they stay accurate as the API evolves — if one of them
 breaks, that's a CI failure, not a stale doc.

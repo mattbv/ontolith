@@ -69,7 +69,7 @@ jobs:
         run: uv run mkdocs build --strict
 
       - name: Upload Pages artifact
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
@@ -77,11 +77,13 @@ jobs:
   deploy:
     name: Deploy to GitHub Pages
     needs: build
-    # Deploys on a push to main AND on a manual workflow_dispatch run (the
-    # latter is the usual way to trigger the first deploy right after
-    # enabling Pages, or to redeploy without a new push) -- only a
-    # pull_request build should ever skip this.
-    if: github.event_name != 'pull_request'
+    # Deploys on a push to main AND on a manual workflow_dispatch run
+    # against main (the latter is the usual way to trigger the first
+    # deploy right after enabling Pages, or to redeploy without a new
+    # push) -- explicitly pinned to main rather than relying only on
+    # excluding pull_request, so a workflow_dispatch run against some
+    # other branch doesn't reach this job either.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       pages: write
