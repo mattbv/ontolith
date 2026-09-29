@@ -220,27 +220,36 @@ trusting the step's own pre-existing comment at face value. That comment claimed
 "exits 1 on any detected change, including non-breaking ones," itself marked "verified." Re-checking
 found the *first* pass at correcting this (this Update's own initial draft) swung too far the other
 way, claiming the gate "only fails a PR on a genuine breaking change" — a subsequent review round
-disproved that too: `griffecli.check()` does only return 1 via `find_breaking_changes()`
-(`griffecli/_internal/cli.py`), but that detector's own idea of "breaking" is broader than "an
-existing public export was removed or renamed" — it also flags a public attribute's value *text*
-changing even when semantically identical (confirmed: reordering
+disproved that too, and its own replacement text ("any non-underscore module-level function")
+introduced a second, narrower inaccuracy caught by a *third* round: `griffecli.check()` does only
+return 1 via `find_breaking_changes()` (`griffecli/_internal/cli.py`), and that detector only
+inspects the names a module's own `is_public` (`griffe/_internal/mixins.py`) considers public — for
+a module that defines its own `__all__`, that means exactly the names listed there, nothing else
+(underscore-prefix has no separate bearing once `__all__` exists); for a module with no `__all__`
+at all, it falls back to non-underscore, non-imported names. That detector's own idea of "breaking"
+is broader than "an existing public export was removed or renamed" — it also flags a public
+attribute's value *text* changing even when semantically identical (confirmed: reordering
 `frozenset({"entity", "assertion"})` to `frozenset({"assertion", "entity"})` in `store/base.py` —
-same set, exit 1) and a signature change on *any* non-underscore module-level function, including
-ones outside this ADR's own 13-package public surface entirely (confirmed: a required parameter
-added to `plugins/sandbox/wire.py`'s `restricted_loads`, an internal helper never exported — exit
-1). This gate is a strictly *narrower* net than ADR-0019's own Decision #1 public-surface scope in
-one direction (it can't see an `__all__`-only removal that keeps the underlying binding — confirmed
-exit 0; `test_public_api_surface.py`'s pinned `_EXPECTED` dict is what catches that case) and a
-*wider* one in another (it inspects every non-underscore name in every module, public-surface-pinned
-or not). Blocking it is still the right call — see `ci.yml`'s own comment for the accepted-cost
-framing — but "only fails on a genuine breaking change" overclaimed what it actually enforces, twice
-in a row within the same review arc; corrected here rather than left standing. This gate is also not
-a required status check in the repo's branch ruleset (no `required_status_checks` rule exists), so a
-flagged-but-intentional or false-positive failure is a visible red CI check a reviewer merges past
-knowingly, the same as any other job here, not a structural block needing a special override. Git
-tag + GitHub Release only — no `release.yml`/PyPI-publish automation exists yet (the Implementation
-Plan §7.1 pipeline sketch describing one was aspirational, never built), and the `ontolith` package
-name isn't registered on PyPI; publishing remains separate, future, user-driven work, not part of
+same set, exit 1) and a signature change on any name listed in its own module's `__all__`, even one
+outside this ADR's own 13-package public surface entirely (confirmed: a required parameter added to
+`plugins/sandbox/wire.py`'s `restricted_loads`, listed in that module's own `__all__` but not this
+ADR's pinned surface — exit 1). The same edit on a name *absent* from its module's own `__all__`
+does NOT trip it (confirmed: a required parameter added to `interfaces/cli.py`'s `db_status`, which
+`cli.py`'s own `__all__ = ["app"]` never lists — exit 0). This gate is a strictly *narrower* net than
+ADR-0019's own Decision #1 public-surface scope in one direction (it can't see an `__all__`-only
+removal that keeps the underlying binding — confirmed exit 0; `test_public_api_surface.py`'s pinned
+`_EXPECTED` dict is what catches that case) and a *wider* one in another (it inspects every name any
+module's own `__all__` lists, public-surface-pinned or not — 47 non-`__init__` modules under
+`src/ontolith` define one). Blocking it is still the right call — see `ci.yml`'s own comment for the
+accepted-cost framing — but each of the two prior attempts at describing its real scope overclaimed
+in a different direction, both within the same review arc; corrected here rather than left standing.
+This gate is also not a required status check in the repo's branch ruleset (no
+`required_status_checks` rule exists), so a flagged-but-intentional or false-positive failure is a
+visible red CI check a reviewer merges past knowingly, the same as any other job here, not a
+structural block needing a special override. Git tag + GitHub Release only — no
+`release.yml`/PyPI-publish automation exists yet (the Implementation Plan §7.1 pipeline sketch
+describing one was aspirational, never built), and the `ontolith` package name isn't registered on
+PyPI; publishing remains separate, future, user-driven work, not part of
 this tag.
 
 ## References

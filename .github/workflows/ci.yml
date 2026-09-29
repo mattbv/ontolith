@@ -66,24 +66,30 @@ jobs:
         # CI failure a reviewer sees and must knowingly merge past, the same
         # as any other job in this workflow, not a structural merge block.
         #
-        # A pure addition exits 0 (confirmed: added a new `__all__` export,
-        # ran `griffe check` against HEAD). But this does NOT mean it exits 1
-        # only for a genuine breaking change — an earlier version of this
-        # comment claimed that, and it's wrong: griffe's breakage detector
-        # (`find_breaking_changes`) also flags a public attribute's value
-        # TEXT changing even when the value is semantically identical
-        # (confirmed: reordering `frozenset({"entity", "assertion"})` to
-        # `frozenset({"assertion", "entity"})` in store/base.py — same set,
-        # exit 1, "Attribute value was changed"), and a signature change on
-        # ANY non-underscore module-level function, including ones this
-        # project's own ADR-0019 doesn't consider part of the public surface
-        # at all (confirmed: adding a required parameter to
-        # plugins/sandbox/wire.py's restricted_loads, an internal helper —
-        # exit 1). Removing something from `__all__` alone, with the import
-        # kept, does NOT trip it (confirmed: exit 0) — `test_public_api_
-        # surface.py`'s own pinned `_EXPECTED` dict is what catches that
-        # case, not this step. Expect this gate to occasionally flag a
-        # cosmetic or internal-only change as a false positive; that's a
+        # Griffe checks a module's `__all__` members if it has one, else its
+        # non-underscore/non-imported names — NOT "every non-underscore
+        # module-level function" (an earlier version of this comment claimed
+        # that; wrong, see below). A pure addition to `__all__` exits 0
+        # (confirmed). But it does NOT follow that only a genuine breaking
+        # change exits 1 — a still-earlier draft claimed that too, also
+        # wrong: griffe's breakage detector (`find_breaking_changes`) flags
+        # a public attribute's value TEXT changing even when semantically
+        # identical (confirmed: reordering `frozenset({"entity",
+        # "assertion"})` to `frozenset({"assertion", "entity"})` in
+        # store/base.py — same set, exit 1, "Attribute value was changed"),
+        # and a signature change on any name actually listed in its own
+        # module's `__all__`, even one this project's own ADR-0019 doesn't
+        # consider part of the 13-package public surface (confirmed: adding
+        # a required parameter to plugins/sandbox/wire.py's
+        # restricted_loads, listed in that module's own `__all__` but not
+        # ADR-0019's — exit 1). A signature change on a name NOT listed in
+        # its module's `__all__` does NOT trip it (confirmed: same edit on
+        # cli.py's db_status, absent from cli.py's own `__all__` — exit 0),
+        # and removing something from `__all__` alone, with the import kept,
+        # doesn't either (confirmed: exit 0) — `test_public_api_surface.py`'s
+        # own pinned `_EXPECTED` dict is what catches both of those cases,
+        # not this step. Expect this gate to occasionally flag a cosmetic or
+        # internal-but-`__all__`-listed change as a false positive; that's a
         # known, accepted cost of blocking it, not a bug in this workflow.
         # Compares against the PR's base commit; on a push-to-main run (no
         # PR context) compares against HEAD itself, i.e. a no-op — the

@@ -163,21 +163,25 @@ out of KI-070's own stated scope, and lock-pinned in practice since CI installs 
 ## Update (2026-09-28, v1.0.0 tag, `griffe check` flipped to blocking)
 
 The `griffe check` gate described above lost its `continue-on-error: true` at the 1.0 tag, per this
-ADR's own §Decision #1 framing ("Blocking post-1.0 is then a one-line removal of
+ADR's own §Decision #3 framing ("Blocking post-1.0 is then a one-line removal of
 `continue-on-error`") and Implementation Plan §5's "warn pre-1.0, block post-1.0." Re-verifying the
-gate's actual behavior while flipping it (PR #145's review round) found two things worth correcting
-here, since they touch exactly this ADR's own claims:
+gate's actual behavior while flipping it (PR #145's review, across three rounds — each round's own
+correction of the prior round's account itself needed a further correction) found two things worth
+fixing here, since they touch exactly this ADR's own claims:
 
 1. **§Context's "and exits `1` when it does, including for changes that aren't actually breaking"
    is accurate** and reconfirmed (the `Ontology.namespace` case it describes — a literal extracted
    to a same-valued constant — is the same class of result a fresh test reproduces: reordering a
    `frozenset` literal to the identical set still exits 1, "Attribute value was changed"). The
-   phrase "exits `1` on any detected change" (repeated in §Decision #1) is imprecise, though: it's
-   specifically `find_breaking_changes()`'s own idea of a breakage, which is broader than "an export
-   was removed or renamed" (attribute-value-text changes, any non-underscore module's signature
-   changes) but does *not* include a pure addition (exits 0) or removing a name from `__all__` alone
-   while keeping the underlying binding (also exits 0 — `test_public_api_surface.py`'s pinned
-   `_EXPECTED` dict is what catches that case, not `griffe check`).
+   phrase "exits `1` on any detected change" (repeated in §Decision #3) is imprecise, though: it's
+   specifically `find_breaking_changes()`'s own idea of a breakage, scoped to whatever a module's own
+   `is_public` considers public — for a module with its own `__all__`, exactly the names listed
+   there (confirmed: a required-parameter change on `interfaces/cli.py`'s `db_status`, absent from
+   `cli.py`'s own `__all__ = ["app"]`, exits 0; the same change on a name that IS listed in its own
+   module's `__all__`, even one outside this project's ADR-0019 public surface, exits 1). It does
+   *not* include a pure addition (exits 0) or removing a name from `__all__` alone while keeping the
+   underlying binding (also exits 0 — `test_public_api_surface.py`'s pinned `_EXPECTED` dict is what
+   catches that case, not `griffe check`).
 2. **§Rationale's "Why `griffe check`'s own default (always exit 0) is trusted"** heading directly
    contradicts §Context's own finding two sections above it (which established `griffe check` does
    *not* always exit 0) — a stale leftover from an earlier draft this ADR's own Context paragraph
@@ -187,8 +191,10 @@ here, since they touch exactly this ADR's own claims:
 
 Neither correction changes this ADR's own Decision or Consequences — the gate was always going to
 flip to blocking at 1.0, and now has. See ADR-0019's own 2026-09-28 Update and KI-020's resolution
-note for the fuller, once-more-corrected account (a first re-verification pass overclaimed the
-opposite error, that only a "genuine breaking change" trips it — also wrong, fixed there).
+note for the fuller, three-times-corrected account: a first re-verification pass overclaimed one way
+("only a genuine breaking change trips it"), a second pass's own fix overclaimed a different way
+("any non-underscore module-level function," when it's really "any name in that module's own
+`__all__`") — both wrong, both fixed there.
 
 ## References
 
