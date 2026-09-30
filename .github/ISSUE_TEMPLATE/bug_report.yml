@@ -1,0 +1,36 @@
+name: Bug report
+description: Something behaves differently from the documentation or specification
+labels: ["bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you saw instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: A short script or CLI session that shows the problem.
+      render: python
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Ontolith version
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: input
+    id: env
+    attributes:
+      label: Python version and OS
+      placeholder: "3.12, macOS 15"
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: For security issues, do not open a public issue. See the security policy.
