@@ -12,6 +12,7 @@ Thank you for your interest in contributing to Ontolith! This document provides 
 - [Code Quality Standards](#code-quality-standards)
 - [Pull Request Process](#pull-request-process)
 - [Commit Message Guidelines](#commit-message-guidelines)
+- [Release Process](#release-process)
 
 ## Code of Conduct
 
@@ -301,6 +302,34 @@ test(conformance): add SPEC §19 contradiction vector
 refactor(query): extract temporal filter logic
 chore(ci): add import-linter to quality gates
 ```
+
+## Release Process
+
+Releases are tagged (`vX.Y.Z`, SemVer) off `main` once a milestone's exit
+criteria are met. Publishing to PyPI uses [trusted publishing](https://docs.pypi.org/trusted-publishers/)
+(OIDC) — no API token is stored as a repository secret.
+
+**One-time setup per index** (already done for `pypi` and `testpypi` as of
+the 1.0.0 release): on the index's "Publishing" settings, register a
+trusted publisher for the `ontolith/ontolith` repo, workflow file
+`publish.yml`, and a matching GitHub Environment name (`pypi` /
+`testpypi`) — this can be registered as a *pending* publisher before the
+project exists on that index yet, so the very first publish needs no
+manual upload.
+
+**To cut a release:**
+
+1. Tag `main` (`git tag -a vX.Y.Z -m "..."` — maintainers only) and push
+   the tag, or create a GitHub Release from it. A published GitHub
+   Release automatically triggers `publish.yml`'s real-PyPI job.
+2. For a dry run first, or to publish an existing tag manually, trigger
+   `publish.yml` via `workflow_dispatch` (Actions tab, or
+   `gh workflow run publish.yml -f target=testpypi -f ref=vX.Y.Z`), then
+   verify with `pip install --index-url https://test.pypi.org/simple/ ontolith==X.Y.Z`
+   in a clean environment before publishing for real.
+3. Every publish builds from a clean checkout of the given tag/ref via
+   `uv build`, so what ships is exactly what was tagged — not whatever
+   happens to be in a local working tree.
 
 ## Questions?
 
