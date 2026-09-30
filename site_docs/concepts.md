@@ -20,6 +20,24 @@ assertion captures the model family+version that made it (enforced in
 code; no equivalent DB-level constraint exists for this second
 requirement).
 
+```mermaid
+flowchart TB
+    subgraph KINDS["Principals · every read and write is attributed to one"]
+        direction LR
+        AI["<b>ai</b> · id is a slug<br/>MUST name an accountable owner<br/>model + version stamped on each assertion<br/>defaults to propose<br/>can never direct-write, review, or resolve"]
+        H["<b>human</b> · id is an email or URI"]
+        S["<b>service</b> · id is a slug"]
+        AI -- "owner (human or service)<br/>enforced in code and by a DB CHECK" --> H
+    end
+
+    KINDS -- "each holds one capability per namespace;<br/>acting_as delegation takes the lower of the two" --> CAPS
+
+    subgraph CAPS["Capability ladder · each level includes the ones before it"]
+        direction LR
+        R["<b>read</b><br/>query · get · provenance"] --> P["<b>propose</b><br/>stage a change;<br/>policy decides"] --> W["<b>write</b><br/>direct write,<br/>still conflict-routed"] --> RV["<b>review</b><br/>accept or reject proposals;<br/>resolve contradictions"] --> AD["<b>admin</b><br/>schema · principals ·<br/>policy config"]
+    end
+```
+
 ## Assertions are append-only
 
 An assertion is a single `(subject, predicate, value)` fact with full
@@ -34,6 +52,27 @@ window (supersession) or flag a dispute (contradiction). See
 This is what makes full audit history and bitemporal time-travel possible:
 nothing is ever destroyed, so `as_of(t)` can always reconstruct what was
 known.
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> active: no conflict, or corroboration
+    [*] --> flagged: static value disagrees<br/>with an active one
+    active --> superseded: time_varying successor<br/>closes valid_to
+    active --> flagged: a disagreeing static<br/>value arrives
+    flagged --> active: chosen as winner
+    flagged --> retracted: loses a resolution,<br/>or a direct retract
+    active --> retracted: governed retract
+    superseded --> retracted: an explicit retract<br/>of a superseded assertion
+
+    note right of superseded
+        Kept forever, so as_of(t)
+        can still see it.
+    end note
+    note right of retracted
+        Terminal. Never deleted.
+    end note
+```
 
 ## Confidence and provenance
 
@@ -92,6 +131,32 @@ elif t == "time_varying":
         supersede(existing, new_assertion)   # expected change, no review
 ```
 
+```mermaid
+flowchart TD
+    A(["Accepted assertion A<br/>about subject S, predicate P, value V"]) --> OV{"Active assertions on S, P<br/>with an overlapping validity window?"}
+    OV -- none --> ACT1["Activate A"]
+    OV -- "one or more" --> T{"temporality of P"}
+
+    T -- "static (default)" --> SCARD{"cardinality of P"}
+    SCARD -- many --> ACT2["Activate A<br/>legitimately multi-valued"]
+    SCARD -- single --> DIFF{"Does any existing value differ from V?"}
+    DIFF -- no --> CORR["Activate A as corroboration<br/>both kept, confidence never merged"]
+    DIFF -- yes --> CON["Open or extend a Contradiction<br/>non-terminal members become flagged"]
+    CON --> REV["Human review<br/>resolve_contradiction picks a winner,<br/>the others become retracted"]
+
+    T -- time_varying --> TCARD{"cardinality many<br/>and no supersedes hint?"}
+    TCARD -- yes --> ACT3["Activate A<br/>concurrent values coexist"]
+    TCARD -- no --> TDIFF{"Does the overlapping<br/>value differ from V?"}
+    TDIFF -- no --> ACT5["Activate A<br/>same value coexists, no supersession"]
+    TDIFF -- yes --> SUP["Supersede<br/>prior.valid_to = A.valid_from<br/>prior.status = superseded<br/>A.supersedes = prior.id"]
+    SUP --> ACT4["Activate A · no review needed"]
+
+    classDef dispute fill:#fdecd8,stroke:#b45309,color:#3b2106
+    classDef change fill:#e3e8fb,stroke:#3b4cca,color:#141a3d
+    class CON,REV dispute
+    class SUP,ACT4 change
+```
+
 `cardinality="many"` (ADR-0017, extended to `time_varying` by ADR-0050)
 changes what a differing, window-overlapping value means: for `static`, it
 opts out of contradiction entirely (legitimately multi-valued, e.g. phone
@@ -119,6 +184,33 @@ still be invisible under `as_of()` at an early `t`, if the KB genuinely
 hadn't recorded it yet: see the
 [Bitemporal Queries tutorial](tutorials/bitemporal-queries.md) for a worked
 example.
+
+```mermaid
+gantt
+    title Dana's job title, recorded on two independent time axes
+    dateFormat YYYY-MM-DD
+    axisFormat %Y
+    todayMarker off
+
+    section Valid time
+    Engineer · superseded, window closed        :done,   eng, 2020-01-01, 2023-06-01
+    Senior Engineer · active, open window       :active, sen, 2023-06-01, 2024-12-31
+
+    section Assertion time
+    Engineer recorded 2023-01-01                :milestone, rec1, 2023-01-01, 0d
+    Promotion recorded 2023-05-31               :milestone, rec2, 2023-05-31, 0d
+
+    section as_of probes
+    as_of 2021-06-01 returns nothing            :crit, milestone, q1, 2021-06-01, 0d
+    as_of 2023-03-01 returns Engineer           :milestone, q2, 2023-03-01, 0d
+    as_of 2023-07-01 returns Senior Engineer    :milestone, q3, 2023-07-01, 0d
+```
+
+This is the scenario in
+[`examples/bitemporal_queries.py`](https://github.com/ontolith/ontolith/blob/main/examples/bitemporal_queries.py),
+run verbatim — the `as_of(2021-06-01)` probe really does return nothing even
+though Dana was genuinely an engineer then, because the KB hadn't recorded
+it yet.
 
 ## Governance: proposals and policy
 
