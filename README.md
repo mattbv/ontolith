@@ -1,6 +1,6 @@
 # Ontolith
 
-[![CI](https://github.com/mattbv/ontolith/workflows/CI/badge.svg)](https://github.com/mattbv/ontolith/actions)
+[![CI](https://github.com/ontolith/ontolith/workflows/CI/badge.svg)](https://github.com/ontolith/ontolith/actions)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
@@ -19,7 +19,7 @@ A Python framework/SDK for building collaborative knowledge bases where humans a
 
 ```bash
 # Clone repository
-git clone https://github.com/mattbv/ontolith.git
+git clone https://github.com/ontolith/ontolith.git
 cd ontolith
 
 # Install dependencies (requires Python 3.11+)
@@ -44,7 +44,7 @@ Not yet published to PyPI — install from source (see Quick Start above). See [
 
 ## Documentation
 
-**[Full documentation site](https://mattbv.github.io/ontolith/)** — a Getting
+**[Full documentation site](https://ontolith.github.io/ontolith/)** — a Getting
 Started guide, conceptual overview, tutorials (governance & review,
 bitemporal queries, writing a plugin, hybrid search), and the auto-generated
 API reference. Built from [`site_docs/`](site_docs/) via

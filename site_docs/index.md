@@ -57,7 +57,7 @@ not by convention.
 ## Install
 
 ```bash
-git clone https://github.com/mattbv/ontolith.git
+git clone https://github.com/ontolith/ontolith.git
 cd ontolith
 uv sync
 uv run python examples/quickstart.py
@@ -69,10 +69,10 @@ Ontolith isn't published to PyPI yet — install from source (requires
 ## Project status
 
 Ontolith is at **v1.0.0** — M0 through M4 of the
-[Implementation Plan](https://github.com/mattbv/ontolith/blob/main/docs/Ontolith_Implementation_Plan.md)
+[Implementation Plan](https://github.com/ontolith/ontolith/blob/main/docs/Ontolith_Implementation_Plan.md)
 are complete: substrate, collaboration, extensibility, and production
 hardening (performance budgets, a full security review, an audited and
 frozen public API surface). See the
-[CHANGELOG](https://github.com/mattbv/ontolith/blob/main/CHANGELOG.md) for
-the full history and [Known Issues](https://github.com/mattbv/ontolith/blob/main/docs/known-issues.md)
+[CHANGELOG](https://github.com/ontolith/ontolith/blob/main/CHANGELOG.md) for
+the full history and [Known Issues](https://github.com/ontolith/ontolith/blob/main/docs/known-issues.md)
 for honestly-disclosed gaps and residuals.

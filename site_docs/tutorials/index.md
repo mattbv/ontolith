@@ -1,7 +1,7 @@
 # Tutorials
 
 Each tutorial below walks through one runnable script from
-[`examples/`](https://github.com/mattbv/ontolith/tree/main/examples) in the
+[`examples/`](https://github.com/ontolith/ontolith/tree/main/examples) in the
 repository. Clone the repo and run any of them directly:
 
 ```bash

@@ -1,7 +1,7 @@
 # Bitemporal Queries
 
 Full source:
-[`examples/bitemporal_queries.py`](https://github.com/mattbv/ontolith/blob/main/examples/bitemporal_queries.py)
+[`examples/bitemporal_queries.py`](https://github.com/ontolith/ontolith/blob/main/examples/bitemporal_queries.py)
 
 This tutorial covers `time_varying` supersession and `as_of(t)`
 time-travel — the two features that make Ontolith bitemporal rather than

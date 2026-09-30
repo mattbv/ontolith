@@ -3,7 +3,7 @@
 This walks through building a small knowledge base from scratch: connecting,
 defining a schema, creating principals and entities, making assertions, and
 querying them back with provenance. It mirrors
-[`examples/quickstart.py`](https://github.com/mattbv/ontolith/blob/main/examples/quickstart.py)
+[`examples/quickstart.py`](https://github.com/ontolith/ontolith/blob/main/examples/quickstart.py)
 in the repository — run that file directly if you'd rather see it all at
 once.
 
@@ -13,7 +13,7 @@ Ontolith isn't on PyPI yet. Install from source with
 [uv](https://github.com/astral-sh/uv):
 
 ```bash
-git clone https://github.com/mattbv/ontolith.git
+git clone https://github.com/ontolith/ontolith.git
 cd ontolith
 uv sync
 ```

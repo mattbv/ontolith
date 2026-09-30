@@ -18,5 +18,5 @@ covered by the project's SemVer commitment; anything not listed here isn't.
 
 CLI flags and MCP tool schemas are deliberately **not** part of this pinned
 surface (ADR-0019 Decision #1) — see the CLI's own `--help` output and
-[`src/ontolith/interfaces/mcp.py`](https://github.com/mattbv/ontolith/blob/main/src/ontolith/interfaces/mcp.py)'s
+[`src/ontolith/interfaces/mcp.py`](https://github.com/ontolith/ontolith/blob/main/src/ontolith/interfaces/mcp.py)'s
 docstrings for those.

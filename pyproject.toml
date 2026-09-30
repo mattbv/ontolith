@@ -120,10 +120,10 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mattbv/ontolith"
-Documentation = "https://mattbv.github.io/ontolith/"
-Repository = "https://github.com/mattbv/ontolith"
-Issues = "https://github.com/mattbv/ontolith/issues"
+Homepage = "https://github.com/ontolith/ontolith"
+Documentation = "https://ontolith.github.io/ontolith/"
+Repository = "https://github.com/ontolith/ontolith"
+Issues = "https://github.com/ontolith/ontolith/issues"
 
 [project.scripts]
 ontolith = "ontolith.interfaces.cli:app"

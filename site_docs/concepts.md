@@ -2,7 +2,7 @@
 
 A handful of ideas everything else in Ontolith is built from. For the full
 formal treatment, see the
-[Technical Specification](https://github.com/mattbv/ontolith/blob/main/docs/Ontolith_SPEC.md) —
+[Technical Specification](https://github.com/ontolith/ontolith/blob/main/docs/Ontolith_SPEC.md) —
 this page is the short version.
 
 ## Principals
