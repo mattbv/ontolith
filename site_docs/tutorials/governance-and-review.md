@@ -42,7 +42,7 @@ The AI's proposal — even from a well-trusted principal — does not:
 proposal, decision = kb.propose(
     subject=acme.id, predicate="Company.headquarters", value="Metropolis",
     value_type="Text", author=researcher_bot.id, source="a news article",
-    confidence=0.7, model="claude-sonnet-4-20250101",  # required for AI authors
+    confidence=0.7, model="example-model-2026-01",  # required for AI authors
 )
 # decision is a RequireReview; proposal.state == "require_review"
 ```
@@ -82,7 +82,7 @@ still awaiting review):
 proposal, decision = kb.propose(
     subject=acme.id, predicate="Company.name", value="Extremely Legitimate Business Inc",
     value_type="Text", author=researcher_bot.id, source="an anonymous forum post",
-    confidence=0.2, model="claude-sonnet-4-20250101",
+    confidence=0.2, model="example-model-2026-01",
 )
 proposal = kb.reject_proposal(proposal.id, reviewer=reviewer.id, reason="Not a credible source.")
 # proposal.state == "rejected"

@@ -313,6 +313,17 @@ elif t == "static":
         activate(A)                                # corroboration: keep both, do NOT merge confidence
 ```
 
+> **Implementation deviation, recorded in ADR-0017 and ADR-0050.** The routing above is silent on
+> `PropertyDef.cardinality` (`"single"` | `"many"`, schema-declared, default `"single"`). The
+> shipped implementation (`govern/conflict.route()`) adds it as a second axis: for `static`,
+> `cardinality="many"` activates a differing value instead of contradicting — a third routing
+> outcome distinct from both `static`+`single` (contradiction) and `time_varying` (supersession)
+> (ADR-0017). For `time_varying`, `cardinality="many"` only supersedes a specific prior assertion
+> when the caller names it via an explicit `supersedes=` hint; with no hint, a differing overlapping
+> value coexists rather than superseding (ADR-0050) — otherwise two genuinely concurrent
+> `time_varying` values (e.g. two simultaneous job titles) would collapse into one. Both deviations
+> default to today's `cardinality="single"` behavior, so untouched schemas are unaffected.
+
 ### 10.2 Temporal supersession (`time_varying`)
 ```
 def supersede(existing, A):
