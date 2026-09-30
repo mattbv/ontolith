@@ -69,18 +69,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The gitleaks-action wrapper (gitleaks/gitleaks-action@v3) gates
+      # organization accounts behind a paid GITLEAKS_LICENSE — it did the
+      # day this repo moved from a personal account to the ontolith org, and
+      # this job broke as a result. The underlying gitleaks CLI itself stays
+      # free regardless of account type; only the Action wrapper monetizes
+      # org usage. Run the CLI directly instead of reintroducing that
+      # dependency. (The org also now has GitHub's own free secret scanning
+      # + push protection enabled at the repo level as a second layer; this
+      # job stays for PR-time, full-history scanning equivalent to before.)
+      - name: Install gitleaks
+        run: |
+          curl -sSL -o gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo mv gitleaks /usr/local/bin/
+          rm gitleaks.tar.gz
+
       - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@v3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # This repo is private under a personal account (not an
-          # organization) — gitleaks-action's license requirement is gated
-          # on org vs. personal account, not public vs. private repo
-          # visibility, so no GITLEAKS_LICENSE is needed here. That would
-          # change if this repo ever moved under an organization.
-          #
-          # PR comments disabled so this job only needs the default
-          # read-only GITHUB_TOKEN (workflow permissions: contents: read,
-          # above) rather than pull-requests: write — findings still surface
-          # via the job's own log/summary output.
-          GITLEAKS_ENABLE_COMMENTS: false
+        run: gitleaks detect --source . --redact -v --exit-code 1
