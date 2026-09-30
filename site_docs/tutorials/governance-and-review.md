@@ -6,6 +6,40 @@ Full source:
 This tutorial walks through why AI principals can't write directly, and the
 full review lifecycle a proposal goes through when it doesn't auto-accept.
 
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Agent as scout (ai, propose)
+    participant KB as Ontology
+    participant Policy as PolicyStrategy (pure)
+    actor Reviewer as alice (human, review)
+    participant Store as StorageBackend
+
+    Agent->>KB: propose(subject, predicate, value, source, confidence, model)
+    KB->>Policy: evaluate(proposal, principal, read-only view)
+    alt AutoAccept
+        Policy-->>KB: AutoAccept
+        KB->>Store: apply via conflict routing, one transaction
+        KB-->>Agent: auto_accepted
+    else RequireReview (the default for every AI proposal)
+        Policy-->>KB: RequireReview(reviewers, reason)
+        KB-->>Agent: require_review
+        opt Reviewer wants a better source
+            Reviewer->>KB: request_changes(reason)
+            Agent->>KB: resubmit() replays the original payload
+            KB->>Policy: fresh evaluation
+            Policy-->>KB: RequireReview
+        end
+        Reviewer->>KB: accept_proposal() or reject_proposal(reason)
+        KB->>Store: on accept, apply via conflict routing, one transaction
+        KB-->>Agent: accepted or rejected
+    else Reject
+        Policy-->>KB: Reject(reason)
+        KB-->>Agent: rejected, nothing written
+    end
+    Note over KB,Store: Every review action is stored as a proposal_event and shows up in provenance.
+```
+
 ## Why AI proposals always require review
 
 Ontolith's capability lattice (`read < propose < write < review < admin`)
