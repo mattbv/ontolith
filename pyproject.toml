@@ -8,7 +8,7 @@ license = { text = "Apache-2.0" }
 requires-python = ">=3.11"
 keywords = ["knowledge-graph", "ontology", "ai", "collaboration", "governance"]
 classifiers = [
-	"Development Status :: 5 - Production/Stable",
+	"Development Status :: 4 - Beta",
 	"Intended Audience :: Developers",
 	"License :: OSI Approved :: Apache Software License",
 	"Programming Language :: Python :: 3",

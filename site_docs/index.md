@@ -28,7 +28,9 @@ not by convention.
 - **Governed plugins** — importers, exporters, reasoners, connectors, and
   validators loaded through `PluginRegistry` (third-party plugins,
   discovered via entry points) run process-isolated by default, with
-  capability-scoped filesystem/network access. Validators/completeness
+  `capabilities.network`/`.filesystem` enforced at the OS syscall level on
+  Linux (seccomp) — advisory only on macOS/Windows, where process/IPC
+  isolation still applies. Validators/completeness
   validators wired in directly via `Ontology.connect()` (first-party,
   deployment-configured) run in-process instead — trusted the same way a
   `PolicyStrategy` already is.

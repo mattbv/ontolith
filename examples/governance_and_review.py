@@ -83,7 +83,7 @@ def main() -> None:
         author=researcher_bot.id,
         source="a news article",
         confidence=0.7,
-        model="claude-sonnet-4-20250101",
+        model="example-model-2026-01",
     )
     print(f"AI propose():    decision = {type(decision).__name__} ({proposal.state})")
     assert isinstance(decision, RequireReview)
@@ -132,7 +132,7 @@ def main() -> None:
         author=researcher_bot.id,
         source="an anonymous forum post",
         confidence=0.2,
-        model="claude-sonnet-4-20250101",
+        model="example-model-2026-01",
     )
     proposal = kb.reject_proposal(
         proposal.id, reviewer=reviewer.id, reason="Not a credible source."

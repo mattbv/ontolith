@@ -36,6 +36,10 @@ Every assertion in Ontolith is made *by* someone — a human or an AI, each a
 accountable owner (SPEC §8.1) and have their capability capped at `propose`
 by default: they can suggest facts, never write them directly.
 
+`auth_method` below is descriptive, not enforcing — only `"apikey"` is
+backed by a real shipped `AuthProvider` (`TokenAuthProvider`) today.
+`"oidc"` and `"workload"` are specified (SPEC §8.2) but not built yet.
+
 ```python
 alice = kb.create_principal(
     "alice@example.com",
@@ -105,7 +109,7 @@ proposal, decision = kb.propose_ref(
     author=research_bot.id,
     source="ACM Digital Library",
     confidence=0.95,
-    model="claude-sonnet-4-20250101",  # required provenance for AI authors
+    model="example-model-2026-01",  # required provenance for AI authors
 )
 ```
 

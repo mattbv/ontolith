@@ -37,6 +37,12 @@ def main() -> None:
     print("✓ Connected to knowledge base\n")
 
     # Create principals
+    #
+    # auth_method is descriptive, not enforcing: only "apikey" is backed by
+    # a real shipped AuthProvider today (TokenAuthProvider). "oidc" and
+    # "workload" are recorded for a principal that will authenticate that
+    # way once SPEC §8.2's providers ship — setting them here doesn't wire
+    # up OIDC or workload-identity auth.
     print("Creating principals...")
     alice = kb.create_principal(
         "alice@example.com",
@@ -169,7 +175,7 @@ def main() -> None:
         author=research_bot.id,
         source="ACM Digital Library",
         confidence=0.95,
-        model="claude-sonnet-4-20250101",
+        model="example-model-2026-01",
     )
     print(f"✓ Proposed: {ada.id} contributedTo {analytical_engine.id}")
     print(f"  (by AI: {research_bot.id}, confidence: 0.95)")
