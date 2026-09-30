@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-labelledby="t d">
+  <title id="t">Ontolith</title>
+  <desc id="d">Ontolith wordmark over layered strata, with a small knowledge graph in which two disagreeing facts are held for review.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#151B36"/>
+      <stop offset="1" stop-color="#0E1226"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+
+  <!-- Strata: append-only layers, oldest at the bottom -->
+  <g>
+    <rect x="0" y="468" width="1280" height="34" fill="#2A3470"/>
+    <rect x="0" y="502" width="1280" height="34" fill="#232C60"/>
+    <rect x="0" y="536" width="1280" height="34" fill="#1D2551"/>
+    <rect x="0" y="570" width="1280" height="34" fill="#181F44"/>
+    <rect x="0" y="604" width="1280" height="36" fill="#131939"/>
+    <g stroke="#0E1226" stroke-width="2">
+      <line x1="0" y1="502" x2="1280" y2="502"/>
+      <line x1="0" y1="536" x2="1280" y2="536"/>
+      <line x1="0" y1="570" x2="1280" y2="570"/>
+      <line x1="0" y1="604" x2="1280" y2="604"/>
+    </g>
+    <!-- a closed validity window in an older layer, and its open successor on top -->
+    <rect x="720" y="545" width="236" height="16" rx="3" fill="#56618F"/>
+    <rect x="956" y="477" width="324" height="16" rx="3" fill="#6F81FF"/>
+    <line x1="956" y1="493" x2="956" y2="545" stroke="#6F81FF" stroke-width="2" stroke-dasharray="4 5"/>
+  </g>
+
+  <!-- Timeline ticks along the top of the strata -->
+  <g stroke="#6F81FF" stroke-width="2" opacity="0.55">
+    <line x1="80" y1="460" x2="80" y2="468"/>
+    <line x1="240" y1="460" x2="240" y2="468"/>
+    <line x1="400" y1="460" x2="400" y2="468"/>
+    <line x1="560" y1="460" x2="560" y2="468"/>
+    <line x1="720" y1="460" x2="720" y2="468"/>
+    <line x1="880" y1="460" x2="880" y2="468"/>
+    <line x1="1040" y1="460" x2="1040" y2="468"/>
+    <line x1="1200" y1="460" x2="1200" y2="468"/>
+  </g>
+
+  <!-- Knowledge graph -->
+  <g stroke="#56618F" stroke-width="2" fill="none">
+    <line x1="880" y1="150" x2="1010" y2="110"/>
+    <line x1="880" y1="150" x2="960" y2="260"/>
+    <line x1="1010" y1="110" x2="1130" y2="180"/>
+    <line x1="960" y1="260" x2="1130" y2="180"/>
+    <line x1="960" y1="260" x2="1090" y2="340"/>
+    <line x1="880" y1="150" x2="800" y2="290"/>
+    <line x1="800" y1="290" x2="960" y2="260"/>
+  </g>
+  <!-- two disagreeing values on one static property, held for review -->
+  <g stroke="#F0A640" stroke-width="2" fill="none">
+    <line x1="1130" y1="180" x2="1200" y2="110"/>
+    <line x1="1130" y1="180" x2="1215" y2="235"/>
+    <path d="M1200 110 Q1250 172 1215 235" stroke-dasharray="5 6"/>
+  </g>
+
+  <g fill="#0E1226" stroke-width="3">
+    <circle cx="880" cy="150" r="13" stroke="#6F81FF"/>
+    <circle cx="1010" cy="110" r="10" stroke="#6F81FF"/>
+    <circle cx="960" cy="260" r="15" stroke="#6F81FF"/>
+    <circle cx="800" cy="290" r="9" stroke="#6F81FF"/>
+    <circle cx="1090" cy="340" r="9" stroke="#6F81FF"/>
+    <circle cx="1130" cy="180" r="13" stroke="#6F81FF"/>
+    <circle cx="1200" cy="110" r="8" stroke="#F0A640"/>
+    <circle cx="1215" cy="235" r="8" stroke="#F0A640"/>
+  </g>
+  <g fill="#6F81FF">
+    <circle cx="880" cy="150" r="4"/>
+    <circle cx="960" cy="260" r="5"/>
+    <circle cx="1130" cy="180" r="4"/>
+  </g>
+
+  <!-- Wordmark -->
+  <g font-family="ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+    <text x="80" y="236" font-size="116" font-weight="700" letter-spacing="-3" fill="#EEF0F8">Ontolith</text>
+    <text x="84" y="300" font-size="30" font-weight="400" fill="#B9C0DC">A governed knowledge base where humans</text>
+    <text x="84" y="342" font-size="30" font-weight="400" fill="#B9C0DC">and AI agents write the same ontology.</text>
+  </g>
+  <text x="84" y="410" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="20" letter-spacing="1" fill="#8E9BF5">append-only · bitemporal · nothing silently overwritten</text>
+</svg>
