@@ -1,7 +1,7 @@
 # Hybrid Search
 
 Full source:
-[`examples/hybrid_search.py`](https://github.com/mattbv/ontolith/blob/main/examples/hybrid_search.py)
+[`examples/hybrid_search.py`](https://github.com/ontolith/ontolith/blob/main/examples/hybrid_search.py)
 
 This tutorial combines vector similarity search with symbolic filters and
 provenance-confidence floors — all through the same `QueryBuilder`.

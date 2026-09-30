@@ -1,7 +1,7 @@
 # Writing a Plugin
 
 Full source:
-[`examples/writing_a_plugin.py`](https://github.com/mattbv/ontolith/blob/main/examples/writing_a_plugin.py)
+[`examples/writing_a_plugin.py`](https://github.com/ontolith/ontolith/blob/main/examples/writing_a_plugin.py)
 
 This tutorial registers and calls a real reference plugin, then covers what
 you'd change to write your own.
@@ -69,7 +69,7 @@ fixed in the M4 security review).
     with the all-`False` default manifest), logs a real warning about what
     actually is/isn't enforced (this project deliberately surfaces gaps
     rather than staying silent about them — see
-    [`docs/known-issues.md`](https://github.com/mattbv/ontolith/blob/main/docs/known-issues.md)
+    [`docs/known-issues.md`](https://github.com/ontolith/ontolith/blob/main/docs/known-issues.md)
     KI-014/KI-106 for the full detail), and **every call** on a platform
     with no OS-level enforcement mechanism (macOS/Windows today) logs a
     second warning at call time ("OS-level capability enforcement did not
@@ -79,7 +79,7 @@ fixed in the M4 security review).
 ## Writing your own
 
 A plugin is one of five protocols
-([`ontolith/plugins/ports.py`](https://github.com/mattbv/ontolith/blob/main/src/ontolith/plugins/ports.py)):
+([`ontolith/plugins/ports.py`](https://github.com/ontolith/ontolith/blob/main/src/ontolith/plugins/ports.py)):
 
 | Protocol | Method | Given |
 |---|---|---|
@@ -137,7 +137,7 @@ proposal path — a plugin never bypasses governance, no matter how it
 computed the fact.
 
 See
-[`src/ontolith/plugins/reference/`](https://github.com/mattbv/ontolith/tree/main/src/ontolith/plugins/reference)
+[`src/ontolith/plugins/reference/`](https://github.com/ontolith/ontolith/tree/main/src/ontolith/plugins/reference)
 in the repository for four complete, real reference plugins (a CSV
 importer, a JSON exporter, an RDF/OWL exporter, and a required-fields
 validator) to use as templates.

@@ -1,7 +1,7 @@
 # Governance & Review
 
 Full source:
-[`examples/governance_and_review.py`](https://github.com/mattbv/ontolith/blob/main/examples/governance_and_review.py)
+[`examples/governance_and_review.py`](https://github.com/ontolith/ontolith/blob/main/examples/governance_and_review.py)
 
 This tutorial walks through why AI principals can't write directly, and the
 full review lifecycle a proposal goes through when it doesn't auto-accept.

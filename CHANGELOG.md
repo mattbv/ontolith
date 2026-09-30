@@ -1776,5 +1776,5 @@ new HIGH regressions, closed in a sixth PR.
 - Contribution guidelines and community health files
 - import-linter configuration for dependency rule enforcement
 
-[Unreleased]: https://github.com/mattbv/ontolith/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/mattbv/ontolith/releases/tag/v1.0.0
+[Unreleased]: https://github.com/ontolith/ontolith/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/ontolith/ontolith/releases/tag/v1.0.0

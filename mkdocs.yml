@@ -2,9 +2,9 @@ site_name: Ontolith
 site_description: >-
   A Python framework/SDK for building collaborative knowledge bases where
   humans and AI agents are co-equal authors of a shared, governed ontology.
-site_url: https://mattbv.github.io/ontolith/
-repo_url: https://github.com/mattbv/ontolith
-repo_name: mattbv/ontolith
+site_url: https://ontolith.github.io/ontolith/
+repo_url: https://github.com/ontolith/ontolith
+repo_name: ontolith/ontolith
 edit_uri: edit/main/site_docs/
 
 docs_dir: site_docs
@@ -85,8 +85,8 @@ nav:
       - ontolith.plugins: reference/plugins.md
       - ontolith.interfaces: reference/interfaces.md
   - Project:
-      - Known Issues: https://github.com/mattbv/ontolith/blob/main/docs/known-issues.md
-      - Architecture Decisions: https://github.com/mattbv/ontolith/tree/main/docs/adr
-      - Specification: https://github.com/mattbv/ontolith/blob/main/docs/Ontolith_SPEC.md
-      - Implementation Plan: https://github.com/mattbv/ontolith/blob/main/docs/Ontolith_Implementation_Plan.md
-      - Changelog: https://github.com/mattbv/ontolith/blob/main/CHANGELOG.md
+      - Known Issues: https://github.com/ontolith/ontolith/blob/main/docs/known-issues.md
+      - Architecture Decisions: https://github.com/ontolith/ontolith/tree/main/docs/adr
+      - Specification: https://github.com/ontolith/ontolith/blob/main/docs/Ontolith_SPEC.md
+      - Implementation Plan: https://github.com/ontolith/ontolith/blob/main/docs/Ontolith_Implementation_Plan.md
+      - Changelog: https://github.com/ontolith/ontolith/blob/main/CHANGELOG.md

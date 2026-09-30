@@ -28,7 +28,7 @@ This project adheres to a Code of Conduct that all contributors are expected to 
 
 ```bash
 # Clone the repository
-git clone https://github.com/mattbv/ontolith.git
+git clone https://github.com/ontolith/ontolith.git
 cd ontolith
 
 # Install dependencies
@@ -304,7 +304,7 @@ chore(ci): add import-linter to quality gates
 
 ## Questions?
 
-- Open an [Issue](https://github.com/mattbv/ontolith/issues) for questions or to check existing ones before creating a new one (GitHub Discussions isn't enabled on this repo)
+- Open an [Issue](https://github.com/ontolith/ontolith/issues) for questions or to check existing ones before creating a new one (GitHub Discussions isn't enabled on this repo)
 - Review the [Technical Specification](docs/Ontolith_SPEC.md) for implementation details
 
 ## License
